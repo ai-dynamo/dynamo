@@ -13,7 +13,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::{PrefillLoadEstimator, config::min_initial_workers_from_env};
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -33,7 +33,10 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet, model_runtime_config_watch},
+    discovery::{
+        KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet, model_runtime_config_watch,
+        wait_for_initial_runtime_configs,
+    },
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{EncoderRouter, PrefillRouter, TextKvPushRouter, TextKvRouter},
@@ -57,7 +60,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
-    session_affinity::create_affinity_coordinator,
+    session_affinity::{ScaleUpMigrationTracker, create_affinity_coordinator},
     types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
@@ -1947,19 +1950,26 @@ impl ModelWatcher {
             worker_set.worker_monitor = Some(worker_monitor.clone());
             let (text_kv_router, text_kv_affinity) = if router_config.router_mode == RouterMode::KV
             {
-                let runtime_configs = model_runtime_config_watch(&endpoint, card.name()).await?;
+                let mut runtime_configs =
+                    model_runtime_config_watch(&endpoint, card.name()).await?;
+                wait_for_initial_runtime_configs(
+                    &mut runtime_configs,
+                    min_initial_workers_from_env()?,
+                )
+                .await?;
                 let text_kv_router = Arc::new(TextKvRouter::new(
                     client.clone(),
                     worker_monitor.clone(),
-                    runtime_configs,
+                    runtime_configs.clone(),
                 ));
-                let affinity = create_affinity_coordinator(
-                    router_config
-                        .session_affinity_ttl_secs
-                        .map(Duration::from_secs),
-                    client.clone(),
-                )
-                .await?;
+                let affinity_ttl = router_config
+                    .session_affinity_ttl_secs
+                    .map(Duration::from_secs);
+                let scale_up = affinity_ttl.map(|_| {
+                    ScaleUpMigrationTracker::new(card.name().to_string(), runtime_configs)
+                });
+                let affinity =
+                    create_affinity_coordinator(affinity_ttl, client.clone(), scale_up).await?;
                 (Some(text_kv_router), affinity)
             } else {
                 (None, None)

@@ -4,6 +4,7 @@
 mod coordinator;
 mod push_router;
 mod replica_sync;
+mod scale_up;
 
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use dynamo_runtime::{component::Client, pipeline::Error};
 pub(crate) use coordinator::{AffinityAcquire, affinity_id, invalid_argument};
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 pub use push_router::SessionAffinityPushRouter;
+pub(crate) use scale_up::{ScaleUpMigrationTracker, ScaleUpSnapshot};
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;
@@ -23,11 +25,15 @@ pub type LlmResponse =
 pub(crate) async fn create_affinity_coordinator(
     ttl: Option<Duration>,
     client: Client,
+    scale_up: Option<ScaleUpMigrationTracker>,
 ) -> Result<Option<AffinityCoordinator>, Error> {
     let Some(ttl) = ttl else {
         return Ok(None);
     };
-    let coordinator = AffinityCoordinator::new(ttl)?;
+    let coordinator = match scale_up {
+        Some(scale_up) => AffinityCoordinator::new_with_scale_up(ttl, scale_up)?,
+        None => AffinityCoordinator::new(ttl)?,
+    };
     coordinator.enable_replica_sync(client).await?;
     Ok(Some(coordinator))
 }

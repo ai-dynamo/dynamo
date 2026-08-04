@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    collections::HashSet,
     pin::Pin,
     sync::{
         Arc, OnceLock, Weak,
@@ -25,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::replica_sync::SessionAffinityUpdate;
 use super::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, MAX_SESSION_AFFINITY_TTL_SECS,
-    replica_sync::ReplicaSyncRuntime,
+    ScaleUpMigrationTracker, ScaleUpSnapshot, replica_sync::ReplicaSyncRuntime,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -51,6 +52,13 @@ enum AffinityEntry {
         revision: u64,
         active_leases: usize,
         idle_deadline: Instant,
+        scale_snapshot: Option<Arc<ScaleUpSnapshot>>,
+        migration_generation: u64,
+    },
+    Migrating {
+        old_target: AffinityTarget,
+        revision: u64,
+        notify: Arc<Notify>,
     },
 }
 
@@ -61,6 +69,7 @@ pub(super) struct AffinityCoordinatorInner {
     max_session_id_bytes: usize,
     entry_count: AtomicUsize,
     next_revision: AtomicU64,
+    scale_up: Option<ScaleUpMigrationTracker>,
     cancel: CancellationToken,
     replica: OnceLock<ReplicaSyncRuntime>,
     #[cfg(test)]
@@ -83,6 +92,7 @@ pub(super) enum ReplicaApplyOutcome {
     Inserted,
     Refreshed,
     ReplacedExpired,
+    ReboundMigration,
     IgnoredInitializing,
     IgnoredConflict,
     RejectedSessionId,
@@ -96,17 +106,40 @@ pub struct AffinityCoordinator {
 
 impl AffinityCoordinator {
     pub fn new(ttl: Duration) -> Result<Self, Error> {
-        Self::new_with_limits(
+        Self::new_with_options(
             ttl,
             MAX_SESSION_AFFINITY_ENTRIES,
             MAX_SESSION_AFFINITY_ID_BYTES,
+            None,
         )
     }
 
+    pub(crate) fn new_with_scale_up(
+        ttl: Duration,
+        scale_up: ScaleUpMigrationTracker,
+    ) -> Result<Self, Error> {
+        Self::new_with_options(
+            ttl,
+            MAX_SESSION_AFFINITY_ENTRIES,
+            MAX_SESSION_AFFINITY_ID_BYTES,
+            Some(scale_up),
+        )
+    }
+
+    #[cfg(test)]
     fn new_with_limits(
         ttl: Duration,
         max_entries: usize,
         max_session_id_bytes: usize,
+    ) -> Result<Self, Error> {
+        Self::new_with_options(ttl, max_entries, max_session_id_bytes, None)
+    }
+
+    fn new_with_options(
+        ttl: Duration,
+        max_entries: usize,
+        max_session_id_bytes: usize,
+        scale_up: Option<ScaleUpMigrationTracker>,
     ) -> Result<Self, Error> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
@@ -122,6 +155,7 @@ impl AffinityCoordinator {
             max_session_id_bytes,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
+            scale_up,
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
             #[cfg(test)]
@@ -220,6 +254,11 @@ impl AffinityCoordinator {
             match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
                     self.reserve_entry()?;
+                    let scale_snapshot = self
+                        .inner
+                        .scale_up
+                        .as_ref()
+                        .map(ScaleUpMigrationTracker::snapshot);
                     tracing::debug!(
                         session_id = %session_id,
                         "session affinity miss: new session, pinning after worker selection"
@@ -228,10 +267,12 @@ impl AffinityCoordinator {
                         &self.inner,
                         session_id,
                         requested_target,
+                        scale_snapshot,
                     )));
                 }
                 Entry::Occupied(mut entry) => match entry.get_mut() {
-                    AffinityEntry::Initializing { notify, .. } => {
+                    AffinityEntry::Initializing { notify, .. }
+                    | AffinityEntry::Migrating { notify, .. } => {
                         #[cfg(test)]
                         self.inner.waiter_observed.notify_one();
                         let notified = notify.clone().notified_owned();
@@ -258,6 +299,7 @@ impl AffinityCoordinator {
                         revision,
                         active_leases,
                         idle_deadline,
+                        ..
                     } if *active_leases == 0 && *idle_deadline <= now => {
                         tracing::debug!(
                             session_id = %session_id,
@@ -276,6 +318,11 @@ impl AffinityCoordinator {
                             revision,
                             notify,
                             requested_target,
+                            scale_snapshot: self
+                                .inner
+                                .scale_up
+                                .as_ref()
+                                .map(ScaleUpMigrationTracker::snapshot),
                             active: true,
                         }));
                     }
@@ -283,8 +330,48 @@ impl AffinityCoordinator {
                         target,
                         revision,
                         active_leases,
+                        scale_snapshot,
+                        migration_generation,
                         ..
                     } => {
+                        if requested_target.is_none()
+                            && *active_leases == 0
+                            && let (Some(scale_up), Some(previous_snapshot)) =
+                                (&self.inner.scale_up, scale_snapshot.as_ref())
+                        {
+                            let evaluation = scale_up.evaluate(
+                                &SessionAffinityId::new(session_id.clone()),
+                                previous_snapshot,
+                            );
+                            if let Some(migration_workers) = evaluation.migration_workers {
+                                let old_target = *target;
+                                let previous_snapshot = previous_snapshot.clone();
+                                let next_snapshot = evaluation.snapshot;
+                                let old_migration_generation = *migration_generation;
+                                let revision =
+                                    self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
+                                let notify = Arc::new(Notify::new());
+                                *entry.get_mut() = AffinityEntry::Migrating {
+                                    old_target,
+                                    revision,
+                                    notify: notify.clone(),
+                                };
+                                drop(entry);
+                                return Ok(AffinityAcquire::Migrate(AffinityMigration {
+                                    coordinator: Arc::downgrade(&self.inner),
+                                    session_id,
+                                    revision,
+                                    notify,
+                                    old_target,
+                                    old_migration_generation,
+                                    previous_snapshot,
+                                    next_snapshot,
+                                    migration_workers,
+                                    active: true,
+                                }));
+                            }
+                            *scale_snapshot = Some(evaluation.snapshot);
+                        }
                         validate_bound_target(&session_id, *target, requested_target)?;
                         tracing::debug!(
                             session_id = %session_id,
@@ -298,6 +385,8 @@ impl AffinityCoordinator {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id,
                             revision: *revision,
+                            migration_generation: (*migration_generation > 0)
+                                .then_some(*migration_generation),
                             active: true,
                         };
                         return Ok(AffinityAcquire::Bound {
@@ -319,19 +408,24 @@ impl AffinityCoordinator {
         let Some(entry) = self.inner.entries.get(session_id.as_str()) else {
             return Ok(None);
         };
-        let AffinityEntry::Bound {
-            target,
-            active_leases,
-            idle_deadline,
-            ..
-        } = entry.value()
-        else {
-            return Ok(None);
+        let target = match entry.value() {
+            AffinityEntry::Bound {
+                target,
+                active_leases,
+                idle_deadline,
+                ..
+            } => {
+                if *active_leases == 0 && *idle_deadline <= Instant::now() {
+                    return Ok(None);
+                }
+                *target
+            }
+            // Query-only requests do not initiate migration. While another
+            // request moves the session, a concurrent query keeps the old pin.
+            AffinityEntry::Migrating { old_target, .. } => *old_target,
+            AffinityEntry::Initializing { .. } => return Ok(None),
         };
-        if *active_leases == 0 && *idle_deadline <= Instant::now() {
-            return Ok(None);
-        }
-        validate_bound_target(session_id.as_str(), *target, requested_target)?;
+        validate_bound_target(session_id.as_str(), target, requested_target)?;
         tracing::debug!(
             session_id = %session_id.as_str(),
             worker_id = target.worker_id,
@@ -339,7 +433,7 @@ impl AffinityCoordinator {
             "session affinity hit: reusing pinned worker"
         );
 
-        Ok(Some(*target))
+        Ok(Some(target))
     }
 
     #[cfg(test)]
@@ -404,7 +498,19 @@ impl AffinityCoordinator {
         session_id: impl Into<String>,
         target: AffinityTarget,
     ) -> ReplicaApplyOutcome {
-        self.inner.apply_replica_update(session_id.into(), target)
+        self.inner
+            .apply_replica_update(session_id.into(), target, None)
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_replica_migration_for_test(
+        &self,
+        session_id: impl Into<String>,
+        target: AffinityTarget,
+        generation: u64,
+    ) -> ReplicaApplyOutcome {
+        self.inner
+            .apply_replica_update(session_id.into(), target, Some(generation))
     }
 
     fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
@@ -434,9 +540,14 @@ impl AffinityCoordinatorInner {
             .is_ok()
     }
 
-    fn publish_replica_update(&self, session_id: &str, target: AffinityTarget) {
+    fn publish_replica_update(
+        &self,
+        session_id: &str,
+        target: AffinityTarget,
+        migration_generation: Option<u64>,
+    ) {
         if let Some(replica) = self.replica.get() {
-            replica.publish(session_id, target);
+            replica.publish(session_id, target, migration_generation);
         }
     }
 
@@ -444,12 +555,18 @@ impl AffinityCoordinatorInner {
         &self,
         session_id: String,
         target: AffinityTarget,
+        migration_generation: Option<u64>,
     ) -> ReplicaApplyOutcome {
         if session_id.len() > self.max_session_id_bytes {
             return ReplicaApplyOutcome::RejectedSessionId;
         }
 
         let now = Instant::now();
+        let incoming_generation = migration_generation.unwrap_or(0);
+        let scale_snapshot = self
+            .scale_up
+            .as_ref()
+            .map(ScaleUpMigrationTracker::snapshot);
         match self.entries.entry(session_id) {
             Entry::Vacant(entry) => {
                 if !self.reserve_entry() {
@@ -461,11 +578,15 @@ impl AffinityCoordinatorInner {
                     revision,
                     active_leases: 0,
                     idle_deadline: now + self.ttl,
+                    scale_snapshot,
+                    migration_generation: incoming_generation,
                 });
                 ReplicaApplyOutcome::Inserted
             }
             Entry::Occupied(mut entry) => match entry.get_mut() {
-                AffinityEntry::Initializing { .. } => ReplicaApplyOutcome::IgnoredInitializing,
+                AffinityEntry::Initializing { .. } | AffinityEntry::Migrating { .. } => {
+                    ReplicaApplyOutcome::IgnoredInitializing
+                }
                 AffinityEntry::Bound {
                     active_leases,
                     idle_deadline,
@@ -477,16 +598,41 @@ impl AffinityCoordinatorInner {
                         revision,
                         active_leases: 0,
                         idle_deadline: now + self.ttl,
+                        scale_snapshot,
+                        migration_generation: incoming_generation,
                     };
                     ReplicaApplyOutcome::ReplacedExpired
                 }
                 AffinityEntry::Bound {
                     target: existing,
                     idle_deadline,
+                    scale_snapshot: existing_snapshot,
+                    migration_generation: existing_generation,
                     ..
                 } if *existing == target => {
                     *idle_deadline = now + self.ttl;
+                    if incoming_generation > *existing_generation {
+                        *existing_generation = incoming_generation;
+                        *existing_snapshot = scale_snapshot;
+                    }
                     ReplicaApplyOutcome::Refreshed
+                }
+                AffinityEntry::Bound {
+                    migration_generation: existing_generation,
+                    ..
+                } if migration_generation.is_some()
+                    && incoming_generation > *existing_generation =>
+                {
+                    let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+                    *entry.get_mut() = AffinityEntry::Bound {
+                        target,
+                        revision,
+                        active_leases: 0,
+                        idle_deadline: now + self.ttl,
+                        scale_snapshot,
+                        migration_generation: incoming_generation,
+                    };
+                    ReplicaApplyOutcome::ReboundMigration
                 }
                 AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
             },
@@ -500,6 +646,7 @@ trait VacantEntryExt {
         inner: &Arc<AffinityCoordinatorInner>,
         session_id: String,
         requested_target: Option<AffinityTarget>,
+        scale_snapshot: Option<Arc<ScaleUpSnapshot>>,
     ) -> AffinityInitialization;
 }
 
@@ -509,6 +656,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
         inner: &Arc<AffinityCoordinatorInner>,
         session_id: String,
         requested_target: Option<AffinityTarget>,
+        scale_snapshot: Option<Arc<ScaleUpSnapshot>>,
     ) -> AffinityInitialization {
         let revision = inner.next_revision.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
@@ -522,6 +670,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
             revision,
             notify,
             requested_target,
+            scale_snapshot,
             active: true,
         }
     }
@@ -529,6 +678,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
 
 pub(crate) enum AffinityAcquire {
     Initialize(AffinityInitialization),
+    Migrate(AffinityMigration),
     Bound {
         target: AffinityTarget,
         lease: AffinityLease,
@@ -536,10 +686,27 @@ pub(crate) enum AffinityAcquire {
 }
 
 impl AffinityAcquire {
+    pub(crate) fn action_name(&self) -> &'static str {
+        match self {
+            Self::Initialize(_) => "initialize",
+            Self::Migrate(_) => "migrate",
+            Self::Bound { .. } => "reuse",
+        }
+    }
+
     pub(crate) fn target(&self) -> Option<AffinityTarget> {
         match self {
-            Self::Initialize(_) => None,
+            Self::Initialize(_) | Self::Migrate(_) => None,
             Self::Bound { target, .. } => Some(*target),
+        }
+    }
+
+    /// Newly added workers eligible for this session's lazy scale-up move.
+    /// The underlying token or text selector still chooses the exact rank.
+    pub(crate) fn migration_worker_ids(&self) -> Option<&HashSet<u64>> {
+        match self {
+            Self::Migrate(migration) => Some(&migration.migration_workers),
+            Self::Initialize(_) | Self::Bound { .. } => None,
         }
     }
 
@@ -551,6 +718,11 @@ impl AffinityAcquire {
         match self {
             Self::Initialize(initialization) => {
                 let lease = initialization.commit(selected_target)?;
+                lease.publish(selected_target);
+                Ok(lease.into_stream(stream))
+            }
+            Self::Migrate(migration) => {
+                let lease = migration.commit(selected_target)?;
                 lease.publish(selected_target);
                 Ok(lease.into_stream(stream))
             }
@@ -567,8 +739,11 @@ impl AffinityAcquire {
     }
 
     pub(crate) fn invalidate(self) {
-        if let Self::Bound { mut lease, .. } = self {
-            lease.invalidate();
+        match self {
+            Self::Bound { mut lease, .. } => lease.invalidate(),
+            Self::Initialize(_) | Self::Migrate(_) => {
+                // Dropping either transactional operation performs rollback.
+            }
         }
     }
 }
@@ -579,6 +754,7 @@ pub(crate) struct AffinityInitialization {
     revision: u64,
     notify: Arc<Notify>,
     requested_target: Option<AffinityTarget>,
+    scale_snapshot: Option<Arc<ScaleUpSnapshot>>,
     active: bool,
 }
 
@@ -604,6 +780,14 @@ impl AffinityInitialization {
             revision: self.revision,
             active_leases: 1,
             idle_deadline: Instant::now() + inner.ttl,
+            // If topology changed while selection was in flight, bind against
+            // the latest view rather than immediately migrating next turn.
+            scale_snapshot: inner
+                .scale_up
+                .as_ref()
+                .map(ScaleUpMigrationTracker::snapshot)
+                .or_else(|| self.scale_snapshot.clone()),
+            migration_generation: 0,
         };
         drop(entry);
         self.active = false;
@@ -612,6 +796,7 @@ impl AffinityInitialization {
             coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
             revision: self.revision,
+            migration_generation: None,
             active: true,
         })
     }
@@ -638,17 +823,123 @@ impl Drop for AffinityInitialization {
     }
 }
 
+pub(crate) struct AffinityMigration {
+    coordinator: Weak<AffinityCoordinatorInner>,
+    session_id: String,
+    revision: u64,
+    notify: Arc<Notify>,
+    old_target: AffinityTarget,
+    old_migration_generation: u64,
+    previous_snapshot: Arc<ScaleUpSnapshot>,
+    next_snapshot: Arc<ScaleUpSnapshot>,
+    migration_workers: Arc<HashSet<u64>>,
+    active: bool,
+}
+
+impl AffinityMigration {
+    fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
+        if !self.migration_workers.contains(&target.worker_id) {
+            return Err(invalid_argument(format!(
+                "session {} scale-up migration selected worker {}, which is not newly added",
+                self.session_id, target.worker_id
+            )));
+        }
+        let Some(inner) = self.coordinator.upgrade() else {
+            return Err(anyhow::anyhow!("session affinity coordinator dropped"));
+        };
+        let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
+            return Err(invalid_argument("session affinity migration was cancelled"));
+        };
+        if !matches!(
+            entry.value(),
+            AffinityEntry::Migrating { revision, .. } if *revision == self.revision
+        ) {
+            return Err(invalid_argument("session affinity migration changed"));
+        }
+        let generation = self.next_snapshot.generation();
+        *entry = AffinityEntry::Bound {
+            target,
+            revision: self.revision,
+            active_leases: 1,
+            idle_deadline: Instant::now() + inner.ttl,
+            scale_snapshot: Some(self.next_snapshot.clone()),
+            migration_generation: generation,
+        };
+        drop(entry);
+        self.active = false;
+        self.notify.notify_waiters();
+        tracing::debug!(
+            session_id = %self.session_id,
+            generation,
+            old_worker_id = self.old_target.worker_id,
+            old_dp_rank = ?self.old_target.dp_rank,
+            new_worker_id = target.worker_id,
+            new_dp_rank = ?target.dp_rank,
+            "Committed affinity scale-up migration"
+        );
+        Ok(AffinityLease {
+            coordinator: Arc::downgrade(&inner),
+            session_id: self.session_id.clone(),
+            revision: self.revision,
+            migration_generation: Some(generation),
+            active: true,
+        })
+    }
+
+    fn rollback(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let Some(inner) = self.coordinator.upgrade() else {
+            return;
+        };
+        let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
+            return;
+        };
+        if !matches!(
+            entry.value(),
+            AffinityEntry::Migrating { revision, .. } if *revision == self.revision
+        ) {
+            return;
+        }
+        *entry = AffinityEntry::Bound {
+            target: self.old_target,
+            revision: self.revision,
+            active_leases: 0,
+            idle_deadline: Instant::now() + inner.ttl,
+            scale_snapshot: Some(self.previous_snapshot.clone()),
+            migration_generation: self.old_migration_generation,
+        };
+        drop(entry);
+        self.notify.notify_waiters();
+        tracing::debug!(
+            session_id = %self.session_id,
+            worker_id = self.old_target.worker_id,
+            dp_rank = ?self.old_target.dp_rank,
+            "Rolled back affinity scale-up migration"
+        );
+    }
+}
+
+impl Drop for AffinityMigration {
+    fn drop(&mut self) {
+        self.rollback();
+    }
+}
+
 pub(crate) struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
+    migration_generation: Option<u64>,
     active: bool,
 }
 
 impl AffinityLease {
     fn publish(&self, target: AffinityTarget) {
         if let Some(inner) = self.coordinator.upgrade() {
-            inner.publish_replica_update(&self.session_id, target);
+            inner.publish_replica_update(&self.session_id, target, self.migration_generation);
         }
     }
 
@@ -680,6 +971,7 @@ impl AffinityLease {
                 revision,
                 active_leases,
                 idle_deadline,
+                ..
             } = entry.value_mut()
             else {
                 return;
@@ -691,7 +983,7 @@ impl AffinityLease {
             *idle_deadline = Instant::now() + inner.ttl;
             *target
         };
-        inner.publish_replica_update(&self.session_id, target);
+        inner.publish_replica_update(&self.session_id, target, self.migration_generation);
     }
 
     fn invalidate(&mut self) {

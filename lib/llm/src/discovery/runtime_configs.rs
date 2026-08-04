@@ -20,6 +20,32 @@ use dynamo_kv_router::protocols::WorkerId;
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
 type DiscoveredRuntimeConfigs = HashMap<WorkerId, (String, ModelRuntimeConfig)>;
 
+/// Wait until a model-scoped runtime-config watch contains the configured
+/// number of startup workers.
+///
+/// Both token and text KV routers use this gate before capturing their initial
+/// affinity topology, so workers intended to be present at startup are not
+/// mistaken for a later scale-up.
+pub(crate) async fn wait_for_initial_runtime_configs(
+    runtime_configs: &mut RuntimeConfigWatch,
+    min_initial_workers: usize,
+) -> anyhow::Result<()> {
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
+
+    let _ = runtime_configs
+        .wait_for(|configs| configs.len() >= min_initial_workers)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "runtime config watch closed before {} workers appeared",
+                min_initial_workers
+            )
+        })?;
+    Ok(())
+}
+
 fn base_runtime_config_watch(
     mut stream: DiscoveryStream,
 ) -> watch::Receiver<DiscoveredRuntimeConfigs> {
@@ -220,5 +246,29 @@ mod tests {
             .unwrap();
         configs.changed().await.unwrap();
         assert!(configs.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn initial_runtime_config_gate_waits_for_the_full_startup_topology() {
+        let (tx, mut runtime_configs) = watch::channel(HashMap::new());
+        let waiter =
+            tokio::spawn(
+                async move { wait_for_initial_runtime_configs(&mut runtime_configs, 2).await },
+            );
+
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        tx.send(HashMap::from([(1, ModelRuntimeConfig::default())]))
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        tx.send(HashMap::from([
+            (1, ModelRuntimeConfig::default()),
+            (2, ModelRuntimeConfig::default()),
+        ]))
+        .unwrap();
+        waiter.await.unwrap().unwrap();
     }
 }

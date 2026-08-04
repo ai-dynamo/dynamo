@@ -27,7 +27,8 @@ use crate::{
     },
     request_template::RequestTemplate,
     session_affinity::{
-        AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
+        AffinityCoordinator, ScaleUpMigrationTracker, SessionAffinityPushRouter,
+        create_affinity_coordinator,
     },
     types::{
         Annotated,
@@ -267,11 +268,17 @@ pub async fn build_preprocessed_routing(
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
     let endpoint_id = router_client.endpoint.id();
 
-    let affinity = create_affinity_coordinator(
-        session_affinity_ttl_secs.map(Duration::from_secs),
-        router_client.clone(),
-    )
-    .await?;
+    let affinity_ttl = session_affinity_ttl_secs.map(Duration::from_secs);
+    let scale_up = affinity_ttl.and_then(|_| {
+        chooser.as_ref().map(|chooser| {
+            ScaleUpMigrationTracker::new(
+                chooser.routing_scope().to_string(),
+                chooser.runtime_configs(),
+            )
+        })
+    });
+    let affinity =
+        create_affinity_coordinator(affinity_ttl, router_client.clone(), scale_up).await?;
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)

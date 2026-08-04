@@ -11,7 +11,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -111,11 +111,15 @@ impl TextKvRouter {
     fn select(
         &self,
         explicit: Option<AffinityTarget>,
+        allowed_worker_ids: Option<&HashSet<u64>>,
     ) -> Result<(AffinityTarget, TextKvPermit), Error> {
         let mut worker_ids = self.client.instance_ids_free();
         let model_workers = self.runtime_configs.borrow();
         worker_ids.retain(|worker_id| model_workers.contains_key(worker_id));
         drop(model_workers);
+        if let Some(allowed_worker_ids) = allowed_worker_ids {
+            worker_ids.retain(|worker_id| allowed_worker_ids.contains(worker_id));
+        }
         worker_ids.sort_unstable();
         if worker_ids.is_empty() {
             return Err(anyhow::anyhow!(
@@ -290,7 +294,12 @@ where
 
         let (target, mut permit) = match operation.as_ref().and_then(AffinityAcquire::target) {
             Some(target) => (target, self.selector.reserve_existing(target)),
-            None => self.selector.select(explicit)?,
+            None => self.selector.select(
+                explicit,
+                operation
+                    .as_ref()
+                    .and_then(AffinityAcquire::migration_worker_ids),
+            )?,
         };
         apply_target(&mut *request, target);
 
@@ -300,8 +309,18 @@ where
             worker_id = target.worker_id,
             dp_rank = ?target.dp_rank,
             affinity_reuse = operation.as_ref().is_some_and(|operation| operation.target().is_some()),
+            affinity_action = operation.as_ref().map_or("none", AffinityAcquire::action_name),
             "Selected text-input KV target"
         );
+        if let Some(session_id) = session_id.as_ref() {
+            tracing::debug!(
+                session_id = %session_id.as_str(),
+                worker_id = target.worker_id,
+                dp_rank = ?target.dp_rank,
+                affinity_action = operation.as_ref().map_or("none", AffinityAcquire::action_name),
+                "Observed text-input KV session target"
+            );
+        }
 
         let stream = match self.inner.dispatch_exact(request, target.worker_id).await {
             Ok(stream) => stream,

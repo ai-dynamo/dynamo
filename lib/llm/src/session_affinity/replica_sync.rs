@@ -34,6 +34,8 @@ pub(super) struct SessionAffinityUpdate {
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
     pub router_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_generation: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -43,12 +45,13 @@ struct ReplicaUpdateSender {
 }
 
 impl ReplicaUpdateSender {
-    fn publish(&self, session_id: &str, target: AffinityTarget) {
+    fn publish(&self, session_id: &str, target: AffinityTarget, migration_generation: Option<u64>) {
         let update = SessionAffinityUpdate {
             session_id: session_id.to_string(),
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
             router_id: self.router_id,
+            migration_generation,
         };
         if let Err(error) = self.tx.try_send(update) {
             tracing::trace!(
@@ -83,7 +86,11 @@ impl ReplicaUpdateApplier {
             worker_id: update.worker_id,
             dp_rank: update.dp_rank,
         };
-        let outcome = coordinator.apply_replica_update(update.session_id, target);
+        let outcome = coordinator.apply_replica_update(
+            update.session_id,
+            target,
+            update.migration_generation,
+        );
         drop(coordinator);
         tracing::trace!(
             worker_id = target.worker_id,
@@ -231,8 +238,14 @@ impl ReplicaSyncRuntime {
         })
     }
 
-    pub(super) fn publish(&self, session_id: &str, target: AffinityTarget) {
-        self.sender.publish(session_id, target);
+    pub(super) fn publish(
+        &self,
+        session_id: &str,
+        target: AffinityTarget,
+        migration_generation: Option<u64>,
+    ) {
+        self.sender
+            .publish(session_id, target, migration_generation);
     }
 
     pub(super) fn shutdown_now(&mut self) {
@@ -296,6 +309,7 @@ mod tests {
             worker_id,
             dp_rank: Some(0),
             router_id,
+            migration_generation: None,
         }
     }
 
@@ -322,6 +336,7 @@ mod tests {
                 worker_id: 10,
                 dp_rank: Some(0),
             },
+            None,
         );
         runtime.publish(
             "second",
@@ -329,6 +344,7 @@ mod tests {
                 worker_id: 11,
                 dp_rank: Some(0),
             },
+            None,
         );
 
         assert_eq!(rx.recv().await.unwrap().session_id, "first");
