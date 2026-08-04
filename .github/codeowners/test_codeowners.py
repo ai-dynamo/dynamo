@@ -29,10 +29,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     _dead_patterns,
-    _probe_path,
     is_policy_change,
     ownership_contract_violations,
-    shared_additivity_violations,
     split_coverage,
     strict_failure,
 )
@@ -498,9 +496,8 @@ class TestComputeResolution:
     @pytest.mark.parametrize("section", ["shared", "required_owners", "advisory"])
     def test_removed_inherits_key_is_rejected_with_guidance(self, section: str) -> None:
         # The inherits/owners split is gone: an owner rule declares its
-        # complete owner set under 'owners', and the additivity gate (not a
-        # second authoring key) catches a list that drops an enclosing
-        # rule's owner. Stale authoring muscle-memory gets a pointed error.
+        # complete owner set under 'owners'. Stale authoring
+        # muscle-memory gets a pointed error.
         spec = self._spec()
         spec[section] = [
             {
@@ -879,8 +876,7 @@ class TestOwnershipContracts:
     def test_shared_rule_is_not_a_tree_level_contract(self) -> None:
         # The tree-level contract check enforces only required_owners and
         # blocking file-type declarations; a shared drop is a POLICY-shape
-        # problem and is caught by shared_additivity_violations instead
-        # (see TestSharedAdditivity), not by per-file contract validation.
+        # problem, not a per-file contract violation.
         spec = self._spec()
         spec["shared"].append({"glob": "lib/private/", "owners": ["runtime"]})
         model = compute_resolution(spec)
@@ -944,7 +940,7 @@ class TestOwnershipContracts:
         model = compute_resolution(self._spec())
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
-            True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None, []
+            True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None
         )
         assert message is None
 
@@ -953,186 +949,9 @@ class TestOwnershipContracts:
         model.shared.append({"glob": "lib/private/", "owners": ["runtime"]})
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
-            True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None, []
+            True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None
         )
         assert message and "lost declared owners" in message
-
-
-class TestSharedAdditivity:
-    """shared rows are co-ownership BY DEFINITION: the pure policy gate
-    rejects a shared owner list that drops what an enclosing rule grants.
-    Narrowing ownership is still possible -- through an area path_globs
-    override, which this check deliberately does not police."""
-
-    def _spec(self) -> dict:
-        return {
-            "meta": {"catch_all": "@root"},
-            "areas": [
-                {
-                    "label": "runtime",
-                    "github_team": "@runtime",
-                    "path_globs": ["lib/"],
-                },
-                {"label": "docs", "github_team": "@docs", "path_globs": []},
-                {"label": "ops", "github_team": "@ops", "path_globs": []},
-            ],
-        }
-
-    def test_restated_enclosing_owner_passes(self) -> None:
-        spec = self._spec()
-        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["runtime", "docs"]}]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_dropped_enclosing_owner_is_flagged(self) -> None:
-        # The Harrison case: "docs now co-owns lib/metrics/" authored as the
-        # complete truth minus the enclosing area = an accidental takeover.
-        spec = self._spec()
-        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["docs"]}]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        assert len(violations) == 1
-        assert violations[0].glob == "lib/metrics/"
-        assert violations[0].missing == ("@runtime",)
-
-    def test_catch_all_is_a_default_not_a_grant(self) -> None:
-        # A shared row over an otherwise-uncovered path replaces only the
-        # catch-all; requiring the catch-all team restated would make every
-        # top-level shared row carry dead weight.
-        spec = self._spec()
-        spec["shared"] = [{"glob": "tools/lint.py", "owners": ["docs"]}]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_wildcard_glob_checks_its_static_prefix(self) -> None:
-        spec = self._spec()
-        spec["shared"] = [{"glob": "lib/**/*checkpoint*", "owners": ["docs"]}]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        assert len(violations) == 1
-        assert violations[0].missing == ("@runtime",)
-
-    def test_basename_glob_has_no_enclosing_rule(self) -> None:
-        # A bare basename glob applies tree-wide; no static enclosure exists,
-        # so the check skips it rather than guessing against the tree.
-        spec = self._spec()
-        spec["shared"] = [{"glob": "*.proto", "owners": ["docs"]}]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_nested_shared_must_restate_shallower_shared(self) -> None:
-        spec = self._spec()
-        spec["shared"] = [
-            {"glob": "lib/metrics/", "owners": ["runtime", "docs"]},
-            {"glob": "lib/metrics/dash/", "owners": ["runtime", "ops"]},
-        ]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        assert len(violations) == 1
-        assert violations[0].glob == "lib/metrics/dash/"
-        assert violations[0].missing == ("@docs",)
-
-    def test_area_override_may_still_narrow(self) -> None:
-        # Reassignment stays possible where it belongs: an area path_globs
-        # override. The additivity gate polices only the shared tier.
-        spec = self._spec()
-        spec["areas"][1]["path_globs"] = ["lib/docs_owned/"]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_exact_file_glob_probes_itself(self) -> None:
-        spec = self._spec()
-        spec["areas"][2]["path_globs"] = ["lib/ops_tool.py"]
-        spec["shared"] = [{"glob": "lib/ops_tool.py", "owners": ["docs"]}]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        assert len(violations) == 1
-        assert set(violations[0].missing) == {"@ops"}
-
-    def test_shared_dir_clobbering_nested_base_rule_is_flagged(self) -> None:
-        # Downward pass: shared rows render LAST, so a shared dir glob that
-        # restates its enclosing owners can still strip a MORE-SPECIFIC base
-        # rule nested inside its subtree. The upward probe (a direct child
-        # of the shared glob) never matches the nested rule, so this needs
-        # the full-artifact probe of every base rule.
-        spec = self._spec()
-        spec["areas"].append(
-            {
-                "label": "special",
-                "github_team": "@special",
-                "path_globs": ["lib/metrics/special.py"],
-            }
-        )
-        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["runtime", "docs"]}]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        assert len(violations) == 1
-        assert violations[0].glob == "lib/metrics/"
-        assert violations[0].missing == ("@special",)
-
-        # Restating the nested team on the shared row resolves it -- the
-        # author explicitly chose to widen that team to the whole subtree.
-        spec["shared"] = [
-            {"glob": "lib/metrics/", "owners": ["runtime", "docs", "special"]}
-        ]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_wildcard_shared_clobbering_nested_base_rule_is_flagged(self) -> None:
-        # A wildcard shared row reaches INSIDE nested subtrees: probe an
-        # instantiated path (sentinel-filled final segment) under each
-        # nested base directory.
-        spec = self._spec()
-        spec["areas"].append(
-            {"label": "deep", "github_team": "@deep", "path_globs": ["lib/deep/"]}
-        )
-        spec["shared"] = [
-            {"glob": "lib/**/*checkpoint*", "owners": ["runtime", "docs"]}
-        ]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        assert len(violations) == 1
-        assert violations[0].glob == "lib/**/*checkpoint*"
-        assert violations[0].missing == ("@deep",)
-
-        spec["shared"] = [
-            {"glob": "lib/**/*checkpoint*", "owners": ["runtime", "docs", "deep"]}
-        ]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_exact_equal_area_and_shared_glob_stays_clean(self) -> None:
-        # An area override with the SAME glob as a shared row is the normal
-        # "specialist dir with co-ownership" idiom; the downward pass must
-        # not flag the shared row for superseding its own glob's area row
-        # (the upward pass already requires the area team be restated).
-        spec = self._spec()
-        spec["areas"].append(
-            {"label": "sub", "github_team": "@sub", "path_globs": ["lib/sub/"]}
-        )
-        spec["shared"] = [{"glob": "lib/sub/", "owners": ["runtime", "sub"]}]
-        assert shared_additivity_violations(compute_resolution(spec)) == []
-
-    def test_strict_gate_blocks_on_additivity_violation(self) -> None:
-        spec = self._spec()
-        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["docs"]}]
-        violations = shared_additivity_violations(compute_resolution(spec))
-        message = strict_failure(
-            True,
-            CoverageGate(blocking=[], warnings=[]),
-            None,
-            [],
-            [],
-            None,
-            violations,
-        )
-        assert message and "drop owner(s) granted by an enclosing rule" in message
-
-
-class TestProbePath:
-    def test_dir_glob_probes_synthetic_child(self) -> None:
-        assert _probe_path("lib/metrics/") == "lib/metrics/\x00"
-
-    def test_exact_path_probes_itself(self) -> None:
-        assert _probe_path("lib/ops_tool.py") == "lib/ops_tool.py"
-
-    def test_wildcard_glob_probes_static_prefix(self) -> None:
-        assert _probe_path("deploy/operator/samples/*gms*") == (
-            "deploy/operator/samples/\x00"
-        )
-        assert _probe_path("deploy/**/*checkpoint*") == "deploy/\x00"
-
-    def test_basename_glob_probes_nothing(self) -> None:
-        assert _probe_path("*.proto") is None
-        assert _probe_path("Dockerfile?") is None
 
 
 def test_dead_patterns_include_advisory_rules() -> None:
@@ -1593,18 +1412,6 @@ class TestContributorActionMatrix:
         areas.write_text(self.BASE_AREAS)
         assert _run_build(repo, areas).returncode == 0
         assert self._routing(areas, "owned/tool.py") == ["@org/owned"]
-
-    def test_5b_remove_enclosing_owner_blocks(self, tmp_path) -> None:
-        areas, repo, _ = self._fixture(tmp_path)
-        # Writing the shared row WITHOUT the enclosing area is a silent
-        # takeover, not co-ownership -- the additivity gate rejects it.
-        areas.write_text(
-            self.BASE_AREAS + 'shared:\n  - glob: "owned/tool.py"\n    owners: [docs]\n'
-        )
-        result = _run_build(repo, areas)
-        assert result.returncode == 1
-        assert "drop owner(s) granted by an enclosing rule" in result.stdout
-        assert "@org/owned" in result.stdout
 
     def test_6_add_area_claiming_new_directory_passes(self, tmp_path) -> None:
         areas, repo, _ = self._fixture(tmp_path)

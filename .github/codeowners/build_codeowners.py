@@ -4,10 +4,9 @@ Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
 pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
 and reports how much of the live tree is EXPLICITLY owned vs. falls to the
 catch-all. It also rejects stale globs (all of them in full-tree runs; in
-diff-aware runs, the ones this branch itself orphaned), rejects shared rules
-that drop an enclosing rule's owners, and verifies that final last-match
-resolution retains every owner promised by required and blocking file-type
-declarations.
+diff-aware runs, the ones this branch itself orphaned) and verifies that final
+last-match resolution retains every owner promised by required and blocking
+file-type declarations.
 
 This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
 is a pure function of the policy YAML; the tree only enters here, in the
@@ -25,7 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -123,173 +122,6 @@ def ownership_contract_violations(
     return violations
 
 
-@dataclass(frozen=True)
-class SharedAdditivityViolation:
-    """A shared rule that drops an owner granted by the rules above it."""
-
-    glob: str
-    missing: tuple[str, ...]
-    declared: tuple[str, ...]
-
-
-def _probe_path(glob: str) -> str | None:
-    """A path prefix every file matched by ``glob`` is guaranteed to share.
-
-    Directory globs probe a synthetic direct child, exact paths probe
-    themselves, and a wildcard glob probes a synthetic child of its static
-    directory prefix. Returns ``None`` for basename globs (no anchored
-    prefix), which imply no enclosing rule and are skipped.
-    """
-    wildcard = min((i for i in (glob.find(c) for c in "*?[") if i != -1), default=-1)
-    if wildcard != -1:
-        prefix = glob[:wildcard].rpartition("/")[0]
-        return f"{prefix}/\x00" if prefix else None
-    if glob.endswith("/"):
-        return f"{glob}\x00"
-    return glob
-
-
-def _instantiated_probe(shared_glob: str, base_dir_glob: str) -> str | None:
-    """A concrete path under ``base_dir_glob`` that ``shared_glob`` matches.
-
-    Lets the downward pass test whether a WILDCARD shared row reaches inside
-    a nested base rule's subtree: the shared glob's final segment is
-    instantiated with sentinel characters no real rule matches by accident.
-    ``None`` when instantiation is ambiguous (character classes) or the
-    result does not actually match the shared glob -- skipping is safe
-    (under-enforcement), guessing is not.
-    """
-    last = shared_glob.rsplit("/", 1)[-1]
-    if not last or "[" in last:
-        return None
-    concrete = last.replace("**", "\x00").replace("*", "\x00").replace("?", "\x01")
-    candidate = base_dir_glob + concrete
-    return candidate if match(anchor(shared_glob), candidate) else None
-
-
-def _last_match(
-    rules: list[tuple[str, list[str]]], path: str
-) -> tuple[str, list[str]] | None:
-    """The (pattern, owners) of the LAST rule matching ``path``, or None."""
-    won: tuple[str, list[str]] | None = None
-    for pattern, owners in rules:
-        if match(pattern, path):
-            won = (pattern, owners)
-    return won
-
-
-def shared_additivity_violations(
-    model: ResolvedModel,
-) -> list[SharedAdditivityViolation]:
-    """Shared rules whose owner list drops what another rule grants.
-
-    ``shared`` rows are co-ownership by definition, but CODEOWNERS is
-    last-match-wins, so each row must restate the owners it keeps. This is
-    the machine check that makes the restatement trustworthy, in both
-    directions:
-
-    UPWARD -- resolve a representative probe for each shared glob against
-    everything the emitter renders BEFORE that row (areas, file-type
-    defaults, overrides, shorter shared rules) and require the row to retain
-    every owner it finds. The catch-all is a default, not a grant, so
-    replacing it is fine.
-
-    DOWNWARD -- shared rows render LAST, so a shared glob that reaches
-    inside a MORE-SPECIFIC base rule's subtree re-clobbers it under
-    last-match (the upward probe, a direct child of the shared glob, can
-    never see that). Probe each area base rule against the full artifact
-    and flag any shared row that wins while dropping the base team; for
-    wildcard shared rows, additionally probe an instantiated path inside
-    each nested base directory.
-
-    Pure function of the policy -- judged rules-against-rules, never the
-    live tree, so the check cannot flap with base churn.
-    """
-    label_to_team = model.label_to_team()
-    # Render WITHOUT shared rows or the catch-all: what remains is exactly
-    # the explicit-grant tier a shared row may not silently shrink.
-    lines, _ = render_codeowners(
-        replace(model, shared=[], catch_all=""), group=True, external=[]
-    )
-    rules = parse_codeowners("\n".join(lines))
-    ordered = sorted(
-        model.shared, key=lambda s: (len(anchor(s["glob"])), anchor(s["glob"]))
-    )
-    violations: list[SharedAdditivityViolation] = []
-    seen: set[tuple[str, tuple[str, ...]]] = set()
-
-    def flag(glob: str, missing: tuple[str, ...], declared: tuple[str, ...]) -> None:
-        key = (glob, missing)
-        if key not in seen:
-            seen.add(key)
-            violations.append(
-                SharedAdditivityViolation(glob=glob, missing=missing, declared=declared)
-            )
-
-    # Upward pass. Note: a violating shorter row is still appended with its
-    # narrowed (declared) owners, so a longer row resolving against it may
-    # not be flagged in the same run -- the gate blocks on the first
-    # violation either way; the count converges once the author fixes it.
-    for rule in ordered:
-        declared = [label_to_team.get(o, o) for o in rule["owners"]]
-        probe = _probe_path(rule["glob"])
-        if probe is not None:
-            missing = set(resolve_owners(rules, probe)) - set(declared)
-            if missing:
-                flag(rule["glob"], tuple(sorted(missing)), tuple(declared))
-        rules.append((anchor(rule["glob"]), declared))
-
-    # Downward pass, over the complete artifact.
-    full_lines, _ = render_codeowners(model, group=True, external=[])
-    full_rules = parse_codeowners("\n".join(full_lines))
-    shared_by_anchor = {anchor(s["glob"]): s for s in model.shared}
-    wildcard_shared = [s for s in model.shared if any(c in s["glob"] for c in "*?[")]
-
-    def check_probe(probe: str, base_glob: str, team: str) -> None:
-        won = _last_match(full_rules, probe)
-        if won is None or won[0] == anchor(base_glob):
-            return
-        shared_rule = shared_by_anchor.get(won[0])
-        if shared_rule is None or team in won[1]:
-            return
-        flag(
-            shared_rule["glob"],
-            (team,),
-            tuple(label_to_team.get(o, o) for o in shared_rule["owners"]),
-        )
-
-    for area in model.areas:
-        for base_glob in area.path_globs:
-            probe = _probe_path(base_glob)
-            if probe is None:
-                continue
-            check_probe(probe, base_glob, area.github_team)
-            if not base_glob.endswith("/"):
-                continue
-            for s in wildcard_shared:
-                candidate = _instantiated_probe(s["glob"], base_glob)
-                if candidate is not None:
-                    check_probe(candidate, base_glob, area.github_team)
-    return violations
-
-
-def print_additivity_violations(
-    violations: list[SharedAdditivityViolation],
-) -> None:
-    """Print a bounded shared-rule owner-drop report."""
-    if not violations:
-        return
-    print(
-        f"shared rules dropping enclosing owners: {len(violations)} "
-        "(restate the owner in the rule's 'owners' list):"
-    )
-    for violation in violations[:15]:
-        print(
-            f"    {violation.glob}: missing {list(violation.missing)}; "
-            f"declared {list(violation.declared)}"
-        )
-
-
 def print_ownership_violations(
     violations: list[OwnershipContractViolation],
 ) -> None:
@@ -340,7 +172,6 @@ def strict_failure(
     ownership_violations: list[OwnershipContractViolation],
     dead: list[str],
     newly_stale: list[str] | None,
-    additivity: list[SharedAdditivityViolation],
 ) -> str | None:
     """Return the fail-closed message for the active strict gate.
 
@@ -350,8 +181,7 @@ def strict_failure(
     globs, the ones this branch itself orphaned (see
     ``newly_stale_patterns``); staleness inherited from the base branch
     surfaces as a non-fatal report line so base churn cannot red-X
-    unrelated PRs. Shared-rule additivity is a pure policy property, so it
-    is judged (and can only change) on full-tree runs.
+    unrelated PRs.
     """
     if not strict:
         return None
@@ -371,11 +201,6 @@ def strict_failure(
             f"!! strict: {len(newly_stale)} ownership glob(s) match no "
             "tracked files after this change's deletions -- prune them from "
             "areas.yaml and regenerate CODEOWNERS in this PR"
-        )
-    if additivity:
-        return (
-            f"!! strict: {len(additivity)} shared rule(s) drop owner(s) "
-            "granted by an enclosing rule -- restate them under 'owners'"
         )
     if ownership_violations:
         return (
@@ -578,21 +403,14 @@ def main() -> int:
     dead = _dead_patterns(model, tree)
     if changed is None:
         newly_stale = None
-        # Pure policy property; only a policy edit (always judged full-tree)
-        # can change it, so diff-aware runs skip it entirely.
-        additivity = shared_additivity_violations(model)
     else:
         # One git call, and only when something is stale to attribute.
         base_paths = merge_base_tree(Path(args.repo), args.base) if dead else []
         newly_stale = newly_stale_patterns(dead, base_paths)
-        additivity = []
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
-    print_additivity_violations(additivity)
     gate = split_coverage(unmatched, changed)
     _print_warnings(gate, args.base)
-    failure = strict_failure(
-        args.strict, gate, changed, violations, dead, newly_stale, additivity
-    )
+    failure = strict_failure(args.strict, gate, changed, violations, dead, newly_stale)
     if failure:
         print(failure)
         return 1

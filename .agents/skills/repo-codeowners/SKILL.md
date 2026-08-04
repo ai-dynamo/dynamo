@@ -107,11 +107,10 @@ Semantics worth knowing before you file one:
   must never be dropped are declared under `required_owners:` in
   `areas.yaml`; the CI gate fails any policy change that removes a declared
   owner from a matching path.
-- **`shared` rows are additive by contract.** A `shared` entry lists its
-  complete owner set (owners kept plus owners added); the gate rejects a
-  list that drops an owner an enclosing rule grants and names the missing
-  team. To narrow ownership on purpose, use an area `path_globs` override,
-  not a `shared` entry.
+- **`shared` rows list their complete owner set.** Owners kept plus owners
+  added. Nothing validates this, so omitting a team that a broader rule
+  grants silently takes the path from them. Check with `who_owns.py` after
+  regenerating.
 
 ## Flow 4: Grant an external contributor area-scoped ownership
 
