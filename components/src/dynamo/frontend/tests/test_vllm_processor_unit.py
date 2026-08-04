@@ -1104,3 +1104,100 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+class TestGuidedDecodingTranslation:
+    """response_format / guided_* must reach sampling_options.guided_decoding.
+
+    The Rust OpenAIPreprocessor is bypassed on the vllm chat-processor path, so
+    this file owns the translation the Rust ``get_guided_json`` normally does.
+    The worker feeds the result into vLLM's ``StructuredOutputsParams``, which
+    rejects a constraint set holding zero or more than one constraint — so the
+    key must be absent unless exactly one constraint is present.
+    """
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+
+    def _build(self, request):
+        from dynamo.frontend.vllm_processor import _build_guided_decoding
+
+        return _build_guided_decoding({"model": MODEL, **request})
+
+    @pytest.mark.parametrize(
+        "request_extra, expected",
+        [
+            # OpenAI response_format nesting.
+            (
+                {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "city", "schema": SCHEMA},
+                    }
+                },
+                {"json": SCHEMA},
+            ),
+            # Bare json_object maps to the "any JSON object" schema.
+            (
+                {"response_format": {"type": "json_object"}},
+                {"json": {"type": "object"}},
+            ),
+            # CommonExt spellings.
+            ({"guided_json": SCHEMA}, {"json": SCHEMA}),
+            ({"guided_regex": r"\d{3}-\d{4}"}, {"regex": r"\d{3}-\d{4}"}),
+            (
+                {"guided_grammar": 'root ::= "yes" | "no"'},
+                {"grammar": 'root ::= "yes" | "no"'},
+            ),
+            ({"guided_choice": ["yes", "no"]}, {"choice": ["yes", "no"]}),
+            # guided_json wins over response_format (Rust get_guided_json).
+            (
+                {
+                    "guided_json": SCHEMA,
+                    "response_format": {"type": "json_object"},
+                },
+                {"json": SCHEMA},
+            ),
+            # whitespace_pattern refines a real constraint.
+            (
+                {"guided_json": SCHEMA, "guided_whitespace_pattern": "[ \n]*"},
+                {"json": SCHEMA, "whitespace_pattern": "[ \n]*"},
+            ),
+        ],
+    )
+    def test_constraint_is_translated(self, request_extra, expected):
+        assert self._build(request_extra) == expected
+
+    @pytest.mark.parametrize(
+        "request_extra",
+        [
+            {},  # plain chat request
+            {"response_format": {"type": "text"}},  # the common default
+            {"response_format": None},
+            {"response_format": {"type": "json_schema", "json_schema": {}}},
+            {"guided_choice": []},  # empty choice list is not a constraint
+            {"guided_whitespace_pattern": "[ \n]*"},  # not a constraint by itself
+        ],
+    )
+    def test_no_constraint_emits_nothing(self, request_extra):
+        assert self._build(request_extra) is None
+
+    def test_emitted_dict_holds_exactly_one_constraint(self):
+        guided_decoding = self._build(
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "city", "schema": self.SCHEMA},
+                },
+                "guided_whitespace_pattern": "[ \n]*",
+            }
+        )
+        constraints = [
+            key
+            for key in ("json", "regex", "choice", "grammar", "structural_tag")
+            if guided_decoding.get(key) is not None
+        ]
+        assert constraints == ["json"]

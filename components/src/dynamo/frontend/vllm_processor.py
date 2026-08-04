@@ -168,6 +168,57 @@ def _build_reasoning_parser_metadata(
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
 
 
+def _build_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None:
+    """Translate the structured-decoding request fields into Dynamo's
+    ``sampling_options.guided_decoding``.
+
+    The Rust ``OpenAIPreprocessor`` is bypassed when a chat processor is set,
+    so the ``response_format`` / ``guided_*`` translation it normally performs
+    has to happen here. Mirrors ``CommonExtProvider::get_guided_json`` in
+    ``lib/llm/src/protocols/openai/chat_completions.rs``: ``guided_json`` wins
+    over ``response_format``, ``json_object`` becomes the "any JSON object"
+    schema, and ``text`` carries no constraint.
+
+    Returns None when the request carries no constraint. The worker feeds this
+    dict straight into vLLM's ``StructuredOutputsParams``, which rejects a
+    constraint set that is empty, so the key must stay absent rather than
+    carry a dict of ``None`` values.
+    """
+    guided_json = request.get("guided_json")
+    if guided_json is None:
+        response_format = request.get("response_format")
+        if isinstance(response_format, dict):
+            response_format_type = response_format.get("type")
+            if response_format_type == "json_object":
+                # Minimal JSON Schema for "any JSON object".
+                guided_json = {"type": "object"}
+            elif response_format_type == "json_schema":
+                json_schema = response_format.get("json_schema")
+                if isinstance(json_schema, dict):
+                    guided_json = json_schema.get("schema")
+
+    guided_decoding = {
+        key: value
+        for key, value in (
+            ("json", guided_json),
+            ("regex", request.get("guided_regex")),
+            ("grammar", request.get("guided_grammar")),
+            # An empty choice list is not a constraint, matching Rust's
+            # GuidedDecodingOptions::from_optional.
+            ("choice", request.get("guided_choice") or None),
+        )
+        if value is not None
+    }
+    if not guided_decoding:
+        return None
+
+    # whitespace_pattern only refines a constraint, it is not one itself.
+    whitespace_pattern = request.get("guided_whitespace_pattern")
+    if whitespace_pattern is not None:
+        guided_decoding["whitespace_pattern"] = whitespace_pattern
+    return guided_decoding
+
+
 def _inject_routing_metadata(
     dynamo_preproc: dict[str, Any],
     target: dict[str, Any],
@@ -592,6 +643,12 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        # The Rust preprocessor is bypassed on this path, so response_format and
+        # the guided_* extensions are translated here. Set the key only when a
+        # constraint is present; the worker turns it into StructuredOutputsParams.
+        guided_decoding = _build_guided_decoding(request)
+        if guided_decoding is not None:
+            dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_ended is not None:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
