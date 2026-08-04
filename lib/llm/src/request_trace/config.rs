@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
-use dynamo_runtime::logging::{should_sample_trace_key, trace_sample_ratio_from_env};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::telemetry::parse_sink_names;
 
@@ -147,20 +147,37 @@ impl RequestTraceRuntimePolicy {
         {
             return true;
         }
+        request_trace_key(record).is_some_and(|key| self.should_sample_key(key))
+    }
+
+    fn should_emit_payload(&self, agent_session_id: Option<&str>, request_id: &str) -> bool {
+        self.legacy_audit_force_logging
+            || should_sample_request(agent_session_id, request_id, self.sample_ratio)
+    }
+
+    fn should_sample_key(&self, key: &str) -> bool {
         self.sample_ratio
-            .is_none_or(|ratio| should_sample_record(record, ratio))
+            .is_none_or(|ratio| should_sample_key(key.as_bytes(), ratio))
     }
 }
 
-fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
-    if ratio <= 0.0 {
-        return false;
-    }
-    if ratio >= 1.0 {
-        return true;
-    }
+fn should_sample_request(
+    agent_session_id: Option<&str>,
+    request_id: &str,
+    sample_ratio: Option<f64>,
+) -> bool {
+    sample_ratio.is_none_or(|ratio| {
+        should_sample_key(agent_session_id.unwrap_or(request_id).as_bytes(), ratio)
+    })
+}
 
-    let key = record
+#[cfg(test)]
+fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
+    request_trace_key(record).is_some_and(|key| should_sample_key(key.as_bytes(), ratio))
+}
+
+fn request_trace_key(record: &RequestTraceRecord) -> Option<&str> {
+    record
         .agent_context
         .as_ref()
         .map(|context| context.session_id.as_str())
@@ -175,12 +192,33 @@ fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
                 .payload
                 .as_ref()
                 .map(|payload| payload.request_id.as_str())
-        });
-    let Some(key) = key else {
-        return false;
-    };
+        })
+}
 
-    should_sample_trace_key(key.as_bytes(), ratio)
+fn should_sample_key(key: &[u8], ratio: f64) -> bool {
+    if ratio <= 0.0 {
+        return false;
+    }
+    if ratio >= 1.0 {
+        return true;
+    }
+
+    let threshold = (ratio * ((u64::MAX as f64) + 1.0)) as u64;
+    xxh3_64(key) < threshold
+}
+
+fn request_trace_sample_ratio_from_env() -> Option<f64> {
+    let raw = std::env::var(env_request_trace::DYN_REQUEST_TRACE_SAMPLE_RATIO).ok()?;
+    match raw.parse::<f64>() {
+        Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => Some(value),
+        _ => {
+            eprintln!(
+                "WARNING: invalid DYN_REQUEST_TRACE_SAMPLE_RATIO '{}'; expected a number between 0.0 and 1.0, keeping all request trace records",
+                raw
+            );
+            None
+        }
+    }
 }
 
 static POLICY: OnceLock<RequestTraceRuntimePolicy> = OnceLock::new();
@@ -194,7 +232,7 @@ fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
     let enabled = !records.is_empty();
     let (sinks, legacy_file_format, legacy_audit_sinks_selected) =
         load_sinks(enabled, legacy_audit_sinks.as_deref());
-    let sample_ratio = enabled.then(trace_sample_ratio_from_env).flatten();
+    let sample_ratio = enabled.then(request_trace_sample_ratio_from_env).flatten();
     let has_file_sink = sinks.contains(&RequestTraceSinkKind::File);
     let file_path = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_PATH)
         .or_else(|| env_trimmed(env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH))
@@ -481,6 +519,22 @@ pub(super) fn should_sample(record: &RequestTraceRecord) -> bool {
         .should_sample(record)
 }
 
+pub(crate) fn should_emit_payload(agent_session_id: Option<&str>, request_id: &str) -> bool {
+    POLICY
+        .get_or_init(load_runtime_policy_from_env)
+        .should_emit_payload(agent_session_id, request_id)
+}
+
+pub(crate) fn should_emit_request(agent_session_id: Option<&str>, request_id: &str) -> bool {
+    should_sample_request(
+        agent_session_id,
+        request_id,
+        POLICY
+            .get_or_init(load_runtime_policy_from_env)
+            .sample_ratio,
+    )
+}
+
 pub fn is_enabled() -> bool {
     policy().enabled
 }
@@ -519,6 +573,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
         env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+        env_request_trace::DYN_REQUEST_TRACE_SAMPLE_RATIO,
         env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
         env_request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
@@ -683,25 +738,30 @@ mod tests {
         let request_id = (0..256)
             .map(|index| format!("request-{index}"))
             .find(|request_id| {
-                should_sample_trace_key(request_id.as_bytes(), 0.5)
-                    != should_sample_trace_key(session_id.as_bytes(), 0.5)
+                should_sample_key(request_id.as_bytes(), 0.5)
+                    != should_sample_key(session_id.as_bytes(), 0.5)
             })
             .expect("a request key with a different decision");
         let request = agent_request_record(&request_id, session_id);
         let tool = tool_record(session_id);
-        let expected = should_sample_trace_key(session_id.as_bytes(), 0.5);
+        let expected = should_sample_key(session_id.as_bytes(), 0.5);
 
         assert_eq!(should_sample_record(&request, 0.5), expected);
         assert_eq!(should_sample_record(&tool, 0.5), expected);
+        assert_eq!(
+            should_sample_request(Some(session_id), &request_id, Some(0.5)),
+            expected
+        );
     }
 
     #[test]
     #[serial_test::serial]
-    fn request_trace_loads_the_otel_sample_ratio() {
+    fn request_trace_loads_its_own_sample_ratio() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
-                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0.25"),
+                (env_request_trace::DYN_REQUEST_TRACE_SAMPLE_RATIO, "0.25"),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0"),
             ],
             || {
                 assert_eq!(load_runtime_policy_from_env().sample_ratio, Some(0.25));
@@ -711,16 +771,16 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_audit_forced_payloads_ignore_the_otel_sample_ratio() {
+    fn legacy_audit_forced_payloads_ignore_the_request_trace_sample_ratio() {
         with_request_trace_env(
             &[
                 (env_audit::DYN_AUDIT_FORCE_LOGGING, "true"),
-                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0"),
+                (env_request_trace::DYN_REQUEST_TRACE_SAMPLE_RATIO, "0"),
             ],
             || {
                 let runtime_policy = load_runtime_policy_from_env();
                 assert_eq!(runtime_policy.sample_ratio, Some(0.0));
-                assert!(runtime_policy.should_sample(&payload_record("request-123")));
+                assert!(runtime_policy.should_emit_payload(None, "request-123"));
                 assert!(!runtime_policy.should_sample(&request_record("request-123")));
             },
         );

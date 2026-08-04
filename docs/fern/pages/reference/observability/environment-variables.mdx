@@ -141,7 +141,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="OTEL_TRACES_SAMPLE_RATIO" type="number">
-  Head-sampling ratio in `[0.0, 1.0]`. Unset exports every trace. For example, `0.01` retains approximately one percent of traces. The same ratio applies to runtime spans, request-trace records before they fan out to file, standard error, NATS, S3, or the OTLP log sink, and forward-pass metric trace files. Legacy payload capture enabled by `DYN_AUDIT_FORCE_LOGGING` remains unsampled.
+  Head-sampling ratio in `[0.0, 1.0]` for runtime OpenTelemetry spans. Unset exports every trace. For example, `0.01` retains approximately one percent of traces.
 </ParamField>
 
 <ParamField path="OTEL_SERVICE_NAME" type="string" default="dynamo">
@@ -278,6 +278,10 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 
 <ParamField path="DYN_REQUEST_TRACE_RECORDS" type="string" default="request_end,tool">
   Comma-separated record types: `request_end`, `request_payload`, and `tool`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_SAMPLE_RATIO" type="number">
+  Deterministic request-trace sampling ratio in `[0.0, 1.0]`. Agent records use the session ID, and other records use the request ID. A selected record is sent to every configured sink. `DYN_AUDIT_FORCE_LOGGING` payload capture remains unsampled.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">

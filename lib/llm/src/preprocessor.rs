@@ -4437,10 +4437,18 @@ impl
         } else {
             None
         };
-        let payload_handle = crate::request_trace::payload::create_handle(
+        let payload_agent_context = context
+            .get::<crate::protocols::common::extensions::AgentContext>(
+                crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
+            )
+            .ok();
+        let payload_handle = crate::request_trace::payload::create_handle_with_agent_session(
             &request,
             &request_id,
             payload_http_headers,
+            payload_agent_context
+                .as_deref()
+                .map(|context| context.session_id.as_str()),
         );
 
         // For non-streaming requests (stream=false), enable usage by default

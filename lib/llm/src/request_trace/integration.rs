@@ -59,6 +59,13 @@ pub(crate) fn build_request_end_trace_state(
     context: &Context<()>,
     trace_block_size: usize,
 ) -> Option<RequestEndTraceState> {
+    let agent_session_id = common_request
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.as_str());
+    if !super::config::should_emit_request(agent_session_id, context.id()) {
+        return None;
+    }
     build_request_end_trace_state_for_policy(
         common_request,
         tracker,
