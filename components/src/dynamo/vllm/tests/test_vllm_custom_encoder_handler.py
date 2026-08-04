@@ -54,8 +54,9 @@ def _qwen_adapter():
         _QwenBackend(),
         SimpleNamespace(
             is_multimodal_model=lambda: True,
+            architectures=["Qwen3VLForConditionalGeneration"],
             hf_config=SimpleNamespace(
-                architectures=["Qwen3VLForConditionalGeneration"],
+                vision_config=SimpleNamespace(spatial_merge_size=2),
             ),
         ),
         SimpleNamespace(),

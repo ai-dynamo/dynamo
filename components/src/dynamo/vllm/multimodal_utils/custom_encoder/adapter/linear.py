@@ -40,13 +40,10 @@ from vllm.inputs import EmbedsPrompt, TokensPrompt
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter.base import (
     CustomEncoderAdapter,
 )
-from dynamo.vllm.multimodal_utils.custom_encoder.adapter.model_config import (
-    _hidden_size,
-    _is_multimodal_model,
-)
 from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
     VisionEncoderBackend,
 )
+from dynamo.vllm.multimodal_utils.model_config import _hidden_size, _is_multimodal_model
 
 logger = logging.getLogger(__name__)
 
