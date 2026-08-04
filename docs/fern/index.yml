@@ -376,6 +376,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/reinforcement-learning/overview.md
+          - page: RL Implementation Guide
+            path: pages/use-cases/reinforcement-learning/implementation-guide.md
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film
