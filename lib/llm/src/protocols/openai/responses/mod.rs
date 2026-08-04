@@ -2753,6 +2753,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!([{
                     "type": "namespace",
                     "name": "agents",
+                    "description": "Subagent tools",
                     "tools": [{"type": "function", "name": "spawn_agent"}],
                 }]))
                 .unwrap(),
