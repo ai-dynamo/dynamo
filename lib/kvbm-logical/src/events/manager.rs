@@ -15,6 +15,7 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::policy::EventEmissionPolicy;
 use super::protocol::{EventReleaseHandle, KvCacheEvent};
@@ -152,6 +153,17 @@ impl EventsManager {
     pub fn subscribe(&self) -> impl Stream<Item = KvCacheEvent> + Send + 'static {
         let rx = self.event_tx.subscribe();
         BroadcastStream::new(rx).filter_map(|result| result.ok())
+    }
+
+    /// Subscribe without discarding broadcast lag errors.
+    ///
+    /// This is intended for exact, process-local consumers that must fail
+    /// closed if they cannot keep up. Normal production consumers should use
+    /// [`subscribe`](Self::subscribe), whose best-effort behavior is unchanged.
+    pub fn subscribe_loss_aware(
+        &self,
+    ) -> impl Stream<Item = Result<KvCacheEvent, BroadcastStreamRecvError>> + Send + 'static {
+        BroadcastStream::new(self.event_tx.subscribe())
     }
 
     /// Hook called when a block is registered in the BlockRegistry.
@@ -311,6 +323,23 @@ mod tests {
 
         assert_eq!(event1, KvCacheEvent::Create(seq_hash));
         assert_eq!(event2, KvCacheEvent::Create(seq_hash));
+    }
+
+    #[tokio::test]
+    async fn test_loss_aware_subscription_reports_lag() {
+        let manager = EventsManager::builder().channel_capacity(1).build();
+        let mut stream = Box::pin(manager.subscribe_loss_aware());
+        let registry = BlockRegistry::new();
+        let first = create_seq_hash_at_position(1);
+        let second = create_seq_hash_at_position(2);
+
+        let first_handle = registry.register_sequence_hash(first);
+        manager.on_block_registered(&first_handle).unwrap();
+        let second_handle = registry.register_sequence_hash(second);
+        manager.on_block_registered(&second_handle).unwrap();
+
+        let event = stream.next().await.unwrap();
+        assert!(matches!(event, Err(BroadcastStreamRecvError::Lagged(1))));
     }
 
     #[test]

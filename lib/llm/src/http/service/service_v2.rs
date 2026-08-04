@@ -27,6 +27,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -105,6 +106,7 @@ pub struct State {
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -115,6 +117,52 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            return None;
+        }
+    };
+
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(milliseconds) => {
+            let interval = Duration::from_millis(milliseconds);
+            if std::time::Instant::now().checked_add(interval).is_some() {
+                Some(interval)
+            } else {
+                tracing::warn!(
+                    env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                    value,
+                    "ignoring SSE keep-alive interval outside the platform range"
+                );
+                None
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                value,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            None
+        }
+    }
+}
+
+fn sse_keep_alive_from_env() -> Option<Duration> {
+    parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
 }
 
 /// Lifecycle stage for the HTTP frontend.
@@ -292,6 +340,7 @@ struct StateFlags {
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
     generate_endpoints_enabled: AtomicBool,
+    batch_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -309,6 +358,7 @@ impl StateFlags {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
             EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Batch => self.batch_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -344,6 +394,9 @@ impl StateFlags {
             EndpointType::Generate => self
                 .generate_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Batch => self
+                .batch_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
         }
     }
 }
@@ -372,9 +425,11 @@ impl State {
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
                 generate_endpoints_enabled: AtomicBool::new(false),
+                batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            sse_keep_alive: config.sse_keep_alive,
         }
     }
 
@@ -446,9 +501,13 @@ impl State {
         &self.cancel_token
     }
 
-    // TODO
+    /// Interval for SSE comment frames while the response stream is idle.
+    ///
+    /// Disabled by default because some OpenAI-compatible clients do not
+    /// ignore SSE comments. Provider-facing deployments can opt in with
+    /// `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS`.
     pub fn sse_keep_alive(&self) -> Option<Duration> {
-        None
+        self.sse_keep_alive
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -481,6 +540,11 @@ impl State {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 }
 
@@ -542,6 +606,12 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    /// OpenAI-compatible Batch API placeholders. Disabled by default until
+    /// batch storage and job lifecycle support are implemented; when enabled,
+    /// the placeholder handlers return 501.
+    #[builder(default = "false")]
+    enable_batch_endpoints: bool,
+
     /// Experimental engine-native APIs (currently the token-in/token-out
     /// `Generate` endpoint `POST /inference/v1/generate`). **Disabled by
     /// default** — a deployment opts into this endpoint via this builder flag
@@ -595,6 +665,11 @@ pub struct HttpServiceConfig {
     /// Distributed runtime used by the RL worker discovery API.
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Interval for SSE comment frames while a streaming response is idle.
+    /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
+    #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
+    sse_keep_alive: Option<Duration>,
 }
 
 fn default_rl_port() -> u16 {
@@ -887,6 +962,10 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the batch files endpoint path (default: `/v1/files`)
+static HTTP_SVC_FILES_PATH_ENV: &str = "DYN_HTTP_SVC_FILES_PATH";
+/// Environment variable to set the batches endpoint path (default: `/v1/batches`)
+static HTTP_SVC_BATCHES_PATH_ENV: &str = "DYN_HTTP_SVC_BATCHES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 /// Environment variable to enable the experimental vLLM-compatible
@@ -952,7 +1031,6 @@ impl HttpServiceConfigBuilder {
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
         let admin_api_enabled =
             config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
-
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -961,6 +1039,7 @@ impl HttpServiceConfigBuilder {
                 metrics_config,
                 frontend_api_config,
                 nvext_enabled,
+                sse_keep_alive: config.sse_keep_alive,
             },
         ));
         state
@@ -975,6 +1054,9 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Batch, config.enable_batch_endpoints);
         state.flags.set(
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
@@ -1200,6 +1282,13 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
@@ -1226,6 +1315,11 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
+        let (batch_docs, batch_route) = super::openai::batch_router(
+            state.clone(),
+            var(HTTP_SVC_FILES_PATH_ENV).ok(),
+            var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+        );
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
@@ -1235,6 +1329,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+        endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
 
         if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
@@ -1772,6 +1867,39 @@ mod tests {
                 "builder=false wins even if disable is unset"
             );
         });
+    }
+
+    #[test]
+    fn test_sse_keep_alive_env_var() {
+        assert_eq!(
+            parse_sse_keep_alive(Err(std::env::VarError::NotPresent)),
+            None
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("0".to_string())), None);
+        assert_eq!(
+            parse_sse_keep_alive(Ok("5000".to_string())),
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("invalid".to_string())), None);
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            assert_eq!(
+                parse_sse_keep_alive(Err(std::env::VarError::NotUnicode(OsString::from_vec(
+                    vec![0xff]
+                ),))),
+                None
+            );
+        }
+
+        let interval = Duration::from_millis(u64::MAX);
+        let expected = std::time::Instant::now()
+            .checked_add(interval)
+            .map(|_| interval);
+        assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
     }
 
     #[test]

@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+#[cfg(any(test, feature = "bench"))]
+use std::sync::Arc;
 
+#[cfg(any(test, feature = "bench"))]
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
@@ -48,6 +52,15 @@ fn softmax_sample_with_sample(
     }
 
     let entries: Vec<(WorkerWithDpRank, f64)> = logits.iter().map(|(w, l)| (*w, *l)).collect();
+    softmax_sample_entries(entries, temperature, sample)
+}
+
+fn softmax_sample_entries(
+    entries: Vec<(WorkerWithDpRank, f64)>,
+    temperature: f64,
+    sample: f64,
+) -> (WorkerWithDpRank, f64) {
+    assert!(!entries.is_empty(), "Empty logits for softmax sampling");
 
     let (min_val, max_val) = entries
         .iter()
@@ -87,6 +100,8 @@ fn softmax_sample_with_sample(
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
     pub worker_type: &'static str,
+    #[cfg(any(test, feature = "bench"))]
+    deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +117,21 @@ impl DefaultWorkerSelector {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
+            #[cfg(any(test, feature = "bench"))]
+            deterministic_rng: None,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub fn new_seeded(
+        kv_router_config: Option<KvRouterConfig>,
+        worker_type: &'static str,
+        seed: u64,
+    ) -> Self {
+        Self {
+            kv_router_config: kv_router_config.unwrap_or_default(),
+            worker_type,
+            deterministic_rng: Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
         }
     }
 
@@ -200,18 +230,53 @@ impl DefaultWorkerSelector {
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
-        let adjusted_prefill_blocks = raw_prefill_blocks - overlap_credit_blocks;
-        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
-        let logit = prefill_cost_blocks + decode_cost_blocks;
+        let active_request_cost_blocks =
+            self.kv_router_config.decode_active_request_weight * worker_load.active_requests as f64;
 
+        // Decode routers normally force `overlap_score_credit=0` through the
+        // per-request override, which preserves load-only disagg routing. When
+        // conditional disagg leaves a positive overlap credit in place, prefer
+        // cache-hot decode workers while still charging decode backlog.
+        if self.worker_type == "decode"
+            && !request.track_prefill_tokens
+            && weights.overlap_score_credit > 0.0
+        {
+            // Clamp at zero because downstream taint multipliers assume non-negative scores.
+            // This loses ordering between workers whose overlap fully offsets decode load, but
+            // avoids inverting taint preference among negative-score workers.
+            let overlap_adjusted_decode_blocks =
+                (decode_cost_blocks - overlap_credit_blocks).max(0.0);
+            let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            tracing::debug!(
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
+                 = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
+                 = max(0, {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}) + {active_request_cost_blocks:.3}",
+                worker.worker_id,
+                worker.dp_rank,
+            );
+            return logit;
+        }
+
+        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
+        let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+
+        // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
+        // spawns without the caller's request span, so the logging layer cannot attach
+        // `x_request_id`/`trace_id` to them. Stamp the identity the row needs to be self-joining:
+        // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
+        // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
+        // inside the macro so they cost nothing when DEBUG is disabled.
         if shared_beyond > 0 {
             tracing::debug!(
+                request_id = request.mode.request_id().unwrap_or("-"),
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
+                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
+                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
@@ -221,9 +286,11 @@ impl DefaultWorkerSelector {
             );
         } else {
             tracing::debug!(
+                request_id = request.mode.request_id().unwrap_or("-"),
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
+                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
+                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
@@ -268,6 +335,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         }
 
         let request_blocks = request.request_blocks(block_size);
+        // Borrowed, never allocated; bridges the winner row to `[ROUTING] Best`.
+        let request_id = request.mode.request_id().unwrap_or("-");
 
         let weights = LogitWeights {
             overlap_score_credit: request
@@ -312,6 +381,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
             tracing::info!(
+                request_id,
                 "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
                 self.worker_type,
                 worker.worker_id,
@@ -325,6 +395,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: request
+                    .potential_decode_blocks_after_admission(worker, block_size),
             });
         }
 
@@ -367,33 +439,77 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
         };
 
-        let (best_worker, best_logit) = if temperature == 0.0 {
-            let mut best_worker = None;
-            let mut best_logit = f64::INFINITY;
-            let mut tie_count = 0usize;
+        #[cfg(any(test, feature = "bench"))]
+        let deterministic_choice = self.deterministic_rng.as_ref().map(|rng| {
+            let mut candidates = Vec::new();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                let score = get_score(worker);
-                if score < best_logit {
-                    best_worker = Some(worker);
-                    best_logit = score;
-                    tie_count = 1;
-                    return;
-                }
+                candidates.push(worker);
+            });
+            candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
 
-                if score == best_logit {
-                    tie_count += 1;
-                    // Reservoir sampling keeps tied minima uniform without collecting workers.
-                    if fastrand::usize(0..tie_count) == 0 {
+            let mut rng = rng.lock();
+            if temperature == 0.0 {
+                let mut best_worker = None;
+                let mut best_logit = f64::INFINITY;
+                let mut tie_count = 0usize;
+                for worker in candidates {
+                    let score = get_score(worker);
+                    if score < best_logit {
                         best_worker = Some(worker);
+                        best_logit = score;
+                        tie_count = 1;
+                        continue;
+                    }
+
+                    if score == best_logit {
+                        tie_count += 1;
+                        if rng.usize(0..tie_count) == 0 {
+                            best_worker = Some(worker);
+                        }
                     }
                 }
-            });
+                return (
+                    best_worker.expect("eligible worker rank non-empty"),
+                    best_logit,
+                );
+            }
 
-            (
-                best_worker.expect("eligible worker rank non-empty"),
-                best_logit,
-            )
-        } else {
+            let entries = candidates
+                .into_iter()
+                .map(|worker| (worker, get_score(worker)))
+                .collect();
+            softmax_sample_entries(entries, temperature, rng.f64())
+        });
+
+        let random_choice = || {
+            if temperature == 0.0 {
+                let mut best_worker = None;
+                let mut best_logit = f64::INFINITY;
+                let mut tie_count = 0usize;
+                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                    let score = get_score(worker);
+                    if score < best_logit {
+                        best_worker = Some(worker);
+                        best_logit = score;
+                        tie_count = 1;
+                        return;
+                    }
+
+                    if score == best_logit {
+                        tie_count += 1;
+                        // Reservoir sampling keeps tied minima uniform without collecting workers.
+                        if fastrand::usize(0..tie_count) == 0 {
+                            best_worker = Some(worker);
+                        }
+                    }
+                });
+
+                return (
+                    best_worker.expect("eligible worker rank non-empty"),
+                    best_logit,
+                );
+            }
+
             let mut worker_logits = FxHashMap::default();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
@@ -402,6 +518,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
             softmax_sample(&worker_logits, temperature)
         };
+        #[cfg(any(test, feature = "bench"))]
+        let (best_worker, best_logit) = deterministic_choice.unwrap_or_else(random_choice);
+        #[cfg(not(any(test, feature = "bench")))]
+        let (best_worker, best_logit) = random_choice();
 
         let best_host_pinned_overlap_blocks = request
             .overlap
@@ -421,6 +541,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         if self.worker_type == "decode" {
             tracing::info!(
                 router_mode = "kv",
+                request_id,
                 worker_id = best_worker.worker_id,
                 worker_type = %self.worker_type,
                 dp_rank = ?best_worker.dp_rank,
@@ -437,6 +558,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: request
+                    .potential_decode_blocks_after_admission(best_worker, block_size),
             });
         }
 
@@ -449,6 +572,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         tracing::info!(
             router_mode = "kv",
+            request_id,
             worker_id = best_worker.worker_id,
             worker_type = %self.worker_type,
             dp_rank = ?best_worker.dp_rank,
@@ -465,6 +589,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
+            potential_decode_blocks: request
+                .potential_decode_blocks_after_admission(best_worker, block_size),
         })
     }
 }
@@ -718,6 +844,50 @@ mod tests {
             selected_count > 1,
             "zero-temperature tie-breaking should not always select the same worker"
         );
+    }
+
+    #[test]
+    fn seeded_selector_is_stable_for_ties_and_temperature_sampling() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        for temperature in [0.0, 0.7] {
+            let config = KvRouterConfig {
+                router_temperature: temperature,
+                ..Default::default()
+            };
+            let first = DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42);
+            let second = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+            let first_workers = HashMap::from([
+                (30, SimpleWorkerConfig::default()),
+                (10, SimpleWorkerConfig::default()),
+                (20, SimpleWorkerConfig::default()),
+            ]);
+            let second_workers = HashMap::from([
+                (20, SimpleWorkerConfig::default()),
+                (30, SimpleWorkerConfig::default()),
+                (10, SimpleWorkerConfig::default()),
+            ]);
+            let request = base_request(16);
+
+            let first_sequence = (0..64)
+                .map(|_| {
+                    first
+                        .select_worker(&first_workers, &request, request.eligibility(), 16)
+                        .unwrap()
+                        .worker
+                })
+                .collect::<Vec<_>>();
+            let second_sequence = (0..64)
+                .map(|_| {
+                    second
+                        .select_worker(&second_workers, &request, request.eligibility(), 16)
+                        .unwrap()
+                        .worker
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(first_sequence, second_sequence);
+        }
     }
 
     #[test]
@@ -1265,7 +1435,7 @@ mod tests {
             (cold_worker.worker_id, SimpleWorkerConfig::default()),
         ]);
 
-        let mut request = base_request(64);
+        let mut request = base_request(128);
         request
             .overlap
             .tier_overlap_blocks
@@ -1315,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_logit_does_not_clamp_negative_prefill_cost() {
+    fn test_worker_logit_clamps_non_decode_overlap_credit() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
         request.overlap.effective_cached_tokens.insert(worker, 96);
@@ -1325,6 +1495,7 @@ mod tests {
             crate::sequences::WorkerLoadProjection {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
+                active_requests: 0,
                 additional_active_blocks: 3,
             },
         );
@@ -1344,7 +1515,71 @@ mod tests {
         request.track_prefill_tokens = false;
         assert_eq!(
             selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            -7.0
+            5.0
+        );
+    }
+
+    #[test]
+    fn test_worker_logit_can_charge_active_requests() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(0);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 100,
+                active_requests: 4,
+                ..Default::default()
+            },
+        );
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
+        let default = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let weighted = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                decode_active_request_weight: 32.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        assert_eq!(
+            default.worker_logit(&request, worker, 16, 0, weights, "test"),
+            100.0
+        );
+        assert_eq!(
+            weighted.worker_logit(&request, worker, 16, 0, weights, "test"),
+            228.0
+        );
+    }
+
+    #[test]
+    fn test_decode_worker_logit_credits_overlap_without_prefill_tracking() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
+
+        assert_eq!(
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            7.0
         );
     }
 
