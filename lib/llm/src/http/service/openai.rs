@@ -6415,7 +6415,7 @@ mod tests {
     #[test]
     fn test_deduplicate_stream_roles_preserves_only_first_role_per_choice() {
         let mut emitted_roles = HashSet::new();
-        let mut first = make_delta(
+        let mut first_choice_zero = make_delta(
             None,
             Some("thinking"),
             None,
@@ -6425,7 +6425,7 @@ mod tests {
             None,
             None,
         );
-        let mut second = make_delta(
+        let mut first_choice_one = make_delta(
             None,
             None,
             None,
@@ -6435,12 +6435,44 @@ mod tests {
             None,
             None,
         );
+        first_choice_one.inner.choices[0].index = 1;
+        let mut second_choice_zero = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        let mut second_choice_one = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        second_choice_one.inner.choices[0].index = 1;
 
-        deduplicate_stream_roles(&mut first, &mut emitted_roles);
-        deduplicate_stream_roles(&mut second, &mut emitted_roles);
+        deduplicate_stream_roles(&mut first_choice_zero, &mut emitted_roles);
+        deduplicate_stream_roles(&mut first_choice_one, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second_choice_zero, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second_choice_one, &mut emitted_roles);
 
-        assert_eq!(first.inner.choices[0].delta.role, Some(Role::Assistant));
-        assert_eq!(second.inner.choices[0].delta.role, None);
+        assert_eq!(
+            first_choice_zero.inner.choices[0].delta.role,
+            Some(Role::Assistant)
+        );
+        assert_eq!(
+            first_choice_one.inner.choices[0].delta.role,
+            Some(Role::Assistant)
+        );
+        assert_eq!(second_choice_zero.inner.choices[0].delta.role, None);
+        assert_eq!(second_choice_one.inner.choices[0].delta.role, None);
     }
 
     #[test]
