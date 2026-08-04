@@ -70,6 +70,58 @@ patch_memory_snapshot()
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()
 
+# Persist/rehydrate the prefix-cache index across a shadow failover so reattached
+# KV bytes become an actual prefix HIT (opt-in via GMS_KV_INDEX_PATH).
+from gpu_memory_service.integrations.vllm.kv_index_persist import (  # noqa: E402
+    _fresh_import_probe as _kv_fresh_import_probe,
+)
+from gpu_memory_service.integrations.vllm.kv_index_persist import (  # noqa: E402
+    enable_kv_index_persistence,
+)
+from gpu_memory_service.integrations.vllm.kv_index_persist import (  # noqa: E402
+    mark_rehydrate_pending as _mark_kv_index_rehydrate_pending,
+)
+from gpu_memory_service.integrations.vllm.kv_index_persist import (  # noqa: E402
+    set_kv_caches as _set_kv_index_caches,
+)
+from gpu_memory_service.integrations.vllm.kv_index_persist import (  # noqa: E402
+    set_kv_manager as _set_kv_index_manager,
+)
+
+enable_kv_index_persistence()
+
+if os.getenv("GMS_KV_DEBUG"):
+    # DEBUG: sample layer-0 KV whole-tensor abs-sum after each forward, so we can see
+    # the active engine's KV become non-zero as it serves (and compare to what a
+    # standby reads after reattach).
+    try:
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as _GMR
+
+        _dbg_orig_exec = _GMR.execute_model
+        _dbg_exec_state = {"n": 0, "last": -1.0}
+
+        def _dbg_execute_model(self, *a, **k):
+            r = _dbg_orig_exec(self, *a, **k)
+            try:
+                kvs = getattr(self, "kv_caches", None) or []
+                if kvs:
+                    v = float(kvs[0].float().abs().sum().item())
+                    _dbg_exec_state["n"] += 1
+                    if abs(v - _dbg_exec_state["last"]) > 1.0:
+                        logger.info(
+                            "[GMS][dbg] post-exec L0 KV abssum=%.1f (call %d)",
+                            v,
+                            _dbg_exec_state["n"],
+                        )
+                        _dbg_exec_state["last"] = v
+            except Exception:
+                pass
+            return r
+
+        _GMR.execute_model = _dbg_execute_model
+    except Exception as _e:  # pragma: no cover
+        logger.warning("[GMS][dbg] exec-model patch failed: %s", _e)
+
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 # MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
@@ -350,6 +402,20 @@ class GMSWorker(Worker):
         except Exception as e:
             logger.debug("[GMS] Could not correct memory accounting: %s", e)
 
+    def execute_model(self, *args, **kwargs):
+        out = super().execute_model(*args, **kwargs)
+        # EXPERIMENT (GMS_KV_PUBLISH_TEST): after each forward, cuCtxSynchronize the KV
+        # client context to test whether the winner's KV writes need an explicit publish
+        # barrier to become visible to a reattaching engine across the process boundary.
+        if os.getenv("GMS_KV_PUBLISH_TEST"):
+            try:
+                mgr = get_gms_client_memory_manager("kv_cache")
+                if mgr is not None and not mgr.is_unmapped:
+                    mgr._vmm.synchronize()
+            except Exception:
+                pass
+        return out
+
     def sleep(self, level: int = 1) -> None:
         """vLLM sleep implementation with GMS integration.
 
@@ -361,6 +427,23 @@ class GMSWorker(Worker):
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
         """
         free_bytes_before = torch_device().mem_get_info()[0]
+
+        # DEBUG: fingerprint L0's KV at the STABLE point -- all forward-pass writes are
+        # done and nothing is unmapped yet. This is the correct barrier for the target
+        # dump: cache_full_blocks reads at schedule-time (before that step writes), so it
+        # sees zeros. The dump lets an independent external client import the same
+        # allocation post-sleep and check byte-identity across processes.
+        if os.getenv("GMS_KV_DEBUG") and os.getenv("GMS_KV_TARGET_FILE"):
+            try:
+                _kvim = get_gms_client_memory_manager("kv_cache")
+                _kvc = getattr(self.model_runner, "kv_caches", None)
+                if _kvim is not None and _kvc:
+                    # _fresh_import_probe reads the module-global manager; a non-shadow
+                    # engine hasn't gone through wake_up yet, so set it here.
+                    _set_kv_index_manager(_kvim)
+                    _kv_fresh_import_probe(list(_kvim.mappings.items()), _kvc)
+            except Exception as _e:
+                logger.warning("[GMS][dbg] pre-sleep fingerprint dump failed: %s", _e)
 
         # Pause MX serving before GMS unmap
         mx_ctx = get_mx_load_context()
@@ -455,10 +538,135 @@ class GMSWorker(Worker):
                     len(existing_kv),
                 )
                 kv_cache_manager.remap_all_vas()
+                # Bytes are back; arm the prefix-index rehydration so the first
+                # cache lookup after wake replays the persisted index onto them.
+                _mark_kv_index_rehydrate_pending()
+                # DECISIVE PROBE: before ANY forward pass, compare this reattached KV to
+                # the winner's stable-point dump, position-sensitively. Tells reattach
+                # byte-fidelity apart from downstream (index/forward) bugs.
+                if os.getenv("GMS_KV_DEBUG") and os.getenv("GMS_KV_TARGET_FILE"):
+                    try:
+                        from gpu_memory_service.integrations.vllm.kv_index_persist import (
+                            compare_to_winner_target as _cmp_winner,
+                        )
+
+                        _cmp_winner(
+                            getattr(self.model_runner, "kv_caches", None),
+                            kv_cache_manager.mappings,
+                        )
+                    except Exception as _ce:
+                        logger.warning(
+                            "[GMS][dbg] reattach byte-compare failed: %s", _ce
+                        )
+                if os.getenv("GMS_KV_DEBUG"):
+                    # D4: which allocation_id each layer VA binds to, in insertion
+                    # (=layer) order — compare vs the winner to detect a positional
+                    # pairing cross-wire.
+                    for _i, (_va, _m) in enumerate(kv_cache_manager.mappings.items()):
+                        logger.info(
+                            "[GMS][id] shadow idx=%d slot=%s alloc=%s asize=%d",
+                            _i,
+                            _m.layout_slot,
+                            _m.allocation_id,
+                            _m.aligned_size,
+                        )
+                # DEBUG: sample the reattached KV so we can tell "bytes present" from
+                # "bytes wrong/zero" and detect layer cross-wiring.
+                if os.getenv("GMS_KV_DEBUG"):
+                    try:
+                        import hashlib as _hl
+
+                        kvs = getattr(self.model_runner, "kv_caches", None) or []
+                        sums = []
+                        for li, t in enumerate(kvs):
+                            try:
+                                # whole-tensor abs-sum: nonzero iff ANY block in this
+                                # layer holds real KV (robust to which block_ids were used)
+                                v = float(t.float().abs().sum().item())
+                            except Exception:
+                                v = -1.0
+                            sums.append(v)
+                        nz = sum(1 for v in sums if v > 0.0)
+                        digest = _hl.sha256(
+                            ",".join(f"{v:.3f}" for v in sums).encode()
+                        ).hexdigest()[:12]
+                        logger.info(
+                            "[GMS][dbg] reattached KV: %d/%d layers nonzero, "
+                            "per-layer-absum-hash=%s first3=%s",
+                            nz,
+                            len(sums),
+                            digest,
+                            [round(v, 1) for v in sums[:3]],
+                        )
+                        # D1: does each KV tensor's data_ptr sit on a REMAPPED VA
+                        # (handle!=0) or on stale/scratch memory?
+                        _maps = list(kv_cache_manager.mappings.items())
+                        for _i in range(min(4, len(kvs))):
+                            _dp = kvs[_i].data_ptr()
+                            _match = "NONE"
+                            for _va, _m in _maps:
+                                _span = max(_m.va_reserved_size, _m.aligned_size)
+                                if _va <= _dp < _va + _span:
+                                    _match = "va=0x%x off=%d handle=%d alloc=%s" % (
+                                        _va,
+                                        _dp - _va,
+                                        _m.handle,
+                                        str(_m.allocation_id)[:8],
+                                    )
+                                    break
+                            logger.info(
+                                "[GMS][dbg] L%d data_ptr=0x%x -> %s", _i, _dp, _match
+                            )
+                        # SHADOW fresh-import: read L0's SERVER physical at a NEW VA,
+                        # bypassing the shadow's own mapped VA. If fresh != va_mapped,
+                        # the shadow's remap didn't truly rebind its tensor VA onto the
+                        # server allocation (same-VA-different-physical trap).
+                        from gpu_memory_service.client.torch.tensor import (
+                            _tensor_from_pointer as _tfp,
+                        )
+                        from gpu_memory_service.common.locks import (
+                            GrantedLockType as _GLT,
+                        )
+
+                        _va0, _m0 = _maps[0]
+                        _asz = _m0.aligned_size
+                        _fd = kv_cache_manager.export_handle(_m0.allocation_id)
+                        _hh = kv_cache_manager._vmm.import_shareable_handle_close_fd(
+                            _fd
+                        )
+                        _fva = kv_cache_manager._vmm.address_reserve(
+                            _asz, kv_cache_manager.granularity
+                        )
+                        kv_cache_manager._vmm.map(_fva, _asz, _hh)
+                        kv_cache_manager._vmm.set_access(
+                            _fva, _asz, kv_cache_manager.device, _GLT.RW
+                        )
+                        kv_cache_manager._vmm.synchronize()
+                        _ft = _tfp(_fva, [kvs[0].numel()], [1], kvs[0].dtype, 0)
+                        logger.info(
+                            "[GMS][dbg] SHADOW fresh-import L0=%s fresh_read=%.1f va_mapped_read=%.1f elem0=%.3f (winner sentinel=42)",
+                            str(_m0.allocation_id)[:8],
+                            float(_ft.float().abs().sum().item()),
+                            float(kvs[0].float().abs().sum().item()),
+                            float(_ft[0].item()),
+                        )
+                    except Exception as _e:
+                        logger.warning("[GMS][dbg] KV sample failed: %s", _e)
             else:
                 kv_cache_manager.reallocate_all_handles(tag="kv_cache")
                 kv_cache_manager.remap_all_vas()
+                if os.getenv("GMS_KV_DEBUG"):
+                    for _i, (_va, _m) in enumerate(kv_cache_manager.mappings.items()):
+                        logger.info(
+                            "[GMS][id] winner idx=%d slot=%s alloc=%s asize=%d",
+                            _i,
+                            _m.layout_slot,
+                            _m.allocation_id,
+                            _m.aligned_size,
+                        )
             self.model_runner.post_kv_cache_wake_up()
+            _set_kv_index_caches(getattr(self.model_runner, "kv_caches", None))
+            _set_kv_index_manager(kv_cache_manager)
             if was_scratch:
                 self._register_kv_caches_with_nixl()
 

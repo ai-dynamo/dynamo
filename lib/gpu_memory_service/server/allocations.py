@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -177,7 +178,15 @@ class GMSAllocationManager:
         # the RPC transport. This leaves no server-owned FD that must survive
         # checkpoint/restore and allows a restored allocation handle to issue
         # fresh exports for reconnecting clients.
-        return int(self._vmm.export_to_shareable_handle(info.handle))
+        fd = int(self._vmm.export_to_shareable_handle(info.handle))
+        if os.getenv("GMS_KV_DEBUG"):
+            logger.info(
+                "[GMS][srv] export alloc=%s handle=%d fd=%d",
+                str(allocation_id)[:8],
+                int(info.handle),
+                fd,
+            )
+        return fd
 
     def free_allocation(self, allocation_id: str) -> bool:
         info = self._allocations.get(allocation_id)
