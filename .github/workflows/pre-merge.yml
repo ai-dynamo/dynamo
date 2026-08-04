@@ -47,7 +47,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, fern-check, docs-website-composition, fern-broken-links, operator, snapshot, rust-tests, rust-clippy]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -82,6 +82,42 @@ jobs:
     - name: Validate Fern configuration
       working-directory: docs/fern
       run: fern check
+
+  docs-website-composition:
+    name: Docs Website Composition Check
+    needs: changed-files
+    if: needs.changed-files.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        fetch-depth: 0
+    # The sync and release-version composition (rsync scopes, nav path
+    # transforms, the shared-Reference machinery) only executes on main pushes
+    # and tag cuts, so fern check pre-merge validates the source tree rather
+    # than the tree that actually publishes. This replays both jobs against
+    # docs-website and runs fern check on the composed result.
+    - name: Fetch docs-website
+      run: git fetch --no-tags --depth=1 origin docs-website:refs/remotes/origin/docs-website
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - name: Install Fern CLI
+      run: npm install -g fern-api
+    - name: Install yq
+      run: |
+        # Runner-owned bin dir: no sudo, and $GITHUB_PATH puts it ahead of
+        # any preinstalled yq for the steps that follow.
+        mkdir -p "$RUNNER_TEMP/bin"
+        wget -qO "$RUNNER_TEMP/bin/yq" https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
+        chmod +x "$RUNNER_TEMP/bin/yq"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+    - name: Replay the docs-website composition
+      env:
+        DOCS_WEBSITE_REF: origin/docs-website
+      run: bash docs/fern/scripts/simulate_docs_website.sh
 
   fern-broken-links:
     name: Fern Broken Links Check
