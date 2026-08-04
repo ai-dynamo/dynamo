@@ -1774,6 +1774,66 @@ mod tests {
         (addr, conn_count)
     }
 
+    /// Full request-plane TLS handshake + encrypted round-trip using the real
+    /// `tls_utils` config builders (the same ones egress/ingress use). Generates
+    /// a self-signed cert, trusts it as the CA, and drives a verified handshake
+    /// with SNI `localhost` (mirroring `connector.connect(server_name, stream)`
+    /// in `TcpConnection::connect`), then echoes bytes over the encrypted stream.
+    #[tokio::test]
+    async fn request_plane_tls_handshake_roundtrip() {
+        use std::io::Write as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Self-signed cert with SAN=localhost; also used as the trusted CA.
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+
+        // Server acceptor + client connector via the real builders.
+        let server_config =
+            crate::tls_utils::server_tls_config(cert_file.path(), key_file.path()).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let client_config =
+            crate::tls_utils::client_tls_config(Some(cert_file.path()), false).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        // TLS echo server on loopback.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(tcp).await.expect("server TLS handshake");
+            let mut buf = [0u8; 5];
+            tls.read_exact(&mut buf).await.unwrap();
+            tls.write_all(&buf).await.unwrap();
+            tls.flush().await.unwrap();
+        });
+
+        // Client: TCP connect + verified TLS handshake with SNI (mirrors egress).
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("client TLS handshake (CA verification + SNI)");
+
+        tls.write_all(b"hello").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut resp = [0u8; 5];
+        tls.read_exact(&mut resp).await.unwrap();
+        assert_eq!(&resp, b"hello", "bytes should round-trip over TLS");
+
+        server.await.unwrap();
+    }
+
     struct RecordingWriter {
         written: Vec<u8>,
         max_per_write: Option<usize>,
