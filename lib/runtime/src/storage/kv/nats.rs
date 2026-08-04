@@ -129,6 +129,20 @@ impl Bucket for NATSBucket {
         }
     }
 
+    async fn replace(
+        &self,
+        key: &kv::Key,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
+        let entry = self
+            .nats_store
+            .entry(key)
+            .await
+            .map_err(|error| StoreError::NATSError(error.to_string()))?
+            .ok_or_else(|| StoreError::MissingKey(key.to_string()))?;
+        self.update(key, value, entry.revision).await
+    }
+
     async fn get(&self, key: &kv::Key) -> Result<Option<bytes::Bytes>, StoreError> {
         self.nats_store
             .get(key)
@@ -247,9 +261,8 @@ impl NATSBucket {
     ) -> Result<StoreOutcome, StoreError> {
         match self.nats_store.entry(key).await {
             Ok(Some(entry)) => {
-                // Re-try the update with new version number
-                let next_rev = entry.revision + 1;
-                match self.nats_store.update(key, value, next_rev).await {
+                // Re-try against the current stream revision.
+                match self.nats_store.update(key, value, entry.revision).await {
                     Ok(correct_revision) => Ok(StoreOutcome::Created(correct_revision)),
                     Err(err) => Err(StoreError::NATSError(format!(
                         "Error during update of key {key} after resync: {err}"

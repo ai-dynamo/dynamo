@@ -1224,6 +1224,94 @@ fn find_conflicting_model_name(
     Ok(None)
 }
 
+const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
+
+fn model_card_without_taints(
+    instance: &DiscoveryInstance,
+) -> Result<(serde_json::Value, HashSet<String>)> {
+    let DiscoveryInstance::Model { card_json, .. } = instance else {
+        anyhow::bail!("model update requires a model discovery instance")
+    };
+
+    let mut card = card_json.clone();
+    let runtime_config = card
+        .get_mut("runtime_config")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("model card is missing runtime_config")?;
+    let taints = runtime_config
+        .remove("taints")
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let taints = taints
+        .as_array()
+        .context("model card runtime_config.taints must be an array")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .context("model card runtime_config.taints entries must be strings")
+        })
+        .collect::<Result<HashSet<_>>>()?;
+
+    Ok((card, taints))
+}
+
+fn expected_topology_taints(card: &serde_json::Value) -> Result<HashSet<String>> {
+    let Some(domains) = card
+        .pointer("/runtime_config/topology_domains")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(HashSet::new());
+    };
+
+    domains
+        .iter()
+        .map(|(domain, value)| {
+            let value = value
+                .as_str()
+                .context("model card runtime_config.topology_domains values must be strings")?;
+            Ok(format!(
+                "{TOPOLOGY_TAINT_PREFIX}{}={}",
+                domain.trim(),
+                value.trim()
+            ))
+        })
+        .collect()
+}
+
+/// Validate the discovery-layer mutable boundary for model-card updates.
+///
+/// Model cards remain immutable after registration except for worker-managed
+/// `runtime_config.taints`. Reserved topology taints are derived from the
+/// immutable `topology_domains` map and must stay canonical.
+fn validate_model_taint_update(
+    existing: &DiscoveryInstance,
+    candidate: &DiscoveryInstance,
+) -> Result<()> {
+    if existing.id() != candidate.id() {
+        anyhow::bail!("model update cannot change discovery identity")
+    }
+
+    let (existing_card, _) = model_card_without_taints(existing)?;
+    let (candidate_card, candidate_taints) = model_card_without_taints(candidate)?;
+    if existing_card != candidate_card {
+        anyhow::bail!("model update can only change runtime_config.taints")
+    }
+
+    let expected_topology = expected_topology_taints(&candidate_card)?;
+    let actual_topology = candidate_taints
+        .into_iter()
+        .filter(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+        .collect::<HashSet<_>>();
+    if actual_topology != expected_topology {
+        anyhow::bail!(
+            "reserved {TOPOLOGY_TAINT_PREFIX} taints must match runtime_config.topology_domains"
+        )
+    }
+
+    Ok(())
+}
+
 /// Discovery trait for service discovery across different backends
 #[async_trait]
 pub trait Discovery: Send + Sync {
@@ -1293,6 +1381,47 @@ pub trait Discovery: Send + Sync {
 
     /// Backend-specific raw registration implementation.
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
+
+    /// Updates only the mutable taints of this worker's existing model card.
+    ///
+    /// The shared validation here prevents backend implementations from
+    /// widening the mutable surface. The model identity and every card field
+    /// other than `runtime_config.taints` must remain unchanged.
+    async fn update_model(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+        let candidate = spec.into_instance(self.instance_id());
+        let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            ..
+        } = &candidate
+        else {
+            anyhow::bail!("update_model requires a model discovery spec")
+        };
+        let query = DiscoveryQuery::EndpointModels {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+        };
+        let candidate_id = candidate.id();
+        let existing = self
+            .list(query)
+            .await?
+            .into_iter()
+            .find(|instance| instance.id() == candidate_id)
+            .with_context(|| {
+                format!("model discovery record {candidate_id:?} is not registered")
+            })?;
+
+        validate_model_taint_update(&existing, &candidate)?;
+        self.update_model_internal(candidate.clone()).await?;
+        Ok(candidate)
+    }
+
+    /// Backend-specific model update after shared mutable-boundary validation.
+    async fn update_model_internal(&self, _instance: DiscoveryInstance) -> Result<()> {
+        anyhow::bail!("model updates are not supported by this discovery backend")
+    }
 
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
@@ -1391,5 +1520,65 @@ mod tests {
             }
             _ => panic!("expected endpoint discovery metadata"),
         }
+    }
+}
+
+#[cfg(test)]
+mod model_taint_update_tests {
+    use super::*;
+
+    fn model_instance(taints: &[&str]) -> DiscoveryInstance {
+        DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {
+                    "taints": taints,
+                    "topology_domains": {"zone": "west"}
+                }
+            }),
+            model_suffix: None,
+        }
+    }
+
+    #[test]
+    fn model_update_accepts_only_caller_managed_taint_changes() {
+        let existing = model_instance(&["old", "dynamo.topology/zone=west"]);
+        let candidate = model_instance(&["new", "dynamo.topology/zone=west"]);
+
+        validate_model_taint_update(&existing, &candidate).unwrap();
+    }
+
+    #[test]
+    fn model_update_rejects_immutable_card_changes() {
+        let existing = model_instance(&["dynamo.topology/zone=west"]);
+        let mut candidate = model_instance(&["dynamo.topology/zone=west"]);
+        let DiscoveryInstance::Model { card_json, .. } = &mut candidate else {
+            unreachable!()
+        };
+        card_json["display_name"] = serde_json::json!("other-model");
+
+        let error = validate_model_taint_update(&existing, &candidate).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("can only change runtime_config.taints")
+        );
+    }
+
+    #[test]
+    fn model_update_rejects_reserved_topology_taint_changes() {
+        let existing = model_instance(&["dynamo.topology/zone=west"]);
+        let candidate = model_instance(&["dynamo.topology/zone=east"]);
+
+        let error = validate_model_taint_update(&existing, &candidate).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must match runtime_config.topology_domains")
+        );
     }
 }

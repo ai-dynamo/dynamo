@@ -79,6 +79,21 @@ impl Bucket for EtcdBucket {
         }
     }
 
+    async fn replace(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+        let k = make_key(&self.bucket_name, key);
+        let kvs = self
+            .client
+            .kv_get(k, None)
+            .await
+            .map_err(|error| StoreError::EtcdError(error.to_string()))?;
+        let current_version = kvs
+            .first()
+            .map(|kv| kv.version() as u64)
+            .ok_or_else(|| StoreError::MissingKey(key.to_string()))?;
+        self.update(key, value, current_version.saturating_sub(1))
+            .await
+    }
+
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd get: {k}");

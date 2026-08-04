@@ -157,6 +157,25 @@ impl Bucket for MemoryBucketRef {
         Ok(outcome)
     }
 
+    async fn replace(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+        let mut locked_data = self.inner.data.lock();
+        let bucket = locked_data
+            .get_mut(&self.name)
+            .ok_or_else(|| StoreError::MissingBucket(self.name.to_string()))?;
+        let entry = bucket
+            .data
+            .get_mut(&key.0)
+            .ok_or_else(|| StoreError::MissingKey(key.to_string()))?;
+        let next_revision = entry.0.saturating_add(1).max(1);
+        *entry = (next_revision, value.clone());
+        let _ = self.inner.change_sender.send(MemoryEvent::Put {
+            bucket: self.name.clone(),
+            key: key.to_string(),
+            value,
+        });
+        Ok(StoreOutcome::Created(next_revision))
+    }
+
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         let locked_data = self.inner.data.lock();
         let Some(bucket) = locked_data.get(&self.name) else {

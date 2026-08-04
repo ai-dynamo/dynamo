@@ -492,6 +492,22 @@ impl Discovery for KVStoreDiscovery {
         Ok(instance)
     }
 
+    async fn update_model_internal(&self, instance: DiscoveryInstance) -> Result<()> {
+        let DiscoveryInstanceId::Model(id) = instance.id() else {
+            anyhow::bail!("update_model_internal requires a model discovery instance")
+        };
+        let bucket = self
+            .store
+            .get_bucket(MODELS_BUCKET)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("model discovery bucket is not registered"))?;
+        let key = kv::Key::new(id.to_path());
+        bucket
+            .replace(&key, serde_json::to_vec(&instance)?.into())
+            .await?;
+        Ok(())
+    }
+
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let (bucket_name, key_path) = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
@@ -1101,5 +1117,62 @@ mod tests {
 
         register_task.await.unwrap();
         cancel_token.cancel();
+    }
+
+    fn model_spec(taint: &str) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {
+                    "taints": [taint, "dynamo.topology/zone=west"],
+                    "topology_domains": {"zone": "west"}
+                }
+            }),
+            model_suffix: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn model_taint_updates_replace_existing_value_and_emit_added() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let query = DiscoveryQuery::EndpointModels {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+        };
+        let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+
+        client.register(model_spec("first")).await.unwrap();
+        let DiscoveryEvent::Added(first) = stream.next().await.unwrap().unwrap() else {
+            panic!("expected initial model addition");
+        };
+
+        for taint in ["second", "third"] {
+            let updated = client.update_model(model_spec(taint)).await.unwrap();
+            tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+                loop {
+                    if stream.next().await.unwrap().unwrap()
+                        == DiscoveryEvent::Added(updated.clone())
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        let listed = client.list(query).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id(), first.id());
+        let DiscoveryInstance::Model { card_json, .. } = &listed[0] else {
+            panic!("expected model instance");
+        };
+        let taints = card_json["runtime_config"]["taints"].as_array().unwrap();
+        assert!(taints.contains(&serde_json::json!("third")));
+        assert!(!taints.contains(&serde_json::json!("second")));
     }
 }

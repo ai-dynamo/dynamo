@@ -98,6 +98,21 @@ impl DiscoveryMetadata {
         }
     }
 
+    /// Replace an existing model card instance.
+    pub fn replace_model_card(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::Model(key) => {
+                let path = key.to_path();
+                let existing = self.model_cards.get_mut(&path).ok_or_else(|| {
+                    anyhow::anyhow!("model discovery record {path} is not registered")
+                })?;
+                *existing = instance;
+                Ok(())
+            }
+            _ => anyhow::bail!("Cannot replace non-model-card instance as model card"),
+        }
+    }
+
     /// Unregister an endpoint instance
     pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {

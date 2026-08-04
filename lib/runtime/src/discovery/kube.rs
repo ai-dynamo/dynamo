@@ -22,9 +22,26 @@ use crate::discovery::{
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+fn diff_instances(
+    known: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+    current: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+) -> (Vec<DiscoveryInstance>, Vec<DiscoveryInstanceId>) {
+    let added = current
+        .iter()
+        .filter(|(id, instance)| known.get(*id) != Some(*instance))
+        .map(|(_, instance)| instance.clone())
+        .collect();
+    let removed = known
+        .keys()
+        .filter(|id| !current.contains_key(*id))
+        .cloned()
+        .collect();
+    (added, removed)
+}
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -221,6 +238,33 @@ impl Discovery for KubeDiscoveryClient {
         Ok(instance)
     }
 
+    async fn update_model_internal(&self, instance: DiscoveryInstance) -> Result<()> {
+        if !matches!(&instance, DiscoveryInstance::Model { .. }) {
+            anyhow::bail!("update_model_internal requires a model discovery instance")
+        }
+
+        // Hold the local metadata lock through server-side apply so concurrent
+        // registrations cannot overwrite the update with a stale snapshot.
+        let mut metadata = self.metadata.write().await;
+        let original_state = metadata.clone();
+        metadata.replace_model_card(instance)?;
+
+        let cr_name = self.pod_info.target.cr_name();
+        let cr = build_cr(
+            &cr_name,
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            &metadata,
+        )?;
+        if let Err(error) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
+            *metadata = original_state;
+            return Err(error);
+        }
+
+        tracing::debug!("Persisted model taint update to DynamoWorkerMetadata CR");
+        Ok(())
+    }
+
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let instance_id = instance.instance_id();
 
@@ -388,13 +432,13 @@ impl Discovery for KubeDiscoveryClient {
                 }
             }
 
-            let mut known_endpoints = endpoint_instances(&initial);
-            let mut known_ids: HashSet<DiscoveryInstanceId> = initial.into_keys().collect();
+            // Track complete values so same-ID model taint updates are observable.
+            let mut known = initial;
 
             loop {
                 tracing::trace!(
                     stream_id = %stream_id,
-                    known_count = known_ids.len(),
+                    known_count = known.len(),
                     "Watch loop waiting for changes"
                 );
 
@@ -431,12 +475,12 @@ impl Discovery for KubeDiscoveryClient {
                             stream_id = %stream_id,
                             seq = snapshot.sequence,
                             current_count = current.len(),
-                            known_count = known_ids.len(),
+                            known_count = known.len(),
                             "Watch received snapshot update"
                         );
 
-                        let (upserted, removed) =
-                            diff_discovery_instances(&known_ids, &known_endpoints, &current);
+                        // Emit upserts for new and changed model/endpoint values.
+                        let (upserted, removed) = diff_instances(&known, &current);
 
                         // Log diff results (even if empty, for debugging)
                         if upserted.is_empty() && removed.is_empty() {
@@ -456,8 +500,7 @@ impl Discovery for KubeDiscoveryClient {
                             );
                         }
 
-                        // Endpoint values are mutable, so emit Added for new instances and
-                        // same-ID endpoint updates. Other instance types remain ID-only.
+                        // Emit Added events for new and changed values.
                         for instance in upserted {
                             tracing::info!(
                                 stream_id = %stream_id,
@@ -486,8 +529,8 @@ impl Discovery for KubeDiscoveryClient {
                             }
                         }
 
-                        known_endpoints = endpoint_instances(&current);
-                        known_ids = current.into_keys().collect();
+                        // Update known values.
+                        known = current;
                     }
                     Err(_) => {
                         tracing::info!(
@@ -582,5 +625,27 @@ mod tests {
 
         assert_eq!(upserted, vec![added_instance]);
         assert_eq!(removed, vec![removed_instance.id()]);
+    }
+    #[test]
+    fn changed_model_value_is_an_added_upsert() {
+        let model = |taint: &str| DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            card_json: serde_json::json!({
+                "runtime_config": {"taints": [taint]}
+            }),
+            model_suffix: None,
+        };
+        let old = model("old");
+        let updated = model("updated");
+        let known = HashMap::from([(old.id(), old)]);
+        let current = HashMap::from([(updated.id(), updated.clone())]);
+
+        let (added, removed) = diff_instances(&known, &current);
+
+        assert_eq!(added, vec![updated]);
+        assert!(removed.is_empty());
     }
 }
