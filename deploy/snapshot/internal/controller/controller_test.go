@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -753,7 +754,9 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 
 	injectErr := errors.New("injector unavailable")
 	w := makeTestController(t, pod)
-	w.runtime = &fakeRuntime{resolveContainerPID: os.Getpid()}
+	// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
+	// returns ESRCH instead of killing the test process.
+	w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
 	w.injector = errorInjector{err: injectErr}
 
 	_ = w.runRestore(
