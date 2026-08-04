@@ -63,11 +63,11 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     def fake_run_trace_replay(**kwargs):
         seen.update(kwargs)
         return SimpleNamespace(
-            trace_report={
+            summary={
                 "output_throughput_tok_s": 42.0,
                 "goodput_output_throughput_tok_s": 40.0,
             },
-            total_ticks=7,
+            planner=SimpleNamespace(total_ticks=7),
         )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
@@ -77,6 +77,7 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
         backend_deployment=_agg_deployment(),
         workload={
             "trace_path": "tiny.jsonl",
+            "trace_format": "dynamo",
             "arrival_speedup_ratio": 2.0,
             "replay_concurrency": 8,
         },
@@ -118,6 +119,7 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     report = simulation.DynamoReplayRunnerFactory().create(2).run(spec)
 
     assert seen["trace_files"] == "tiny.jsonl"
+    assert seen["trace_format"] == "dynamo"
     assert seen["num_workers"] == 3
     assert seen["router_mode"] == "kv_router"
     assert seen["planner_config"] == {"mode": "agg"}
@@ -125,6 +127,8 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert seen["replay_concurrency"] == 8
     assert seen["trace_block_size"] == 512
     assert seen["benchmark_granularity"] == 8
+    assert seen["capture_per_request"] is False
+    assert seen["capture_planner_details"] is False
     assert seen["sla_ttft_ms"] == 100.0
     assert seen["sla_itl_ms"] == 20.0
     assert seen["sla_e2e_ms"] is None

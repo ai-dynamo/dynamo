@@ -368,6 +368,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/multimodal-serving/overview.md
+          - page: Parallel Media Decoding
+            path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
           - page: Embedding Cache
             path: pages/use-cases/multimodal-serving/embedding-cache.md
           - page: Multimodal KV Routing
@@ -991,6 +993,8 @@ navigation:
         contents:
           - page: Runtime Configuration
             path: pages/reference/components/runtime-configuration.mdx
+          - page: TLS Configuration
+            path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
           - page: Planner Configuration

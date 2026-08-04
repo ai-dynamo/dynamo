@@ -27,8 +27,10 @@ from aiconfigurator.sdk.task_v2 import Task
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.model_cache_paths import model_cache_path_in_pvc
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
+    needs_mocker_aic_perf_model,
     needs_profile_data,
     resolve_model_path,
 )
@@ -50,7 +52,10 @@ def _build_k8s_overrides(
         if dgdr.modelCache.pvcMountPath:
             overrides["k8s_pvc_mount_path"] = dgdr.modelCache.pvcMountPath
         if dgdr.modelCache.pvcModelPath:
-            overrides["k8s_model_path_in_pvc"] = dgdr.modelCache.pvcModelPath
+            overrides["k8s_model_path_in_pvc"] = model_cache_path_in_pvc(
+                dgdr.modelCache.pvcMountPath,
+                dgdr.modelCache.pvcModelPath,
+            )
     return overrides
 
 
@@ -300,18 +305,19 @@ def _run_default_sim(
         **load_kwargs,
     )
 
-    # When interpolation data is needed (mocker or throughput-scaling), a
-    # disaggregated config is required.  If AIC picked an aggregated config,
-    # override to the best available disaggregated alternative so that
-    # run_interpolation() can run successfully downstream.
-    if chosen == "agg" and needs_profile_data(dgdr):
+    # File-based interpolation and rapid mocker AIC specs both require separate
+    # prefill/decode picks. If AIC picked an aggregated config, override to the
+    # best available disaggregated alternative for the downstream consumer.
+    requires_disagg = needs_profile_data(dgdr) or needs_mocker_aic_perf_model(dgdr)
+    if chosen == "agg" and requires_disagg:
         disagg_key = next(
             (k for k in best_configs if "disagg" in k and not best_configs[k].empty),
             None,
         )
         if disagg_key:
             logger.info(
-                "AIC picked aggregated config but interpolation data is required — "
+                "AIC picked aggregated config but separate prefill/decode picks "
+                "are required — "
                 "overriding to '%s' to support mocker/throughput-scaling.",
                 disagg_key,
             )
@@ -319,7 +325,8 @@ def _run_default_sim(
         else:
             logger.warning(
                 "AIC picked aggregated config and no disaggregated alternative "
-                "is available; interpolation data will be skipped."
+                "is available; separate prefill/decode performance data will "
+                "be unavailable."
             )
 
     best_config_df = best_configs.get(chosen, pd.DataFrame())

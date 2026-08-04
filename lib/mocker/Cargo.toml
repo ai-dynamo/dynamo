@@ -39,6 +39,7 @@ velo = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }

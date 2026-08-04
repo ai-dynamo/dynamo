@@ -99,6 +99,8 @@ class DynamoReplayRunner:
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
             "benchmark_granularity": self.benchmark_granularity,
+            "capture_per_request": False,
+            "capture_planner_details": False,
             **self._goodput_sla_kwargs(spec),
         }
 
@@ -210,15 +212,20 @@ class DynamoReplayRunner:
         trace_path = spec.workload["trace_path"]
         if not isinstance(trace_path, str):
             raise TypeError("trace workload requires a string trace_path")
+        trace_format = spec.workload.get("trace_format", "mooncake")
+        if not isinstance(trace_format, str):
+            raise TypeError("trace workload requires a string trace_format")
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_path,
+                trace_format=trace_format,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
                 num_workers=deployment.num_workers,
                 **common,
             )
         return run_trace_replay(
             trace_files=trace_path,
+            trace_format=trace_format,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
             decode_engine_args=self._engine_args(deployment.decode_engine_args),
             num_prefill_workers=deployment.num_prefill_workers,
@@ -289,7 +296,13 @@ class DynamoReplayRunner:
     @staticmethod
     def _normalize_report(report: Any) -> tuple[dict[str, float], dict[str, JSONValue]]:
         metadata: dict[str, JSONValue] = {}
-        if hasattr(report, "trace_report"):
+        if hasattr(report, "summary"):
+            trace_report = dict(report.summary)
+            planner = getattr(report, "planner", None)
+            if planner is not None:
+                trace_report["planner_total_ticks"] = float(planner.total_ticks)
+                metadata["planner_total_ticks"] = int(planner.total_ticks)
+        elif hasattr(report, "trace_report"):
             trace_report = dict(report.trace_report)
             if hasattr(report, "total_ticks"):
                 trace_report["planner_total_ticks"] = float(report.total_ticks)
