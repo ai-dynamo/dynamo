@@ -61,7 +61,7 @@ Backend extras such as `ai-dynamo[vllm]` and `ai-dynamo[sglang]` use the same fl
 
 ## Backend Versions
 
-Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly or stable build ships a given backend version, and get the exact pull or install command, use the build selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#get-dynamo).
+Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly or stable build ships a given backend version, and get the exact pull or install command, use the build selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
 
 To confirm the exact versions a specific nightly shipped, read them from the pulled image:
 

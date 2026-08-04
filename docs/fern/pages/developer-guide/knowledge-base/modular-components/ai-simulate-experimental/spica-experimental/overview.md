@@ -72,7 +72,7 @@ Profiler. That release does not provide `aiconfigurator.sdk.memory`:
   load or returning an empty candidate set after the sweep.
 
 Treat workloads and search modes not covered by image smoke tests as unsupported experimental paths.
-See [Traffic](traffic.md#kv-load-ratio-candidate-relative-concurrency) for the KV-load contract.
+See [Traffic](traffic.md#kv_load_ratio-candidate-relative-concurrency) for the KV-load contract.
 
 ## Develop
 

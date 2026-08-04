@@ -425,7 +425,7 @@ navigation:
         icon: screwdriver-wrench
         slug: parsing
         contents:
-          - page: Introduction
+          - page: Overview
             path: pages/use-cases/tool-calling-and-reasoning/overview.mdx
           - page: Chat Processors
             path: pages/use-cases/tool-calling-and-reasoning/chat-processors.mdx
@@ -652,7 +652,7 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/router/router-guide.md
                   - page: Routing Concepts
                     path: pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md
-                  - page: Worker Filtering
+                  - page: Router Filtering
                     path: pages/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
                   - page: Configuration and Tuning
                     path: pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
