@@ -24,7 +24,7 @@ use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, OverloadedWorkerProvider,
-    SchedulingContext, SchedulingRequest, SchedulingResponse,
+    SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
@@ -176,6 +176,9 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    // Authoritative availability; an unavailable worker is rejected on every
+    // eligibility path.
+    available_worker_provider: Option<WorkerAvailabilityProvider>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -233,6 +236,7 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            None,
         )
         .expect("synthetic policy profile does not require admission policies")
     }
@@ -247,6 +251,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
     ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile_and_capacity(
             slots,
@@ -257,6 +262,7 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            available_worker_provider,
             ADMISSION_CHANNEL_CAPACITY,
         )
     }
@@ -271,6 +277,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
         let pending = PolicyQueue::new(profile.clone());
@@ -335,6 +342,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            available_worker_provider,
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -931,7 +939,13 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
-            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
+            let available_worker_ids = self
+                .available_worker_provider
+                .as_ref()
+                .and_then(|provider| provider());
+            let eligibility = request
+                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                .with_available_workers(available_worker_ids.as_ref());
             self.selector
                 .select_worker(&workers, request, eligibility, self.block_size)
                 .map(|selection| {
@@ -1489,6 +1503,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -1700,6 +1715,7 @@ mod tests {
                 DefaultWorkerSelector::new(None, "test"),
                 None,
                 Some(refresher),
+                None,
                 None,
                 admission_channel_capacity,
             )

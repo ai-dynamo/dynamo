@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::types::KvSchedulerError;
 use crate::protocols::{DpRank, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -25,6 +26,11 @@ pub enum WorkerEligibilityError {
     #[error("worker {worker_id} is overloaded")]
     WorkerOverloaded { worker_id: WorkerId },
 
+    /// Distinct from [`Self::WorkerUnavailable`], which means the worker has no
+    /// config: this one means the worker is not in the routable set.
+    #[error("worker {worker_id} is not routable")]
+    WorkerNotRoutable { worker_id: WorkerId },
+
     #[error("worker {worker_id} does not satisfy routing constraints")]
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
@@ -33,6 +39,11 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    // Workers currently available for selection. `None` means no availability
+    // source is attached; `Some` is authoritative, so an *empty* set rejects
+    // every candidate. Unlike `overloaded` — transient and deliberately ignored
+    // by cache affinity — unavailability is absolute on every path.
+    available_worker_ids: Option<&'a Arc<HashSet<WorkerId>>>,
     pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
@@ -48,9 +59,30 @@ impl<'a> RoutingEligibility<'a> {
         Self {
             allowed_worker_ids,
             overloaded_worker_ids,
+            available_worker_ids: None,
             pinned_worker,
             routing_constraints,
         }
+    }
+
+    /// Attach the authoritative set of available workers. An unavailable worker
+    /// is rejected on every eligibility path, including the affinity/pinned path
+    /// that otherwise ignores transient overload.
+    #[inline]
+    pub fn with_available_workers(
+        mut self,
+        available_worker_ids: Option<&'a Arc<HashSet<WorkerId>>>,
+    ) -> Self {
+        self.available_worker_ids = available_worker_ids;
+        self
+    }
+
+    /// With no availability source attached every worker is available; with one,
+    /// membership is required — an empty set makes nothing available.
+    #[inline]
+    pub fn is_worker_available(&self, worker_id: WorkerId) -> bool {
+        self.available_worker_ids
+            .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
     }
 
     #[inline]
@@ -72,7 +104,9 @@ impl<'a> RoutingEligibility<'a> {
 
     #[inline]
     pub fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
-        self.caller_allows_worker_id(worker_id) && !self.is_worker_overloaded(worker_id)
+        self.caller_allows_worker_id(worker_id)
+            && self.is_worker_available(worker_id)
+            && !self.is_worker_overloaded(worker_id)
     }
 
     #[inline]
@@ -82,6 +116,7 @@ impl<'a> RoutingEligibility<'a> {
         config: &C,
     ) -> bool {
         self.caller_allows_worker_id(worker_id)
+            && self.is_worker_available(worker_id)
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
@@ -137,6 +172,14 @@ impl<'a> RoutingEligibility<'a> {
     ) -> Result<&'w C, WorkerEligibilityError> {
         if !self.caller_allows_worker_id(worker.worker_id) {
             return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        // Reject before taint/overload checks so an unavailable worker is never
+        // selected, even on a cache-hit affinity pin.
+        if !self.is_worker_available(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerNotRoutable {
                 worker_id: worker.worker_id,
             });
         }
@@ -339,6 +382,67 @@ mod tests {
         assert_eq!(
             result.err(),
             Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
+        );
+    }
+
+    // An unavailable worker is rejected on rank validation even though it is
+    // allowed, in range, taint-compatible, and not overloaded — availability
+    // overrides cache affinity.
+    #[test]
+    fn routing_eligibility_rejects_unavailable_worker() {
+        let workers = workers();
+        let available = Arc::new(HashSet::from([8]));
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&available));
+
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
+
+        assert_eq!(
+            result.err(),
+            Some(WorkerEligibilityError::WorkerNotRoutable { worker_id: 7 })
+        );
+    }
+
+    // Unlike transient overload — which the affinity/pinned pre-validation path
+    // deliberately ignores — unavailability must not be ignored.
+    #[test]
+    fn unavailable_worker_not_ignored_by_affinity_path() {
+        let workers = workers();
+        let config = workers.get(&7).unwrap();
+        let constraints = RoutingConstraints::default();
+
+        let no_provider = RoutingEligibility::new(None, None, None, &constraints);
+        assert!(
+            no_provider.allows_worker_ignoring_overload(7, config),
+            "with no availability source attached every worker is available"
+        );
+
+        let available = Arc::new(HashSet::from([8]));
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&available));
+        assert!(
+            !eligibility.allows_worker_ignoring_overload(7, config),
+            "unavailable worker 7 must be rejected even on the affinity-ignoring-overload path"
+        );
+    }
+
+    // The inclusion-set polarity trap: an empty available set means "reject
+    // everything", not "no constraint".
+    #[test]
+    fn empty_available_set_rejects_every_worker() {
+        let workers = workers();
+        let available = Arc::new(HashSet::new());
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&available));
+
+        assert!(!eligibility.is_worker_available(7));
+        assert_eq!(
+            eligibility
+                .validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3))
+                .err(),
+            Some(WorkerEligibilityError::WorkerNotRoutable { worker_id: 7 })
         );
     }
 
