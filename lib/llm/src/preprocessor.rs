@@ -68,7 +68,10 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{AgentHints, NvExtProvider, request_cache_salt, routing_constraints_to_kv},
+        extensions::{
+            AgentHints, CustomEncoderModality, NvExtProvider, request_cache_salt,
+            routing_constraints_to_kv,
+        },
     },
     openai::{
         DeltaGeneratorExt,
@@ -328,11 +331,28 @@ impl MultimodalCounts {
                 .and_then(|m| m.get(key))
                 .map_or(0, |v| v.len())
         };
-        Self {
+        let mut counts = Self {
             image: count("image_url"),
             video: count("video_url"),
             audio: count("audio_url"),
+        };
+        if let Some(items) = request
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("custom_encoder_data"))
+        {
+            for item in items {
+                let MultimodalData::CustomEncoderData { modality, .. } = item else {
+                    continue;
+                };
+                match modality {
+                    CustomEncoderModality::Image => counts.image += 1,
+                    CustomEncoderModality::Video => counts.video += 1,
+                    CustomEncoderModality::Audio => counts.audio += 1,
+                }
+            }
         }
+        counts
     }
 }
 
@@ -1126,6 +1146,20 @@ impl OpenAIPreprocessor {
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
 
+        if let Some(custom_data) = request
+            .nvext()
+            .and_then(|nvext| nvext.custom_encoder_data.as_ref())
+        {
+            let messages = request.typed_messages().ok_or_else(|| {
+                invalid_argument_error(
+                    "nvext.custom_encoder_data is supported only by the Chat Completions API",
+                )
+            })?;
+            custom_data
+                .validate_chat_messages(messages)
+                .map_err(|error| invalid_argument_error(error.to_string()))?;
+        }
+
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
@@ -1203,11 +1237,11 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let has_images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|m| m.get("image_url"))
-            .is_some_and(|v| !v.is_empty());
+        let has_images = preprocessed.multi_modal_data.as_ref().is_some_and(|media| {
+            ["image_url", "custom_encoder_data"]
+                .iter()
+                .any(|key| media.get(*key).is_some_and(|items| !items.is_empty()))
+        });
         let effective_prompt_len = Self::effective_prompt_len_for_cap(
             preprocessed
                 .mm_routing_info
@@ -1604,6 +1638,9 @@ impl OpenAIPreprocessor {
         // Cleared and returned to the caller; empty for non-image / text-only requests.
         #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        let custom_data = request
+            .nvext()
+            .and_then(|nvext| nvext.custom_encoder_data.as_ref());
         // Private per-request total for frontend metrics. `None` means the SMG
         // counter is unavailable or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
@@ -1629,8 +1666,28 @@ impl OpenAIPreprocessor {
         let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
+            if custom_data.is_some() {
+                return Err(invalid_argument_error(
+                    "nvext.custom_encoder_data is supported only by the Chat Completions API",
+                ));
+            }
             return Ok((Vec::new(), None));
         };
+
+        if let Some(custom_data) = custom_data {
+            custom_data
+                .validate_chat_messages(messages)
+                .map_err(|error| invalid_argument_error(error.to_string()))?;
+            let slots = media_map
+                .entry("custom_encoder_data".to_string())
+                .or_default();
+            for item in custom_data.items_in_prompt_order() {
+                slots.push(MultimodalData::CustomEncoderData {
+                    modality: item.modality,
+                    payload: item.payload.clone(),
+                });
+            }
+        }
         let has_media_loader = self.media_loader.is_some();
 
         for message in messages.iter() {
@@ -1844,7 +1901,7 @@ impl OpenAIPreprocessor {
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
             // <image> placeholders for embedding-path / NIXL flows).
-            let messages_json = serde_json::to_value(request.messages())?;
+            let messages_json = serde_json::to_value(messages)?;
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
@@ -4277,6 +4334,33 @@ mod tests {
         assert_eq!(counts.image, 2);
         assert_eq!(counts.video, 1);
         assert_eq!(counts.audio, 0);
+    }
+
+    #[test]
+    fn test_multimodal_counts_include_custom_encoder_inputs() {
+        let mut map: MultimodalDataMap = HashMap::new();
+        map.insert(
+            "custom_encoder_data".to_string(),
+            vec![
+                MultimodalData::CustomEncoderData {
+                    modality: CustomEncoderModality::Image,
+                    payload: serde_json::json!({"id": 1}),
+                },
+                MultimodalData::CustomEncoderData {
+                    modality: CustomEncoderModality::Video,
+                    payload: serde_json::json!({"id": 2}),
+                },
+                MultimodalData::CustomEncoderData {
+                    modality: CustomEncoderModality::Audio,
+                    payload: serde_json::json!({"id": 3}),
+                },
+            ],
+        );
+
+        let counts = MultimodalCounts::from_preprocessed(&preprocessed_with_media(Some(map)));
+        assert_eq!(counts.image, 1);
+        assert_eq!(counts.video, 1);
+        assert_eq!(counts.audio, 1);
     }
 
     #[test]

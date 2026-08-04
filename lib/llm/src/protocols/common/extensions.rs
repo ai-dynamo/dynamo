@@ -47,6 +47,145 @@ pub struct MetadataUpload {
     pub url: String,
 }
 
+/// Opaque custom-encoder inputs attached to a Chat Completions request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEncoderData {
+    pub version: u32,
+    pub items: Vec<CustomEncoderDataItem>,
+}
+
+/// One custom-encoder input and its position in the rendered prompt.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEncoderDataItem {
+    /// Semantic media slot rendered by the frontend. Deployments may support a subset.
+    pub modality: CustomEncoderModality,
+
+    pub placement: CustomEncoderPlacement,
+
+    /// Backend-owned semantic JSON. Object key order and original JSON spelling are not preserved.
+    pub payload: serde_json::Value,
+}
+
+/// Model-facing media semantics for an opaque custom-encoder payload.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEncoderModality {
+    Image,
+    Video,
+    Audio,
+}
+
+impl CustomEncoderModality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEncoderPlacement {
+    /// Index in the original Chat Completions `messages` array.
+    pub message_index: usize,
+
+    /// Insertion slot in the original user-content array; its length means append.
+    /// Items sharing a slot retain their order in the envelope.
+    pub content_index: usize,
+}
+
+impl CustomEncoderData {
+    pub const VERSION: u32 = 1;
+
+    /// Validate the public envelope against the original Chat Completions messages.
+    pub fn validate_chat_messages(
+        &self,
+        messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.version == Self::VERSION,
+            "nvext.custom_encoder_data.version must be {}",
+            Self::VERSION
+        );
+        anyhow::ensure!(
+            !self.items.is_empty(),
+            "nvext.custom_encoder_data.items must not be empty"
+        );
+
+        let messages = serde_json::to_value(messages)?;
+        let messages = messages
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("chat messages must serialize as an array"))?;
+
+        for (item_index, item) in self.items.iter().enumerate() {
+            anyhow::ensure!(
+                item.modality == CustomEncoderModality::Image,
+                "nvext.custom_encoder_data.items[{item_index}].modality `{}` is not supported; only `image` is currently supported",
+                item.modality.as_str()
+            );
+            let placement = item.placement;
+            let message = messages.get(placement.message_index).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "nvext.custom_encoder_data.items[{item_index}].placement.message_index is out of range"
+                )
+            })?;
+            anyhow::ensure!(
+                message.get("role").and_then(serde_json::Value::as_str) == Some("user"),
+                "nvext.custom_encoder_data.items[{item_index}] must be placed in a user message"
+            );
+            let content = message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "nvext.custom_encoder_data.items[{item_index}] requires array-form user content"
+                    )
+                })?;
+            anyhow::ensure!(
+                placement.content_index <= content.len(),
+                "nvext.custom_encoder_data.items[{item_index}].placement.content_index is out of range"
+            );
+        }
+
+        let has_standard_media = messages.iter().any(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        matches!(
+                            part.get("type").and_then(serde_json::Value::as_str),
+                            Some("image_url" | "video_url" | "audio_url" | "input_audio")
+                        )
+                    })
+                })
+        });
+        anyhow::ensure!(
+            !has_standard_media,
+            "nvext.custom_encoder_data cannot be combined with standard multimodal content"
+        );
+
+        Ok(())
+    }
+
+    /// Return inputs in their prompt order, preserving envelope order at equal placements.
+    pub fn items_in_prompt_order(&self) -> Vec<&CustomEncoderDataItem> {
+        let mut indexed: Vec<_> = self.items.iter().enumerate().collect();
+        indexed.sort_by_key(|(index, item)| {
+            (
+                item.placement.message_index,
+                item.placement.content_index,
+                *index,
+            )
+        });
+        indexed.into_iter().map(|(_, item)| item).collect()
+    }
+}
+
 fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -161,6 +300,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Versioned, opaque inputs for a custom encoder. Chat Completions only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub custom_encoder_data: Option<CustomEncoderData>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
@@ -1262,6 +1406,121 @@ mod tests {
             .build()
             .unwrap();
         assert!(!nvext.has_query_instance_id_annotation());
+    }
+
+    #[test]
+    fn custom_encoder_data_round_trips_opaque_payload() {
+        let value = serde_json::json!({
+            "custom_encoder_data": {
+                "version": 1,
+                "items": [{
+                    "modality": "video",
+                    "placement": {"message_index": 0, "content_index": 1},
+                    "payload": {
+                        "kind": "tensor_ref",
+                        "uri": "s3://bucket/tensor.safetensors",
+                        "options": [null, true, 7, {"nested": "value"}]
+                    }
+                }]
+            }
+        });
+
+        let nvext: NvExt = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(nvext).unwrap(), value);
+    }
+
+    #[test]
+    fn custom_encoder_data_validates_placements_and_prompt_order() {
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"}
+                ]
+            },
+            {"role": "assistant", "content": "answer"},
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "third"}]
+            }
+            ]))
+            .unwrap();
+        let data = CustomEncoderData {
+            version: 1,
+            items: vec![
+                CustomEncoderDataItem {
+                    modality: CustomEncoderModality::Image,
+                    placement: CustomEncoderPlacement {
+                        message_index: 2,
+                        content_index: 1,
+                    },
+                    payload: serde_json::json!("later"),
+                },
+                CustomEncoderDataItem {
+                    modality: CustomEncoderModality::Image,
+                    placement: CustomEncoderPlacement {
+                        message_index: 0,
+                        content_index: 1,
+                    },
+                    payload: serde_json::json!("earlier"),
+                },
+            ],
+        };
+
+        data.validate_chat_messages(&messages).unwrap();
+        let ordered = data.items_in_prompt_order();
+        assert_eq!(ordered[0].payload, serde_json::json!("earlier"));
+        assert_eq!(ordered[1].payload, serde_json::json!("later"));
+
+        let mut invalid = data.clone();
+        invalid.items[0].placement.message_index = 1;
+        assert!(
+            invalid
+                .validate_chat_messages(&messages)
+                .unwrap_err()
+                .to_string()
+                .contains("user message")
+        );
+    }
+
+    #[test]
+    fn custom_encoder_data_rejects_standard_media_and_unsupported_modality() {
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.png"}
+                }]
+            }]))
+            .unwrap();
+        let data = CustomEncoderData {
+            version: 1,
+            items: vec![CustomEncoderDataItem {
+                modality: CustomEncoderModality::Video,
+                placement: CustomEncoderPlacement {
+                    message_index: 0,
+                    content_index: 0,
+                },
+                payload: serde_json::json!({}),
+            }],
+        };
+
+        let unsupported_modality_error = data
+            .validate_chat_messages(&messages)
+            .unwrap_err()
+            .to_string();
+        assert!(unsupported_modality_error.contains("only `image` is currently supported"));
+
+        let mut data = data;
+        data.items[0].modality = CustomEncoderModality::Image;
+        let mixed_media_error = data
+            .validate_chat_messages(&messages)
+            .unwrap_err()
+            .to_string();
+        assert!(mixed_media_error.contains("cannot be combined"));
     }
 
     #[test]

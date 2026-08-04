@@ -59,6 +59,14 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
     fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+        let nvext = crate::protocols::common::extensions::parse_nvext(req.nvext.clone())?;
+        anyhow::ensure!(
+            nvext
+                .as_ref()
+                .and_then(|nvext| nvext.custom_encoder_data.as_ref())
+                .is_none(),
+            "nvext.custom_encoder_data is supported only by the Chat Completions API"
+        );
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -148,7 +156,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: crate::protocols::common::extensions::parse_nvext(req.nvext)?,
+            nvext,
             // chat_template_args may be augmented by the Anthropic handler
             // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
             // when a reasoning parser is configured. The conversion layer only
@@ -715,6 +723,30 @@ mod tests {
 
         assert!(err.to_string().contains("invalid nvext"));
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_custom_encoder_data_is_rejected_before_anthropic_conversion() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "custom_encoder_data": {
+                    "version": 1,
+                    "items": [{
+                        "modality": "image",
+                        "placement": {"message_index": 0, "content_index": 0},
+                        "payload": {"kind": "tensor_ref"}
+                    }]
+                }
+            }
+        }"#;
+
+        let request: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+
+        assert!(error.to_string().contains("Chat Completions API"));
     }
 
     #[test]

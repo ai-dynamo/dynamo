@@ -60,6 +60,10 @@ pub async fn tensor_response_stream(
     streaming: bool,
     metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
+    request
+        .validate_custom_encoder_data()
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
+
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
     let model_name = request.model.clone();

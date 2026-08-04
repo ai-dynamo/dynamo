@@ -73,6 +73,7 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
             // reuse intentionally relies on text-prefix routing and affinity
             // to the worker that owns the processor/embedding cache entry.
             MultimodalData::UuidOnly(_) => {}
+            MultimodalData::CustomEncoderData { .. } => {}
         }
     }
     keys.sort();
