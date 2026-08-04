@@ -793,19 +793,22 @@ fn convert_input_items_to_messages(
 /// namespace to restore on the response path.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
-    let mut origins = HashMap::<String, String>::new();
+    let mut origins = HashMap::<String, bool>::new();
     let mut push_function = |name: &str,
                              description: &Option<String>,
                              parameters: &Option<serde_json::Value>,
                              strict: Option<bool>,
-                             origin: String|
+                             is_namespaced: bool|
      -> anyhow::Result<()> {
-        if let Some(previous_origin) = origins.get(name) {
+        if origins
+            .get(name)
+            .is_some_and(|previous_is_namespaced| *previous_is_namespaced || is_namespaced)
+        {
             return Err(anyhow::anyhow!(
-                "Responses function tool name '{name}' is ambiguous after namespace flattening: declared by {previous_origin} and {origin}"
+                "Responses function tool name '{name}' is ambiguous after namespace flattening"
             ));
         }
-        origins.insert(name.to_owned(), origin);
+        origins.entry(name.to_owned()).or_insert(is_namespaced);
         converted.push(ChatCompletionTool {
             r#type: ChatCompletionToolType::Function,
             function: FunctionObject {
@@ -820,23 +823,13 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
 
     for tool in tools {
         match tool {
-            Tool::Function(f) => push_function(
-                &f.name,
-                &f.description,
-                &f.parameters,
-                f.strict,
-                "a top-level function".to_string(),
-            )?,
+            Tool::Function(f) => {
+                push_function(&f.name, &f.description, &f.parameters, f.strict, false)?
+            }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
                     if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
-                            &f.name,
-                            &f.description,
-                            &f.parameters,
-                            f.strict,
-                            format!("namespace '{}'", namespace.name),
-                        )?;
+                        push_function(&f.name, &f.description, &f.parameters, f.strict, true)?;
                     }
                 }
             }
@@ -2715,7 +2708,7 @@ mod tests {
         let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Responses function tool name 'lookup' is ambiguous after namespace flattening: declared by namespace 'crm' and namespace 'billing'"
+            "Responses function tool name 'lookup' is ambiguous after namespace flattening"
         );
     }
 
@@ -2738,8 +2731,23 @@ mod tests {
         let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Responses function tool name 'lookup' is ambiguous after namespace flattening: declared by a top-level function and namespace 'crm'"
+            "Responses function tool name 'lookup' is ambiguous after namespace flattening"
         );
+    }
+
+    #[test]
+    fn test_duplicate_top_level_function_tools_are_preserved() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type": "function", "name": "lookup"},
+                {"type": "function", "name": "lookup"}
+            ]))
+            .unwrap(),
+        );
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.tools.unwrap().len(), 2);
     }
 
     #[allow(deprecated)]
