@@ -18,10 +18,11 @@ use dynamo_kv_router::protocols::WorkerId;
 
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
+type DiscoveredRuntimeConfigs = HashMap<WorkerId, (String, ModelRuntimeConfig)>;
 
 fn base_runtime_config_watch(
     mut stream: DiscoveryStream,
-) -> watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>> {
+) -> watch::Receiver<DiscoveredRuntimeConfigs> {
     let (tx, rx) = watch::channel(HashMap::new());
 
     tokio::spawn(async move {
@@ -46,7 +47,10 @@ fn base_runtime_config_watch(
                     if id.model_suffix.is_some() || card.lora.is_some() {
                         continue;
                     }
-                    configs.insert(id.instance_id, card.runtime_config);
+                    configs.insert(
+                        id.instance_id,
+                        (card.name().to_string(), card.runtime_config),
+                    );
                 }
                 Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(id))) => {
                     if id.model_suffix.is_none() {
@@ -75,6 +79,23 @@ fn base_runtime_config_watch(
 /// Spawns a background task that recomputes the joined state whenever either source changes.
 /// The returned `watch::Receiver` always contains the latest joined snapshot.
 pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<RuntimeConfigWatch> {
+    runtime_config_watch_inner(endpoint, None).await
+}
+
+/// Like [`runtime_config_watch`], but includes only workers advertising the
+/// requested model. A frontend may serve several models through one endpoint,
+/// and routing state must never cross that model boundary.
+pub(crate) async fn model_runtime_config_watch(
+    endpoint: &Endpoint,
+    model_name: &str,
+) -> anyhow::Result<RuntimeConfigWatch> {
+    runtime_config_watch_inner(endpoint, Some(model_name.to_string())).await
+}
+
+async fn runtime_config_watch_inner(
+    endpoint: &Endpoint,
+    model_name: Option<String>,
+) -> anyhow::Result<RuntimeConfigWatch> {
     let component = endpoint.component();
     let cancel_token = component.drt().primary_token();
 
@@ -117,7 +138,16 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
 
             let ready: HashMap<WorkerId, ModelRuntimeConfig> = instances
                 .into_iter()
-                .filter_map(|id| configs.get(&id).map(|cfg| (id, cfg.clone())))
+                .filter_map(|id| {
+                    let (worker_model, config) = configs.get(&id)?;
+                    if model_name
+                        .as_deref()
+                        .is_some_and(|expected| worker_model != expected)
+                    {
+                        return None;
+                    }
+                    Some((id, config.clone()))
+                })
                 .collect();
 
             // Only send if the joined result actually changed, to avoid waking
@@ -180,7 +210,7 @@ mod tests {
         tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
             .unwrap();
         configs.changed().await.unwrap();
-        let config = configs.borrow().get(&7).cloned().unwrap();
+        let (_, config) = configs.borrow().get(&7).cloned().unwrap();
         assert_eq!(config.data_parallel_start_rank, 3);
         assert_eq!(config.data_parallel_size, 2);
 

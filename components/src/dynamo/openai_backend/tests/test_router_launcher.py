@@ -123,6 +123,20 @@ class TestUpstreamHeaders:
         assert headers[ROUTING_KEY_HEADER] == "glmload03-17"
         assert headers["Content-Type"] == "application/json"
 
+    def test_nvext_dp_rank_sets_engine_header(self):
+        from dynamo.openai_backend.worker import DP_RANK_HEADER, _upstream_headers
+
+        headers = _upstream_headers({"nvext": {"dp_rank": 3}})
+        assert headers[DP_RANK_HEADER] == "3"
+
+    def test_invalid_dp_rank_is_ignored(self):
+        from dynamo.openai_backend.worker import DP_RANK_HEADER, _upstream_headers
+
+        for value in (None, True, -1, 2**32, "3"):
+            assert DP_RANK_HEADER not in _upstream_headers(
+                {"nvext": {"dp_rank": value}}
+            )
+
     def test_non_string_user_ignored(self):
         from dynamo.openai_backend.worker import ROUTING_KEY_HEADER, _upstream_headers
 

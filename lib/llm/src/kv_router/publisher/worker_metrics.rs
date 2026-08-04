@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 
 use dynamo_kv_router::protocols::{ActiveLoad, DpRank};
@@ -19,13 +21,13 @@ struct WorkerMetrics {
 }
 
 pub struct WorkerMetricsPublisher {
-    tx: tokio::sync::watch::Sender<WorkerMetrics>,
-    rx: tokio::sync::watch::Receiver<WorkerMetrics>,
+    tx: tokio::sync::watch::Sender<HashMap<DpRank, WorkerMetrics>>,
+    rx: tokio::sync::watch::Receiver<HashMap<DpRank, WorkerMetrics>>,
 }
 
 impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
-        let (tx, rx) = tokio::sync::watch::channel(WorkerMetrics::default());
+        let (tx, rx) = tokio::sync::watch::channel(HashMap::new());
         Ok(Self { tx, rx })
     }
 
@@ -48,15 +50,16 @@ impl WorkerMetricsPublisher {
             num_waiting_reqs,
         };
         tracing::trace!(
-            "Publish metrics: dp_rank={}, active_decode_blocks={:?}, kv_used_blocks={:?}, num_waiting_reqs={:?}",
-            metrics.dp_rank,
-            metrics.active_decode_blocks,
-            metrics.kv_used_blocks,
-            metrics.num_waiting_reqs
+            dp_rank = metrics.dp_rank,
+            active_decode_blocks = ?metrics.active_decode_blocks,
+            kv_used_blocks = ?metrics.kv_used_blocks,
+            num_waiting_reqs = ?metrics.num_waiting_reqs,
+            "Publishing worker metrics"
         );
-        self.tx
-            .send(metrics)
-            .map_err(|_| anyhow::anyhow!("metrics channel closed"))
+        self.tx.send_modify(|metrics_by_rank| {
+            metrics_by_rank.insert(metrics.dp_rank, metrics);
+        });
+        Ok(())
     }
 
     pub async fn create_endpoint(&self, endpoint: Endpoint) -> Result<()> {
@@ -71,8 +74,8 @@ impl WorkerMetricsPublisher {
 
         tokio::spawn(async move {
             let mut rx = metrics_rx;
-            let mut last_metrics: Option<WorkerMetrics> = None;
-            let mut pending_publish: Option<WorkerMetrics> = None;
+            let mut last_metrics: HashMap<DpRank, WorkerMetrics> = HashMap::new();
+            let mut pending_publish: HashMap<DpRank, WorkerMetrics> = HashMap::new();
             let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
             tokio::pin!(publish_timer);
 
@@ -86,20 +89,28 @@ impl WorkerMetricsPublisher {
                             break;
                         }
 
-                        let metrics = rx.borrow_and_update().clone();
-                        if last_metrics.as_ref() == Some(&metrics) {
-                            continue;
-                        }
+                        let metrics_by_rank = rx.borrow_and_update().clone();
+                        for (dp_rank, metrics) in metrics_by_rank {
+                            if last_metrics.get(&dp_rank) == Some(&metrics) {
+                                continue;
+                            }
 
-                        pending_publish = Some(metrics.clone());
-                        last_metrics = Some(metrics);
-                        publish_timer.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + tokio::time::Duration::from_millis(1)
-                        );
+                            if pending_publish.is_empty() {
+                                publish_timer.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + tokio::time::Duration::from_millis(1),
+                                );
+                            }
+                            pending_publish.insert(dp_rank, metrics.clone());
+                            last_metrics.insert(dp_rank, metrics);
+                        }
                     }
-                    _ = &mut publish_timer, if pending_publish.is_some() => {
-                        if let Some(metrics) = pending_publish.take() {
+                    _ = &mut publish_timer, if !pending_publish.is_empty() => {
+                        let mut metrics_to_publish = std::mem::take(&mut pending_publish)
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        metrics_to_publish.sort_unstable_by_key(|(dp_rank, _)| *dp_rank);
+                        for (_, metrics) in metrics_to_publish {
                             let active_load = ActiveLoad {
                                 worker_id,
                                 dp_rank: metrics.dp_rank,
@@ -117,5 +128,25 @@ impl WorkerMetricsPublisher {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retains_the_latest_metrics_for_every_dp_rank() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        publisher.publish(Some(0), None, Some(10), Some(1)).unwrap();
+        publisher.publish(Some(1), None, Some(20), Some(2)).unwrap();
+        publisher.publish(Some(0), None, Some(11), Some(3)).unwrap();
+
+        let metrics = publisher.rx.borrow();
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[&0].kv_used_blocks, Some(11));
+        assert_eq!(metrics[&0].num_waiting_reqs, Some(3));
+        assert_eq!(metrics[&1].kv_used_blocks, Some(20));
+        assert_eq!(metrics[&1].num_waiting_reqs, Some(2));
     }
 }

@@ -22,6 +22,7 @@ mod worker_set;
 pub use worker_set::WorkerSet;
 
 pub(crate) mod runtime_configs;
+pub(crate) use runtime_configs::model_runtime_config_watch;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
 
 mod endpoint_card;

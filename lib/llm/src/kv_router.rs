@@ -53,6 +53,7 @@ mod route_lookup;
 pub mod scheduler;
 pub mod sequence;
 pub mod shared_cache;
+pub(crate) mod text_router;
 
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
@@ -61,6 +62,7 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub(crate) use text_router::{TextKvPushRouter, TextKvRouter};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},

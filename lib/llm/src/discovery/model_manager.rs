@@ -20,7 +20,8 @@ use tokio::sync::oneshot;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
-    kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    kv_source_watch::KvSourceMembershipCoordinator, model_runtime_config_watch,
+    runtime_config_watch,
 };
 
 use dynamo_runtime::{
@@ -1152,8 +1153,12 @@ impl ModelManager {
 
         discovery.register(discovery_spec).await?;
 
-        // Get of create runtime config watcher for this endpoint
-        let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
+        // Several models may share one serving endpoint. Selection must use
+        // only workers whose deployment card advertises this chooser's model.
+        let workers_with_configs = match model_name.as_deref() {
+            Some(model_name) => model_runtime_config_watch(endpoint, model_name).await?,
+            None => self.get_or_create_runtime_config_watcher(endpoint).await?,
+        };
 
         let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
 

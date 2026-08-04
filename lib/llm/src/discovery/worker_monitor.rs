@@ -253,8 +253,13 @@ impl Default for DecodeOverloadLatchState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WorkerLoadState {
+    /// First global DP rank served by this worker process.
+    pub data_parallel_start_rank: u32,
+    /// Number of DP ranks served by this worker process. A single rank starting
+    /// at zero represents a backend without rank-addressable DP routing.
+    pub data_parallel_size: u32,
     pub active_decode_blocks: HashMap<u32, u64>,
     pub kv_used_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
@@ -266,7 +271,40 @@ pub struct WorkerLoadState {
     decode_overload_latches: HashMap<u32, DecodeOverloadLatchState>,
 }
 
+impl Default for WorkerLoadState {
+    fn default() -> Self {
+        Self {
+            data_parallel_start_rank: 0,
+            data_parallel_size: 1,
+            active_decode_blocks: HashMap::new(),
+            kv_used_blocks: HashMap::new(),
+            kv_total_blocks: HashMap::new(),
+            active_prefill_tokens: HashMap::new(),
+            num_waiting_reqs: HashMap::new(),
+            max_num_batched_tokens: HashMap::new(),
+            decode_overload_latches: HashMap::new(),
+        }
+    }
+}
+
 impl WorkerLoadState {
+    fn update_from_runtime_config(&mut self, runtime_config: &ModelRuntimeConfig) {
+        self.data_parallel_start_rank = runtime_config.data_parallel_start_rank;
+        self.data_parallel_size = runtime_config.data_parallel_size.max(1);
+
+        let dp_end = self
+            .data_parallel_start_rank
+            .saturating_add(self.data_parallel_size);
+        for dp_rank in self.data_parallel_start_rank..dp_end {
+            if let Some(total_blocks) = runtime_config.total_kv_blocks {
+                self.kv_total_blocks.insert(dp_rank, total_blocks);
+            }
+            if let Some(max_batched) = runtime_config.max_num_batched_tokens {
+                self.max_num_batched_tokens.insert(dp_rank, max_batched);
+            }
+        }
+    }
+
     fn is_decode_signal_overloaded(
         used_blocks: u64,
         total_blocks: u64,
@@ -703,6 +741,33 @@ impl KvWorkerMonitor {
         self.thresholds.read().unwrap().clone()
     }
 
+    /// Seed the worker whose card is currently constructing this monitor. This
+    /// closes the startup window before the endpoint runtime-config watch emits
+    /// its first joined snapshot.
+    pub(crate) fn seed_worker_runtime_config(
+        &self,
+        worker_id: u64,
+        runtime_config: &ModelRuntimeConfig,
+    ) {
+        self.worker_load_states
+            .entry(worker_id)
+            .or_default()
+            .update_from_runtime_config(runtime_config);
+    }
+
+    /// Clone backend-reported load and topology for the requested endpoint
+    /// workers so request routing never holds the monitor's concurrent map.
+    pub(crate) fn load_states_for(&self, worker_ids: &[u64]) -> HashMap<u64, WorkerLoadState> {
+        worker_ids
+            .iter()
+            .filter_map(|worker_id| {
+                self.worker_load_states
+                    .get(worker_id)
+                    .map(|state| (*worker_id, state.clone()))
+            })
+            .collect()
+    }
+
     /// Update thresholds from a `LoadThresholdConfig`. Only fields that are
     /// `Some` in the input overwrite their counterparts; `None` fields leave
     /// the existing value untouched.
@@ -891,7 +956,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             let mut state = worker_load_states.entry(*lease_id).or_default();
 
                             let dp_start = runtime_config.data_parallel_start_rank;
-                            let dp_end = dp_start + runtime_config.data_parallel_size;
+                            let dp_end = dp_start.saturating_add(runtime_config.data_parallel_size);
+                            state.update_from_runtime_config(runtime_config);
 
                             // Track dp_ranks for this worker (for cleanup when worker disappears)
                             let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
@@ -899,19 +965,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 dp_ranks_set.insert(dp_rank);
                             }
 
-                            // Populate total_blocks for all dp_ranks (they share the same total)
-                            if let Some(total_blocks) = runtime_config.total_kv_blocks {
-                                for dp_rank in dp_start..dp_end {
-                                    state.kv_total_blocks.insert(dp_rank, total_blocks);
-                                }
-                            }
-
-                            // Populate max_num_batched_tokens for all dp_ranks
-                            if let Some(max_batched) = runtime_config.max_num_batched_tokens {
-                                for dp_rank in dp_start..dp_end {
-                                    state.max_num_batched_tokens.insert(dp_rank, max_batched);
-                                }
-                            }
                         }
 
                         let cfg = thresholds.read().unwrap().clone();
@@ -1238,6 +1291,27 @@ mod tests {
     };
     use dynamo_kv_router::protocols::ActiveLoad;
     use std::collections::HashSet;
+
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    #[test]
+    fn runtime_config_seeds_dp_rank_topology_and_capacity() {
+        let mut state = WorkerLoadState::default();
+        state.update_from_runtime_config(&ModelRuntimeConfig {
+            total_kv_blocks: Some(100),
+            max_num_batched_tokens: Some(200),
+            data_parallel_start_rank: 4,
+            data_parallel_size: 2,
+            ..Default::default()
+        });
+
+        assert_eq!(state.data_parallel_start_rank, 4);
+        assert_eq!(state.data_parallel_size, 2);
+        assert_eq!(state.kv_total_blocks.get(&4), Some(&100));
+        assert_eq!(state.kv_total_blocks.get(&5), Some(&100));
+        assert_eq!(state.max_num_batched_tokens.get(&4), Some(&200));
+        assert_eq!(state.max_num_batched_tokens.get(&5), Some(&200));
+    }
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {
