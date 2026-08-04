@@ -48,6 +48,23 @@ fn base_runtime_config_watch(
                     }
                     configs.insert(id.instance_id, card.runtime_config);
                 }
+                Ok(DiscoveryEvent::ModelTaintsUpdated(update)) => {
+                    if update.id.model_suffix.is_some() {
+                        continue;
+                    }
+                    let Some(config) = configs.get_mut(&update.id.instance_id) else {
+                        tracing::warn!(
+                            instance_id = update.id.instance_id,
+                            "Ignoring taint update for an unknown base model card"
+                        );
+                        continue;
+                    };
+                    let taints = update.taints.into_iter().collect();
+                    if config.taints == taints {
+                        continue;
+                    }
+                    config.taints = taints;
+                }
                 Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(id))) => {
                     if id.model_suffix.is_none() {
                         configs.remove(&id.instance_id);
@@ -139,7 +156,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_runtime::discovery::DiscoveryInstance;
+    use dynamo_runtime::discovery::{DiscoveryInstance, ModelCardInstanceId, ModelTaintsUpdate};
 
     fn model_instance(
         instance_id: u64,
@@ -190,5 +207,61 @@ mod tests {
             .unwrap();
         configs.changed().await.unwrap();
         assert!(configs.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn scoped_taint_updates_replace_only_known_base_worker_taints() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let mut configs = base_runtime_config_watch(stream);
+        let mut base = ModelDeploymentCard::default();
+        base.runtime_config.taints = HashSet::from(["old".to_string()]);
+        let base_instance = model_instance(7, None, &base);
+        let DiscoveryInstanceId::Model(id) = base_instance.id() else {
+            unreachable!()
+        };
+
+        tx.send(Ok(DiscoveryEvent::Added(base_instance))).unwrap();
+        configs.changed().await.unwrap();
+        configs.borrow_and_update();
+
+        let updated_taints = vec!["blue".to_string(), "gpu".to_string()];
+        tx.send(Ok(DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+            id: id.clone(),
+            taints: updated_taints.clone(),
+        })))
+        .unwrap();
+        configs.changed().await.unwrap();
+        assert_eq!(
+            configs.borrow_and_update().get(&7).unwrap().taints,
+            updated_taints.iter().cloned().collect()
+        );
+
+        tx.send(Ok(DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+            id: id.clone(),
+            taints: updated_taints,
+        })))
+        .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), configs.changed())
+                .await
+                .is_err()
+        );
+
+        tx.send(Ok(DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+            id: ModelCardInstanceId {
+                instance_id: 99,
+                ..id
+            },
+            taints: vec!["unknown".to_string()],
+        })))
+        .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), configs.changed())
+                .await
+                .is_err()
+        );
+        assert_eq!(configs.borrow().len(), 1);
     }
 }
