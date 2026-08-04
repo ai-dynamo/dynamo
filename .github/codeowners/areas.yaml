@@ -90,6 +90,8 @@ areas:
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
+  - components/src/dynamo/openai_backend/
+  - components/src/dynamo/openai_backend/tests/
   - components/src/dynamo/sglang/
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
