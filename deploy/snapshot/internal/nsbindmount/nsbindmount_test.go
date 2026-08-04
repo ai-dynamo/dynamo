@@ -29,6 +29,15 @@ func writeFakeBinary(t *testing.T, script string) string {
 	return p
 }
 
+func newMounterForTest(t *testing.T, bin string) *ExecMounter {
+	t.Helper()
+	m, err := NewWithBinary(bin, logr.Discard())
+	if err != nil {
+		t.Fatalf("NewWithBinary: %v", err)
+	}
+	return m
+}
+
 // readLines reads a file and splits it into non-empty lines.
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
@@ -50,7 +59,7 @@ func TestExecMounter_Mount_Args(t *testing.T) {
 	// Print each argument on its own line so we can parse them individually.
 	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
 
-	m := NewWithBinary(bin, logr.Discard())
+	m := newMounterForTest(t, bin)
 	pid := os.Getpid()
 	_, err := m.Mount(context.Background(), pid, "/src", "/dst", MountOptions{})
 	if err != nil {
@@ -73,7 +82,7 @@ func TestExecMounter_Mount_ReadOnly(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "args.log")
 	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
 
-	m := NewWithBinary(bin, logr.Discard())
+	m := newMounterForTest(t, bin)
 	pid := os.Getpid()
 	_, err := m.Mount(context.Background(), pid, "/src", "/dst", MountOptions{ReadOnly: true})
 	if err != nil {
@@ -92,7 +101,7 @@ func TestExecMounter_Mount_ReadOnly(t *testing.T) {
 
 func TestExecMounter_Mount_ErrorWrapped(t *testing.T) {
 	bin := writeFakeBinary(t, `echo "subprocess boom" >&2; exit 1`)
-	m := NewWithBinary(bin, logr.Discard())
+	m := newMounterForTest(t, bin)
 
 	_, err := m.Mount(context.Background(), 1, "/src", "/dst", MountOptions{})
 	if err == nil {
@@ -110,7 +119,7 @@ func TestExecMounter_Mount_NsFdOpenFailure(t *testing.T) {
 	// Script always exits 0 so the mount "succeeds".
 	// We use a dead PID so os.Open("/proc/<pid>/ns/mnt") fails.
 	bin := writeFakeBinary(t, `exit 0`)
-	m := NewWithBinary(bin, logr.Discard())
+	m := newMounterForTest(t, bin)
 
 	_, err := m.Mount(context.Background(), math.MaxInt32, "/src", "/dst", MountOptions{})
 	if err == nil {
@@ -123,7 +132,7 @@ func TestExecMounter_Mount_NsFdOpenFailure(t *testing.T) {
 
 func TestExecMounter_Unmount_Error(t *testing.T) {
 	bin := writeFakeBinary(t, `if [ "$1" = "umount-fd" ]; then echo "boom" >&2; exit 1; fi`)
-	m := NewWithBinary(bin, logr.Discard())
+	m := newMounterForTest(t, bin)
 	handle, err := m.Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
@@ -149,7 +158,7 @@ func TestExecMounter_Unmount_Idempotent(t *testing.T) {
 	// Record the first argument of each invocation (subcommand or pid for mount).
 	bin := writeFakeBinary(t, `printf '%s\n' "$1" >> `+callLog)
 
-	m := NewWithBinary(bin, logr.Discard())
+	m := newMounterForTest(t, bin)
 	handle, err := m.Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
 	if err != nil {
 		t.Fatalf("Mount: %v", err)

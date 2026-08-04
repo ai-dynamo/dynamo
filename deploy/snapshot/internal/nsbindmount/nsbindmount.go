@@ -56,13 +56,19 @@ type ExecMounter struct {
 }
 
 // New returns an ExecMounter using the default ns-bind-mount binary path.
-func New(log logr.Logger) *ExecMounter {
-	return &ExecMounter{binaryPath: defaultBinaryPath, log: log}
+// Returns an error if the binary is not found on the host so callers fail
+// at startup rather than at the first mount operation.
+func New(log logr.Logger) (*ExecMounter, error) {
+	return NewWithBinary(defaultBinaryPath, log)
 }
 
 // NewWithBinary returns an ExecMounter using a custom binary path (e.g. for tests).
-func NewWithBinary(path string, log logr.Logger) *ExecMounter {
-	return &ExecMounter{binaryPath: path, log: log}
+// Returns an error if the binary does not exist at path.
+func NewWithBinary(path string, log logr.Logger) (*ExecMounter, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("%s binary not found at %s: %w", binaryName, path, err)
+	}
+	return &ExecMounter{binaryPath: path, log: log}, nil
 }
 
 // mountHandle is the concrete MountHandle returned by ExecMounter.Mount.
@@ -125,7 +131,10 @@ func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 	if err != nil {
 		// Mount succeeded but we cannot hold the namespace reference — unmount
 		// synchronously so the caller never receives an un-unmountable handle.
-		if out, umErr := exec.Command(m.binaryPath, "umount", pidStr, dst).CombinedOutput(); umErr != nil {
+		// Use a short timeout; if cleanup hangs we still return the original error.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if out, umErr := exec.CommandContext(cleanupCtx, m.binaryPath, "umount", pidStr, dst).CombinedOutput(); umErr != nil {
 			m.log.Error(umErr, "cleanup unmount failed after ns fd open error", "dst", dst, "output", strings.TrimSpace(string(out)))
 		}
 		return nil, fmt.Errorf("open /proc/%d/ns/mnt: %w", pid, err)

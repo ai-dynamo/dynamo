@@ -8,7 +8,6 @@ package injection
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 
 	"github.com/go-logr/logr"
@@ -88,7 +87,7 @@ func (i *NSMountInjector) Inject(ctx context.Context, pid int) (InjectionHandle,
 
 	handle, err := i.mounter.Mount(ctx, pid, i.cfg.SourceDir, i.cfg.DestinationDir, nsbindmount.MountOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return nil, err
 	}
 
 	i.log.Info("agent bundle mounted", "pid", pid, "dst", handle.TargetPath())
