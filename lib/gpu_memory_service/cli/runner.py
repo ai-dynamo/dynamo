@@ -25,7 +25,6 @@ from collections.abc import Sequence
 import uvloop
 from gpu_memory_service.common.vmm import init_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
-from gpu_memory_service.v1.cli import main as v1_main
 
 from .args import Config, parse_args
 
@@ -90,6 +89,8 @@ def main(argv: list[str] | None = None) -> None:
     selector.add_argument("--use-v1", action="store_true")
     options, remaining = selector.parse_known_args(argv)
     if options.use_v1:
+        from gpu_memory_service.v1.cli import main as v1_main
+
         v1_main(remaining)
         return
 

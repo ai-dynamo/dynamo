@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
+import textwrap
+from types import SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS
@@ -43,7 +46,11 @@ def test_child_command_launches_default_multi_tag_runner():
 
 def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
     dispatched = []
-    monkeypatch.setattr(runner, "v1_main", dispatched.append)
+    monkeypatch.setitem(
+        sys.modules,
+        "gpu_memory_service.v1.cli",
+        SimpleNamespace(main=dispatched.append),
+    )
 
     runner.main(["--use-v1", "--device", "3"])
 
@@ -59,6 +66,33 @@ def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         server.main(["--use-v1", "--device-type", "xpu"])
     assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
+
+
+def test_default_cli_help_does_not_import_torch():
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class BlockTorch(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path, target=None):
+                if fullname == "torch" or fullname.startswith("torch."):
+                    raise ModuleNotFoundError("torch is intentionally unavailable")
+
+        sys.meta_path.insert(0, BlockTorch())
+        from gpu_memory_service.cli.runner import main
+        main(["--help"])
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "GPU Memory Service" in result.stdout
 
 
 class _Process:
