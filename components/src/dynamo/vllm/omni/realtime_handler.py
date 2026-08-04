@@ -457,6 +457,14 @@ def decode_pcm16(audio_b64: str) -> np.ndarray | None:
 
 
 def tensor_to_numpy(value: Any) -> np.ndarray | None:
+    """Coerce an engine payload value to a flat float32 waveform, or None.
+
+    Anything that is not numeric sample data is skipped rather than raised on:
+    ``model_outputs`` is a general-purpose key whose contents are model-defined,
+    and a structured value there (a dict, a list of objects) survives
+    ``np.asarray`` as an object array instead of failing it. Letting that reach
+    the caller would fail the whole turn over one unreadable step.
+    """
     if value is None:
         return None
     if isinstance(value, np.ndarray):
@@ -468,8 +476,13 @@ def tensor_to_numpy(value: Any) -> np.ndarray | None:
             arr = np.asarray(value)
         except Exception:  # noqa: BLE001 - non-array engine payloads are skipped
             return None
-    if arr.ndim > 1:
-        arr = arr.reshape(-1)
+    # bool/int/uint/float only: rejects object, str, bytes, void and complex.
+    if arr.dtype.kind not in "biuf":
+        return None
+    # Always flatten, including 0-d: a scalar step (e.g. the last entry of a
+    # list of per-step values) would otherwise reach waveform_to_deltas as a
+    # 0-d array and raise IndexError on the next step's ``shape[0]``.
+    arr = arr.reshape(-1)
     return arr.astype(np.float32, copy=False)
 
 

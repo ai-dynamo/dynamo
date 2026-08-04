@@ -235,6 +235,37 @@ def test_extract_audio_chunks_without_audio_is_empty(multimodal_output):
     assert _bare_turn().extract_audio_chunks(output) == []
 
 
+@pytest.mark.parametrize(
+    "raw_audio",
+    [
+        {"logits": [1, 2]},  # structured payload survives np.asarray as object
+        [{"a": 1}, {"b": 2}],
+        "not-audio",
+        object(),
+    ],
+    ids=["dict", "list_of_dicts", "str", "opaque"],
+)
+def test_extract_audio_chunks_skips_non_waveform_model_outputs(raw_audio):
+    # ``model_outputs`` is model-defined, so a non-numeric value there must be
+    # skipped rather than escape and fail the whole turn.
+    output = SimpleNamespace(multimodal_output={"model_outputs": raw_audio})
+    assert _bare_turn().extract_audio_chunks(output) == []
+
+
+def test_scalar_step_does_not_break_the_next_delta():
+    # A list payload yields its last entry; a scalar there flattens to 1-d, so
+    # the following step's prefix comparison has a shape[0] to read.
+    turn = _bare_turn()
+    first = turn.extract_audio_chunks(
+        SimpleNamespace(multimodal_output={"audio": [0.25]})
+    )
+    assert [c.tolist() for c in first] == [[0.25]]
+    second = turn.extract_audio_chunks(
+        SimpleNamespace(multimodal_output={"audio": np.float32([0.25, 0.5])})
+    )
+    assert [c.tolist() for c in second] == [[0.5]]
+
+
 def test_unknown_client_events_are_ignored():
     engine = _FakeEngine()
     handler = _make_handler(engine, emit_transcript=False)
