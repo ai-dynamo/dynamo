@@ -9,8 +9,8 @@ bundle suitable for NVIDIA's Open Source Review Board:
   Inputs (all already produced by the inline-compliance pipeline):
     /tmp/legal/                 NOTICES + license texts (from --target legal)
     /tmp/sboms/                 per-ecosystem deps CSVs (from --target sboms)
-    /tmp/sources/sources.zip    source archives (from --target sources_archive,
-                                post-merge / RC / release only)
+    /tmp/sources/               source archives (from --target
+                                sources_archive; opt-in per caller)
     container/compliance/base_sboms/<base>.cdx.json   if applicable
     container/compliance/osrb/{linkage.yaml,distribution.yaml,modifications/}
 
@@ -28,8 +28,8 @@ bundle suitable for NVIDIA's Open Source Review Board:
       README.md                 generated; explains every file
       CHECKSUMS.sha256          integrity check after upload
 
-  Sources are emitted in a SEPARATE archive (sources-<image>-<version>-<arch>.zip)
-  by container/compliance/collect_sources.py — the OSRB bundle is small
+  Sources are emitted SEPARATELY as a per-arch tarball by
+  container/compliance/collect_sources.py — the OSRB bundle is small
   (MB-scale, just metadata + license texts) and reviewable on its own,
   while sources can be GB-scale and downloaded only when needed.
 
@@ -47,6 +47,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 from collections import Counter
 from datetime import datetime, timezone
@@ -227,21 +228,32 @@ def sources_archive_metadata(sources_archive: Path | None) -> dict:
     """Return sha256 + size of the companion sources archive for provenance.
 
     Sources are NOT embedded in the OSRB bundle — they live in a separate
-    archive (sources-<image>-<version>-<arch>.zip) so reviewers can
+    archive (sources-<image>-<version>-<arch>.tar.gz) so reviewers can
     inspect the metadata without pulling potentially-GB of source.
     Recording the sha256 here lets OSRB verify the sources archive they
-    downloaded separately matches this bundle.
+    downloaded separately matches this bundle. Hashed in chunks: the
+    archive runs to hundreds of MB.
     """
-    if (
-        sources_archive is None
-        or not sources_archive.is_file()
-        or sources_archive.stat().st_size == 0
-    ):
-        return {"sources_archive": None, "sha256": None, "size_bytes": 0}
-    digest = hashlib.sha256(sources_archive.read_bytes()).hexdigest()
+    empty = {"sources_archive": None, "sha256": None, "size_bytes": 0}
+    if sources_archive is None or not sources_archive.is_file():
+        return empty
+    # An archival-off build still emits a valid but memberless tarball, which
+    # is ~45 bytes rather than 0. Reading the first member is enough to tell
+    # the two apart without decompressing the whole archive.
+    try:
+        with tarfile.open(sources_archive, "r:*") as tar:
+            if tar.next() is None:
+                return empty
+    except (tarfile.TarError, OSError):
+        logger.warning("could not read sources archive %s", sources_archive)
+        return empty
+    digest = hashlib.sha256()
+    with sources_archive.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
     return {
         "sources_archive": sources_archive.name,
-        "sha256": digest,
+        "sha256": digest.hexdigest(),
         "size_bytes": sources_archive.stat().st_size,
     }
 
@@ -357,8 +369,9 @@ compliance pipeline that runs as part of every dynamo image build.
 ## Companion sources archive
 
 Source archives for everything dynamo ships on top of the base image are
-emitted in a SEPARATE archive named `sources-{image}-{version}-<arch>.zip`
-alongside this bundle. They live separately because:
+published SEPARATELY from this bundle, as a per-arch `sources.tar.gz`
+carrying its own `README.md`, `manifest.json` and `CHECKSUMS.sha256`.
+They live separately because:
 
 - Sources are large (typically 100s of MB to GBs) — embedding would
   bloat the OSRB review bundle.
@@ -366,7 +379,13 @@ alongside this bundle. They live separately because:
   pulling source.
 - The sha256 of the sources archive is recorded in
   `build-provenance.json` (`sources.sha256`), so they stay
-  cryptographically tied to this bundle.
+  cryptographically tied to this bundle. Compare with `sha256sum
+  sources.tar.gz`, then verify the extracted contents with `sha256sum -c
+  CHECKSUMS.sha256`.
+
+`manifest.json` inside that archive is the authoritative statement of
+source coverage: collection is best-effort, and every component that
+could not be collected is named there with a reason.
 
 ## Verifying the bundle
 
@@ -439,10 +458,10 @@ def main(argv: list[str] | None = None) -> int:
         "--sources-archive",
         type=Path,
         default=None,
-        help="Path to the companion sources zip "
-        "(sources-<image>-<version>-<arch>.zip). Not embedded "
-        "in the OSRB bundle; only its sha256 + size are recorded "
-        "in build-provenance.json for cross-verification.",
+        help="Path to the companion sources tarball produced by the "
+        "`sources_archive` stage. Not embedded in the OSRB bundle; only its "
+        "sha256 and size are recorded in build-provenance.json for "
+        "cross-verification.",
     )
     parser.add_argument(
         "--base-sbom",

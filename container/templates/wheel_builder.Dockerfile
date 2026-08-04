@@ -230,6 +230,21 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
+# Compliance: native source archives drop here. Each from-source build below
+# preserves its upstream tree at /tmp/native-sources/<name>-<ref>.tar.gz so the
+# per-image `sources_collect` stage can COPY them out for OSRB submission.
+# Sources are captured after checkout and any patch we apply, but before
+# configure/make, so the archive is the source we actually built and carries no
+# build output. Created unconditionally (cheap) so the COPY always succeeds even
+# when no native source builds run for this framework.
+#
+# Deliberately NOT gated on ENABLE_SOURCE_ARCHIVAL: declaring that ARG at this
+# scope would invalidate every downstream layer when the flag flips between PR
+# and nightly builds, and gating would let an ARG flip silently empty the
+# archive. This stage is never COPY'd into a runtime image, so the cost is a
+# few MB in a build-only stage.
+RUN mkdir -p /tmp/native-sources
+
 ARG NIXL_UCX_REF
 
 {% if device == "cuda" %}
@@ -238,6 +253,7 @@ ARG NIXL_GDRCOPY_REF
 # Build and install gdrcopy
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
+    tar czf /tmp/native-sources/gdrcopy-${NIXL_GDRCOPY_REF}.tar.gz --exclude=.git gdrcopy && \
     cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
@@ -259,14 +275,6 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
         /tmp/use-sccache.sh install; \
     fi
-
-# Compliance: native source archives drop here. RUN git clone / wget …tar lines
-# in the wheel_builder pipeline preserve their resulting archive at
-# /tmp/native-sources/<name>-<version>.tar.gz so the per-image `sources_collect`
-# stage can COPY them out for OSRB submission. Created here unconditionally
-# (cheap) so the COPY always succeeds even when no native source builds run
-# for this framework.
-RUN mkdir -p /tmp/native-sources
 
 # Compliance source-archival pattern (do NOT add ARG ENABLE_SOURCE_ARCHIVAL
 # at this scope — it would invalidate every downstream layer when the flag
@@ -320,11 +328,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # in the consuming container.
     cd /tmp && \
     git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
+    tar czf /tmp/native-sources/nv-codec-headers-${NV_CODEC_HEADERS_REF}.tar.gz --exclude=.git -C /tmp nv-codec-headers && \
     make -C nv-codec-headers PREFIX=/usr/local install && \
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
     git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    tar czf /tmp/native-sources/libvpx-${LIBVPX_REF}.tar.gz --exclude=.git -C /tmp libvpx && \
     cd libvpx && \
     ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
     make -j$(nproc) && \
@@ -332,6 +342,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     ldconfig && \
     cd /tmp && \
     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cp ffmpeg-${FFMPEG_VERSION}.tar.xz /tmp/native-sources/ && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
@@ -441,6 +452,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     git clone "${NIXL_LIBFABRIC_REPO}" && \
     cd libfabric && \
     git checkout $NIXL_LIBFABRIC_REF && \
+    tar czf /tmp/native-sources/libfabric-${NIXL_LIBFABRIC_REF}.tar.gz --exclude=.git -C /usr/local/src libfabric && \
     ./autogen.sh && \
     ./configure --prefix="/usr/local/libfabric" \
                 --disable-verbs \
@@ -580,6 +592,13 @@ RUN set -u; injected=0; \
     done; \
     echo "wheel NOTICES bundled into $injected wheel(s)"
 
+# cargo vendor below resolves the FULL root workspace, which lists
+# deploy/inference-gateway/ext-proc as a member; the lib/ + components/ copies
+# above omit deploy/, so its manifest must be present or the resolve fails.
+# Copied here (not in the source block above) to keep the wheel-build layers
+# cached — only the vendor path needs it.
+COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+
 # Compliance source archival: vendor the workspace lockfile for the OSRB
 # bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
 # vendor pull. The vendor tree is consumed downstream by each runtime
@@ -590,12 +609,21 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 # Mount cargo registry + git caches so re-runs don't re-download the
 # ~750 crates from crates.io every build. `sharing=shared` lets parallel
 # builds (e.g. multiple frameworks in CI) read the same cache concurrently.
+# mkdir runs unconditionally so the dir always exists for wheel_builder to COPY,
+# even on non-archival builds (empty then); cargo vendor only runs when enabled.
+# --sync folds the nested binding workspaces (lib/bindings/python + kvbm, each a
+# separate workspace with its own Cargo.lock) into the single vendor tree so their
+# third-party crates are archived too; the root workspace alone misses the crates
+# those bindings pull in (e.g. the pyo3/uv-side graph).
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    mkdir -p /tmp/dynamo-vendor-full && \
     if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        mkdir -p /tmp/dynamo-vendor-full && \
         cd /opt/dynamo && \
-        cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
+        cargo vendor --locked \
+            --sync lib/bindings/python/Cargo.toml \
+            --sync lib/bindings/kvbm/Cargo.toml \
+            /tmp/dynamo-vendor-full > /dev/null && \
         cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
     fi
 
@@ -607,8 +635,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.
 
-# Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
-RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
+# Create the dist placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl
+# always matches, plus the vendor dir so wheel_builder's unconditional COPY of it succeeds
+# (dev/local-dev run no cargo vendor, so it stays empty here).
+RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} /tmp/dynamo-vendor-full && \
     touch /opt/dynamo/dist/.placeholder.whl
 
 # Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
@@ -768,6 +798,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+# cargo vendor runs in runtime_wheel_builder, but compliance's sources_collect
+# copies the vendor tree from wheel_builder (the complete final wheel stage).
+# Bring it up so this stage carries it too. Empty on non-archival builds.
+COPY --from=runtime_wheel_builder /tmp/dynamo-vendor-full/ /tmp/dynamo-vendor-full/
 
 # Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
 # stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder

@@ -175,7 +175,7 @@ COPY --from=licenses /legal/ /
 # Collects third-party Go module sources for OSRB submission. Mirrors the
 # `sources_collect` / `sources_archive` pattern used by the runtime
 # templates (container/templates/compliance.Dockerfile). Output is a separate
-# sources-<image>-<arch>.zip companion archive referenced by the OSRB bundle
+# sources-<image>-<arch>.tar.gz companion archive referenced by the OSRB bundle
 # (not bundled in the runtime image).
 #
 # Uses python:3.12-slim as the helper (operator's distroless final has
@@ -192,17 +192,17 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
             --ecosystem go \
-            --output-zip /sources.zip \
+            --output-tar /sources.tar.gz \
             --sources-root /sources \
             --go-vendor-dir /opt/go-vendor \
             -v ; \
     else \
-        python3 -c "import zipfile; zipfile.ZipFile('/sources.zip','w').close()" ; \
+        tar czf /sources.tar.gz -T /dev/null ; \
     fi
 
 
 FROM scratch AS sources_archive
-COPY --from=sources_collect /sources.zip /sources.zip
+COPY --from=sources_collect /sources.tar.gz /sources.tar.gz
 
 
 # Runtime stage

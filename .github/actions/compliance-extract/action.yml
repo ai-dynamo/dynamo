@@ -34,7 +34,7 @@ inputs:
     description: 'Prefix for the uploaded compliance artifacts (typically the same as the build job target_tag_plain)'
     required: true
   archive_sources:
-    description: 'When "true", also extract the source archive (--target sources_archive). Set on post-merge / RC / release pipelines only; PR builds skip to avoid storage cost.'
+    description: 'When "true", also extract the source archive (--target sources_archive). Opt-in per caller; skipped by default to avoid the storage cost.'
     required: false
     default: 'false'
   make_efa:
@@ -42,7 +42,7 @@ inputs:
     required: false
     default: 'false'
   artifact_retention_days:
-    description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
+    description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball is pinned to 30 regardless.'
     required: false
     default: '30'
   git_sha:
@@ -138,6 +138,9 @@ runs:
         #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
         #     pre_runtime COPYs from wheel_builder. We pass the same VALUES so the
         #     cache key lines up and the warm layers cache-hit.
+        #   - ENABLE_SOURCE_ARCHIVAL: gates the cargo-vendor RUN in
+        #     runtime_wheel_builder, so falling back to the Dockerfile default
+        #     rebuilds that layer and everything downstream of it.
         # The warm cache is best-effort though: the shared buildkit pods GC under
         # concurrent load, so a stage can legitimately re-run here (seen post-merge
         # 2026-07-02). Pass the same IRSA secrets docker-remote-build passes so a
@@ -173,6 +176,7 @@ runs:
             --build-arg USE_SCCACHE=true \
             --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }} \
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
@@ -335,10 +339,10 @@ runs:
           done
         fi
 
-    # /sources/ — reproducible tarball of source archives for everything we
-    # ship on top of the FROM base. Bigger than legal/sboms (typically
-    # 50-300 MB), so gated by archive_sources input. Skipped on PR builds.
-    - name: Extract /sources/ (post-merge / RC / release only)
+    # /sources/ — per-arch tarball of source archives for everything we ship
+    # on top of the FROM base. Much bigger than legal/sboms (~200-300 MB per
+    # arch), so gated by archive_sources input. Skipped on PR builds.
+    - name: Extract /sources/
       if: ${{ inputs.archive_sources == 'true' }}
       shell: bash
       env:
@@ -395,10 +399,16 @@ runs:
         path: /tmp/compliance/
         retention-days: ${{ inputs.artifact_retention_days }}
 
-    - name: Upload /sources/ tarball (post-merge / RC / release only)
+    - name: Upload /sources/ tarball
       if: ${{ inputs.archive_sources == 'true' && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
-        path: /tmp/sources/sources.zip
-        retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs
+        # Multi-arch builds export per-arch linux_<arch>/sources.tar.gz subdirs
+        # (same as the compliance artifact above), so upload the dir, not a
+        # fixed filename.
+        path: /tmp/sources/
+        # Matches the compliance artifact's nightly retention. These run to
+        # ~200-300 MB per arch, so a longer window costs real storage; an OSRB
+        # submission that needs them past this re-runs the build from the tag.
+        retention-days: 30
