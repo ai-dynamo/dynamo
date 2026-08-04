@@ -516,7 +516,7 @@ class VllmProcessor:
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:
-            sampling_params.logprobs = top_logprobs or 1
+            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
         elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
             sampling_params.logprobs = logprobs
         elif top_logprobs not in (None, 0):
