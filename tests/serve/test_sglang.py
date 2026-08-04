@@ -52,7 +52,6 @@ logger = logging.getLogger(__name__)
 pytest_plugins = ("tests.utils.otel_plugin",)
 
 
-
 def _disable_responses_reasoning(
     payload: ResponsesPayload | ResponsesStreamPayload,
 ) -> ResponsesPayload | ResponsesStreamPayload:
