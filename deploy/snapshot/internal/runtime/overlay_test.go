@@ -225,13 +225,26 @@ func TestApplyRootfsDiff(t *testing.T) {
 		}
 	})
 
-	t.Run("non-empty invalid archive still fails", func(t *testing.T) {
+	t.Run("non-empty invalid archive fails", func(t *testing.T) {
 		checkpointDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
 			t.Fatalf("write invalid rootfs diff: %v", err)
 		}
 		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should fail for invalid non-empty archive")
+		}
+	})
+
+	t.Run("non-ENOENT stat error is propagated", func(t *testing.T) {
+		// Pass a regular file as checkpointPath so stat of
+		// checkpointPath/rootfs-diff.tar returns ENOTDIR, not ENOENT.
+		f, err := os.CreateTemp(t.TempDir(), "not-a-dir")
+		if err != nil {
+			t.Fatalf("create temp file: %v", err)
+		}
+		f.Close()
+		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testr.New(t)); err == nil {
+			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
 		}
 	})
 }

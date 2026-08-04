@@ -46,6 +46,16 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0-rc1",
 		},
 		{
+			name:            "partial version is normalized",
+			operatorVersion: "1.2",
+			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0",
+		},
+		{
+			name:            "leading v is normalized",
+			operatorVersion: "v1.2.3",
+			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
+		},
+		{
 			name:            "unknown operator version cannot be defaulted",
 			operatorVersion: "unknown",
 			expectedImage:   "",
@@ -90,13 +100,6 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 		initialImage  string
 		expectedImage string
 	}{
-		{
-			name:          "CREATE with empty image defaults to operator version",
-			version:       "1.1.0",
-			operation:     admissionv1.Create,
-			initialImage:  "",
-			expectedImage: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
-		},
 		{
 			name:          "CREATE with preset image is not overwritten",
 			version:       "1.1.0",

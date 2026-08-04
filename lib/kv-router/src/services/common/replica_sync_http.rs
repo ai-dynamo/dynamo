@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -11,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use super::replica_sync::{PeerError, PeerManager};
+use super::replica_sync::{PeerManager, ReplicaPeerError};
 
 #[derive(Debug, Deserialize)]
 struct PeerRequest {
@@ -19,7 +20,7 @@ struct PeerRequest {
 }
 
 async fn register_peer(
-    State(peer_manager): State<Option<PeerManager>>,
+    State(peer_manager): State<Option<Arc<PeerManager>>>,
     payload: Result<Json<PeerRequest>, JsonRejection>,
 ) -> Response {
     let Json(req) = match payload {
@@ -37,7 +38,7 @@ async fn register_peer(
 }
 
 async fn deregister_peer(
-    State(peer_manager): State<Option<PeerManager>>,
+    State(peer_manager): State<Option<Arc<PeerManager>>>,
     payload: Result<Json<PeerRequest>, JsonRejection>,
 ) -> Response {
     let Json(req) = match payload {
@@ -54,11 +55,11 @@ async fn deregister_peer(
     }
 }
 
-async fn list_peers(State(peer_manager): State<Option<PeerManager>>) -> Response {
+async fn list_peers(State(peer_manager): State<Option<Arc<PeerManager>>>) -> Response {
     Json(
         peer_manager
             .as_ref()
-            .map(PeerManager::list_peers)
+            .map(|peer_manager| peer_manager.list_peers())
             .unwrap_or_default(),
     )
     .into_response()
@@ -76,15 +77,16 @@ fn json_error(status: StatusCode, error: impl fmt::Display) -> Response {
         .into_response()
 }
 
-fn peer_error(error: PeerError) -> Response {
+fn peer_error(error: ReplicaPeerError) -> Response {
     let status = match &error {
-        PeerError::InvalidEndpoint(_) => StatusCode::BAD_REQUEST,
-        PeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ReplicaPeerError::InvalidEndpoint(_) => StatusCode::BAD_REQUEST,
+        ReplicaPeerError::Disabled => StatusCode::CONFLICT,
+        ReplicaPeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     json_error(status, error)
 }
 
-pub(crate) fn router(peer_manager: Option<PeerManager>) -> Router {
+pub(crate) fn router(peer_manager: Option<Arc<PeerManager>>) -> Router {
     Router::new()
         .route("/replica_sync/register_peer", post(register_peer))
         .route("/replica_sync/deregister_peer", post(deregister_peer))
@@ -151,7 +153,7 @@ mod tests {
     async fn manages_replica_sync_peers() {
         let cancel_token = CancellationToken::new();
         let peer_manager = PeerManager::start(Vec::new(), cancel_token.clone(), |_| {}).unwrap();
-        let app = router(Some(peer_manager));
+        let app = router(Some(Arc::new(peer_manager)));
         let endpoint = "tcp://127.0.0.1:19092";
         let body = format!(r#"{{"endpoint":"{endpoint}"}}"#);
 

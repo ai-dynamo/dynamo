@@ -13,18 +13,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::config::{RouterConfigOverride, kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::envoy_helpers::find_header;
+use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -65,6 +67,16 @@ fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigO
     })
 }
 
+fn cache_namespace_with_header_override(
+    headers: &[(String, String)],
+    body_cache_namespace: Option<String>,
+) -> Option<String> {
+    find_header(headers, HEADER_TENANT_ID)
+        .filter(|tenant_id| !tenant_id.is_empty())
+        .map(str::to_owned)
+        .or(body_cache_namespace)
+}
+
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
 ///
 /// Mirrors `commonconsts.DynamoContainerPortName` in
@@ -85,6 +97,7 @@ pub struct Router {
     runtime: Runtime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
+    served_model: String,
 }
 
 impl Router {
@@ -109,7 +122,8 @@ impl Router {
 
         // TODO(epp-rolling-namespace): Rebind both routers when the active
         // generation-suffixed worker namespace changes during a rolling update.
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
@@ -120,11 +134,12 @@ impl Router {
         let model_manager = Arc::new(ModelManager::new());
 
         let decode_router = model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                bootstrap.card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -162,6 +177,7 @@ impl Router {
             Some(prefill_config),
             None,
             None,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
@@ -192,15 +208,24 @@ impl Router {
             runtime,
             pod_store,
             pod_store_ready,
+            served_model: model_name,
         })
+    }
+
+    /// The model this pool serves, from the discovered model card.
+    ///
+    /// Authoritative, unlike the `model` field of a request body, which the
+    /// router accepts without checking.
+    pub fn served_model(&self) -> &str {
+        &self.served_model
     }
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, priority_jump, strict_priority)`. Priorities default
-    /// to zero when absent. Mirrors the standalone Dynamo preprocessor lift in
-    /// `lib/llm/src/preprocessor.rs`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
+    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
+    /// Priorities default to zero when absent. Mirrors the standalone Dynamo
+    /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
+    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -209,15 +234,15 @@ impl Router {
 
         let priority_jump = extract_priority_jump(&request);
         let strict_priority = extract_strict_priority(&request);
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
-
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = match self.preprocessor.apply_template(&request)? {
+            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
+            None => self.preprocessor.tokenize("")?,
+        };
         Ok((
             encoding.token_ids().to_vec(),
+            cache_namespace,
             priority_jump,
             strict_priority,
         ))
@@ -297,6 +322,7 @@ impl Router {
     pub async fn route_prefill(
         &self,
         tokens: &[u32],
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
@@ -313,6 +339,7 @@ impl Router {
                 tokens,
                 None,
                 None,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -342,6 +369,7 @@ impl Router {
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
@@ -360,6 +388,7 @@ impl Router {
                 config_override.as_ref(),
                 false,
                 None,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 None,
@@ -378,6 +407,7 @@ impl Router {
         worker_id: u64,
         dp_rank: u32,
         is_disaggregated: bool,
+        cache_namespace: Option<String>,
     ) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
@@ -388,7 +418,7 @@ impl Router {
             let router_config_override = decode_router_config_override(is_disaggregated);
 
             let overlap_blocks = decode_router
-                .get_overlap_blocks(&tokens, None, worker, None)
+                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
                 .await
                 .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
 
@@ -403,6 +433,7 @@ impl Router {
                     None,
                     worker,
                     None,
+                    cache_namespace,
                     router_config_override.as_ref(),
                 )
                 .await;
@@ -911,9 +942,11 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, priority_jump, strict_priority) = self
+        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+        let cache_namespace =
+            cache_namespace_with_header_override(&req.headers, body_cache_namespace);
 
         // Try prefill routing first (disaggregated mode).
         //
@@ -922,6 +955,7 @@ impl EndpointPicker for Router {
         let prefill_result = self
             .route_prefill(
                 &tokens,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids.clone(),
@@ -947,6 +981,7 @@ impl EndpointPicker for Router {
             .route_decode(
                 &tokens,
                 is_disaggregated,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -989,6 +1024,7 @@ impl EndpointPicker for Router {
                     decode_worker.worker_id,
                     decode_worker.dp_rank,
                     is_disaggregated,
+                    cache_namespace,
                 )
                 .await
         {
@@ -1053,6 +1089,7 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
+            reservation_id: None,
         })
     }
 
@@ -1069,9 +1106,19 @@ impl EndpointPicker for Router {
         }
     }
 
-    async fn on_request_complete(&self, request_id: &str) {
+    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
         if request_id.is_empty() {
             return;
+        }
+        if let Some(usage) = usage {
+            tracing::debug!(
+                request_id,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                total_tokens = ?usage.total_tokens,
+                cached_tokens = ?usage.cached_tokens,
+                "Request complete with usage"
+            );
         }
         if let Err(e) = self.free_request(request_id).await {
             tracing::debug!(
@@ -1086,6 +1133,33 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_header_overrides_body_cache_namespace() {
+        let headers = vec![("X-Tenant-ID".to_string(), "tenant-header".to_string())];
+
+        assert_eq!(
+            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
+                .as_deref(),
+            Some("tenant-header")
+        );
+    }
+
+    #[test]
+    fn empty_tenant_header_falls_back_to_body_cache_namespace() {
+        let headers = vec![(HEADER_TENANT_ID.to_string(), String::new())];
+
+        assert_eq!(
+            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
+                .as_deref(),
+            Some("tenant-body")
+        );
+    }
+
+    #[test]
+    fn absent_cache_namespace_stays_absent() {
+        assert_eq!(cache_namespace_with_header_override(&[], None), None);
+    }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this

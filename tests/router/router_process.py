@@ -3,6 +3,7 @@
 
 import os
 import sys
+from collections.abc import Mapping
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -34,7 +35,7 @@ class FrontendRouterProcess(ManagedProcess):
     """Manages a dynamo.frontend process with configurable --router-mode.
 
     Supports all router modes (round-robin, random, kv, direct) and all
-    KV-specific options (block size, thresholds, durable events, disagg).
+    KV-specific options (block size, thresholds, disagg).
     block_size is only sent to the CLI when router_mode is "kv".
     """
 
@@ -50,13 +51,14 @@ class FrontendRouterProcess(ManagedProcess):
         tokens_threshold_frac: float | str | None = None,
         router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
-        durable_kv_events: bool = False,
         router_mode: str = "kv",
         min_initial_workers: int | None = None,
         router_aic_config: dict[str, str | int] | None = None,
         serve_indexer: bool = False,
         use_remote_indexer: bool = False,
         event_plane: str | None = None,
+        session_affinity_ttl_secs: int | None = None,
+        extra_env: Mapping[str, str | None] | None = None,
     ):
         command = [
             sys.executable,
@@ -89,14 +91,16 @@ class FrontendRouterProcess(ManagedProcess):
         if router_queue_threshold is not None:
             command.extend(["--router-queue-threshold", str(router_queue_threshold)])
 
-        if durable_kv_events:
-            command.append("--router-durable-kv-events")
-
         if serve_indexer:
             command.append("--serve-indexer")
 
         if use_remote_indexer:
             command.append("--use-remote-indexer")
+
+        if session_affinity_ttl_secs is not None:
+            command.extend(
+                ["--router-session-affinity-ttl-secs", str(session_affinity_ttl_secs)]
+            )
 
         if router_aic_config is not None:
             command.extend(
@@ -130,6 +134,11 @@ class FrontendRouterProcess(ManagedProcess):
             env.pop("NATS_SERVER", None)
         if min_initial_workers is not None:
             env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
+        for name, value in (extra_env or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
 
         super().__init__(
             command=command,
@@ -142,7 +151,7 @@ class FrontendRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
-            display_name=f"dynamo-frontend-{router_mode}",
+            display_name=f"dynamo-frontend-{router_mode}-{frontend_port}",
         )
         self.port = frontend_port
         self.router_mode = router_mode

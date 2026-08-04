@@ -129,17 +129,17 @@ def test_request_exposes_all_token_ids():
     private attribute so a rename is caught here, not at runtime."""
     from vllm.v1.request import Request
 
-    # vllm-omni monkeypatches vllm.v1.request.Request with its OmniRequest subclass,
-    # whose body does not redeclare `_all_token_ids` (it inherits it). Walk the MRO so
-    # the inherited attribute is still detected, while a real rename in vLLM still fails.
-    sources = []
-    for klass in Request.__mro__:
-        try:
-            sources.append(inspect.getsource(klass))
-        except (OSError, TypeError):
-            continue
+    src = inspect.getsource(Request)
+    # [gluo NOTE] the test suit will attempt to import vllm-omni at conftest for test
+    # selection. However, omni will monkeypatch Request so naive source inspection will
+    # fail (only see OmniRequest's source) walk MRO so a subclass (OmniRequest) still gets
+    # the base that defines it
+    src = "".join(
+        inspect.getsource(c) for c in Request.__mro__ if c.__module__.startswith("vllm")
+    )
+    assert "_all_token_ids" in src
 
-    assert any("_all_token_ids" in src for src in sources), (
+    assert "_all_token_ids" in src, (
         "vllm.v1.request.Request no longer exposes `_all_token_ids` — "
         "InstrumentedScheduler relies on it for NewRequestData.prefill_token_ids."
     )

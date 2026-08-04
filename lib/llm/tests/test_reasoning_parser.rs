@@ -915,19 +915,8 @@ mod tests {
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         if let Some(data) = chunk.data.as_mut() {
             data.llm_metrics = Some(LLMMetricAnnotation {
-                input_tokens: 0,
-                output_tokens: 0,
                 chunk_tokens,
-                cached_tokens: None,
-                prefill_worker_id: None,
-                prefill_dp_rank: None,
-                prefill_worker_type: None,
-                decode_worker_id: None,
-                decode_dp_rank: None,
-                decode_worker_type: None,
-                tokenize_latency: None,
-                detokenize_total_latency: None,
-                detokenize_count: None,
+                ..Default::default()
             });
         }
         chunk

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::protocols::KvTransferEnforcement;
+use dynamo_runtime::protocols::EndpointId;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
@@ -47,12 +48,21 @@ pub enum StructuralTagScope {
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 
+/// Worker-advertised support for Dynamo's vLLM-compatible
+/// `POST /inference/v1/generate` adapter.
+///
+/// This is deliberately a runtime capability rather than an inference from
+/// `ModelType::Chat` / `ModelType::Completions`: other backends expose those
+/// surfaces without implementing vLLM's Generate contract.
+pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerBackend {
     Default,
     Fastokens,
+    Basetenkenizer,
 }
 
 impl TokenizerBackend {
@@ -60,6 +70,7 @@ impl TokenizerBackend {
         match self {
             Self::Default => "default",
             Self::Fastokens => "fastokens",
+            Self::Basetenkenizer => "basetenkenizer",
         }
     }
 
@@ -70,11 +81,12 @@ impl TokenizerBackend {
     pub fn from_env_or_default() -> Self {
         match std::env::var(ENV_TOKENIZER_BACKEND) {
             Ok(v) if v == "fastokens" => Self::Fastokens,
+            Ok(v) if v == "basetenkenizer" => Self::Basetenkenizer,
             Ok(v) if v == "default" || v.is_empty() => Self::Default,
             Ok(v) => {
                 tracing::warn!(
                     value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                    "Unrecognized DYN_TOKENIZER value, expected 'default', 'fastokens', or 'basetenkenizer'; falling back to default"
                 );
                 Self::Default
             }
@@ -90,8 +102,9 @@ impl FromStr for TokenizerBackend {
         match value {
             "default" => Ok(Self::Default),
             "fastokens" => Ok(Self::Fastokens),
+            "basetenkenizer" => Ok(Self::Basetenkenizer),
             _ => Err(format!(
-                "invalid tokenizer backend '{value}' (expected 'default' or 'fastokens')"
+                "invalid tokenizer backend '{value}' (expected 'default', 'fastokens', or 'basetenkenizer')"
             )),
         }
     }
@@ -161,6 +174,20 @@ pub struct ModelRuntimeConfig {
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state (default: true)
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
+
+    /// Whether the running engine is configured to publish KV cache events.
+    ///
+    /// `None` indicates a legacy worker that does not declare this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_publishing_enabled: Option<bool>,
+
+    /// Endpoint whose event sources describe this worker's KV state.
+    ///
+    /// When unset, consumers use the worker's serving endpoint. This keeps existing
+    /// deployments wire-compatible while allowing KV-state ownership and request serving
+    /// to be discovered independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_state_endpoint: Option<EndpointId>,
 
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -259,6 +286,8 @@ impl Default for ModelRuntimeConfig {
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
+            kv_event_publishing_enabled: None,
+            kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
             enable_eagle: false,
@@ -288,6 +317,13 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
+        self.runtime_data
+            .get("native_offloading_capacity")?
+            .get("total_tokens")?
+            .as_u64()
     }
 
     fn taints(&self) -> &HashSet<String> {
@@ -438,6 +474,14 @@ impl ModelRuntimeConfig {
             .unwrap_or_else(TokenizerBackend::from_env_or_default)
     }
 
+    /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
+    /// default for workers that do not advertise an explicit mapping.
+    pub fn effective_kv_state_endpoint(&self, serving_endpoint: &EndpointId) -> EndpointId {
+        self.kv_state_endpoint
+            .clone()
+            .unwrap_or_else(|| serving_endpoint.clone())
+    }
+
     pub fn set_tokenizer_backend(
         &mut self,
         tokenizer_backend: Option<TokenizerBackend>,
@@ -562,6 +606,57 @@ mod tests {
     }
 
     #[test]
+    fn kv_state_endpoint_roundtrips_and_defaults_to_serving_endpoint() {
+        let serving_endpoint = EndpointId::from("ns.worker.generate");
+        let kv_state_endpoint = EndpointId::from("ns.kv.events");
+        let cfg = ModelRuntimeConfig {
+            kv_state_endpoint: Some(kv_state_endpoint.clone()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kv_state_endpoint, Some(kv_state_endpoint.clone()));
+        assert_eq!(
+            parsed.effective_kv_state_endpoint(&serving_endpoint),
+            kv_state_endpoint
+        );
+
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert!(legacy.kv_state_endpoint.is_none());
+        assert_eq!(
+            legacy.effective_kv_state_endpoint(&serving_endpoint),
+            serving_endpoint
+        );
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("kv_state_endpoint")
+        );
+    }
+
+    #[test]
+    fn kv_event_publishing_capability_roundtrips_and_preserves_legacy_unknown() {
+        for enabled in [true, false] {
+            let cfg = ModelRuntimeConfig {
+                kv_event_publishing_enabled: Some(enabled),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.kv_event_publishing_enabled, Some(enabled));
+        }
+
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.kv_event_publishing_enabled, None);
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("kv_event_publishing_enabled")
+        );
+    }
+
+    #[test]
     fn roundtrips_through_serde_json() {
         let cfg = ModelRuntimeConfig {
             stable_routing_id: Some("worker-7".to_string()),
@@ -589,6 +684,14 @@ mod tests {
             assert_eq!(
                 cfg.effective_tokenizer_backend(),
                 TokenizerBackend::Fastokens
+            );
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("basetenkenizer"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
             );
         });
 
@@ -624,18 +727,64 @@ mod tests {
                 TokenizerBackend::Fastokens
             );
         });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Basetenkenizer),
+                ..Default::default()
+            };
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
+            );
+        });
     }
 
     #[test]
     fn tokenizer_backend_roundtrips_through_serde_json() {
-        let cfg = ModelRuntimeConfig {
-            tokenizer_backend: Some(TokenizerBackend::Fastokens),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
-        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+        for backend in [
+            TokenizerBackend::Default,
+            TokenizerBackend::Fastokens,
+            TokenizerBackend::Basetenkenizer,
+        ] {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(backend),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_backend\":\"{}\"", backend.as_str())));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_backend, Some(backend));
+        }
+    }
+
+    #[test]
+    fn tokenizer_backend_string_values_are_strict() {
+        for backend in [
+            TokenizerBackend::Default,
+            TokenizerBackend::Fastokens,
+            TokenizerBackend::Basetenkenizer,
+        ] {
+            assert_eq!(backend.as_str().parse(), Ok(backend));
+        }
+
+        let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
+        assert!(error.contains("basetenkenizer"));
+    }
+
+    #[test]
+    fn native_offloading_capacity_is_backend_neutral() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(
+                "native_offloading_capacity",
+                serde_json::json!({"total_tokens": 300}),
+            )
+            .unwrap();
+
+        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]

@@ -1,19 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
+    make_custom_encoder_payload,
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
+    make_image_payload_uuid_passthrough,
     make_video_payload,
 )
-from tests.utils.payload_builder import chat_payload, chat_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    image_token_metrics_payload,
+)
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -53,6 +62,10 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
+    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
+    # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
+    "agg_custom": "agg_custom.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -260,7 +273,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        followup_payloads=[image_token_metrics_payload()],
+                    ),
                     # Inline-base64 + --frontend-decoding (NIXL RDMA path).
                     # post_merge for the NIXL-stub reason — local pre-merge
                     # builds outside Docker ship a NIXL stub that errors on
@@ -330,7 +346,31 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=670,
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        suffix="uuid_passthrough",
+                        payload=make_image_payload_uuid_passthrough(
+                            ["green"], exercise_embedding_cache=True
+                        ),
+                        extra_script_args=[
+                            "--mm-processor-cache-gb",
+                            "4",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                            # Gemma 4 budgets 280 embeddings per image; the
+                            # 512x512 fixture emits 256. A 280-slot GPU cache can
+                            # retain only one, so the second fill evicts the first.
+                            "--max-num-batched-tokens",
+                            "280",
+                            "--limit-mm-per-prompt",
+                            '{"image": 1, "video": 0, "audio": 0}',
+                        ],
+                        # The connector runs in vLLM's spawned EngineCore, so
+                        # its debug hit diagnostic uses vLLM's logger level.
+                        env={"VLLM_LOGGING_LEVEL": "DEBUG"},
+                    ),
+                ],
             ),
         },
         extra_vllm_args=["--dtype", "bfloat16"],
@@ -521,6 +561,39 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         )
                     )
                 ],
+            ),
+        },
+    ),
+    # CustomEncoder coverage. NOTE: Qwen2.5-1.5B-Instruct is a TEXT-ONLY LM —
+    # it sits in the multimodal profiles because the in-process CustomEncoder
+    # *plugin* (a custom vision encoder) gives it the image->embeds serving
+    # path; the multimodality comes from the encoder, not the model. The
+    # `agg_custom` topology launches examples/custom_encoder/launch/agg_custom.sh
+    # (hence the `directory` override) with the example HitchhikersVisionEncoder,
+    # which fakes an image as a fixed phrase so the spliced prompt answers "42".
+    MultimodalModelProfile(
+        name="Qwen/Qwen2.5-1.5B-Instruct",
+        short_name="custom-encoder",
+        topologies={
+            "agg_custom": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    # The single-GPU test container exposes its GPU at device 0,
+                    # so pin the worker there.
+                    "DYN_WORKER_GPU": "0",
+                    "DYN_ENCODER_CLASS": (
+                        "examples.custom_encoder.hitchhikers_vision_encoder."
+                        "HitchhikersVisionEncoder"
+                    ),
+                    "DYN_CUSTOM_JINJA_TEMPLATE": os.path.join(
+                        WORKSPACE_DIR,
+                        "examples/custom_encoder/templates/qwen_vl.jinja",
+                    ),
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[MmCase(payload=make_custom_encoder_payload())],
             ),
         },
     ),

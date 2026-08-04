@@ -9,7 +9,10 @@ use crate::{
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
-    http::service::service_v2::{self, HttpService},
+    http::service::{
+        FrontendRouteExtension,
+        service_v2::{self, HttpService},
+    },
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{
@@ -24,6 +27,15 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
+) -> anyhow::Result<()> {
+    run_with_frontend_route_extensions(distributed_runtime, engine_config, Vec::new()).await
+}
+
+/// Build and run an HTTP service with additional system route extensions.
+pub async fn run_with_frontend_route_extensions(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
@@ -69,6 +81,9 @@ pub async fn run(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    for extension in frontend_route_extensions {
+        http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
+    }
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
@@ -92,6 +107,7 @@ pub async fn run(
             );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
+            let generate_engine_enabled = http_service.generate_api_enabled();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -105,6 +121,7 @@ pub async fn run(
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
+                generate_engine_enabled,
             )
             .await?;
             http_service
@@ -186,6 +203,7 @@ async fn run_watcher(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
+    generate_engine_enabled: bool,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
@@ -207,6 +225,7 @@ async fn run_watcher(
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
+    watch_obj.set_generate_engine_enabled(generate_engine_enabled);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

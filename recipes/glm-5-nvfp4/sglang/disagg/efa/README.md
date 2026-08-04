@@ -9,7 +9,7 @@ Compared to the non-EFA recipe (UCX/RoCE), this variant:
 - Runs containers `privileged: true` so `fi_mr_reg` can pin VRAM for RDMA.
 - Sets `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` — without this, SGLang defaults to UCX, which silently falls back to TCP on kernel ≥ 6.8.
 
-Please see the [Dynamo on EFA](../../../../../docs/kubernetes/cloud-providers/eks/efa.md) for more on EFA.
+Please see the [Dynamo on EFA](../../../../../docs/fern/pages/kubernetes/installation/rdma-setup/efa-on-aws.mdx) for more on EFA.
 
 ## Topology
 

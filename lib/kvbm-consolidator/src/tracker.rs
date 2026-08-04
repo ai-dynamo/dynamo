@@ -22,6 +22,7 @@
 //! PLH already computed by the upstream registry.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use dynamo_kv_hashing::Request;
 use dynamo_tokens::PositionalLineageHash;
@@ -38,6 +39,7 @@ pub enum ConsolidatedEvent {
         token_ids: Vec<u32>,
         block_size: usize,
         lora_name: Option<String>,
+        cache_namespace: Option<Arc<str>>,
         source: EventSource,
     },
     Remove {
@@ -45,6 +47,39 @@ pub enum ConsolidatedEvent {
         source: EventSource,
     },
     ClearAll,
+}
+
+/// Inputs for a STORE event received from a string-hashed source.
+pub(crate) struct StoreInput {
+    source: EventSource,
+    external_hash: String,
+    parent_external_hash: Option<String>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    lora_name: Option<String>,
+    cache_namespace: Option<Arc<str>>,
+}
+
+impl StoreInput {
+    pub(crate) fn new(
+        source: EventSource,
+        external_hash: String,
+        parent_external_hash: Option<String>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        lora_name: Option<String>,
+        cache_namespace: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            source,
+            external_hash,
+            parent_external_hash,
+            token_ids,
+            block_size,
+            lora_name,
+            cache_namespace,
+        }
+    }
 }
 
 /// Per-block state: which sources have it, an optional registry handle keeping the
@@ -59,6 +94,7 @@ pub struct BlockState {
     pub sources: HashSet<EventSource>,
     pub registry_handle: Option<BlockRegistrationHandle>,
     pub published: bool,
+    pub cache_namespace: Option<Arc<str>>,
 }
 
 impl std::fmt::Debug for BlockState {
@@ -67,6 +103,7 @@ impl std::fmt::Debug for BlockState {
             .field("sources", &self.sources)
             .field("registry_handle", &self.registry_handle.is_some())
             .field("published", &self.published)
+            .field("has_cache_namespace", &self.cache_namespace.is_some())
             .finish()
     }
 }
@@ -101,10 +138,12 @@ impl Tracker {
         token_ids: &[u32],
         block_size: usize,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Option<PositionalLineageHash> {
         let request = Request::builder()
             .tokens(token_ids.to_vec())
             .lora_name(lora_name.map(str::to_string))
+            .salt(cache_namespace.map(str::to_string))
             .build()
             .ok()?;
         let blocks = request.into_blocks(block_size as u32).ok()?;
@@ -128,14 +167,39 @@ impl Tracker {
         block_size: usize,
         lora_name: Option<String>,
     ) -> bool {
-        let parent_plh = match parent_external_hash {
+        self.handle_store_input(StoreInput::new(
+            source,
+            external_hash,
+            parent_external_hash,
+            token_ids,
+            block_size,
+            lora_name,
+            None,
+        ))
+    }
+
+    /// Handle a STORE event with an optional cache namespace.
+    pub(crate) fn handle_store_input(&mut self, input: StoreInput) -> bool {
+        let StoreInput {
+            source,
+            external_hash,
+            parent_external_hash,
+            token_ids,
+            block_size,
+            lora_name,
+            cache_namespace,
+        } = input;
+        let parent_key = parent_external_hash
+            .as_ref()
+            .map(|external_hash| (source, external_hash.clone()));
+        let parent_plh = match parent_key.as_ref() {
             None => None,
-            Some(ref peh) => match self.external_to_seq.get(&(source, peh.clone())) {
+            Some(key) => match self.external_to_seq.get(key) {
                 Some(&p) => Some(p),
                 None => {
                     tracing::warn!(
                         "Unresolved parent external hash {:?} for source {:?}; treating as root",
-                        peh,
+                        key.1,
                         source
                     );
                     None
@@ -143,8 +207,22 @@ impl Tracker {
             },
         };
 
-        let plh = match Self::compute_plh(parent_plh, &token_ids, block_size, lora_name.as_deref())
-        {
+        let cache_namespace = cache_namespace
+            .filter(|namespace| !namespace.is_empty())
+            .or_else(|| {
+                parent_plh
+                    .and_then(|parent_plh| self.blocks.get(&parent_plh))
+                    .and_then(|state| state.cache_namespace.as_ref())
+                    .cloned()
+            });
+
+        let plh = match Self::compute_plh(
+            parent_plh,
+            &token_ids,
+            block_size,
+            lora_name.as_deref(),
+            cache_namespace.as_deref(),
+        ) {
             Some(h) => h,
             None => {
                 tracing::warn!(
@@ -163,10 +241,14 @@ impl Tracker {
             return false;
         }
 
+        self.external_to_seq.insert((source, external_hash), plh);
+
         match self.blocks.get_mut(&plh) {
             Some(state) => {
                 state.sources.insert(source);
-                self.external_to_seq.insert((source, external_hash), plh);
+                if state.cache_namespace.is_none() {
+                    state.cache_namespace = cache_namespace.clone();
+                }
                 // A prior source registered the block without publishable metadata
                 // (KVBM-bridge create with empty tokens / block_size 0). This is the
                 // first real source — publish now.
@@ -177,6 +259,7 @@ impl Tracker {
                         token_ids,
                         block_size,
                         lora_name,
+                        cache_namespace,
                         source,
                     });
                     return true;
@@ -196,14 +279,15 @@ impl Tracker {
                         sources,
                         registry_handle,
                         published: true,
+                        cache_namespace: cache_namespace.clone(),
                     },
                 );
-                self.external_to_seq.insert((source, external_hash), plh);
                 self.event_queue.push_back(ConsolidatedEvent::Store {
                     seq_hash: plh,
                     token_ids,
                     block_size,
                     lora_name,
+                    cache_namespace,
                     source,
                 });
                 true
@@ -228,7 +312,6 @@ impl Tracker {
                 return false;
             }
         };
-
         let (empty, published) = match self.blocks.get_mut(&plh) {
             Some(state) => {
                 state.sources.remove(&source);
@@ -277,6 +360,7 @@ impl Tracker {
                         token_ids,
                         block_size,
                         lora_name,
+                        cache_namespace: None,
                         source: EventSource::Kvbm,
                     });
                     return true;
@@ -296,6 +380,7 @@ impl Tracker {
                         sources,
                         registry_handle,
                         published: publishable,
+                        cache_namespace: None,
                     },
                 );
                 if publishable {
@@ -304,6 +389,7 @@ impl Tracker {
                         token_ids,
                         block_size,
                         lora_name,
+                        cache_namespace: None,
                         source: EventSource::Kvbm,
                     });
                     true
@@ -789,6 +875,103 @@ mod tests {
             }
             other => panic!("expected Store, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn tracker_cache_namespace_isolates_identical_tokens() {
+        let mut t = tracker();
+        let tokens = vec![10, 20, 30, 40];
+
+        t.handle_store_input(StoreInput::new(
+            EventSource::Vllm,
+            "tenant-a-block".into(),
+            None,
+            tokens.clone(),
+            4,
+            None,
+            Some(Arc::from("tenant-a")),
+        ));
+        t.handle_store_input(StoreInput::new(
+            EventSource::Vllm,
+            "tenant-b-block".into(),
+            None,
+            tokens.clone(),
+            4,
+            None,
+            Some(Arc::from("tenant-b")),
+        ));
+
+        let events = t.drain_events();
+        assert_eq!(events.len(), 2);
+        let stores = events
+            .iter()
+            .map(|event| match event {
+                ConsolidatedEvent::Store {
+                    seq_hash,
+                    cache_namespace,
+                    ..
+                } => (*seq_hash, cache_namespace.as_deref()),
+                other => panic!("expected Store, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(stores[0].0, stores[1].0);
+        assert_eq!(stores[0].1, Some("tenant-a"));
+        assert_eq!(stores[1].1, Some("tenant-b"));
+
+        for (namespace, actual) in [("tenant-a", stores[0].0), ("tenant-b", stores[1].0)] {
+            let expected = Request::builder()
+                .tokens(tokens.clone())
+                .salt(Some(namespace.to_string()))
+                .build()
+                .unwrap()
+                .into_blocks(4)
+                .unwrap()[0]
+                .plh;
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn tracker_inherits_cache_namespace_from_parent() {
+        let mut t = tracker();
+        let namespace = Arc::<str>::from("tenant-a");
+
+        t.handle_store_input(StoreInput::new(
+            EventSource::Vllm,
+            "parent".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+            Some(Arc::clone(&namespace)),
+        ));
+        t.handle_store_input(StoreInput::new(
+            EventSource::Vllm,
+            "child".into(),
+            Some("parent".into()),
+            vec![5, 6, 7, 8],
+            4,
+            None,
+            None,
+        ));
+
+        let events = t.drain_events();
+        let namespaces = events
+            .iter()
+            .map(|event| match event {
+                ConsolidatedEvent::Store {
+                    cache_namespace: Some(cache_namespace),
+                    ..
+                } => cache_namespace,
+                other => panic!("expected namespaced Store, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(namespaces[0], namespaces[1]));
+        assert!(Arc::ptr_eq(namespaces[0], &namespace));
+
+        t.handle_remove(EventSource::Vllm, "child");
+        t.handle_remove(EventSource::Vllm, "parent");
+        assert!(t.blocks.is_empty());
     }
 }
 

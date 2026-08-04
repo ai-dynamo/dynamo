@@ -32,11 +32,20 @@ impl SessionAffinityPushRouter {
         ttl: Option<Duration>,
         direct: bool,
     ) -> Result<Self, Error> {
-        Ok(Self {
+        let affinity = ttl.map(AffinityCoordinator::new).transpose()?;
+        Ok(Self::new_with_coordinator(inner, affinity, direct))
+    }
+
+    pub(crate) fn new_with_coordinator(
+        inner: PushRouter<PreprocessedRequest, LlmResponse>,
+        affinity: Option<AffinityCoordinator>,
+        direct: bool,
+    ) -> Self {
+        Self {
             inner,
-            affinity: ttl.map(AffinityCoordinator::new).transpose()?,
+            affinity,
             direct,
-        })
+        }
     }
 
     fn phase(request: &PreprocessedRequest) -> RequestPhase {
@@ -124,23 +133,32 @@ impl SessionAffinityPushRouter {
             .await
     }
 
-    async fn select_and_dispatch_prefill_exact<M, F>(
+    /// Adapts the generic worker-only router while keeping a known rank attached
+    /// to its worker through preparation and exact dispatch.
+    async fn select_and_dispatch_exact_target<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        pinned_worker: Option<u64>,
-        dp_rank: Option<u32>,
+        pinned_target: Option<AffinityTarget>,
         prepare: F,
     ) -> Result<(M, ManyOut<LlmResponse>), Error>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let ((metadata, tracker, target), stream) = self
             .inner
-            .select_and_dispatch_exact(request, pinned_worker, move |request, worker_id| {
-                let target = AffinityTarget { worker_id, dp_rank };
-                let metadata = prepare(request, worker_id, dp_rank)?;
-                Ok((metadata, request.tracker.take(), target))
-            })
+            .select_and_dispatch_exact(
+                request,
+                pinned_target.map(|target| target.worker_id),
+                move |request, worker_id| {
+                    let target = pinned_target.unwrap_or(AffinityTarget {
+                        worker_id,
+                        dp_rank: None,
+                    });
+                    debug_assert_eq!(target.worker_id, worker_id);
+                    let metadata = prepare(request, target)?;
+                    Ok((metadata, request.tracker.take(), target))
+                },
+            )
             .await?;
         Self::record_target(tracker.as_deref(), target);
         Ok((metadata, stream))
@@ -152,7 +170,7 @@ impl SessionAffinityPushRouter {
         prepare: F,
     ) -> Result<(M, ManyOut<LlmResponse>), Error>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let session_id = if self.affinity.is_some() {
             affinity_id(&request)?
@@ -160,9 +178,9 @@ impl SessionAffinityPushRouter {
             None
         };
         if !self.direct && session_id.is_none() {
-            let pinned_worker = phase_worker_id(&request, RequestPhase::Prefill);
+            let explicit = explicit_target(&request, RequestPhase::Prefill)?;
             return self
-                .select_and_dispatch_prefill_exact(request, pinned_worker, None, prepare)
+                .select_and_dispatch_exact_target(request, explicit, prepare)
                 .await;
         }
         let explicit = self.direct_target(
@@ -170,18 +188,13 @@ impl SessionAffinityPushRouter {
             RequestPhase::Prefill,
         )?;
         let Some(session_id) = session_id else {
-            let Some(pinned_worker) = explicit else {
+            let Some(target) = explicit else {
                 return Err(invalid_argument(
                     "Direct routing requires an explicit prefill target",
                 ));
             };
             return self
-                .select_and_dispatch_prefill_exact(
-                    request,
-                    Some(pinned_worker.worker_id),
-                    None,
-                    prepare,
-                )
+                .select_and_dispatch_exact_target(request, Some(target), prepare)
                 .await;
         };
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
@@ -192,14 +205,8 @@ impl SessionAffinityPushRouter {
                 .expect("affinity query requires an enabled coordinator")
                 .query_target(&session_id, explicit)?
                 .or(explicit);
-            let rank = selected.and_then(|target| target.dp_rank);
             return self
-                .select_and_dispatch_prefill_exact(
-                    request,
-                    selected.map(|target| target.worker_id),
-                    rank,
-                    prepare,
-                )
+                .select_and_dispatch_exact_target(request, selected, prepare)
                 .await;
         }
 
@@ -219,7 +226,7 @@ impl SessionAffinityPushRouter {
                         worker_id,
                         dp_rank: rank,
                     };
-                    let metadata = prepare(request, worker_id, rank)?;
+                    let metadata = prepare(request, target)?;
                     Ok((metadata, request.tracker.take(), target))
                 },
             )
@@ -354,15 +361,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         let stream = operation.into_stream(target, stream)?;
         Self::record_target(tracker.as_deref(), target);
         Ok(stream)
-    }
-}
-
-fn phase_worker_id(request: &PreprocessedRequest, phase: RequestPhase) -> Option<u64> {
-    let routing = request.routing.as_ref()?;
-    match phase {
-        RequestPhase::Prefill => routing.prefill_worker_id.or(routing.backend_instance_id),
-        RequestPhase::Decode => routing.decode_worker_id.or(routing.backend_instance_id),
-        RequestPhase::Aggregated => routing.decode_worker_id.or(routing.backend_instance_id),
     }
 }
 
@@ -601,7 +599,7 @@ mod tests {
         assert_eq!(affinity(&router).entry_count(), 0);
         assert!(
             router
-                .select_and_dispatch_prefill(affinity_request(None, true), |_, _, _| Ok(()))
+                .select_and_dispatch_prefill(affinity_request(None, true), |_, _| Ok(()))
                 .await
                 .is_err()
         );
@@ -634,7 +632,7 @@ mod tests {
                 .contains("worker ID required for aggregated request in Direct routing mode")
         );
         let error = router
-            .select_and_dispatch_prefill(Context::new(request(None, false)), |_, _, _| Ok(()))
+            .select_and_dispatch_prefill(Context::new(request(None, false)), |_, _| Ok(()))
             .await
             .unwrap_err();
         assert!(
@@ -644,18 +642,11 @@ mod tests {
         );
         assert_eq!(affinity(&router).entry_count(), 0);
 
-        let mut decode_only = request(None, false);
-        decode_only.routing_mut().decode_worker_id = Some(99);
-        assert_eq!(
-            phase_worker_id(&decode_only, RequestPhase::Aggregated),
-            Some(99)
-        );
-
         runtime.shutdown();
     }
 
     #[tokio::test]
-    async fn failed_prefill_preparation_does_not_record_selected_worker() {
+    async fn prefill_preparation_receives_explicit_rank_zero() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -670,6 +661,10 @@ mod tests {
         let client = endpoint.client().await.unwrap();
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let expected = AffinityTarget {
+            worker_id,
+            dp_rank: Some(0),
+        };
 
         for (mode, direct) in [(RouterMode::Direct, true), (RouterMode::RoundRobin, false)] {
             let inner = PushRouter::from_client(client.clone(), mode).await.unwrap();
@@ -682,15 +677,15 @@ mod tests {
             let mut observed = None;
 
             let error = router
-                .select_and_dispatch_prefill(Context::new(content), |_, worker_id, dp_rank| {
-                    observed = Some((worker_id, dp_rank));
+                .select_and_dispatch_prefill(Context::new(content), |_, target| {
+                    observed = Some(target);
                     Err::<(), _>(anyhow::anyhow!("stop before dispatch"))
                 })
                 .await
                 .unwrap_err();
 
             assert!(error.to_string().contains("stop before dispatch"));
-            assert_eq!(observed, Some((worker_id, None)));
+            assert_eq!(observed, Some(expected));
             assert_eq!(tracker.prefill_worker_id(), None);
             assert_eq!(tracker.decode_worker_id(), None);
         }

@@ -1,20 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Adapter that drives the planner core from the unified replay loop.
+"""Scaling-policy adapter for the unified offline replay loop.
 
-The Rust offline simulation (``PlannerReplayBridge.run``) owns the drive
-loop and calls back into this adapter once per ``PlannerTick`` event, so
-the adapter is a callback hook rather than an external stepper:
+The public replay entrypoint passes this adapter into the Rust runtime as
+an optional scaling component. Rust owns the drive loop:
 
-    Bridge.run(adapter)                        # Rust owns the loop
+    run_replay(..., scaling_policy=adapter)    # Rust owns the loop
       adapter.initial_tick_ms()      -> first tick time
-      per PlannerTick:
+      per ScalingTick:
         adapter.on_tick(metrics)     -> _build_tick_input() -> TickInput
                                         EngineProtocol.tick() -> PlannerEffects
                                         -> {target_prefill, target_decode, next_tick_ms}
         # Rust applies the scaling decision and re-arms the next tick itself
-      adapter.finalize(trace_report) -> ReplayPlannerReport
+      adapter.finalize() -> PlannerReplayDetails
 
 The tick engine is the builtin orchestrator path:
 ``OrchestratorEngineAdapter`` wrapping ``LocalPlannerOrchestrator`` +
@@ -22,8 +21,7 @@ the builtin local-planner plugins. It preserves the planner's
 ``PlannerEffects.scale_to`` replay contract while using plugin-aware
 observability (Prometheus metrics, audit events, diagnostics).
 
-The simulation steps itself — replay no longer drives the bridge
-externally. Async orchestrator calls (``bootstrap_from_fpms`` / ``tick``)
+Async orchestrator calls (``bootstrap_from_fpms`` / ``tick``)
 run inside a single replay-scoped event loop so callers don't change.
 
 Supports both aggregated and disaggregated topologies. No I/O, no
@@ -33,9 +31,13 @@ runtime dependencies. Fully deterministic with offline replay.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, Optional
+
+import msgspec
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -48,7 +50,6 @@ from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
     ScheduledTick,
-    TickDiagnostics,
     TickInput,
     TrafficObservation,
     WorkerCapabilities,
@@ -58,6 +59,7 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.replay.report import PlannerReplayDetails
 
 logger = logging.getLogger(__name__)
 
@@ -73,22 +75,11 @@ class ScalingEvent:
     reason: Optional[str] = None
 
 
-@dataclass
-class ReplayPlannerReport:
-    """Enriched report combining trace metrics and planner diagnostics."""
-
-    trace_report: dict[str, Any]
-    scaling_events: list[ScalingEvent] = field(default_factory=list)
-    diagnostics_log: list[TickDiagnostics] = field(default_factory=list)
-    total_ticks: int = 0
-    html_report_path: Optional[str] = None
-
-
 def _build_fpm_from_dict(d: dict[str, Any]) -> ForwardPassMetrics:
-    """Convert a bridge FPM snapshot dict into a ForwardPassMetrics struct."""
+    """Convert a replay FPM snapshot dict into a ForwardPassMetrics struct."""
     return ForwardPassMetrics(
         worker_id=str(d["worker_id"]),
-        dp_rank=0,
+        dp_rank=int(d.get("dp_rank", 0)),
         wall_time=d["wall_time"],
         scheduled_requests=ScheduledRequestMetrics(
             num_prefill_requests=d["num_prefill_requests"],
@@ -113,19 +104,17 @@ def _build_fpm_from_dict(d: dict[str, Any]) -> ForwardPassMetrics:
 def _update_fpm_cache(
     cache: dict[tuple[str, int], ForwardPassMetrics],
     snapshots: list[dict[str, Any]],
-    active_count: int,
+    active_worker_ids: list[int],
 ) -> None:
     """Update a last-seen FPM cache with new snapshots and prune removed workers."""
     for snap in snapshots:
         fpm = _build_fpm_from_dict(snap)
         cache[(fpm.worker_id, fpm.dp_rank)] = fpm
 
-    # Prune cache down to active_count entries. Workers are removed
-    # highest-ID-first during scale-down, so keep the lowest IDs.
-    while len(cache) > active_count:
-        # Remove the highest worker ID entry
-        worst_key = max(cache.keys(), key=lambda k: int(k[0]))
-        del cache[worst_key]
+    active_worker_ids_as_str = {str(worker_id) for worker_id in active_worker_ids}
+    for key in list(cache):
+        if key[0] not in active_worker_ids_as_str:
+            del cache[key]
 
 
 def _merge_traffic(
@@ -135,18 +124,18 @@ def _merge_traffic(
 
     Exact for every field the planner's scaling consumes:
       - ``duration_s``/``num_req``: summed.
-      - ``avg_isl``/``avg_osl``: num_req-weighted — their denominator *is*
-        ``num_req``, so a num_req-weighted mean of per-window means re-sums to
-        the exact overall mean.
+      - ``avg_isl``/``avg_osl``: weighted by ``shape_count`` (completed,
+        non-rejected requests). ``num_req`` is offered load and intentionally
+        has different timing under queueing.
+      - ``avg_ttft_ms``/``avg_itl_ms``: weighted by their native sample counts.
       - ``avg_kv_hit_rate``: weighted by ``hit_rate_count`` (its true
         denominator: router admissions with ``isl_blocks > 0``), so the merge
         reconstructs the exact sample mean rather than approximating it.
       - ``avg_accept_length``: weighted by ``accept_length_forward_count``
         (decode request-forwards, its true denominator), exact across windows.
 
-    ``avg_ttft_ms``/``avg_itl_ms`` are num_req-weighted approximations (their
-    per-sample counts are not carried across windows); they feed diagnostics
-    only, never the scaling trajectory."""
+    Older bridge payloads without native counts fall back to ``num_req`` for
+    compatibility."""
     if acc is None:
         return dict(window)
     na = float(acc.get("num_req", 0.0))
@@ -163,6 +152,12 @@ def _merge_traffic(
     hit_w = float(window.get("hit_rate_count", 0.0))
     fwd_a = float(acc.get("accept_length_forward_count", 0.0))
     fwd_w = float(window.get("accept_length_forward_count", 0.0))
+    shape_a = float(acc.get("shape_count", na))
+    shape_w = float(window.get("shape_count", nw))
+    ttft_a = float(acc.get("ttft_count", na))
+    ttft_w = float(window.get("ttft_count", nw))
+    itl_a = float(acc.get("itl_count", na))
+    itl_w = float(window.get("itl_count", nw))
 
     merged: dict[str, Any] = {
         "duration_s": acc.get("duration_s", 0.0) + window.get("duration_s", 0.0),
@@ -170,11 +165,13 @@ def _merge_traffic(
         # Carry the native denominators so chained multi-window merges stay exact.
         "hit_rate_count": hit_a + hit_w,
         "accept_length_forward_count": fwd_a + fwd_w,
-        # num_req-weighted: exact for isl/osl, diagnostics-only for ttft/itl.
-        "avg_isl": _weighted("avg_isl", na, nw),
-        "avg_osl": _weighted("avg_osl", na, nw),
-        "avg_ttft_ms": _weighted("avg_ttft_ms", na, nw),
-        "avg_itl_ms": _weighted("avg_itl_ms", na, nw),
+        "shape_count": shape_a + shape_w,
+        "ttft_count": ttft_a + ttft_w,
+        "itl_count": itl_a + itl_w,
+        "avg_isl": _weighted("avg_isl", shape_a, shape_w),
+        "avg_osl": _weighted("avg_osl", shape_a, shape_w),
+        "avg_ttft_ms": _weighted("avg_ttft_ms", ttft_a, ttft_w),
+        "avg_itl_ms": _weighted("avg_itl_ms", itl_a, itl_w),
         # Count-weighted by the true denominator -> exact across windows.
         "avg_kv_hit_rate": _weighted("avg_kv_hit_rate", hit_a, hit_w),
     }
@@ -195,33 +192,27 @@ def _merge_traffic(
 
 
 class ReplayPlannerAdapter:
-    """Drives the plugin planner using the PlannerReplayBridge.
-
-    Supports both ``mode="agg"`` and ``mode="disagg"``.
-    """
+    """Context-managed planner scaling policy for offline replay."""
 
     def __init__(
         self,
         planner_config: PlannerConfig,
-        bridge: Any,  # PlannerReplayBridge (Rust pyclass)
+        engine: EngineProtocol,
         capabilities: Optional[WorkerCapabilities] = None,
         warmup_observations: Optional[list[TrafficObservation]] = None,
+        benchmark_granularity: Optional[int] = None,
+        capture_details: bool = True,
     ) -> None:
         self._config = planner_config
-        self._bridge = bridge
         self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
 
-        self._engine: EngineProtocol
+        self._engine = engine
         self._warmup_observations = list(warmup_observations or [])
+        self._benchmark_granularity = benchmark_granularity
+        self._capture_details = capture_details
+        self._bootstrap_metadata: dict[str, Any] = {"status": "not_attempted"}
         self._orchestrator_bootstrapped = False
-        # Inject a ``VirtualClock`` so plugin scheduler / circuit breaker /
-        # HOLD_LAST cache see trace time, not real wall-clock.
-        self._engine = OrchestratorEngineAdapter(
-            planner_config,
-            capabilities or WorkerCapabilities(),
-            clock=VirtualClock(),
-        )
         # Replay's ``run()`` is synchronous; we own a scoped event loop to
         # drive the async engine calls without forcing callers to use
         # ``asyncio.run``.
@@ -230,8 +221,6 @@ class ReplayPlannerAdapter:
         # Last-seen FPM caches (separate for prefill/decode)
         self._prefill_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
         self._decode_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
-        self._pending_prefill_fpm_snaps: list[dict[str, Any]] = []
-        self._pending_decode_fpm_snaps: list[dict[str, Any]] = []
         # Partial traffic window accumulated across ticks until a throughput tick
         # consumes it (``None`` = nothing pending).
         self._pending_traffic: Optional[dict[str, Any]] = None
@@ -257,6 +246,18 @@ class ReplayPlannerAdapter:
         # installs benchmark FPMs after adapter construction and before the
         # first tick.
 
+    def __enter__(self) -> ReplayPlannerAdapter:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]:
+        try:
+            self.close()
+        except BaseException:
+            if exc_value is None:
+                raise
+            logger.exception("planner replay cleanup failed")
+        return False
+
     # ------------------------------------------------------------------
     # Sync/async bridging
     # ------------------------------------------------------------------
@@ -264,17 +265,17 @@ class ReplayPlannerAdapter:
     def _run_sync(self, coro):
         """Run a coroutine on the replay-owned event loop. Used to call
         the orchestrator path's async APIs from replay's sync surface."""
-        assert self._loop is not None, "sync bridge only available on orchestrator path"
+        assert self._loop is not None, "sync execution requires an active replay scope"
         return self._loop.run_until_complete(coro)
 
     def _bootstrap_orchestrator_if_needed(self) -> None:
         if self._orchestrator_bootstrapped:
             return
-        self._run_sync(
-            self._engine.bootstrap_plugins(  # type: ignore[attr-defined]
-                historical_traffic=self._warmup_observations or None
+        bootstrap_plugins = getattr(self._engine, "bootstrap_plugins", None)
+        if bootstrap_plugins is not None:
+            self._run_sync(
+                bootstrap_plugins(historical_traffic=self._warmup_observations or None)
             )
-        )
         self._orchestrator_bootstrapped = True
 
     def install_benchmark_fpms(
@@ -298,11 +299,12 @@ class ReplayPlannerAdapter:
             agg_fpms=agg_fpms,
         )
 
+    def set_bootstrap_metadata(self, metadata: dict[str, Any]) -> None:
+        self._bootstrap_metadata = dict(metadata)
+
     # ------------------------------------------------------------------
-    # Inverted drive: the Rust ``PlannerReplayBridge.run(self)`` owns the loop and
-    # calls ``initial_tick_ms`` once then ``on_tick`` per ``PlannerTick`` event. The
-    # entrypoint wraps the returned trace_report via ``finalize``. (Replaces the old
-    # Python while-loop that drove ``bridge.advance_to`` + ``bridge.apply_scaling``.)
+    # Rust calls ``initial_tick_ms`` once and ``on_tick`` for each ``ScalingTick``.
+    # The entrypoint wraps the returned trace report via ``finalize``.
     # ------------------------------------------------------------------
 
     def start(self) -> None:
@@ -310,39 +312,41 @@ class ReplayPlannerAdapter:
         self._bootstrap_orchestrator_if_needed()
         self._pending_tick: ScheduledTick = self._engine.initial_tick(0.0)
         self._scaling_events: list[ScalingEvent] = []
-        self._diagnostics_log: list[TickDiagnostics] = []
+        self._ticks: list[dict[str, Any]] = []
         self._total_ticks = 0
 
     def initial_tick_ms(self) -> float:
-        """First tick time in milliseconds (called by the Rust PlannerHook)."""
+        """First tick time in milliseconds."""
         if not self._orchestrator_bootstrapped or not hasattr(self, "_pending_tick"):
             self.start()
         return self._pending_tick.at_s * 1000.0
 
     def on_tick(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Drive one planner tick from the bridge's metrics dict. Returns the scaling
+        """Drive one planner tick from the runtime snapshot. Returns the scaling
         decision (absolute targets, ``None`` = unchanged) + the next tick time in ms
         (``None`` = stop) for the Rust loop to apply and re-arm."""
         tick = self._pending_tick
         tick_input = self._build_tick_input(tick, result)
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
-        if emit_diagnostics:
-            self._diagnostics_log.append(effects.diagnostics)
         self._total_ticks += 1
-        self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
+        if self._capture_details:
+            self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
 
-        # Clear scaling targets once active counts match.
-        active_p = result["active_prefill_count"]
-        active_d = result["active_decode_count"]
+        current_p = result.get(
+            "non_draining_prefill_count", result["active_prefill_count"]
+        )
+        current_d = result.get(
+            "non_draining_decode_count", result["active_decode_count"]
+        )
         if (
             self._scaling_target_prefill is not None
-            and active_p == self._scaling_target_prefill
+            and current_p == self._scaling_target_prefill
         ):
             self._scaling_target_prefill = None
         if (
             self._scaling_target_decode is not None
-            and active_d == self._scaling_target_decode
+            and current_d == self._scaling_target_decode
         ):
             self._scaling_target_decode = None
 
@@ -358,31 +362,209 @@ class ReplayPlannerAdapter:
             self._pending_tick = effects.next_tick
             next_tick_ms = effects.next_tick.at_s * 1000.0
 
-        return {
+        decision = {
             "target_prefill": target_prefill,
             "target_decode": target_decode,
             "next_tick_ms": next_tick_ms,
         }
-
-    def finalize(self, trace_report: dict[str, Any]) -> ReplayPlannerReport:
-        """Assemble the enriched report from accumulated planner state. Called by the
-        entrypoint after the Rust ``run()`` returns the trace_report dict."""
-        try:
-            html_report_path = self._recorder.finalize()
-            return ReplayPlannerReport(
-                trace_report=trace_report,
-                scaling_events=self._scaling_events,
-                diagnostics_log=self._diagnostics_log,
-                total_ticks=self._total_ticks,
-                html_report_path=html_report_path,
+        tick_ordinal = int(result["tick_ordinal"])
+        if self._capture_details:
+            self._ticks.append(
+                {
+                    "ordinal": tick_ordinal,
+                    "at_ms": tick.at_s * 1000.0,
+                    "scheduled_tick": asdict(tick),
+                    "input": self._tick_input_record(tick_input),
+                    "topology": self._topology_record(result),
+                    "effects": asdict(effects),
+                    "runtime_decision": decision,
+                }
             )
-        finally:
-            self.close()
+        return decision
+
+    def finalize(
+        self, lifecycle_operations: list[dict[str, Any]] | None = None
+    ) -> PlannerReplayDetails:
+        """Finalize planner-owned replay details after successful execution."""
+        html_report_path = self._recorder.finalize() if self._capture_details else None
+        return PlannerReplayDetails(
+            metadata=self._planner_metadata(),
+            ticks=self._ticks if self._capture_details else [],
+            scaling_events=self._scaling_events,
+            lifecycle_operations=(
+                list(lifecycle_operations or []) if self._capture_details else []
+            ),
+            total_ticks=self._total_ticks,
+            html_report_path=html_report_path,
+        )
+
+    @staticmethod
+    def _topology_record(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        active_prefill = list(result["active_prefill_ids"])
+        starting_prefill = list(result.get("starting_prefill_ids", []))
+        draining_prefill = list(result.get("draining_prefill_ids", []))
+        active_decode = list(result["active_decode_ids"])
+        starting_decode = list(result.get("starting_decode_ids", []))
+        draining_decode = list(result.get("draining_decode_ids", []))
+        return {
+            "prefill": {
+                "active": active_prefill,
+                "active_count": len(active_prefill),
+                "starting": starting_prefill,
+                "starting_count": len(starting_prefill),
+                "draining": draining_prefill,
+                "draining_count": len(draining_prefill),
+            },
+            "decode": {
+                "active": active_decode,
+                "active_count": len(active_decode),
+                "starting": starting_decode,
+                "starting_count": len(starting_decode),
+                "draining": draining_decode,
+                "draining_count": len(draining_decode),
+            },
+        }
+
+    @staticmethod
+    def _tick_input_record(tick_input: TickInput) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "now_s": tick_input.now_s,
+            "traffic": (
+                None if tick_input.traffic is None else asdict(tick_input.traffic)
+            ),
+            "worker_counts": (
+                None
+                if tick_input.worker_counts is None
+                else asdict(tick_input.worker_counts)
+            ),
+            "fpm_observations": None,
+        }
+        observations = tick_input.fpm_observations
+        if observations is None:
+            return record
+
+        def ordered(values):
+            if not values:
+                return None
+            return [
+                {
+                    "worker_id": worker_id,
+                    "dp_rank": dp_rank,
+                    "metrics": msgspec.to_builtins(metrics),
+                }
+                for (worker_id, dp_rank), metrics in sorted(values.items())
+            ]
+
+        record["fpm_observations"] = {
+            "prefill": ordered(observations.prefill),
+            "decode": ordered(observations.decode),
+        }
+        return record
+
+    def _planner_metadata(self) -> dict[str, Any]:
+        excluded_fields = [
+            "report_output_dir",
+            "report_filename",
+            "report_interval_hours",
+            "report_write_gzip_log",
+            "live_dashboard_port",
+            "plugin_registration.auth",
+            "plugin_registration.transport",
+            "plugin_registration.protocol_version_min",
+            "plugin_registration.protocol_version_max",
+            "plugin_registration.heartbeat_timeout_seconds",
+            "plugin_registration.heartbeat_missed_threshold",
+            "plugin_registration.admin",
+            "plugin_registration.in_process_plugins.kwargs",
+            "scheduling.external_plugins.endpoint",
+            "scheduling.external_plugins.auth_token",
+            "scheduling.gateway",
+        ]
+        config = self._config.model_dump(mode="json", by_alias=True)
+        decision_config = dict(config)
+        for field in excluded_fields[:5]:
+            parent = decision_config
+            parts = field.split(".")
+            for part in parts[:-1]:
+                child = parent.get(part)
+                if not isinstance(child, dict):
+                    parent = {}
+                    break
+                parent = child
+            parent.pop(parts[-1], None)
+        registration = dict(decision_config.get("plugin_registration", {}))
+        in_process = []
+        for plugin in registration.get("in_process_plugins", []):
+            identity = dict(plugin)
+            kwargs = identity.pop("kwargs", {})
+            identity["kwargs_digest"] = hashlib.sha256(
+                json.dumps(kwargs, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            identity["source"] = "in_process"
+            in_process.append(identity)
+        in_process.sort(
+            key=lambda item: (
+                item["plugin_type"],
+                item["priority"],
+                item["plugin_id"],
+                item["module"],
+                item["class"],
+            )
+        )
+        registration = {"in_process_plugins": in_process}
+        decision_config["plugin_registration"] = registration
+
+        scheduling = dict(decision_config.get("scheduling", {}))
+        external = []
+        for plugin in scheduling.get("external_plugins", []):
+            identity = {
+                key: value
+                for key, value in plugin.items()
+                if key not in {"endpoint", "auth_token"}
+            }
+            identity["source"] = "external"
+            external.append(identity)
+        external.sort(
+            key=lambda item: (
+                item["plugin_type"],
+                item["priority"],
+                item["plugin_id"],
+                item["version"],
+            )
+        )
+        scheduling["external_plugins"] = external
+        scheduling.pop("gateway", None)
+        decision_config["scheduling"] = scheduling
+
+        builtin_plugin_ids = [
+            "builtin_load_predict",
+            "builtin_load_propose",
+            "builtin_throughput_propose",
+        ]
+        plugin_pipeline = [
+            {"plugin_id": plugin_id, "source": "builtin"}
+            for plugin_id in builtin_plugin_ids
+        ]
+        plugin_pipeline.extend(in_process)
+        plugin_pipeline.extend(external)
+        config_bytes = json.dumps(
+            decision_config, sort_keys=True, separators=(",", ":")
+        ).encode()
+        return {
+            "planner_config_digest": hashlib.sha256(config_bytes).hexdigest(),
+            "planner_config_identity_exclusions": excluded_fields,
+            "builtin_plugin_ids": builtin_plugin_ids,
+            "configured_plugin_identities": [*in_process, *external],
+            "plugin_pipeline": plugin_pipeline,
+            "pipeline_schema_version": "planner-plugin-pipeline.v1",
+            "mode": self._config.mode,
+            "benchmark_granularity": self._benchmark_granularity,
+            "bootstrap": self._bootstrap_metadata,
+            "details_captured": self._capture_details,
+        }
 
     def close(self) -> None:
-        """Shut down the engine and the replay-scoped event loop. Idempotent so it
-        runs cleanly from both ``finalize`` (success) and the entrypoint's error
-        path (when ``bridge.run`` raises before ``finalize`` is reached)."""
+        """Shut down the engine and replay-scoped event loop. Idempotent."""
         loop = self._loop
         if loop is None:
             return
@@ -444,14 +626,18 @@ class ReplayPlannerAdapter:
     ) -> tuple[Optional[int], Optional[int]]:
         """Compute the (prefill, decode) absolute scale targets and record the scaling
         event. Returns ``(None, None)`` for a no-op. The Rust loop applies the targets,
-        so this no longer calls ``bridge.apply_scaling``."""
+        so this method only records the requested transition."""
         scale = effects.scale_to
         if scale is None:
             raise ValueError(
                 "_compute_scale_decision requires effects.scale_to to be set"
             )
-        current_p = result["active_prefill_count"]
-        current_d = result["active_decode_count"]
+        current_p = result.get(
+            "non_draining_prefill_count", result["active_prefill_count"]
+        )
+        current_d = result.get(
+            "non_draining_decode_count", result["active_decode_count"]
+        )
         target_p = scale.num_prefill if scale.num_prefill is not None else current_p
         target_d = scale.num_decode if scale.num_decode is not None else current_d
 
@@ -518,99 +704,17 @@ class ReplayPlannerAdapter:
             )
         return (target_p, target_d)
 
-    def _feed_extra_fpm_to_regression(
-        self,
-        decode_snaps: list[dict[str, Any]],
-        prefill_snaps: list[dict[str, Any]],
-    ) -> None:
-        """Feed accumulated FPM snapshots to regression, excluding the last
-        per worker (which will be added by _observe_fpm via fpm_observations).
-        This avoids double-counting the cached snapshot.
-
-        Works via ``_get_regression(kind)`` for orchestrator replay. Returns
-        early on easy mode (no regressions) or when the requested regression
-        slot isn't installed.
-        """
-        if self._is_easy_mode():
-            return  # easy mode has no regression models
-
-        if self._config.mode == "agg":
-            agg_reg = self._get_regression("agg")
-            if agg_reg is None:
-                return
-            last_idx_per_worker: dict[int, int] = {}
-            for i, snap in enumerate(decode_snaps):
-                last_idx_per_worker[snap["worker_id"]] = i
-            exclude = set(last_idx_per_worker.values())
-            for i, snap in enumerate(decode_snaps):
-                if i in exclude:
-                    continue
-                fpm = _build_fpm_from_dict(snap)
-                if fpm.wall_time > 0.0:
-                    agg_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-        else:
-            has_prefill = self._config.mode in ("prefill", "disagg")
-            has_decode = self._config.mode in ("decode", "disagg")
-            if has_prefill:
-                p_reg = self._get_regression("prefill")
-                if p_reg is not None:
-                    last_idx: dict[int, int] = {}
-                    for i, snap in enumerate(prefill_snaps):
-                        last_idx[snap["worker_id"]] = i
-                    exclude = set(last_idx.values())
-                    for i, snap in enumerate(prefill_snaps):
-                        if i in exclude:
-                            continue
-                        fpm = _build_fpm_from_dict(snap)
-                        if fpm.wall_time > 0.0:
-                            p_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-            if has_decode:
-                d_reg = self._get_regression("decode")
-                if d_reg is not None:
-                    last_idx = {}
-                    for i, snap in enumerate(decode_snaps):
-                        last_idx[snap["worker_id"]] = i
-                    exclude = set(last_idx.values())
-                    for i, snap in enumerate(decode_snaps):
-                        if i in exclude:
-                            continue
-                        fpm = _build_fpm_from_dict(snap)
-                        if fpm.wall_time > 0.0:
-                            d_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-
     def _is_easy_mode(self) -> bool:
         """Easy-mode check routed via config — both paths honour this
         the same way (no regression in non-SLA modes)."""
         return self._config.optimization_target != "sla"
 
-    def _get_regression(self, kind: str):
-        """Return the regression model for ``kind`` (``"agg"`` /
-        ``"prefill"`` / ``"decode"``).
-
-        Normal path: read from the orchestrator adapter's shared scaling
-        state. That state owns both benchmark-installed regressions and the
-        empty live-regression slots that replay must feed when no AIC data was
-        installed.
-        """
-        attr = f"_{kind}_regression"
-        state = getattr(self._engine, "_scaling_state", None)
-        if state is not None:
-            regression = getattr(state, attr, None)
-            if regression is not None:
-                return regression
-        # Benchmark regressions are also published to the orchestrator so
-        # external plugins can read them during bootstrap hooks.
-        orch = getattr(self._engine, "_orchestrator", None)
-        if orch is None:
-            return None
-        return orch.get_regression(kind)
-
     def _build_tick_input(
         self, tick: ScheduledTick, result: dict[str, Any]
     ) -> TickInput:
-        """Convert bridge result dict to planner TickInput."""
-        # Keep planner cadence on the scheduled replay clock. The Rust bridge
-        # also advances idle gaps to this timestamp so traffic windows drain
+        """Convert the Rust scaling snapshot to planner ``TickInput``."""
+        # Keep planner cadence on the scheduled replay clock. Rust also
+        # advances idle gaps to this timestamp so traffic windows drain
         # with the same duration the planner sees.
         now_s = tick.at_s
 
@@ -618,15 +722,17 @@ class ReplayPlannerAdapter:
         if tick.need_worker_states:
             active_p = result["active_prefill_count"]
             active_d = result["active_decode_count"]
+            current_p = result.get("non_draining_prefill_count", active_p)
+            current_d = result.get("non_draining_decode_count", active_d)
             expected_p = (
                 self._scaling_target_prefill
                 if self._scaling_target_prefill is not None
-                else active_p
+                else current_p
             )
             expected_d = (
                 self._scaling_target_decode
                 if self._scaling_target_decode is not None
-                else active_d
+                else current_d
             )
             worker_counts = WorkerCounts(
                 ready_num_prefill=active_p if self._is_disagg else None,
@@ -636,52 +742,41 @@ class ReplayPlannerAdapter:
                 prefill_scaling_in_progress=(
                     self._is_disagg
                     and self._scaling_target_prefill is not None
-                    and self._scaling_target_prefill != active_p
+                    and self._scaling_target_prefill != current_p
                 ),
                 decode_scaling_in_progress=(
                     self._scaling_target_decode is not None
-                    and self._scaling_target_decode != active_d
+                    and self._scaling_target_decode != current_d
                 ),
             )
 
         fpm_observations = None
-        if not hasattr(self, "_pending_prefill_fpm_snaps"):
-            self._pending_prefill_fpm_snaps = []
-        if not hasattr(self, "_pending_decode_fpm_snaps"):
-            self._pending_decode_fpm_snaps = []
-        self._pending_prefill_fpm_snaps.extend(result.get("prefill_fpm_snapshots", []))
-        self._pending_decode_fpm_snaps.extend(result.get("decode_fpm_snapshots", []))
+        # Merge each callback's latest worker/rank snapshots into the last-seen
+        # cache, then expose the cache only on FPM ticks. This matches the live
+        # subscriber's latest-snapshot semantics.
+        _update_fpm_cache(
+            self._prefill_fpm_cache,
+            result.get("prefill_fpm_snapshots", []),
+            result["active_prefill_ids"],
+        )
+        _update_fpm_cache(
+            self._decode_fpm_cache,
+            result.get("decode_fpm_snapshots", []),
+            result["active_decode_ids"],
+        )
         if tick.need_worker_fpm:
-            prefill_snaps = self._pending_prefill_fpm_snaps
-            decode_snaps = self._pending_decode_fpm_snaps
-            self._pending_prefill_fpm_snaps = []
-            self._pending_decode_fpm_snaps = []
-
-            _update_fpm_cache(
-                self._prefill_fpm_cache, prefill_snaps, result["active_prefill_count"]
-            )
-            _update_fpm_cache(
-                self._decode_fpm_cache, decode_snaps, result["active_decode_count"]
-            )
-
-            # In offline replay, we accumulate many FPM snapshots per tick
-            # (one per engine pass). Feed ALL non-idle snapshots directly to
-            # the regression models for a representative fit. The last-per-worker
-            # cache is only used for the FpmObservations dict (worker count
-            # reconciliation), not as the sole regression input.
             prefill_dict = (
                 dict(self._prefill_fpm_cache) if self._prefill_fpm_cache else None
             )
             decode_dict = (
                 dict(self._decode_fpm_cache) if self._decode_fpm_cache else None
             )
-            self._feed_extra_fpm_to_regression(decode_snaps, prefill_snaps)
             fpm_observations = FpmObservations(
                 prefill=prefill_dict,
                 decode=decode_dict,
             )
 
-        # The Rust bridge drains the per-tick traffic window into ``result["traffic"]``;
+        # Rust drains the per-tick traffic window into ``result["traffic"]``;
         # accumulate it so a need_traffic_metrics tick sees the full window since the
         # last consumed one (the planner consumes traffic only on throughput ticks).
         tick_traffic = result.get("traffic")
@@ -710,12 +805,11 @@ class ReplayPlannerAdapter:
                     accept_length=t.get("avg_accept_length"),
                 )
                 # Stash observed TTFT/ITL for the diagnostics recorder.
-                # When num_req == 0, the Rust accumulator returns 0 as a
-                # placeholder; only record latency values when we actually
-                # observed requests in this window.
+                ttft_count = float(t.get("ttft_count", num_req))
+                itl_count = float(t.get("itl_count", num_req))
                 self._last_traffic = Metrics(
-                    ttft=t.get("avg_ttft_ms") if num_req > 0 else None,
-                    itl=t.get("avg_itl_ms") if num_req > 0 else None,
+                    ttft=t.get("avg_ttft_ms") if ttft_count > 0 else None,
+                    itl=t.get("avg_itl_ms") if itl_count > 0 else None,
                     num_req=traffic.num_req,
                     isl=traffic.isl,
                     osl=traffic.osl,
@@ -729,3 +823,27 @@ class ReplayPlannerAdapter:
             worker_counts=worker_counts,
             fpm_observations=fpm_observations,
         )
+
+
+def create_replay_planner_adapter(
+    planner_config: PlannerConfig,
+    capabilities: Optional[WorkerCapabilities] = None,
+    warmup_observations: Optional[list[TrafficObservation]] = None,
+    benchmark_granularity: Optional[int] = None,
+    capture_details: bool = True,
+) -> ReplayPlannerAdapter:
+    """Create a replay adapter backed by the builtin planner orchestrator."""
+    engine = OrchestratorEngineAdapter(
+        planner_config,
+        capabilities or WorkerCapabilities(),
+        clock=VirtualClock(),
+    )
+    adapter = ReplayPlannerAdapter(
+        planner_config=planner_config,
+        engine=engine,
+        capabilities=capabilities,
+        warmup_observations=warmup_observations,
+        benchmark_granularity=benchmark_granularity,
+        capture_details=capture_details,
+    )
+    return adapter

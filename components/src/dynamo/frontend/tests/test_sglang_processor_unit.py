@@ -32,6 +32,7 @@ from dynamo.frontend.sglang_prepost import (
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
     _parse_json_array_buffer,
+    build_response_format_guided_decoding,
     build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
@@ -43,7 +44,9 @@ from dynamo.frontend.sglang_processor import (
     SglangProcessor,
     _build_dynamo_preproc,
     _init_worker,
+    _load_chat_template,
     _map_finish_reason,
+    _model_eos_token_ids,
     _normalize_eos_token_ids,
     _preprocess_worker,
     _runtime_config_parser_name,
@@ -99,6 +102,71 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+
+    @pytest.mark.multimodal
+    def test_rejects_multimodal_cache_uuid(self):
+        request = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                            "uuid": "cached-image",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(PreprocessError, match="supported only by the vLLM backend"):
+            _build_dynamo_preproc(request, [1], "test", None)
+
+    @pytest.mark.multimodal
+    @pytest.mark.parametrize(
+        ("content_part", "message"),
+        [
+            (
+                {
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/video.mp4"},
+                    "uuid": "cached-video",
+                },
+                "supported only for image_url",
+            ),
+            (
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.png"},
+                    "uuid": "",
+                },
+                "must be a non-empty string",
+            ),
+            (
+                {"type": "image_url", "image_url": None},
+                "must contain a non-empty URL or uuid",
+            ),
+        ],
+    )
+    def test_maps_invalid_multimodal_input_to_preprocess_error(
+        self,
+        content_part,
+        message,
+    ):
+        request = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [content_part],
+                }
+            ],
+        }
+
+        with pytest.raises(PreprocessError, match=message):
+            _build_dynamo_preproc(request, [1], "test", None)
 
     def test_top_k_zero_maps_to_negative_one(self):
         """SGLang uses -1 for disabled top_k, OpenAI uses 0."""
@@ -241,6 +309,20 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
     def test_tokenizer_eos_token_ids_falls_back_to_single_id(self):
         tokenizer = types.SimpleNamespace(eos_token_id=2)
         assert _tokenizer_eos_token_ids(tokenizer) == [2]
+
+    def test_model_eos_token_ids_merge_generation_config(self, tmp_path):
+        tokenizer = types.SimpleNamespace(eos_token_ids=[2, 3], eos_token_id=2)
+        (tmp_path / "generation_config.json").write_text(
+            json.dumps({"eos_token_id": [3, 4, 5]}),
+            encoding="utf-8",
+        )
+
+        assert _model_eos_token_ids(tokenizer, str(tmp_path)) == [2, 3, 4, 5]
+
+    def test_model_eos_token_ids_fall_back_when_config_is_absent(self, tmp_path):
+        tokenizer = types.SimpleNamespace(eos_token_id=2)
+
+        assert _model_eos_token_ids(tokenizer, str(tmp_path)) == [2]
 
     def test_normalize_eos_token_ids_ignores_non_ints_and_bools(self):
         assert _normalize_eos_token_ids([2, True, "3", 4, 2]) == [2, 4]
@@ -630,6 +712,7 @@ def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
     assert _normalize_sglang_parser_name("minimax_m3_nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
+    assert _normalize_sglang_parser_name("kimi-k3") == "kimi_k3"
 
 
 def test_minimax_m3_force_reasoning_uses_thinking_mode():
@@ -933,6 +1016,90 @@ def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode(monkeypat
     assert result.force_reasoning is True
     assert result.reasoning_parser.model_type == "minimax-m3"
     assert result.reasoning_parser.force_reasoning is True
+
+
+class TestBuildResponseFormatGuidedDecoding:
+    def test_json_schema_builds_guided_decoding(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "city_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+
+        guided = build_response_format_guided_decoding(
+            {"model": "test", "response_format": response_format}
+        )
+
+        assert guided == {
+            "json": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }
+        }
+
+    def test_top_level_schema_builds_guided_decoding(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "strict": {"type": "boolean", "default": True},
+            },
+            "required": ["city"],
+        }
+
+        guided = build_response_format_guided_decoding(
+            {
+                "model": "test",
+                "response_format": {"type": "json_schema", "schema": schema},
+            }
+        )
+
+        assert guided == {
+            "json": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }
+        }
+        assert "strict" in schema["properties"]
+
+    def test_json_schema_requires_schema(self):
+        with pytest.raises(
+            PreprocessError,
+            match="schema is required for json_schema response format request",
+        ):
+            build_response_format_guided_decoding(
+                {"model": "test", "response_format": {"type": "json_schema"}}
+            )
+
+    def test_json_object_builds_guided_decoding(self):
+        assert build_response_format_guided_decoding(
+            {"model": "test", "response_format": {"type": "json_object"}}
+        ) == {"json": {"type": "object"}}
+
+    def test_structural_tag_builds_guided_decoding(self):
+        response_format = {
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "<json>",
+                    "schema": {"type": "object"},
+                    "end": "</json>",
+                }
+            ],
+            "triggers": ["<json>"],
+        }
+
+        assert build_response_format_guided_decoding(
+            {"model": "test", "response_format": response_format}
+        ) == {"structural_tag": response_format}
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
@@ -1533,6 +1700,39 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
 
+    def test_response_format_takes_precedence_over_tool_guidance(
+        self, tokenizer, caplog
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert (
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+            in caplog.text
+        )
+
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.
 
@@ -1738,6 +1938,48 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 reasoning_parser_name=None,
             )
 
+    def test_chat_template_override_helpers(self, tmp_path):
+        """Chat template overrides can be supplied as a Jinja file path."""
+        template_file = tmp_path / "template.jinja"
+        template_file.write_text("custom template\\n\n", encoding="utf-8")
+
+        template = _load_chat_template(str(template_file))
+
+        assert template == "custom template\n"
+
+    def test_chat_template_override_expands_path(self, tmp_path, monkeypatch):
+        """Chat template file paths expand environment variables and home dirs."""
+        template_file = tmp_path / "template.jinja"
+        template_file.write_text("custom template", encoding="utf-8")
+
+        monkeypatch.setenv("CHAT_TEMPLATE_DIR", str(tmp_path))
+        assert _load_chat_template("$CHAT_TEMPLATE_DIR/template.jinja") == (
+            "custom template"
+        )
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _load_chat_template("~/template.jinja") == "custom template"
+
+    def test_chat_template_override_rejects_missing_path(self, tmp_path):
+        """Missing path-like chat templates fail at startup."""
+        missing_template = tmp_path / "missing.jinja"
+
+        with pytest.raises(FileNotFoundError, match="Chat template file not found"):
+            _load_chat_template(str(missing_template))
+
+    def test_chat_template_override_rejects_builtin_template_name(self):
+        """SGLang built-in template names are not supported in this path."""
+        with pytest.raises(ValueError, match="built-in chat template names"):
+            _load_chat_template("llama-2")
+
+    def test_chat_template_override_rejects_non_jinja_file(self, tmp_path):
+        """SGLang JSON template files are not supported in this path."""
+        template_file = tmp_path / "template.json"
+        template_file.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="supports only .jinja"):
+            _load_chat_template(str(template_file))
+
     def test_init_worker_propagates_exclude_flag_true(self):
         """_init_worker sets the worker-global exclude_tools flag to True."""
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
@@ -1749,6 +1991,29 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
         # Reset to default
         sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
+
+    def test_init_worker_applies_chat_template_override(self, monkeypatch):
+        """Preprocess workers use the same chat template override as the main process."""
+
+        class FakeTokenizer:
+            chat_template = "original"
+
+        monkeypatch.setattr(
+            sglang_processor_module,
+            "get_tokenizer",
+            lambda model_path, trust_remote_code=False: FakeTokenizer(),
+        )
+
+        _init_worker(
+            MODEL,
+            None,
+            None,
+            exclude_tools_when_tool_choice_none=True,
+            chat_template="custom template",
+            default_thinking_mode="disabled",
+        )
+        assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
+        assert sglang_processor_module._w_default_thinking_mode == "disabled"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
@@ -2084,6 +2349,141 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.request["chat_template_kwargs"]["enable_thinking"] is True
         assert result.force_reasoning is True
 
+    def test_default_thinking_mode_disabled_reaches_generic_chat_template(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": "generic-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["thinking"] is False
+        assert captured["kwargs"]["enable_thinking"] is False
+        assert captured["kwargs"]["thinking_mode"] == "disabled"
+        assert result.request["chat_template_kwargs"]["thinking_mode"] == "disabled"
+        assert "chat_template_kwargs" not in request
+
+    def test_default_thinking_mode_does_not_override_request_kwargs(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert "thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
+    def test_default_thinking_mode_does_not_override_pythonized_args(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": True},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert "thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
+    def test_null_root_thinking_does_not_suppress_deployment_default(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": None,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["enable_thinking"] is False
+
+    def test_reasoning_effort_takes_precedence_over_deployment_default(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high",
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["reasoning_effort"] == "high"
+        assert "thinking" not in captured["kwargs"]
+        assert "enable_thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
@@ -2290,6 +2690,118 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
+
+    # Only the explicit case is covered: with no `thinking` key we deliberately
+    # do NOT materialize one, so the K3 chat template applies its own default
+    # (measured: an unset `thinking` renders byte-identically to `thinking=True`).
+    # The parser reaches the same conclusion independently via
+    # `_THINKING_BY_DEFAULT`, so template and parser agree without our help.
+    @pytest.mark.parametrize(
+        ("chat_template_kwargs", "expected"),
+        [
+            ({"thinking": False}, False),
+        ],
+    )
+    def test_kimi_k3_template_and_parser_share_thinking_state(
+        self,
+        monkeypatch,
+        chat_template_kwargs,
+        expected,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        def fake_create_parsers(*args, force_reasoning=False, **kwargs):
+            return None, types.SimpleNamespace(force_reasoning=force_reasoning)
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "create_parsers",
+            fake_create_parsers,
+        )
+
+        result = preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": chat_template_kwargs,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="kimi_k3",
+        )
+
+        assert captured["kwargs"]["thinking"] is expected
+        assert result.request["chat_template_kwargs"]["thinking"] is expected
+        assert result.force_reasoning is expected
+        assert result.reasoning_parser.force_reasoning is expected
+
+    @pytest.mark.multimodal
+    def test_kimi_k3_normalizes_template_media_but_forwards_original_url(
+        self,
+        monkeypatch,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                return [1, 2, 3]
+
+        def normalize_for_template(message, *args, **kwargs):
+            normalized = copy.deepcopy(message)
+            for part in normalized.get("content", []):
+                if part.get("type") == "image_url":
+                    part["type"] = "image"
+            return normalized
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "process_content_for_template_format",
+            normalize_for_template,
+        )
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/k3.png"},
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        dynamo_preproc = _build_dynamo_preproc(
+            result.request,
+            result.prompt_token_ids,
+            request["model"],
+            None,
+        )
+
+        assert captured["messages"][0]["content"][1]["type"] == "image"
+        assert request["messages"][0]["content"][1]["type"] == "image_url"
+        assert dynamo_preproc["multi_modal_data"] == {
+            "image_url": [{"Url": "https://example.com/k3.png"}]
+        }
 
 
 # ---------------------------------------------------------------------------

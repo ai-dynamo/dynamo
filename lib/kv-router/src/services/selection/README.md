@@ -1,7 +1,7 @@
 # Dynamo Selection Service
 
 The public deployment and HTTP API contract is documented in
-[Standalone Selection Service](../../../../../docs/components/router/standalone-selection.md).
+[Standalone Selection Service](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md).
 
 This module composes the existing worker catalog, KV indexer, scheduler queue,
 and active-sequence accounting. Keep these implementation invariants explicit:

@@ -109,9 +109,7 @@ async def fetch_engine_capacity(engine_base_url: str) -> Optional[EngineCapacity
             response.raise_for_status()
             info = response.json()
     except Exception as exc:  # noqa: BLE001 - capacity is best-effort
-        LOGGER.warning(
-            "Could not fetch engine capacity from /get_server_info: %s", exc
-        )
+        LOGGER.warning("Could not fetch engine capacity from /get_server_info: %s", exc)
         return None
 
     if not isinstance(info, dict):

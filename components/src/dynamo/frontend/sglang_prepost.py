@@ -28,7 +28,8 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from .utils import random_call_id
+from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ _THINKING_BY_DEFAULT = {
     "nemotron_3",
     "interns1",
     "kimi_k2",
+    "kimi_k3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
@@ -107,6 +109,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
+    "kimi-k3": "kimi_k3",
 }
 
 
@@ -126,9 +129,9 @@ def resolve_request_force_reasoning(
     Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
     combined with template_manager.force_reasoning:
 
-      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
-        ``thinking=False`` for ``kimi_k2``) disables it.
+        ``thinking=False`` for Kimi) disables it.
       * MiniMax-M3 defaults to adaptive, but SGLang still enables the
         reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
         explicitly ``"disabled"``.
@@ -157,7 +160,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
-            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"kimi_k2", "kimi_k3"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is not False
 
@@ -410,6 +415,7 @@ def _flatten_message_content(content: Any) -> Any:
 
 def _normalize_openai_thinking_template_kwargs(
     request: dict[str, Any],
+    default_thinking_mode: str | None = None,
 ) -> dict[str, Any]:
     request = copy.copy(request)
     chat_template_kwargs = dict(
@@ -434,8 +440,17 @@ def _normalize_openai_thinking_template_kwargs(
         elif thinking_type == "disabled":
             setdefault_reasoning(False)
 
-    if request.get("reasoning_effort") == "none":
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = reasoning_effort
+    if reasoning_effort == "none":
         setdefault_reasoning(False)
+
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=request.get("thinking") is not None,
+    )
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -610,6 +625,46 @@ def build_tool_call_guided_decoding(
     return None
 
 
+def build_response_format_guided_decoding(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build Dynamo guided decoding from OpenAI chat response_format."""
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return None
+
+    response_format_type = response_format.get("type")
+    if response_format_type == "json_object":
+        return {"json": {"type": "object"}}
+    if response_format_type == "structural_tag":
+        return {"structural_tag": response_format}
+    if response_format_type != "json_schema":
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        schema = json_schema.get("schema")
+    else:
+        schema = response_format.get("schema")
+    if schema is None:
+        raise PreprocessError(
+            "schema is required for json_schema response format request."
+        )
+    if not isinstance(schema, dict):
+        raise PreprocessError(
+            "schema must be a JSON object for json_schema response format request."
+        )
+    if not isinstance(json_schema, dict):
+        # This only the effective schema mutation from SGLang's
+        # ChatCompletionRequest.set_json_schema(), not the full response_format
+        # normalization into {"json_schema": {"name", "schema", "strict"}}.
+        schema = copy.deepcopy(schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("strict", None)
+    return {"json": schema}
+
+
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     """Flatten ``apply_chat_template`` output to ``list[int]``.
 
@@ -663,6 +718,7 @@ def preprocess_chat_request(
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -673,7 +729,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _normalize_openai_thinking_template_kwargs(request)
+    request = _normalize_openai_thinking_template_kwargs(request, default_thinking_mode)
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -757,11 +813,20 @@ def preprocess_chat_request(
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
     )
-    guided_decoding = build_tool_call_guided_decoding(
+    response_format_guided_decoding = build_response_format_guided_decoding(request)
+    tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    if (
+        response_format_guided_decoding is not None
+        and tool_call_guided_decoding is not None
+    ):
+        logger.warning(
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+        )
+    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
@@ -901,9 +966,9 @@ class SglangStreamingPostProcessor:
             tool_call_parser_name
         )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
-        # Preserve special tokens when a tool call parser is active so
-        # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
-        self._skip_special_tokens = tool_call_parser is None
+        # Preserve special tokens when a parser is active so tool-call and
+        # reasoning delimiters remain visible during incremental decoding.
+        self._skip_special_tokens = self._fast_plain_text
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading

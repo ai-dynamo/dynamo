@@ -1977,6 +1977,7 @@ mod tests {
                         tokenize_latency: None,
                         detokenize_total_latency: None,
                         detokenize_count: None,
+                        ..Default::default()
                     }),
                 }),
                 id: None,

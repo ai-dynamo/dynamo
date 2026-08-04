@@ -232,6 +232,18 @@ pub mod frontend_service {
     /// pooling-model latencies (sub-second) without sacrificing resolution.
     pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
 
+    /// Number of `image_url` content parts per request (histogram)
+    pub const IMAGES_PER_REQUEST: &str = "images_per_request";
+
+    /// Number of `video_url` content parts per request (histogram)
+    pub const VIDEOS_PER_REQUEST: &str = "videos_per_request";
+
+    /// Number of `audio_url` content parts per request (histogram)
+    pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
+
+    /// Calculated image-placeholder token count per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):
@@ -462,6 +474,9 @@ pub mod work_handler {
         /// Generation error
         pub const GENERATE: &str = "generate";
 
+        /// Response serialization error
+        pub const SERIALIZATION: &str = "serialization";
+
         /// Response publishing error
         pub const PUBLISH_RESPONSE: &str = "publish_response";
 
@@ -581,11 +596,11 @@ pub mod routing_overhead {
     /// Time spent querying the shared KV cache (Mooncake)
     pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
 
-    /// Total shared cache query errors (timeouts, HTTP failures)
+    /// Total shared cache failures (query and subscriber failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (component-scoped aggregate histograms + counters)
 ///
 /// These constants are the suffix portions of full metric names, combined with
 /// [`name_prefix::COMPONENT`] to form the complete name, e.g.
@@ -593,6 +608,9 @@ pub mod routing_overhead {
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod router {
+    /// Total number of requests admitted by the router scheduler
+    pub const REQUESTS_STARTED_TOTAL: &str = "router_requests_started_total";
+
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
@@ -603,6 +621,9 @@ pub mod router {
     /// Total number of remote indexer routing-decision writes that failed
     pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
         "router_remote_indexer_write_failures_total";
+
+    /// Number of workers expected to publish KV events but missing query endpoints
+    pub const KV_EVENT_SOURCE_MISMATCH_WORKERS: &str = "router_kv_event_source_mismatch_workers";
 
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
@@ -646,10 +667,14 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// L1 tokenizer cache hits (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    /// L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
-    /// L1 tokenizer cache misses (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
+    /// Tokens returned from the L1 tokenizer prefix cache (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_CACHED_TOKENS_TOTAL: &str = "tokenizer_cache_cached_tokens_total";
+    /// Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL: &str = "tokenizer_cache_uncached_tokens_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average

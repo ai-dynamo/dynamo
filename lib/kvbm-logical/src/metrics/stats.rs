@@ -38,9 +38,11 @@ pub struct StatsSnapshot {
     pub allocation_rate: f64,
     /// Evictions per second.
     pub eviction_rate: f64,
-    /// Ratio of blocks returned to hashes requested in match_blocks.
+    /// Ratio of block hit occurrences returned to input hash occurrences
+    /// requested in match_blocks and match_blocks_scattered.
     pub match_hit_rate: f64,
-    /// Ratio of blocks returned to hashes requested in scan_matches.
+    /// Ratio of distinct matching hashes returned to input hash occurrences
+    /// requested in scan_matches.
     pub scan_hit_rate: f64,
     /// Rate of change of allocation_rate (d(alloc_rate)/dt).
     pub allocation_gradient: f64,

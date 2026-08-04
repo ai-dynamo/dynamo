@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import json
 import logging
@@ -32,6 +31,7 @@ from dynamo.common.snapshot.restore_context import (
 )
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
+    EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
@@ -39,8 +39,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
-    MediaDecoder,
-    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -59,12 +57,14 @@ from .capacity import (
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
 )
-from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
+from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -110,54 +110,6 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
     return config.model
-
-
-def build_headless_namespace(config: Config) -> argparse.Namespace:
-    """Build an argparse Namespace from engine_args for vLLM's run_headless().
-
-    run_headless() expects the raw CLI namespace. We reconstruct it from
-    the already-parsed AsyncEngineArgs so parse_args() doesn't need to
-    leak transport details.
-    """
-    ns = argparse.Namespace(**vars(config.engine_args))
-    # run_headless() reads api_server_count; default to 0 (no API server)
-    if not hasattr(ns, "api_server_count"):
-        ns.api_server_count = 0
-    return ns
-
-
-def run_dynamo_headless(config: Config) -> None:
-    """Run in headless mode for multi-node TP/PP.
-
-    Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
-    no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
-    """
-    # Propagate worker_cls for custom load formats so headless workers use
-    # the same model loader settings as the leader node.
-    if config.engine_args.load_format == "gms":
-        config.engine_args.worker_cls = (
-            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
-        )
-
-        if config.gms_shadow_mode:
-            from gpu_memory_service.integrations.vllm.utils import (
-                configure_gms_lock_mode,
-                configure_mx_ports,
-            )
-
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-            configure_gms_lock_mode(config.engine_args)
-            configure_mx_ports(config.engine_args)
-
-    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
-    # Dynamo does not set a custom worker class here.
-
-    # Keep the upstream CLI import local so tests that only exercise
-    # build_headless_namespace() do not pull in vLLM's full CLI import graph.
-    from vllm.entrypoints.cli.serve import run_headless
-
-    args = build_headless_namespace(config)
-    run_headless(args)
 
 
 async def worker(argv: list[str] | None = None) -> None:
@@ -262,6 +214,20 @@ def setup_metrics_collection(
         Additional labels can be provided via inject_labels parameter.
     """
     metrics_model_name = get_metrics_model_name(config)
+
+    # The DynamoMultimodalEmbeddingCacheConnector (scheduler side, EngineCore
+    # process) publishes its cache metrics through the multiprocess .db files.
+    # Forward that family only when the connector is configured — the
+    # encode-routing path exposes the same metric names in-process via
+    # register_embedding_cache_metrics instead.
+    engine_metric_prefixes = ["vllm:", "lmcache:"]
+    ec_config = getattr(config.engine_args, "ec_transfer_config", None)
+    if (
+        getattr(ec_config, "ec_connector", None)
+        == "DynamoMultimodalEmbeddingCacheConnector"
+    ):
+        engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
         # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
@@ -291,7 +257,7 @@ def setup_metrics_collection(
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=engine_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -321,7 +287,7 @@ def setup_metrics_collection(
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=engine_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -337,7 +303,7 @@ def setup_metrics_collection(
             register_engine_metrics_callback(
                 endpoint=generate_endpoint,
                 registry=REGISTRY,
-                metric_prefix_filters=["vllm:", "lmcache:"],
+                metric_prefix_filters=engine_metric_prefixes,
                 namespace_name=config.namespace,
                 component_name=config.component,
                 endpoint_name=config.endpoint,
@@ -415,11 +381,6 @@ def setup_kv_event_publisher(
     if not config.engine_args.enable_prefix_caching:
         return None
 
-    # Skip KV event publishing for decode workers
-    if config.disaggregation_mode == DisaggregationMode.DECODE:
-        logger.info("Skipping KV event publisher setup for decode worker")
-        return None
-
     if config.engine_args.kv_events_config is None:
         return None
 
@@ -467,6 +428,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            kv_state_endpoint=config.kv_state_endpoint,
         )
         kv_publishers.append(kv_publisher)
 
@@ -478,6 +440,7 @@ def setup_kv_event_publisher(
 
 
 def setup_fpm_relay(
+    config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
 ) -> Optional[list]:
@@ -492,7 +455,7 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    if not (envs.is_set("DYN_FORWARDPASS_METRIC_PORT") or config.fpm_trace):
         return None
 
     try:
@@ -599,31 +562,15 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
-    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
-    if (
-        not config.route_to_encoder
-        and config.multimodal_embedding_cache_capacity_gb > 0
-    ):
-        from vllm.config import ECTransferConfig
-
-        logger.info(
-            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
-            "(capacity=%.2f GB)",
-            config.multimodal_embedding_cache_capacity_gb,
-        )
-        instance_id = 0
-        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
-        engine_args.ec_transfer_config = ECTransferConfig(
-            engine_id=engine_id,
-            ec_role="ec_both",
-            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
-            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
-            ec_connector_extra_config={
-                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
-            },
-        )
-        logger.info("Configured ec_both with engine_id=%s", engine_id)
+    # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
+    configure_multimodal_embedding_cache(
+        engine_args,
+        route_to_encoder=config.route_to_encoder,
+        capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+        namespace=config.namespace,
+        component=config.component,
+        model_name=get_metrics_model_name(config),
+    )
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
@@ -759,11 +706,9 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-    runtime_config.enable_local_indexer = (
-        config.enable_local_indexer
-        and config.disaggregation_mode != DisaggregationMode.DECODE
-    )
+    runtime_config.enable_local_indexer = config.enable_local_indexer
+    runtime_config.kv_event_publishing_enabled = config.use_kv_events
+    runtime_config.kv_state_endpoint = config.kv_state_endpoint
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
@@ -771,6 +716,11 @@ async def register_vllm_model(
     if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+        if config.dyn_default_thinking_mode is not None:
+            runtime_config.set_engine_specific(
+                "default_thinking_mode",
+                json.dumps(config.dyn_default_thinking_mode),
+            )
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
@@ -802,18 +752,9 @@ async def register_vllm_model(
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA
-    media_decoder = None
-    media_fetcher = None
-    if config.frontend_decoding:
-        media_decoder = MediaDecoder()
-        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-        # media_decoder.enable_video({})
-
-        media_fetcher = MediaFetcher()
-        media_fetcher.timeout_ms(30000)
-        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
-        media_fetcher.allow_direct_ip(allow_internal)
-        media_fetcher.allow_direct_port(allow_internal)
+    media_decoder, media_fetcher = create_frontend_media_config(
+        config.frontend_decoding
+    )
 
     await register_model(
         model_input,
@@ -829,6 +770,7 @@ async def register_vllm_model(
         worker_type=worker_type,
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
+        model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
         # lifecycle registration; embeddings still do not.
