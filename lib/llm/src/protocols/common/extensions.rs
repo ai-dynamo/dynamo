@@ -64,8 +64,25 @@ pub struct CustomEncoderDataItem {
 
     pub placement: CustomEncoderPlacement,
 
+    /// Optional frontend-only routing-affinity hints. Backends must ignore this object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<CustomEncoderRouting>,
+
     /// Backend-owned semantic JSON. Object key order and original JSON spelling are not preserved.
     pub payload: serde_json::Value,
+}
+
+/// Untrusted hints used only to construct the frontend's routing-side prompt view.
+/// They are never forwarded as authoritative backend processor-cache identities.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEncoderRouting {
+    /// Encoder output span expected by the frontend KV router.
+    pub media_token_count: u32,
+
+    /// Caller-owned stable affinity identity, not the opaque payload spelling.
+    /// It must change whenever the resolved media or encoder output can change.
+    pub affinity_key: String,
 }
 
 /// Model-facing media semantics for an opaque custom-encoder payload.
@@ -149,6 +166,16 @@ impl CustomEncoderData {
                 placement.content_index <= content.len(),
                 "nvext.custom_encoder_data.items[{item_index}].placement.content_index is out of range"
             );
+            if let Some(routing) = item.routing.as_ref() {
+                anyhow::ensure!(
+                    routing.media_token_count > 0,
+                    "nvext.custom_encoder_data.items[{item_index}].routing.media_token_count must be greater than zero"
+                );
+                anyhow::ensure!(
+                    !routing.affinity_key.trim().is_empty(),
+                    "nvext.custom_encoder_data.items[{item_index}].routing.affinity_key must not be empty"
+                );
+            }
         }
 
         let has_standard_media = messages.iter().any(|message| {
@@ -1416,6 +1443,10 @@ mod tests {
                 "items": [{
                     "modality": "video",
                     "placement": {"message_index": 0, "content_index": 1},
+                    "routing": {
+                        "media_token_count": 300,
+                        "affinity_key": "tensor:sha256:abc123"
+                    },
                     "payload": {
                         "kind": "tensor_ref",
                         "uri": "s3://bucket/tensor.safetensors",
@@ -1456,6 +1487,7 @@ mod tests {
                         message_index: 2,
                         content_index: 1,
                     },
+                    routing: None,
                     payload: serde_json::json!("later"),
                 },
                 CustomEncoderDataItem {
@@ -1464,6 +1496,10 @@ mod tests {
                         message_index: 0,
                         content_index: 1,
                     },
+                    routing: Some(CustomEncoderRouting {
+                        media_token_count: 12,
+                        affinity_key: "tensor:sha256:earlier".to_string(),
+                    }),
                     payload: serde_json::json!("earlier"),
                 },
             ],
@@ -1504,6 +1540,7 @@ mod tests {
                     message_index: 0,
                     content_index: 0,
                 },
+                routing: None,
                 payload: serde_json::json!({}),
             }],
         };
@@ -1516,6 +1553,30 @@ mod tests {
 
         let mut data = data;
         data.items[0].modality = CustomEncoderModality::Image;
+        data.items[0].routing = Some(CustomEncoderRouting {
+            media_token_count: 0,
+            affinity_key: "tensor:sha256:abc123".to_string(),
+        });
+        let zero_count_error = data
+            .validate_chat_messages(&messages)
+            .unwrap_err()
+            .to_string();
+        assert!(zero_count_error.contains("media_token_count must be greater than zero"));
+
+        data.items[0].routing = Some(CustomEncoderRouting {
+            media_token_count: 1,
+            affinity_key: " ".to_string(),
+        });
+        let empty_key_error = data
+            .validate_chat_messages(&messages)
+            .unwrap_err()
+            .to_string();
+        assert!(empty_key_error.contains("routing.affinity_key must not be empty"));
+
+        data.items[0].routing = Some(CustomEncoderRouting {
+            media_token_count: 1,
+            affinity_key: "tensor:sha256:abc123".to_string(),
+        });
         let mixed_media_error = data
             .validate_chat_messages(&messages)
             .unwrap_err()
