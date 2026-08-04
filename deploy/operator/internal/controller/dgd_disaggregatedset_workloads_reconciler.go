@@ -27,12 +27,27 @@ import (
 )
 
 type disaggregatedSetWorkloadsReconciler struct {
-	owner   *DynamoGraphDeploymentReconciler
+	owner   disaggregatedSetWorkloadsOwner
 	rollout *dgdWorkerRolloutReconciler
 }
 
+type disaggregatedSetWorkloadsOwner interface {
+	reconcileDisaggregatedSetResources(
+		ctx context.Context,
+		dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+		restartState *dynamo.RestartState,
+		checkpointInfos map[string]*checkpoint.CheckpointInfo,
+	) (ReconcileResult, error)
+
+	getUpdatedInProgressForDisaggregatedSet(
+		ctx context.Context,
+		dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+		componentsToCheck []string,
+	) []string
+}
+
 func newDisaggregatedSetWorkloadsReconciler(
-	owner *DynamoGraphDeploymentReconciler,
+	owner disaggregatedSetWorkloadsOwner,
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
 	return &disaggregatedSetWorkloadsReconciler{

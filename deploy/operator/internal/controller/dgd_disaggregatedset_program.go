@@ -29,6 +29,7 @@ import (
 )
 
 type disaggregatedSetProgram struct {
+	owner           disaggregatedSetProgramOwner
 	sharedResources *dgdSharedResourcesReconciler
 	rollout         *dgdWorkerRolloutReconciler
 	restart         *dgdRestartReconciler
@@ -36,9 +37,17 @@ type disaggregatedSetProgram struct {
 	scalingAdapters *dgdScalingAdaptersReconciler
 }
 
+type disaggregatedSetProgramOwner interface {
+	shouldUseDisaggregatedSet(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (bool, string)
+	newComponentProgram() *componentProgram
+	restoreDisaggregatedSetServiceOwnershipToDCDs(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error
+	deleteDisaggregatedSetIfExists(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error
+}
+
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggregatedSetProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &disaggregatedSetProgram{
+		owner: r,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -72,9 +81,9 @@ func (p *disaggregatedSetProgram) Reconcile(
 		programResult.Fail(req.DGD.Generation, reason, retErr)
 	}()
 
-	useDS, fallbackReason := p.workloads.owner.shouldUseDisaggregatedSet(req.DGD)
+	useDS, fallbackReason := p.owner.shouldUseDisaggregatedSet(req.DGD)
 	if !useDS {
-		fallbackProgram := p.workloads.owner.newComponentProgram()
+		fallbackProgram := p.owner.newComponentProgram()
 		programResult, retErr = fallbackProgram.Reconcile(ctx, req)
 		if fallbackReason != "" {
 			programResult.Eventf(
@@ -88,11 +97,11 @@ func (p *disaggregatedSetProgram) Reconcile(
 			return programResult, retErr
 		}
 		setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionFalse, "FallbackToComponentProgram", fallbackReason)
-		if err := p.workloads.owner.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, req.DGD); err != nil {
+		if err := p.owner.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, req.DGD); err != nil {
 			retErr = fmt.Errorf("failed to restore DisaggregatedSet service ownership: %w", err)
 			return programResult, retErr
 		}
-		if err := p.workloads.owner.deleteDisaggregatedSetIfExists(ctx, req.DGD); err != nil {
+		if err := p.owner.deleteDisaggregatedSetIfExists(ctx, req.DGD); err != nil {
 			retErr = fmt.Errorf("failed to delete stale DisaggregatedSet: %w", err)
 			return programResult, retErr
 		}
