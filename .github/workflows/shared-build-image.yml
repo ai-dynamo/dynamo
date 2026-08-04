@@ -226,8 +226,8 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -235,6 +235,7 @@ jobs:
         id: calculate-target-tag
         shell: bash
         env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
         run: |
           TAG_BUILDER=${{ inputs.framework }}-${{ inputs.target }}
@@ -258,7 +259,6 @@ jobs:
           IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}
           TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}-test
 
-          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
           TEST_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TEST_IMAGE_TAG}"
 
@@ -313,13 +313,13 @@ jobs:
         id: extra-tags
         shell: bash
         env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           EXTRA_TAGS: ${{ inputs.extra_tags }}
           MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.mutable_image_uri }}
           EXPLICIT_CUDA_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_image_uri }}
           EXPLICIT_CUDA_MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_mutable_image_uri }}
         run: |
-          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
           if [ -n "$EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
@@ -366,9 +366,9 @@ jobs:
         if: ${{ inputs.target == 'frontend' }}
         shell: bash
         env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          ECR_HOSTNAME: ${{ vars.ECR_REGISTRY }}
           IMAGE_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
         timeout-minutes: 60
         run: |
@@ -498,9 +498,8 @@ jobs:
           build_target: ${{ (inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
@@ -606,7 +605,7 @@ jobs:
           # Match the build's sccache build-args so the extract reuses the warm
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          sccache_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_region: ${{ vars.AWS_DEFAULT_REGION }}
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}
