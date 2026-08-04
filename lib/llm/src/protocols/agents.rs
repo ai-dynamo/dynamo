@@ -62,8 +62,9 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
 
     if let Some(session_id) = header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
+            parent_session_id: header_value(headers, HEADER_DYNAMO_PARENT_SESSION_ID)
+                .filter(|parent_session_id| parent_session_id != &session_id),
             session_id,
-            parent_session_id: header_value(headers, HEADER_DYNAMO_PARENT_SESSION_ID),
             session_final,
         });
     }
@@ -79,6 +80,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
         let parent_session_id = mapping
             .parent_session_header
             .and_then(|parent_header| header_value(headers, parent_header))
+            .filter(|parent_session_id| parent_session_id != &session_id)
             .filter(|_| {
                 !mapping.infer_parent_from_session_for_child || session_id != root_session_id
             })

@@ -1078,6 +1078,23 @@ mod tests {
     }
 
     #[test]
+    fn agent_context_ignores_self_parent_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_PARENT_THREAD_ID,
+            "codex-thread".parse().unwrap(),
+        );
+
+        assert_eq!(
+            agent_context_from_headers(&headers)
+                .unwrap()
+                .parent_session_id,
+            None
+        );
+    }
+
+    #[test]
     fn codex_session_id_is_ignored_without_thread_id() {
         let mut headers = HeaderMap::new();
         headers.insert("session-id", "codex-run".parse().unwrap());
