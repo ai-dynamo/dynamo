@@ -198,6 +198,51 @@ def test_load_rejects_exception_missing_owner(tmp_path: Path):
         CodecPolicy.load(pol)
 
 
+def test_load_rejects_scalar_allow_paths(tmp_path: Path):
+    """A bare string for allow_paths must abort, not allow-list everything.
+
+    `classify` tests `abspath.startswith(p) for p in self.allow_paths`. A scalar
+    iterates per character, one of which is "/", so every absolute path matches
+    and every violation comes back "allowed" -- the gate passes any image while
+    still printing a report. One missing "- " is all it takes, which is why this
+    key is validated more strictly than the others.
+    """
+    pol = _write_policy(
+        tmp_path,
+        "deny_globs: ['**/libx264.so*']\nallow_paths: /usr/local/lib\n",
+    )
+    with pytest.raises(ValueError, match="allow_paths"):
+        CodecPolicy.load(pol)
+
+
+def test_scalar_allow_paths_would_have_allow_listed_everything():
+    """The bug the check above prevents, pinned so the reason stays visible.
+
+    Constructed directly rather than through `load`, which now rejects it.
+    """
+    policy = CodecPolicy(
+        {"deny_globs": ["**/libx264.so*"], "allow_paths": "/usr/local/lib"}
+    )
+    assert policy.classify("/opt/evil/libx264.so.164") == ("allowed", None)
+    # Spelled correctly, the same path is a violation.
+    ok = CodecPolicy(
+        {"deny_globs": ["**/libx264.so*"], "allow_paths": ["/usr/local/lib"]}
+    )
+    assert ok.classify("/opt/evil/libx264.so.164") == ("violation", None)
+
+
+def test_load_accepts_a_well_formed_allow_paths_list(tmp_path: Path):
+    """Paired positive case: the valid shape must still load and still allow."""
+    pol = _write_policy(
+        tmp_path,
+        "deny_globs: ['**/libx264.so*']\nallow_paths:\n  - /usr/local/lib\n",
+    )
+    policy = CodecPolicy.load(pol)
+    assert policy.allow_paths == ["/usr/local/lib"]
+    assert policy.classify("/usr/local/lib/libx264.so.164") == ("allowed", None)
+    assert policy.classify("/opt/evil/libx264.so.164") == ("violation", None)
+
+
 def test_wheel_renamed_codec_lib_is_denied(tmp_path: Path):
     # auditwheel hash-renamed libx264-<hash>.so vendored under a wheel .libs/ must
     # be caught by the hashed deny-glob, not just the plain soname.

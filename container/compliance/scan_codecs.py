@@ -79,6 +79,21 @@ class CodecPolicy:
             raise ValueError(
                 f"codec policy {path} requires a non-empty deny_globs list"
             )
+        # allow_paths is the key that fails OPEN, so it needs the strictest check.
+        # `classify` tests `abspath.startswith(p) for p in self.allow_paths`; a
+        # scalar string iterates per character, one of which is "/", and every
+        # absolute path starts with "/" -- so a single missing "- " turns the
+        # whole gate into a pass. Nothing downstream would report it, because
+        # every finding comes back verdict "allowed".
+        allow_paths = doc.get("allow_paths")
+        if allow_paths is not None and (
+            not isinstance(allow_paths, list)
+            or not all(isinstance(p, str) and p for p in allow_paths)
+        ):
+            raise ValueError(
+                f"codec policy {path}: allow_paths must be a list of non-empty "
+                "strings (a bare string would allow-list every path)"
+            )
         for exc in doc.get("exceptions") or []:
             if not all(exc.get(k) for k in ("glob", "reason", "owner")):
                 raise ValueError(
