@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -198,6 +199,20 @@ func dgdPowerLimit(
 	return value, exists
 }
 
+// validateDGDPowerLimitValue checks that the power-limit annotation value is a
+// positive decimal integer. The annotation is made immutable on creation, so an
+// invalid value that slips through requires a DGD delete-and-recreate to correct.
+func validateDGDPowerLimitValue(value string, fldPath *field.Path) *field.Error {
+	watts, err := strconv.Atoi(value)
+	if err != nil {
+		return field.Invalid(fldPath, value, "must be a decimal integer")
+	}
+	if watts <= 0 {
+		return field.Invalid(fldPath, value, "must be greater than zero")
+	}
+	return nil
+}
+
 func dgdDRAPath(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
@@ -214,6 +229,12 @@ func dgdDRAPath(
 	for i := range component.PodTemplate.Spec.Containers {
 		if len(component.PodTemplate.Spec.Containers[i].Resources.Claims) != 0 {
 			return containersPath.Index(i).Child("resources", "claims")
+		}
+	}
+	initContainersPath := fldPath.Child("podTemplate", "spec", "initContainers")
+	for i := range component.PodTemplate.Spec.InitContainers {
+		if len(component.PodTemplate.Spec.InitContainers[i].Resources.Claims) != 0 {
+			return initContainersPath.Index(i).Child("resources", "claims")
 		}
 	}
 	return nil

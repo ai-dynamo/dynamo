@@ -368,10 +368,13 @@ def _resolve_one_power_service(
 ) -> Service:
     """Resolve a single role's worker Service without reading the power annotation.
 
-    Role/name resolution reuses ``get_component_from_type_or_name`` for disagg
-    typed roles (including untyped components matched by explicit name). For agg
-    (single generic ``type: worker``), the fallback is scoped to this power
-    parser only — not the shared component resolver.
+    Role/name resolution delegates to ``get_component_from_type_or_name``, which
+    already handles the unique-generic-worker fallback for agg (DECODE role with
+    no typed decode component).  The except clause here covers only the case where
+    multiple generic ``type: worker`` components exist: the shared resolver returns
+    ``SubComponentNotFoundError`` in that situation (it cannot distinguish them),
+    so this function converts it to a ``DuplicateSubComponentError`` to give callers
+    an actionable diagnostic.
     """
     try:
         return get_component_from_type_or_name(

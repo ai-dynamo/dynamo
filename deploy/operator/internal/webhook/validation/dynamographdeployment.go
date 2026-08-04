@@ -268,7 +268,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		}
 
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
-		if _, hasPowerLimit := dgdPowerLimit(component); hasPowerLimit {
+		if powerLimitValue, hasPowerLimit := dgdPowerLimit(component); hasPowerLimit {
+			powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
+			if err := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath); err != nil {
+				allErrs = append(allErrs, err)
+			}
 			if draPath := dgdDRAPath(component, componentPath); draPath != nil {
 				allErrs = append(allErrs, field.Forbidden(
 					draPath,

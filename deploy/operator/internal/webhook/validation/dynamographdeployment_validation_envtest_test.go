@@ -570,6 +570,55 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 power annotation with zero value is rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "0", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "0": must be greater than zero`,
+			},
+		},
+		{
+			name: "v1beta1 power annotation with negative value is rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "-300", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "-300": must be greater than zero`,
+			},
+		},
+		{
+			name: "v1beta1 power annotation with non-integer value is rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300W", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "300W": must be a decimal integer`,
+			},
+		},
+		{
+			name: "v1beta1 power annotation with init-container DRA claim is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				worker := betaWorkerComponent(dgd)
+				worker.PodTemplate.Spec.InitContainers = []corev1.Container{
+					{
+						Name:  "init-gpu",
+						Image: "nvcr.io/nvidia/cuda:12.0-base",
+						Resources: corev1.ResourceRequirements{
+							Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+						},
+					},
+				}
+				worker.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{
+					{Name: "gpu", ResourceClaimTemplateName: k8sptr.To("gpu-template")},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec.initContainers[0].resources.claims: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
+			},
+		},
+		{
 			name: "v1beta1 power annotation cannot be added to a DRA component",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
