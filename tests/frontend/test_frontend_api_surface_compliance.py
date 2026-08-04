@@ -579,6 +579,7 @@ def test_frontend_api_surface_compliance(
         _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
         _wait_for_frontend_healthy(frontend_port)
         codex_subagent_trace_start = _request_trace_record_count(request_trace_path)
+        write_codex_config(codex_home, frontend_port, enable_multi_agent=True)
         _run_codex_subagent_smoke(
             _codex_cli,
             _node_bin,
