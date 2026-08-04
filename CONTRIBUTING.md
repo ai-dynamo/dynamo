@@ -33,7 +33,7 @@ Or view the source: [`docs/contribution-guide.md`](docs/contribution-guide.md)
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
 - [Design Proposals](https://github.com/ai-dynamo/enhancements)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf)
+- [CNCF Slack (`#ai-dynamo`)](https://slack.cncf.io/)
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Wed 10:30 AM PT) development community meetings
