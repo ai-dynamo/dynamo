@@ -26,6 +26,7 @@ use super::{
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
     discovery::{Discovery, DiscoverySpec},
+    pipeline::network::RequestPlanePayloadCodec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
@@ -1148,6 +1149,7 @@ impl ModelManager {
             endpoint: router_endpoint_id.name.clone(),
             transport,
             device_type: None,
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
         discovery.register(discovery_spec).await?;

@@ -702,6 +702,7 @@ mod tests {
             instance_id,
             transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             device_type: None,
+            request_plane_codec: None,
         })
     }
 
@@ -1008,6 +1009,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             device_type: None,
+            request_plane_codec: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
@@ -1016,6 +1018,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             device_type: None,
+            request_plane_codec: None,
             endpoint: "ep2".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
@@ -1024,6 +1027,7 @@ mod tests {
         let spec3 = DiscoverySpec::Endpoint {
             namespace: "ns2".to_string(),
             device_type: None,
+            request_plane_codec: None,
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
@@ -1072,6 +1076,7 @@ mod tests {
 
             let spec = DiscoverySpec::Endpoint {
                 device_type: None,
+                request_plane_codec: None,
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
