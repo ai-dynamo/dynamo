@@ -22,17 +22,15 @@ def _check_cuda(result, operation: str) -> None:
     if result == cuda.CUresult.CUDA_SUCCESS:
         return
 
-    detail = str(result)
-    try:
-        error_result, error_string = cuda.cuGetErrorString(result)
-        if error_result == cuda.CUresult.CUDA_SUCCESS and error_string:
-            detail = (
-                error_string.decode()
-                if isinstance(error_string, bytes)
-                else str(error_string)
-            )
-    except Exception:
-        pass
+    error_result, error_string = cuda.cuGetErrorString(result)
+    if error_result == cuda.CUresult.CUDA_SUCCESS and error_string:
+        detail = (
+            error_string.decode()
+            if isinstance(error_string, bytes)
+            else str(error_string)
+        )
+    else:
+        detail = f"{result} (cuGetErrorString failed: {error_result})"
     raise RuntimeError(f"CUDA driver call {operation} failed: {detail}")
 
 

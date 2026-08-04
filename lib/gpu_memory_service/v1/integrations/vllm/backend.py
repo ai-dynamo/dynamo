@@ -61,8 +61,6 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         )
         self._allocator_failure: Exception | None = None
         self._allocator_failure_lock = threading.Lock()
-        if _allocator_ext is None:
-            raise RuntimeError("GPU Memory Service allocator extension is not built")
         _allocator_ext.init_module(self._malloc, self._free)
         self._pluggable_allocator = torch.cuda.CUDAPluggableAllocator(
             _allocator_ext.__file__,

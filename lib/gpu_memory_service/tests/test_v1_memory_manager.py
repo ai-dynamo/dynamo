@@ -37,7 +37,26 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
             servers[domain] = stack.enter_context(server)
             threads[domain] = thread
 
-        monkeypatch.setattr(device_identity, "get_device_uuid", lambda device: "GPU-0")
+        identity_events = []
+        physical_uuid = ["GPU-0"]
+        cached_uuid = [None]
+
+        def invalidate_device_uuid_cache():
+            identity_events.append("invalidate")
+            cached_uuid[0] = None
+
+        def get_device_uuid(device):
+            identity_events.append("lookup")
+            if cached_uuid[0] is None:
+                cached_uuid[0] = physical_uuid[0]
+            return cached_uuid[0]
+
+        monkeypatch.setattr(
+            device_identity,
+            "invalidate_device_uuid_cache",
+            invalidate_device_uuid_cache,
+        )
+        monkeypatch.setattr(device_identity, "get_device_uuid", get_device_uuid)
         weights = GMSClientMemoryManager(paths["weights"], vmms["weights"], 0)
         kv_cache = GMSClientMemoryManager(paths["kv_cache"], vmms["kv_cache"], 0)
         weights.connect(RequestedLockType.RW)
@@ -80,9 +99,13 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
         assert vmms["kv_cache"].server_handles.isdisjoint(old_kv_handles)
         assert vmms["weights"].access == {weights_va: GrantedLockType.RO}
         assert vmms["kv_cache"].access == {kv_va: GrantedLockType.RW}
+        assert identity_events == ["invalidate", "lookup"] * 4
 
         weights.unmap_all_vas()
         weights.disconnect()
+        physical_uuid[0] = "GPU-1"
+        with pytest.raises(RuntimeError, match="sidecar is on another physical GPU"):
+            weights.connect(RequestedLockType.RO)
         kv_cache.close()
         for server in servers.values():
             server.shutdown()

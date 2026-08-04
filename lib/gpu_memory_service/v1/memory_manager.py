@@ -78,12 +78,14 @@ class GMSClientMemoryManager:
             if self._session is not None:
                 raise RuntimeError("GMS memory manager is already connected")
             try:
+                device_identity.invalidate_device_uuid_cache()
+                device_uuid = device_identity.get_device_uuid(self._device)
                 session = self._session_factory(
                     self._socket_path,
                     lock_type,
                     self._identity,
                 )
-                if session.identity[1] != device_identity.get_device_uuid(self._device):
+                if session.identity[1] != device_uuid:
                     session.close()
                     raise RuntimeError("GMS sidecar is on another physical GPU")
                 if self._identity is None:
