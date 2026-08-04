@@ -12193,12 +12193,12 @@ spec:
                           description: |-
                             forceScalingGroup opts a single-node component into rendering as a
                             PodCliqueScalingGroup with one single-pod PodClique per replica.
-                            Scaling changes the scaling-group replica count; the first
-                            `minAvailable` replicas share the base PodGang, and replicas beyond
-                            `minAvailable` are gang-scheduled independently in their own
-                            PodGangs (set `minAvailable: 1` for fully independent replicas).
-                            `false` or omitted means automatic selection (multi-node and
-                            inter-pod GMS components use a scaling group, other single-node
+                            Scaling changes the scaling-group replica count. The first
+                            `minAvailable` replicas join the deployment's base PodGang together
+                            with its other base workloads; each replica beyond `minAvailable`
+                            gets its own PodGang, gang-scheduled separately from the rest of the
+                            deployment. `false` or omitted means automatic selection (multi-node
+                            and inter-pod GMS components use a scaling group, other single-node
                             components a standalone PodClique), not "force PodClique".
                             Immutable after creation.
                           type: boolean
@@ -12225,8 +12225,10 @@ spec:
                   type: boolean
                 minAvailable:
                   description: |-
-                    minAvailable maps to Grove PodClique minAvailable for single-node and
-                    Grove PodCliqueScalingGroup minAvailable for multi-node components.
+                    minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
+                    components rendered as a scaling group (multi-node, inter-pod GMS, or
+                    `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove
+                    PodClique minAvailable for all other single-node components.
                     This field determines 1) the minimum number of replicas guaranteed to be
                     gang-scheduled, and 2) when violating minAvailable replicas triggers gang
                     termination.

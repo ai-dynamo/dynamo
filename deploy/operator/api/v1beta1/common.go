@@ -168,12 +168,12 @@ const (
 type GroveSpec struct {
 	// forceScalingGroup opts a single-node component into rendering as a
 	// PodCliqueScalingGroup with one single-pod PodClique per replica.
-	// Scaling changes the scaling-group replica count; the first
-	// `minAvailable` replicas share the base PodGang, and replicas beyond
-	// `minAvailable` are gang-scheduled independently in their own
-	// PodGangs (set `minAvailable: 1` for fully independent replicas).
-	// `false` or omitted means automatic selection (multi-node and
-	// inter-pod GMS components use a scaling group, other single-node
+	// Scaling changes the scaling-group replica count. The first
+	// `minAvailable` replicas join the deployment's base PodGang together
+	// with its other base workloads; each replica beyond `minAvailable`
+	// gets its own PodGang, gang-scheduled separately from the rest of the
+	// deployment. `false` or omitted means automatic selection (multi-node
+	// and inter-pod GMS components use a scaling group, other single-node
 	// components a standalone PodClique), not "force PodClique".
 	// Immutable after creation.
 	// +optional
