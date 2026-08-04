@@ -1479,6 +1479,7 @@ func TestGenerateComponentContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("generate the component context")
 			ctx := generateComponentContext(
 				betaComponent(t, tt.component),
 				tt.parentGraphDeploymentName,
@@ -1487,6 +1488,7 @@ func TestGenerateComponentContext(t *testing.T) {
 				DiscoveryContext{Backend: tt.discoveryBackend, Mode: configv1alpha1.KubeDiscoveryModePod},
 			)
 
+			t.Log("verify the resolved context")
 			assert.Equal(t, tt.expectedDynamoNamespace, ctx.DynamoNamespace,
 				"DynamoNamespace should be computed from k8s namespace + DGD name")
 			assert.Equal(t, tt.expectedComponentType, ctx.ComponentType)

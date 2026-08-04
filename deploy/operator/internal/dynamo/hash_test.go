@@ -30,8 +30,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const testRuntimeVersion15 = "1.5.0"
-
 func baseDGD(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) *v1alpha1.DynamoGraphDeployment {
 	return &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -93,21 +91,21 @@ func TestComputeLegacyAlphaDGDWorkersSpecHash_MatchesV1Alpha1Hash(t *testing.T) 
 }
 
 func TestComputeLegacyAlphaDGDWorkersSpecHash_IgnoresRuntimeProfile(t *testing.T) {
-	t.Log("construct a legacy worker with an enabled runtime profile")
+	t.Log("construct a legacy worker with a disabled runtime profile")
 	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: commonconsts.ComponentTypeWorker,
 			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 				MainContainer: &corev1.Container{Image: "registry.example/runtime:custom"},
 			},
-			RuntimeVersionOverride: "1.4.0",
+			RuntimeVersionOverride: "1.3.0",
 		},
 	})
 
-	t.Log("compute the frozen alpha hash before and after an equivalent profile change")
+	t.Log("compute the frozen alpha hash before and after enabling the runtime profile")
 	baseHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(betaDGD(t, alpha))
 	assert.NoError(t, err)
-	alpha.Spec.Services["worker"].RuntimeVersionOverride = testRuntimeVersion15
+	alpha.Spec.Services["worker"].RuntimeVersionOverride = "1.4.0"
 	changedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(betaDGD(t, alpha))
 	assert.NoError(t, err)
 
@@ -337,6 +335,8 @@ func TestComputeBetaDGDWorkersSpecHash_KeepsPreGateRuntimeProfileEmpty(t *testin
 }
 
 func TestComputeBetaDGDWorkersSpecHash_UsesCanonicalResolvedRuntimeProfile(t *testing.T) {
+	const runtimeVersion = "1.5.0"
+
 	t.Log("compute the profile hash from a semantic image tag")
 	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -353,7 +353,7 @@ func TestComputeBetaDGDWorkersSpecHash_UsesCanonicalResolvedRuntimeProfile(t *te
 
 	t.Log("declare the equivalent compatibility version explicitly")
 	explicit := base.DeepCopy()
-	explicit.Spec.Components[0].RuntimeVersionOverride = testRuntimeVersion15
+	explicit.Spec.Components[0].RuntimeVersionOverride = runtimeVersion
 
 	t.Log("verify equivalent resolved profiles hash identically")
 	assert.Equal(t, implicitHash, mustComputeBetaDGDWorkersSpecHash(t, explicit))

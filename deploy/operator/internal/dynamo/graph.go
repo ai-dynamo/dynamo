@@ -1813,6 +1813,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
+			RuntimeProfile:                 parentContext.RuntimeProfile,
 		}
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
