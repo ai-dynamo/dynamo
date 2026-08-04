@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Regression for DYN-3741 / NVBug 6555989: a right-trim (`-}}`) on the
-# silent validateTerminationGracePeriod include ate the newline before
-# `apiVersion`, gluing it onto the SPDX comment:
+# Regression: right-trim (`-}}`) on silent validateTerminationGracePeriod
+# include ate the newline before `apiVersion`, gluing it onto the SPDX
+# comment:
 #
 #   # SPDX-License-Identifier: Apache-2.0apiVersion: apps/v1
 #
