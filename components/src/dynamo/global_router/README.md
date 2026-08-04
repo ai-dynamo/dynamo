@@ -207,10 +207,12 @@ The default pool selection uses a 2D grid lookup. Each dimension is divided into
 
 **Decode Pool Selection** (disagg mode, based on request token count and ITL target):
 
-The handler currently passes `len(request["token_ids"])` into the strategy's
-`context_length` dimension. It does not add subsequently generated tokens. The
-bucket calculation otherwise uses `context_length_*` and `itl_target` with
-`decode_pool_mapping`.
+Valid `PreprocessedRequest` payloads require `token_ids`. The handler passes the
+length of that list into the strategy's `context_length` dimension and does not
+add subsequently generated tokens. Its `request.get("token_ids", [])` fallback
+only protects malformed direct calls; a missing field routes those calls with a
+request token count of `0`. The bucket calculation otherwise uses
+`context_length_*` and `itl_target` with `decode_pool_mapping`.
 
 **Agg Pool Selection** (agg mode, based on TTFT and ITL targets, with optional ISL):
 

@@ -208,12 +208,14 @@ request = {
 stream = await client.direct(request, worker_id)
 try:
     first = await anext(stream)
-    if first.get("finish_reason") == "error":
-        raise RuntimeError(f"Worker returned an error: {first}")
-    print(first)
+    if first.is_error():
+        raise RuntimeError(f"Worker returned an error: {first.comments()}")
+    print(first.data())
     await router.mark_prefill_complete("req-123")
     async for response in stream:
-        print(response)
+        if response.is_error():
+            raise RuntimeError(f"Worker returned an error: {response.comments()}")
+        print(response.data())
 finally:
     await router.free("req-123")
 ```

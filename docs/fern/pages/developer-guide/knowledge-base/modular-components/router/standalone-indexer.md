@@ -104,7 +104,8 @@ The service is exposed through the Python bindings package and launched with `py
 cd lib/bindings/python && VIRTUAL_ENV=../../../.venv ../../../.venv/bin/maturin develop --uv --features kv-indexer
 ```
 
-After installation, launch the service with `python -m dynamo.indexer`.
+After installation, launch the service from `lib/bindings/python` with
+`../../../.venv/bin/python -m dynamo.indexer`.
 
 ### Standalone build with metrics
 
@@ -483,7 +484,11 @@ If no `replay_endpoint` is configured, gaps are logged as warnings but not recov
 
 Deregistration removes the listener's sequence watermark. Re-registering the same worker and
 DP rank therefore starts with a fresh watermark; it does not continue incremental replay from
-the previous listener's `last_seq`.
+the previous listener's `last_seq`. If the first live batch starts above sequence `0`, a configured
+`replay_endpoint` triggers replay from sequence `0` before that live batch is applied. This only
+recovers history still retained by the engine. Without a replay endpoint, or when the requested
+range is no longer retained, restart with a healthy indexer in `--peers` to recover its startup
+snapshot, or perform another full resynchronization before relying on the rebuilt worker state.
 
 ## Limitations
 

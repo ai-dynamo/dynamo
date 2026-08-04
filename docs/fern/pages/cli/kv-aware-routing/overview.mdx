@@ -50,7 +50,7 @@ The vLLM and SGLang presets start two workers and require 2 GPUs. The TensorRT-L
 
 ## Disaggregated serving with KV routing
 
-The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 GPUs. The TensorRT-LLM preset starts 1 prefill and 1 decode worker and requires 2 GPUs. The frontend runs in KV routing mode and automatically detects the typed prefill service to activate an internal prefill router.
+The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 GPUs. The TensorRT-LLM preset starts 1 prefill and 1 decode worker and requires 2 GPUs. The frontend runs in KV routing mode and activates its internal prefill router after discovering compatible typed prefill and decode services for the same model and namespace.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">
