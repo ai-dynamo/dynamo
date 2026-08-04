@@ -39,6 +39,8 @@ class FakeVMM(VMMDevice):
         self.reservations: dict[int, int] = {}
         self.mapped: dict[int, tuple[int, int]] = {}
         self.access: dict[int, object] = {}
+        self.fail_reserve = False
+        self.fail_access = False
 
     def ensure_initialized(self):
         pass
@@ -78,6 +80,8 @@ class FakeVMM(VMMDevice):
         return handle
 
     def address_reserve(self, size, granularity):
+        if self.fail_reserve:
+            raise RuntimeError("reserve failed")
         va = next(self._vas)
         self.reservations[va] = size
         return va
@@ -97,6 +101,8 @@ class FakeVMM(VMMDevice):
         self.access.pop(va, None)
 
     def set_access(self, va, size, device, access):
+        if self.fail_access:
+            raise RuntimeError("access failed")
         if self.mapped[va][0] != size:
             raise AssertionError("access size mismatch")
         self.access[va] = access

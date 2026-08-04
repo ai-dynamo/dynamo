@@ -16,6 +16,9 @@ from typing import TYPE_CHECKING, Iterator, Tuple
 
 import torch
 from gpu_memory_service.client.torch.tensor import GMSTensorSpec, TensorMetadata
+from gpu_memory_service.core.client.torch.storage_rebinding import (
+    clone_storage_spans_and_rebind_tensors,
+)
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
@@ -253,52 +256,29 @@ def rebind_nonparameter_tensors(
     not freed before the layout is published.
     """
     mappings = gms_client_memory_manager.mappings
-    rebound_bytes = 0
-    for name, tensor, tensor_type in list(_iter_module_tensors(model)):
-        if tensor_type == "parameter":
-            continue
-        ptr = int(tensor.data_ptr())
-        if not any(
-            va <= ptr < va + mapping.aligned_size for va, mapping in mappings.items()
+    private_tensors = []
+    for _name, tensor, tensor_type in _iter_module_tensors(model):
+        if tensor_type != "parameter" and any(
+            va <= int(tensor.data_ptr()) < va + mapping.aligned_size
+            for va, mapping in mappings.items()
         ):
-            # Allocated outside the GMS pool; already private.
-            continue
+            private_tensors.append(tensor)
 
-        mod, attr = _resolve_module_attr(model, name)
-        if (
-            tensor_type == "buffer"
-            and hasattr(mod, "_buffers")
-            and attr in mod._buffers
-        ):
-            mod._buffers[attr] = tensor.detach().clone()
-        elif attr.isdigit() and not isinstance(mod, torch.nn.Module):
-            # Element of a tensor list/tuple attribute.
-            if isinstance(mod, list):
-                mod[int(attr)] = tensor.detach().clone()
-            elif isinstance(mod, tuple):
-                # Tuples are immutable: rebuild the tuple on its owner.
-                container_name, _ = name.rsplit(".", 1)
-                owner, container_attr = _resolve_module_attr(model, container_name)
-                if isinstance(getattr(type(owner), container_attr, None), property):
-                    # Read-only derived attribute; the underlying tensors
-                    # are iterated (and rebound) separately.
-                    logger.debug("[GMS] Skipping property attribute %r", name)
-                    continue
-                elements = list(mod)
-                elements[int(attr)] = tensor.detach().clone()
-                setattr(owner, container_attr, tuple(elements))
-            else:
-                logger.debug("[GMS] Cannot rebind container element %r", name)
+    if retain_gms_tensors is not None:
+        retained_storage_ids: set[int] = set()
+        for tensor in private_tensors:
+            storage = tensor.untyped_storage()
+            storage_id = int(storage._cdata)
+            if storage_id in retained_storage_ids:
                 continue
-        else:
-            if isinstance(getattr(type(mod), attr, None), property):
-                # Read-only derived attribute; the underlying tensor is
-                # iterated (and rebound) separately.
-                logger.debug("[GMS] Skipping property attribute %r", name)
-                continue
-            setattr(mod, attr, tensor.detach().clone())
-        if retain_gms_tensors is not None:
-            retain_gms_tensors.append(tensor)
-        rebound_bytes += tensor.numel() * tensor.element_size()
+            retained_storage_ids.add(storage_id)
+            retain_gms_tensors.append(
+                torch.empty(0, dtype=torch.uint8, device=storage.device).set_(
+                    storage,
+                    0,
+                    (int(storage.nbytes()),),
+                    (1,),
+                )
+            )
 
-    return rebound_bytes
+    return clone_storage_spans_and_rebind_tensors(private_tensors)

@@ -38,6 +38,14 @@ from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.utils import align_to_granularity
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
+from gpu_memory_service.core.client.memory_manager import (
+    LocalMapping as CoreLocalMapping,
+)
+from gpu_memory_service.core.client.memory_manager import (
+    install_mapping,
+    reserve_and_install_mapping,
+    unmap_mapping,
+)
 from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 logger = logging.getLogger(__name__)
@@ -85,7 +93,7 @@ class _ScratchMapping:
 
 
 @dataclass(frozen=True)
-class LocalMapping:
+class LocalMapping(CoreLocalMapping):
     """Immutable record of a local VA mapping.
 
     Fields:
@@ -98,29 +106,32 @@ class LocalMapping:
       - tag: Allocation tag for server tracking
     """
 
-    allocation_id: str
-    va: int
-    size: int
-    aligned_size: int
     handle: int  # 0 if unmapped but VA reserved
     tag: str
     layout_slot: int
-    va_reserved_size: int = 0
 
-    def __post_init__(self) -> None:
-        if self.va_reserved_size == 0:
-            object.__setattr__(self, "va_reserved_size", self.aligned_size)
+    @property
+    def va(self) -> int:
+        return self.base
+
+    @property
+    def size(self) -> int:
+        return self.requested_size
+
+    @property
+    def va_reserved_size(self) -> int:
+        return self.reservation_size
 
     def with_handle(self, handle: int) -> "LocalMapping":
         return LocalMapping(
             self.allocation_id,
-            self.va,
             self.size,
             self.aligned_size,
+            self.va,
+            self.va_reserved_size,
             handle,
             self.tag,
             self.layout_slot,
-            self.va_reserved_size,
         )
 
     def with_server_identity(
@@ -130,13 +141,13 @@ class LocalMapping:
     ) -> "LocalMapping":
         return LocalMapping(
             allocation_id,
-            self.va,
             self.size,
             self.aligned_size,
+            self.va,
+            self.va_reserved_size,
             self.handle,
             self.tag,
             layout_slot,
-            self.va_reserved_size,
         )
 
 
@@ -388,20 +399,28 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
-        handle = self._vmm.import_shareable_handle_close_fd(fd)
-        self._vmm.map(va, aligned_size, handle)
-        self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
-        self._track_mapping(
-            LocalMapping(
-                allocation_id=allocation_id,
-                va=va,
-                size=size,
-                aligned_size=aligned_size,
-                handle=handle,
-                tag=tag,
-                layout_slot=layout_slot,
-            )
+        mapping = LocalMapping(
+            allocation_id,
+            size,
+            aligned_size,
+            va,
+            aligned_size,
+            0,
+            tag,
+            layout_slot,
         )
+        try:
+            handle = install_mapping(
+                self._vmm,
+                mapping,
+                fd,
+                self.device,
+                self._granted_lock_type,
+            )
+        except Exception:
+            self.abort()
+            raise
+        self._track_mapping(mapping.with_handle(handle))
         return handle
 
     def unmap_va(self, va: int) -> None:
@@ -413,8 +432,7 @@ class GMSClientMemoryManager:
         mapping = self._mappings.get(va)
         if mapping is None or mapping.handle == 0:
             return
-        self._vmm.unmap(va, mapping.aligned_size)
-        self._vmm.release(mapping.handle)
+        unmap_mapping(self._vmm, mapping, mapping.handle)
         self._mappings[va] = mapping.with_handle(0)
 
     def free_va(self, va: int) -> None:
@@ -468,20 +486,26 @@ class GMSClientMemoryManager:
             alloc_tag = str(getattr(info, "tag", "default"))
             layout_slot = int(info.layout_slot)
 
-            fd = self.export_handle(allocation_id)
-            va = self.reserve_va(aligned_size)
-            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
-            return va
+            return self._create_local_mapping(
+                allocation_id,
+                alloc_size,
+                aligned_size,
+                alloc_tag,
+                layout_slot,
+            )
 
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id, layout_slot = self.allocate_handle(size, tag)
-        fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
-        va = self.reserve_va(aligned_size)
-        self.map_va(fd, va, size, alloc_id, tag, layout_slot)
-        return va
+        return self._create_local_mapping(
+            alloc_id,
+            size,
+            aligned_size,
+            tag,
+            layout_slot,
+        )
 
     def destroy_mapping(self, va: int) -> None:
         """Unmap + free VA + free server handle for a single mapping."""
@@ -588,20 +612,26 @@ class GMSClientMemoryManager:
                     f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
-            fd = self.export_handle(alloc_info.allocation_id)
-            handle = self._vmm.import_shareable_handle_close_fd(fd)
-            self._vmm.map(va, mapping.aligned_size, handle)
-            self._vmm.set_access(
-                va, mapping.aligned_size, self.device, self._granted_lock_type
+            remapped = mapping.with_server_identity(
+                alloc_info.allocation_id,
+                int(alloc_info.layout_slot),
             )
+            try:
+                handle = install_mapping(
+                    self._vmm,
+                    remapped,
+                    self.export_handle(alloc_info.allocation_id),
+                    self.device,
+                    self._granted_lock_type,
+                )
+            except Exception:
+                self.abort()
+                raise
             remapped_vas.append(va)
 
             if mapping.allocation_id != alloc_info.allocation_id:
                 self._inverse_mapping.pop(mapping.allocation_id, None)
-            self._mappings[va] = mapping.with_server_identity(
-                alloc_info.allocation_id,
-                int(alloc_info.layout_slot),
-            ).with_handle(handle)
+            self._mappings[va] = remapped.with_handle(handle)
             self._inverse_mapping[alloc_info.allocation_id] = va
             remapped_count += 1
             total_bytes += mapping.aligned_size
@@ -775,14 +805,14 @@ class GMSClientMemoryManager:
 
         for base_va, scratch in list(self._scratch_mappings.items()):
             self._mappings[base_va] = LocalMapping(
-                allocation_id="",
-                va=base_va,
-                size=scratch.size,
-                aligned_size=scratch.aligned_size,
-                handle=0,
-                tag=scratch.tag,
-                layout_slot=0,
-                va_reserved_size=scratch.va_reserved_size,
+                "",
+                scratch.size,
+                scratch.aligned_size,
+                base_va,
+                scratch.va_reserved_size,
+                0,
+                scratch.tag,
+                0,
             )
         moved = len(self._scratch_mappings)
         self._scratch_mappings.clear()
@@ -889,3 +919,39 @@ class GMSClientMemoryManager:
     def _track_mapping(self, m: LocalMapping) -> None:
         self._mappings[m.va] = m
         self._inverse_mapping[m.allocation_id] = m.va
+
+    def _create_local_mapping(
+        self,
+        allocation_id: str,
+        size: int,
+        aligned_size: int,
+        tag: str,
+        layout_slot: int,
+    ) -> int:
+        try:
+            mapping, handle = reserve_and_install_mapping(
+                self._vmm,
+                self.export_handle(allocation_id),
+                allocation_id,
+                size,
+                aligned_size,
+                aligned_size,
+                self.granularity,
+                self.device,
+                self._granted_lock_type,
+            )
+        except Exception:
+            self.abort()
+            raise
+        tracked = LocalMapping(
+            mapping.allocation_id,
+            mapping.requested_size,
+            mapping.aligned_size,
+            mapping.base,
+            mapping.reservation_size,
+            handle,
+            tag,
+            layout_slot,
+        )
+        self._track_mapping(tracked)
+        return mapping.base

@@ -276,6 +276,51 @@ def test_rw_commit_publishes_allocations_metadata_and_layout_hash(running_gms):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("failure", ["reserve", "access"])
+def test_mapping_install_failure_aborts_writer_epoch(
+    running_gms,
+    failure,
+):
+    server, socket_path = running_gms
+    vmm = server._gms._allocations._vmm
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    exported_fds: list[int] = []
+    export_handle = writer.export_handle
+
+    def capture_export(allocation_id):
+        fd = export_handle(allocation_id)
+        exported_fds.append(fd)
+        return fd
+
+    writer.export_handle = capture_export
+    try:
+        if failure == "reserve":
+            vmm.fail_reserve = True
+        else:
+            vmm.fail_access = True
+
+        with pytest.raises(RuntimeError, match=f"{failure} failed"):
+            writer.create_mapping(size=4096, tag="weights")
+
+        assert len(exported_fds) == 1
+        with pytest.raises(OSError):
+            os.fstat(exported_fds[0])
+        assert not writer.mappings
+        assert not writer.is_connected
+        _wait_for_server_state(server, ServerState.EMPTY)
+        assert server._gms.allocation_count == 0
+        if failure == "reserve":
+            assert not vmm.imports
+            assert not vmm.mapped
+            assert not vmm.reservations
+    finally:
+        vmm.fail_reserve = False
+        vmm.fail_access = False
+        writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_rw_disconnect_aborts_layout_and_next_writer_starts_clean(running_gms):
     server, socket_path = running_gms
 

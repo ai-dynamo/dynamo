@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import select
 import socket
 from typing import Optional
 
@@ -21,6 +20,7 @@ from gpu_memory_service.common.protocol.messages import (
 )
 from gpu_memory_service.common.protocol.wire import recv_message, send_message
 from gpu_memory_service.common.utils import fail
+from gpu_memory_service.core.server.lease import socket_is_alive
 
 from .allocations import AllocationNotFoundError
 from .fsm import Connection, InvalidTransition
@@ -38,19 +38,7 @@ def _is_connection_alive(conn: Connection) -> bool:
     sock = conn.writer.get_extra_info("socket")
     if sock is None:
         return False
-    try:
-        fd = sock.fileno()
-    except OSError:
-        return False
-    if fd < 0:
-        return False
-
-    flags = select.POLLERR | select.POLLHUP | select.POLLNVAL
-    if hasattr(select, "POLLRDHUP"):
-        flags |= select.POLLRDHUP
-    poller = select.poll()
-    poller.register(fd, flags)
-    return not poller.poll(0)
+    return socket_is_alive(sock)
 
 
 class GMSRPCServer:

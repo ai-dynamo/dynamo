@@ -1,24 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Server-side VMM allocation store.
-
-Uses the ``VMMDevice`` abstraction from ``common.vmm`` so that future
-non-CUDA device types can plug in without touching this file.
-
-"""
+"""V0 allocation catalog over shared physical GMS ownership."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 from uuid import uuid4
 
 from gpu_memory_service.common.utils import align_to_granularity
 from gpu_memory_service.common.vmm import get_vmm
+from gpu_memory_service.core.server.allocations import (
+    GMSAllocationManager as CoreAllocationManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +27,16 @@ class AllocationInfo:
     allocation_id: str
     size: int
     aligned_size: int
-    handle: int
     tag: str
     layout_slot: int
-    created_at: float
 
 
 class AllocationNotFoundError(Exception):
-    """Raised when an allocation_id doesn't exist."""
+    """Raised when an allocation ID is not present in the active V0 catalog."""
 
 
 class GMSAllocationManager:
-    """Server-side CUDA VMM allocation store."""
+    """Add V0 IDs, tags, layout slots, and allocation retry to the core."""
 
     def __init__(
         self,
@@ -59,10 +56,10 @@ class GMSAllocationManager:
 
         self._device = device
         self._vmm = get_vmm()
+        self._physical = CoreAllocationManager(self._vmm, device)
+        self._granularity = self._vmm.get_allocation_granularity(device)
         self._allocations: dict[str, AllocationInfo] = {}
         self._next_layout_slot = 0
-        self._vmm.ensure_initialized()
-        self._granularity = self._vmm.get_allocation_granularity(device)
         self._allocation_retry_interval = allocation_retry_interval
         self._allocation_retry_timeout = allocation_retry_timeout
         logger.info(
@@ -97,6 +94,7 @@ class GMSAllocationManager:
             raise ValueError(f"size must be > 0, got {size}")
 
         aligned_size = align_to_granularity(size, self._granularity)
+        allocation_id = str(uuid4())
         started_at = time.monotonic()
         reported_oom = False
         while True:
@@ -105,11 +103,11 @@ class GMSAllocationManager:
                     "RW client disconnected during allocation retry"
                 )
 
-            allocated, handle = self._vmm.create_tolerate_oom(
-                aligned_size, self._device
-            )
-            if allocated:
+            try:
+                self._physical.allocate(allocation_id, aligned_size)
                 break
+            except MemoryError:
+                pass
 
             if on_oom is not None and not reported_oom:
                 on_oom()
@@ -124,21 +122,18 @@ class GMSAllocationManager:
                         f"tag={tag}, waited_sec={waited:.3f}"
                     )
 
-            # Visibility while retrying. Logged every iteration with elapsed
-            # time + free GPU memory, so a stuck retry loop is observable
-            # rather than silent.
             free_b, total_b = -1, -1
             try:
                 free_b, total_b = self._vmm.device_memory_info(self._device)
             except Exception:
                 logger.debug(
-                    "NVML memory info failed for device %d",
+                    "device memory info failed for device %d",
                     self._device,
                     exc_info=True,
                 )
             elapsed = time.monotonic() - started_at
             logger.warning(
-                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, "
+                "physical allocation OOM for aligned_size=%d bytes, tag=%s, "
                 "elapsed=%.2fs free=%d total=%d; retrying in %.3fs",
                 aligned_size,
                 tag,
@@ -150,19 +145,17 @@ class GMSAllocationManager:
             await asyncio.sleep(self._allocation_retry_interval)
 
         info = AllocationInfo(
-            allocation_id=str(uuid4()),
+            allocation_id=allocation_id,
             size=size,
             aligned_size=aligned_size,
-            handle=int(handle),
             tag=tag,
             layout_slot=self._next_layout_slot,
-            created_at=time.time(),
         )
-        self._next_layout_slot = info.layout_slot + 1
-        self._allocations[info.allocation_id] = info
+        self._next_layout_slot += 1
+        self._allocations[allocation_id] = info
         logger.debug(
             "Allocated %s: size=%d, aligned=%d, tag=%s, slot=%d",
-            info.allocation_id,
+            allocation_id,
             size,
             aligned_size,
             tag,
@@ -171,43 +164,37 @@ class GMSAllocationManager:
         return info
 
     def export_allocation(self, allocation_id: str) -> int:
-        info = self.get_allocation(allocation_id)
-        # Export FDs are connection handles, not durable allocation state.
-        # Create one only when a client requests it and transfer ownership to
-        # the RPC transport. This leaves no server-owned FD that must survive
-        # checkpoint/restore and allows a restored allocation handle to issue
-        # fresh exports for reconnecting clients.
-        return int(self._vmm.export_to_shareable_handle(info.handle))
+        self.get_allocation(allocation_id)
+        return self._physical.export(allocation_id)
 
     def free_allocation(self, allocation_id: str) -> bool:
-        info = self._allocations.get(allocation_id)
-        if info is None:
+        if allocation_id not in self._allocations:
             return False
-        self._vmm.release(info.handle)
-        self._allocations.pop(allocation_id, None)
+        self._physical.free(allocation_id)
+        del self._allocations[allocation_id]
         logger.debug("Freed allocation: %s", allocation_id)
         return True
 
     def clear_all(self) -> int:
-        allocation_ids = list(self._allocations)
-        for allocation_id in allocation_ids:
-            info = self._allocations[allocation_id]
-            self._vmm.release(info.handle)
-            self._allocations.pop(allocation_id, None)
-        if allocation_ids:
-            logger.info("Cleared %d allocations", len(allocation_ids))
+        count = self._physical.clear()
+        self._allocations.clear()
         self._next_layout_slot = 0
-        return len(allocation_ids)
+        if count:
+            logger.info("Cleared %d allocations", count)
+        return count
 
     def get_allocation(self, allocation_id: str) -> AllocationInfo:
-        info = self._allocations.get(allocation_id)
-        if info is None:
-            raise AllocationNotFoundError(f"Unknown allocation: {allocation_id}")
-        return info
+        try:
+            return self._allocations[allocation_id]
+        except KeyError:
+            raise AllocationNotFoundError(
+                f"Unknown allocation: {allocation_id}"
+            ) from None
 
     def list_allocations(self, tag: Optional[str] = None) -> list[AllocationInfo]:
-        allocations = list(self._allocations.values())
-        allocations.sort(key=lambda info: info.layout_slot)
+        allocations = sorted(
+            self._allocations.values(), key=lambda info: info.layout_slot
+        )
         if tag is None:
             return allocations
         return [info for info in allocations if info.tag == tag]
