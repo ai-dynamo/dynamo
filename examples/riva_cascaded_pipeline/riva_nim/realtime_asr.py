@@ -43,6 +43,7 @@ from dynamo.vllm.realtime.events import (
 logger = logging.getLogger(__name__)
 
 OPENAI_PCM_SAMPLE_RATE = 24_000
+PCM16_BYTES_PER_SAMPLE = 2
 MAX_AUDIO_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_UTTERANCE_SECONDS = 60
 
@@ -78,13 +79,20 @@ class _AudioTurn(RealtimeTurn):
             raise ValueError("audio chunk is empty")
         if len(audio) > MAX_AUDIO_CHUNK_BYTES:
             raise ValueError("audio chunk exceeds 4 MiB")
-        if len(audio) % 2:
+        if len(audio) % PCM16_BYTES_PER_SAMPLE:
             raise ValueError("PCM16 audio must be 2-byte aligned")
         self.received_bytes += len(audio)
-        max_bytes = OPENAI_PCM_SAMPLE_RATE * 2 * MAX_UTTERANCE_SECONDS
+        max_bytes = (
+            OPENAI_PCM_SAMPLE_RATE * PCM16_BYTES_PER_SAMPLE * MAX_UTTERANCE_SECONDS
+        )
         if self.received_bytes > max_bytes:
             raise ValueError(f"input audio exceeds {MAX_UTTERANCE_SECONDS} seconds")
         self.audio.put_nowait(audio)
+
+    def append_silence(self, duration_ms: int) -> None:
+        samples = OPENAI_PCM_SAMPLE_RATE * duration_ms // 1000
+        if samples:
+            self.audio.put_nowait(bytes(samples * PCM16_BYTES_PER_SAMPLE))
 
     def close(self) -> None:
         if not self.closed:
@@ -108,12 +116,16 @@ class RivaRealtimeTranscriptionHandler:
         model_name: str,
         riva_model: str,
         language_code: str,
+        commit_padding_ms: int,
         timeout_s: float,
     ) -> None:
         self.asr_service = asr_service
         self.model_name = model_name
         self.riva_model = riva_model
         self.language_code = language_code
+        if commit_padding_ms < 0:
+            raise ValueError("commit_padding_ms must be non-negative")
+        self.commit_padding_ms = commit_padding_ms
         self.timeout_s = timeout_s
 
     def _streaming_config(self) -> StreamingRecognitionConfig:
@@ -298,6 +310,7 @@ class RivaRealtimeTranscriptionHandler:
                 await connection.emit_for_turn(
                     turn, input_audio_buffer_committed_event(turn.item_id)
                 )
+                turn.append_silence(self.commit_padding_ms)
                 turn.close()
                 connection.finish_active_turn()
             elif event_type == "input_audio_buffer.clear":
