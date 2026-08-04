@@ -37,15 +37,10 @@ def _create_ext_modules():
     # No CUDA or PyTorch dependency - just provides my_malloc/my_free that call Python callbacks
     return [
         Extension(
-            name="gpu_memory_service.client.torch.extensions._allocator_ext",
-            sources=["client/torch/extensions/allocator.cpp"],
-            extra_compile_args=extra_compile_args,
-        ),
-        Extension(
             name="gpu_memory_service.core.client.torch.extensions._allocator_ext",
             sources=["core/client/torch/extensions/allocator.cpp"],
             extra_compile_args=extra_compile_args,
-        ),
+        )
     ]
 
 
@@ -82,7 +77,6 @@ setup(
         "gpu_memory_service.server",
         "gpu_memory_service.client",
         "gpu_memory_service.client.torch",
-        "gpu_memory_service.client.torch.extensions",
         "gpu_memory_service.failover_lock",
         "gpu_memory_service.failover_lock.flock",
         "gpu_memory_service.integrations",
@@ -93,7 +87,6 @@ setup(
         "gpu_memory_service.snapshot",
         "gpu_memory_service.snapshot.backends",
         "gpu_memory_service.v1",
-        "gpu_memory_service.v1.integrations",
         "gpu_memory_service.v1.integrations.vllm",
     ],
     package_dir={
@@ -106,7 +99,6 @@ setup(
         "gpu_memory_service.server": "server",
         "gpu_memory_service.client": "client",
         "gpu_memory_service.client.torch": "client/torch",
-        "gpu_memory_service.client.torch.extensions": "client/torch/extensions",
         "gpu_memory_service.failover_lock": "failover_lock",
         "gpu_memory_service.failover_lock.flock": "failover_lock/flock",
         "gpu_memory_service.integrations": "integrations",
@@ -118,7 +110,6 @@ setup(
         "gpu_memory_service.snapshot.backends": "snapshot/backends",
     },
     package_data={
-        "gpu_memory_service.client.torch.extensions": ["*.cpp"],
         "gpu_memory_service.core.client.torch.extensions": ["*.cpp"],
     },
     entry_points={

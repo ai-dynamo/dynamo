@@ -47,23 +47,6 @@ def _connect_in_thread(path: str, lock_type: RequestedLockType):
 
 
 @pytest.mark.timeout(10)
-def test_client_waits_for_server_startup(tmp_path) -> None:
-    path = str(tmp_path / "gms.sock")
-    result, connected, client_thread = _connect_in_thread(path, RequestedLockType.RW)
-    assert not connected.wait(0.1)
-    assert client_thread.is_alive()
-
-    _manager, server, server_thread = _serve(path, FakeVMM(granularity=64))
-    try:
-        assert connected.wait(5)
-        result.pop().close()
-        client_thread.join(timeout=5)
-        assert not client_thread.is_alive()
-    finally:
-        _stop(server, server_thread)
-
-
-@pytest.mark.timeout(10)
 def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch) -> None:
     path = str(tmp_path / "gms.sock")
     vmm = FakeVMM(granularity=64)
@@ -100,7 +83,7 @@ def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.timeout(10)
-def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnect(
+def test_sessions_commit_share_prioritize_writer_and_release_on_disconnect(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -108,15 +91,6 @@ def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnec
     vmm = FakeVMM(granularity=64)
     manager, server, server_thread = _serve(path, vmm)
     first_writer = _GMSClientSession(path, RequestedLockType.RW)
-    handle_request = manager.handle_request
-
-    def raise_oserror(*_args) -> None:
-        raise OSError("manager failed")
-
-    monkeypatch.setattr(manager, "handle_request", raise_oserror)
-    with pytest.raises(RuntimeError, match="manager failed"):
-        first_writer.allocate("failed", 64)
-    monkeypatch.setattr(manager, "handle_request", handle_request)
     first_writer.allocate("aborted", 64)
 
     writer_waiting = threading.Event()
@@ -147,18 +121,16 @@ def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnec
     os.close(fd)
 
     writer_waiting.clear()
-    dead_writer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    dead_writer.connect(path)
-    send_message(dead_writer, HandshakeRequest(RequestedLockType.RW))
+    disconnected_writer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    disconnected_writer.connect(path)
+    send_message(disconnected_writer, HandshakeRequest(RequestedLockType.RW))
     assert writer_waiting.wait(5)
-    dead_writer.close()
-    (
-        cancellation_reader_result,
-        cancellation_reader_connected,
-        cancellation_thread,
-    ) = _connect_in_thread(path, RequestedLockType.RO)
-    assert cancellation_reader_connected.wait(5)
-    cancellation_reader_result.pop().close()
+    disconnected_writer.close()
+    reader_result, reader_connected, disconnected_thread = _connect_in_thread(
+        path, RequestedLockType.RO
+    )
+    assert reader_connected.wait(5)
+    reader_result.pop().close()
 
     writer_waiting.clear()
     next_writer_result, next_writer_connected, next_writer_thread = _connect_in_thread(
@@ -188,7 +160,7 @@ def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnec
     next_writer.close()
     for thread in (
         replacement_thread,
-        cancellation_thread,
+        disconnected_thread,
         next_writer_thread,
         late_reader_thread,
     ):

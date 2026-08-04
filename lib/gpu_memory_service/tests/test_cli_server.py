@@ -41,6 +41,26 @@ def test_child_command_launches_default_multi_tag_runner():
     ]
 
 
+def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
+    dispatched = []
+    monkeypatch.setattr(runner, "v1_main", dispatched.append)
+
+    runner.main(["--use-v1", "--device", "3"])
+
+    assert dispatched == [["--device", "3"]]
+    assert server._child_command(3, "cuda", use_v1=True) == [
+        sys.executable,
+        "-m",
+        "gpu_memory_service",
+        "--use-v1",
+        "--device",
+        "3",
+    ]
+    with pytest.raises(SystemExit):
+        server.main(["--use-v1", "--device-type", "xpu"])
+    assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
+
+
 class _Process:
     def __init__(self, exit_code: int | None = None) -> None:
         self.exit_code = exit_code

@@ -86,7 +86,7 @@ def _ensure_callbacks_initialized() -> None:
             f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
-    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
+    from gpu_memory_service.core.client.torch.extensions import _allocator_ext as cumem
     from torch.cuda import CUDAPluggableAllocator
 
     if _callbacks_initialized:
