@@ -94,19 +94,23 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
 # the runtime, frontend and planner stages already use. `chmod -R g+w /opt/uv/cache`
 # would also work but copies a ~780MB tree into a new layer, which the permissions
 # memo above rules out.
-ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv
+# Use a cache path this stage owns outright rather than an inherited one. uv does not
+# only create new entries — it OPENS existing cache metadata on init, which is the exact
+# original failure (`failed to open file .../sdists-v9/.git: Permission denied`). So a
+# shallow chown of the cache root is not enough: any root-owned file nested inside an
+# inherited cache re-breaks it. trtllm already ships ~27MB of root-owned content under
+# /home/dynamo/.cache/uv, group-writable today but not guaranteed to stay that way.
+# Recursively chmod-ing instead would copy a 781MB tree into a new layer, which the
+# permissions memo above rules out.
+ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv-local-dev
 
-# Prepare the cache dirs while we are still root. `usermod -u` above re-chowns only
-# files owned by the OLD uid, so whatever the base image left root-owned survives the
-# remap: the trtllm dev image ships /home/dynamo/.cache/uv as root:0 because its runtime
-# template chowns /home/dynamo/.cache but not the uv dir beneath it. As the remapped user
-# we could neither chmod that dir nor mkdir inside a root-owned parent, so doing this
-# after the USER switch turns any base that ships 0755 into a hard build failure.
-# Shallow chown only — the permissions memo above rules out -R, and a root-owned entry
-# already inside the cache stays as it is; uv only needs to create new entries.
+# Prepare the dirs while we are still root. `usermod -u` above re-chowns only files owned
+# by the OLD uid, so whatever the base left root-owned survives the remap; as the remapped
+# user we could neither chmod such a dir nor mkdir inside a root-owned parent, which turns
+# any base that ships 0755 into a hard build failure.
 USER root
 RUN set -eux; \
-    for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit /home/$USERNAME/.cache/uv; do \
+    for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit "$UV_CACHE_DIR"; do \
         mkdir -p "$d"; \
         chown "$USERNAME:$USER_GID" "$d"; \
         chmod g+rwx "$d"; \
