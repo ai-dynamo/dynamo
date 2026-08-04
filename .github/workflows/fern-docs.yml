@@ -619,6 +619,11 @@ jobs:
           git add "fern/pages-$TAG/"
           git add "fern/versions/$TAG.yml"
           git add fern/docs.yml
+          # Versioned translation snapshots; the glob is empty for tags cut
+          # from branches carrying no translations.
+          for d in fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && git add "$d"
+          done
 
           git commit -m "docs(fern): release version $TAG
 
