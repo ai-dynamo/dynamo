@@ -158,6 +158,15 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # The permanent statement of what may ship is
 # tests/dependencies/test_no_software_video_codecs.py -- when this purge
 # becomes redundant, delete it and keep those assertions.
+#
+# CUDA only, and it has to be: the replacement ffmpeg is copied in under
+# `device == "cuda"` just below. Running the purge on XPU strips the base image's
+# media stack and puts nothing back, leaving that image with no ffmpeg at all and
+# an empty IMAGEIO_FFMPEG_EXE -- worse than either leaving it alone or replacing
+# it properly. The XPU image is not published, so there is nothing to remove from
+# it in the first place; the codec gate skips it for the same reason. Matches the
+# equivalent purge in vllm_runtime.Dockerfile.
+{% if device == "cuda" %}
 RUN set -eux; \
     python3 -m pip uninstall --yes \
         av \
@@ -195,6 +204,7 @@ RUN set -eux; \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
     ldconfig
+{% endif %}
 
 {% if device == "cuda" %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
@@ -288,6 +298,13 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 # guard) and the media-codec scan below re-permits it only under /usr/local while
 # still catching any stray third-party libav*/ffmpeg. This adds the extra
 # non-FFmpeg AAC/H.264 implementation names the scan's deny_globs don't list.
+#
+# CUDA only, for the same reason as the purge above: this asserts that the purge
+# worked, and on XPU there is no purge to assert. Left ungated it would fail that
+# build on the base image's own libraries -- which is precisely what happened to
+# the first version of this change, where gating the purge alone turned a working
+# XPU build into a failing one.
+{% if device == "cuda" %}
 RUN set -eux; \
     remaining="$(find /usr /opt /workspace /sgl-workspace -xdev \
         \( -type f -o -type l \) \
@@ -301,6 +318,7 @@ RUN set -eux; \
         exit 1; \
     fi; \
     python3 -c 'import soundfile, torchaudio; from PIL import Image'
+{% endif %}
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
