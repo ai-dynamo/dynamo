@@ -32,7 +32,7 @@ spec:
     - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
   containers:
     - name: main
-      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1
       securityContext: {runAsUser: 0, capabilities: {add: ["SYS_PTRACE", "IPC_LOCK"]}}
       resources: {requests: {nvidia.com/gpu: "8", memory: "1200Gi"}, limits: {nvidia.com/gpu: "8"}}
       env:
