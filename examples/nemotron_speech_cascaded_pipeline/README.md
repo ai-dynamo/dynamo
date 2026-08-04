@@ -259,9 +259,13 @@ kubectl logs --namespace "${NAMESPACE}" \
 Forward the generated frontend service:
 
 ```bash
-kubectl port-forward --namespace "${NAMESPACE}" \
+kubectl port-forward --namespace "${NAMESPACE}" --address 0.0.0.0 \
   service/nemotron-speech-cascaded-frontend 8000:8000
 ```
+
+Keep this command running for validation and the Blueprint demo. The broader
+bind lets a local Docker container reach the listener; do not expose port 8000
+through an external firewall because it does not provide authentication.
 
 The deployment exposes:
 
@@ -284,19 +288,77 @@ The TTS adapter requires a Dynamo runtime with streaming
 `/v1/audio/speech` support. The realtime ASR adapter disables server VAD
 because Pipecat's local VAD and Smart Turn processors commit the input audio.
 
-## Use the Blueprint UI
+## Run the Blueprint UI and Pipecat
 
-Run the Nemotron Voice Agent Generic Assistant with its Dynamo service profile:
+The [Nemotron Voice Agent Blueprint](https://github.com/NVIDIA-AI-Blueprints/nemotron-voice-agent)
+provides the browser UI and the Generic Assistant Pipecat pipeline. The
+temporary [companion Dynamo profile](https://github.com/ptarasiewiczNV/nemotron-voice-agent/tree/e33d9bb86016239a35fdae2d1360dd4d2019257e)
+adds OpenAI-compatible clients for this deployment. Access to that private fork
+is required until the companion change is upstreamed.
 
-This command requires the companion Dynamo profile in the Blueprint repository.
+There is no separate Pipecat command: the Blueprint Compose service runs both
+Pipecat and the UI. Run the following steps on the machine that has Kubernetes
+and Docker access.
+
+### 1. Keep the Dynamo frontend reachable from Docker
+
+Keep the port-forward from deployment step 5 running. The Compose container
+resolves `host.docker.internal` to the Docker host, where that listener
+exposes Dynamo on port 8000. If you stopped it, run the command from step 5
+again before starting the Blueprint.
+
+### 2. Start the Blueprint application
+
+In a second terminal:
 
 ```bash
-docker compose --profile generic-assistant/dynamo up -d
+git clone git@github.com:ptarasiewiczNV/nemotron-voice-agent.git
+cd nemotron-voice-agent
+git checkout e33d9bb86016239a35fdae2d1360dd4d2019257e
+
+cat > .env <<'EOF'
+NVIDIA_API_KEY=not-used
+TRANSPORT_SELECTION=websocket
+PIPELINE_TLS=true
+EOF
+
+docker compose --profile generic-assistant/dynamo up --detach --build
+docker compose --profile generic-assistant/dynamo ps
+curl --fail --insecure https://localhost:7860/health
 ```
 
-Open `http://localhost:7860`. This is the same application, browser UI,
-Pipecat pipeline, prompt, VAD, and turn processor used by the direct NIM
-profile; only the service endpoints differ.
+`TRANSPORT_SELECTION=websocket` makes the demo usable through a single SSH
+tunnel. The Dynamo profile connects ASR, LLM, and TTS to
+`host.docker.internal:8000`; it does not start duplicate model containers.
+
+Follow the Pipecat logs while testing:
+
+```bash
+docker compose --profile generic-assistant/dynamo \
+  logs --follow generic-assistant-dynamo
+```
+
+### 3. Open the UI
+
+For a local Kubernetes/Docker host, open `https://localhost:7860`. For a remote
+host, create the tunnel from your workstation:
+
+```bash
+ssh -N -L 7860:127.0.0.1:7860 <user>@<remote-host>
+```
+
+Then open `https://localhost:7860`, accept the development certificate, allow
+microphone access, and start a conversation. This uses the same browser UI,
+prompt, Pipecat pipeline, VAD, and turn processor as the direct NIM profile;
+only the model service path differs.
+
+Stop the application with:
+
+```bash
+docker compose --profile generic-assistant/dynamo down
+```
+
+Stop the Kubernetes port-forward with `Ctrl-C` in its terminal.
 
 ## Tests
 
