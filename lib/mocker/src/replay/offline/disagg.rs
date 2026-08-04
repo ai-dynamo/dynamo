@@ -11,26 +11,25 @@ pub(super) use super::components::ReplayMode;
 use super::components::TrafficStats;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
-    ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
-    TrafficAccumulator,
+    ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator,
 };
 use super::core::round_robin::PoolRoundRobinPlacement;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
-use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::events::{SimulationEvent, SimulationWorkerStage, WorkerCompletionPayload};
 #[cfg(test)]
 use super::extensions::kv_router::{
     DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
 };
-use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_transfer_complete,
-    pop_ready_worker_completion, pop_ready_worker_ready, push_planner_tick, push_transfer_complete,
-    push_worker_completion, push_worker_ready,
+    ReadyWorkerCompletions, next_timestamp as choose_next_timestamp, pop_ready_scaling_tick,
+    pop_ready_transfer_complete, pop_ready_worker_completions, pop_ready_worker_ready,
+    push_scaling_tick, push_transfer_complete, push_worker_completions, push_worker_ready,
 };
+use super::scaling::{LatestFpmBuffer, ReplayScalingPolicy, ReplayScalingSnapshot};
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
 use super::state::{DisaggPhase, DisaggRequestState};
@@ -42,12 +41,10 @@ use crate::common::handoff::{
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
-use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayTerminalStatus, SlaThresholds, TraceCollector,
-};
+use crate::replay::{OfflineDisaggReplayConfig, ReplayTerminalStatus, TraceCollector};
 use crate::scheduler::{
     AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
 };
@@ -61,6 +58,7 @@ pub(crate) enum DisaggTransition {
     DestinationAccepted { uuid: Uuid },
     DestinationReserved { uuid: Uuid },
     TransferQueued { uuid: Uuid },
+    DecodeDriveQuiesced,
     DestinationActivated { uuid: Uuid },
     SourceReleased { uuid: Uuid },
     HandoffCompleted { uuid: Uuid },
@@ -364,11 +362,7 @@ impl DisaggFlowState {
         if let Some(sample) = placement.planner_cache_sample {
             traffic.on_admission(sample.overlap_blocks, sample.isl_blocks);
         }
-        let input_tokens = self
-            .state(placement.request_id)?
-            .original_request()?
-            .tokens
-            .len();
+        let input_tokens = self.state(placement.request_id)?.input_length()?;
         collector.on_prefill_route_overlap(
             placement.request_id,
             placement.reported_overlap_tokens.min(input_tokens),
@@ -382,11 +376,7 @@ impl DisaggFlowState {
         placement: Placement,
         collector: &mut TraceCollector,
     ) -> Result<()> {
-        let input_tokens = self
-            .state(placement.request_id)?
-            .original_request()?
-            .tokens
-            .len();
+        let input_tokens = self.state(placement.request_id)?.input_length()?;
         collector.on_decode_route_overlap(
             placement.request_id,
             placement.reported_overlap_tokens.min(input_tokens),
@@ -395,11 +385,9 @@ impl DisaggFlowState {
     }
 
     #[inline(never)]
-    fn prepare_prefill_submission(&self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
-        Ok((
-            self.state(uuid)?.build_prefill_request()?,
-            self.state(uuid)?.handoff_id,
-        ))
+    fn prepare_prefill_submission(&mut self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
+        let handoff_id = self.state(uuid)?.handoff_id;
+        Ok((self.state_mut(uuid)?.build_prefill_request()?, handoff_id))
     }
 
     #[inline(never)]
@@ -431,10 +419,16 @@ impl DisaggFlowState {
     }
 
     #[inline(never)]
-    fn prepare_destination_reservation(&self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
+    fn prepare_destination_reservation(
+        &mut self,
+        uuid: Uuid,
+    ) -> Result<(DirectRequest, HandoffId)> {
+        let handoff_id = self.state(uuid)?.handoff_id;
         Ok((
-            self.state(uuid)?.original_request()?.clone(),
-            self.state(uuid)?.handoff_id,
+            self.state_mut(uuid)?
+                .materialize_original_request()?
+                .clone(),
+            handoff_id,
         ))
     }
 
@@ -598,22 +592,19 @@ impl DisaggFlowState {
     #[inline(never)]
     fn on_external_arrival(
         &mut self,
-        mut request: DirectRequest,
+        mut request: ReplayRequestPayload,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
         collector: &mut TraceCollector,
     ) -> Result<Uuid> {
-        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        request.uuid = Some(uuid);
-        request.arrival_timestamp_ms = Some(arrival_time_ms);
+        let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
+        let input_length = request.input_length();
+        let output_length = request.metadata().max_output_tokens;
+        request.metadata_mut().uuid = Some(uuid);
+        request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
-        collector.on_arrival(
-            uuid,
-            arrival_time_ms,
-            request.tokens.len(),
-            request.max_output_tokens,
-        );
+        collector.on_arrival(uuid, arrival_time_ms, input_length, output_length);
         if self.requests.contains_key(&uuid) {
             bail!("offline disagg replay request {uuid} is already active");
         }
@@ -806,7 +797,7 @@ impl DisaggFlowState {
                 })?;
             debug_assert!(actual_output_tokens <= requested_output_tokens);
             let latencies = collector.request_latencies(signal.uuid);
-            traffic.on_request(input_tokens, actual_output_tokens, latencies);
+            traffic.on_completion(input_tokens, actual_output_tokens, latencies);
         }
         let terminal_status = if signal.rejected {
             ReplayTerminalStatus::Rejected
@@ -869,7 +860,7 @@ impl DisaggFlowState {
 }
 
 pub(in crate::replay) trait PoolPlacement<Events, Metadata>:
-    PlacementPolicy<DirectRequest, Metadata = Metadata, Observation = Events> + Sized
+    PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Events> + Sized
 where
     Events: EngineEventBatch,
     Metadata: ReplayAdmissionMetadata,
@@ -914,10 +905,8 @@ where
     /// gracefully once the next scheduled timestamp exceeds this cap, leaving
     /// any in-flight requests as incomplete in the report.
     max_sim_time_ms: Option<f64>,
-    /// Planner hook. When set, `run()` seeds a recurring `PlannerTick` event and
-    /// calls back into the planner at each tick (this is the unified replacement
-    /// for the old Python-driven `advance_to` stepping loop).
-    planner_hook: Option<Box<dyn PlannerHook>>,
+    /// Optional scaling component. When set, `run()` seeds recurring `ScalingTick` events.
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     /// Whether to retain the latest FPM snapshot per worker/rank in the buffers
     /// above. Only the planner consumes them, so the plain `run()` path leaves this
     /// `false`.
@@ -1057,7 +1046,7 @@ where
             decode_fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
-            planner_hook: None,
+            scaling_policy: None,
             collect_fpm: false,
         })
     }
@@ -1089,15 +1078,11 @@ where
         self
     }
 
-    /// Set the SLA thresholds used to classify goodput in the final report.
-    pub(in crate::replay) fn with_sla_thresholds(mut self, sla: SlaThresholds) -> Self {
-        self.collector.set_sla_thresholds(sla);
-        self
-    }
-
-    /// Attach a planner hook. Enables FPM collection and makes `run()` drive the
-    /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
-    pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
+    /// Attach a scaling policy and enable tick-scoped FPM collection.
+    pub(in crate::replay) fn with_scaling_policy(
+        mut self,
+        policy: Box<dyn ReplayScalingPolicy>,
+    ) -> Self {
         self.collect_fpm = true;
         let prefill_dp_size = self.prefill_engine.dp_size();
         for worker_id in self.prefill_engine.active_group_ids() {
@@ -1109,7 +1094,7 @@ where
             self.decode_fpm_buffer
                 .activate_worker(worker_id, decode_dp_size, self.now_ms);
         }
-        self.planner_hook = Some(hook);
+        self.scaling_policy = Some(policy);
         self
     }
 
@@ -1286,12 +1271,13 @@ where
 
     fn route_prefill(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.phase = DisaggPhase::QueuedPrefill;
-        let request = self.state(uuid)?.build_prefill_request()?;
-        let metadata = Metadata::from_hashes(self.state_mut(uuid)?.take_replay_hashes());
+        let metadata =
+            Metadata::from_hashes(self.state_mut(uuid)?.take_replay_hashes()).for_prefill();
         let session_id = self.state(uuid)?.session_id().map(str::to_owned);
+        let request = self.flow.state(uuid)?.request_payload()?;
         let effects = self
             .prefill_placement
-            .place(&request, metadata, session_id, self.now_ms)?;
+            .place(request, metadata, session_id, self.now_ms)?;
         self.dispatch_prefill_placements(effects.released)?;
         match effects.decision {
             PlacementDecision::Immediate(placement) => {
@@ -1312,10 +1298,16 @@ where
 
     fn route_destination(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.await_destination();
-        let request = self.state(uuid)?.original_request()?.clone();
+        // TODO: Keep the destination side compact through decode routing and
+        // reservation once decode-block hashes can be derived without prompt
+        // expansion and the scheduler accepts compact metadata. Destination-
+        // first SGLang currently materializes here before prefill; source-first
+        // vLLM has already materialized at prefill worker submission.
+        self.state_mut(uuid)?.materialize_original_request()?;
         let session_id = self.state(uuid)?.session_id().map(str::to_owned);
+        let request = self.flow.state(uuid)?.request_payload()?;
         let effects = self.decode_placement.place(
-            &request,
+            request,
             Metadata::from_hashes(None),
             session_id,
             self.now_ms,
@@ -1631,23 +1623,25 @@ where
     /// Admit one external request into prefill-side state, collector state, and optional router.
     fn on_external_arrival(
         &mut self,
-        request: DirectRequest,
+        request: ReplayRequestPayload,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<Uuid> {
-        self.flow.on_external_arrival(
+        let uuid = self.flow.on_external_arrival(
             request,
             arrival_time_ms,
             replay_hashes,
             session_id,
             &mut self.collector,
-        )
+        )?;
+        self.traffic.on_arrival();
+        Ok(uuid)
     }
 
     /// Return true once both stages, both routers, and all admissions are fully
-    /// drained. Lingering `WorkerReady`/`PlannerTick` events (worker startup, a
-    /// re-armed planner heartbeat) do not represent request work, so they do not
+    /// drained. Lingering `WorkerReady`/`ScalingTick` events do not represent request work,
+    /// so they do not
     /// keep the run alive — otherwise a recurring tick would never let `run()` exit.
     fn is_done(&self) -> bool {
         self.only_idle_events_remain()
@@ -1660,7 +1654,7 @@ where
     }
 
     /// Return true once the request workload is complete, even if `WorkerReady`
-    /// or `PlannerTick` events remain in the queue.
+    /// or `ScalingTick` events remain in the queue.
     fn is_workload_done(&self) -> bool {
         self.cluster_in_flight() == 0
             && CoreAdmissionSource::is_drained(&self.admission)
@@ -1673,13 +1667,13 @@ where
 
     /// True if the event heap is empty or contains only "idle" events that carry no
     /// pending request work: `WorkerReady` (a worker still starting up) or
-    /// `PlannerTick` (a re-armed planner heartbeat).
+    /// `ScalingTick` (a re-armed scaling heartbeat).
     fn only_idle_events_remain(&self) -> bool {
         use super::events::SimulationEventKind;
         self.events.iter().all(|e| {
             matches!(
                 e.kind,
-                SimulationEventKind::WorkerReady { .. } | SimulationEventKind::PlannerTick
+                SimulationEventKind::WorkerReady { .. } | SimulationEventKind::ScalingTick
             )
         })
     }
@@ -1833,49 +1827,65 @@ where
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> Result<bool> {
         let mut changed = false;
-        while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
-            match payload.stage {
-                SimulationWorkerStage::Prefill => {
-                    let payload = self.prefill_engine.on_scheduled_completion(payload)?;
-                    self.wake_deferred_actions(SimulationWorkerStage::Prefill, payload.worker_idx);
-                    if self.collect_fpm
-                        && let Some(fpm) = payload.fpm
-                    {
-                        self.prefill_fpm_buffer
-                            .insert(payload.worker_idx, fpm, self.now_ms);
-                    }
-                    self.process_prefill_pass(
-                        payload.worker_idx,
-                        payload.completed_requests,
-                        payload.output_signals,
-                        payload.lifecycle_events,
-                        payload.engine_events,
-                    )?;
+        while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
+            match completions {
+                ReadyWorkerCompletions::Single(payload) => {
+                    self.apply_worker_completion(payload)?;
                 }
-                SimulationWorkerStage::Decode => {
-                    let payload = self.decode_engine.on_scheduled_completion(payload)?;
-                    self.wake_deferred_actions(SimulationWorkerStage::Decode, payload.worker_idx);
-                    if self.collect_fpm
-                        && let Some(fpm) = payload.fpm
-                    {
-                        self.decode_fpm_buffer
-                            .insert(payload.worker_idx, fpm, self.now_ms);
+                ReadyWorkerCompletions::Batch(payloads) => {
+                    for payload in payloads {
+                        self.apply_worker_completion(payload)?;
                     }
-                    self.process_decode_pass(
-                        payload.output_signals,
-                        payload.lifecycle_events,
-                        payload.engine_events,
-                        payload.accept_length_output_tokens,
-                        payload.accept_length_decode_forwards,
-                    )?;
-                }
-                SimulationWorkerStage::Aggregated => {
-                    bail!("offline disagg replay received an aggregated completion event")
                 }
             }
             changed = true;
         }
         Ok(changed)
+    }
+
+    fn apply_worker_completion(
+        &mut self,
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> Result<()> {
+        match payload.stage {
+            SimulationWorkerStage::Prefill => {
+                let payload = self.prefill_engine.on_scheduled_completion(payload)?;
+                self.wake_deferred_actions(SimulationWorkerStage::Prefill, payload.worker_idx);
+                if self.collect_fpm
+                    && let Some(fpm) = payload.fpm
+                {
+                    self.prefill_fpm_buffer
+                        .insert(payload.worker_idx, fpm, self.now_ms);
+                }
+                self.process_prefill_pass(
+                    payload.worker_idx,
+                    payload.completed_requests,
+                    payload.output_signals,
+                    payload.lifecycle_events,
+                    payload.engine_events,
+                )
+            }
+            SimulationWorkerStage::Decode => {
+                let payload = self.decode_engine.on_scheduled_completion(payload)?;
+                self.wake_deferred_actions(SimulationWorkerStage::Decode, payload.worker_idx);
+                if self.collect_fpm
+                    && let Some(fpm) = payload.fpm
+                {
+                    self.decode_fpm_buffer
+                        .insert(payload.worker_idx, fpm, self.now_ms);
+                }
+                self.process_decode_pass(
+                    payload.output_signals,
+                    payload.lifecycle_events,
+                    payload.engine_events,
+                    payload.accept_length_output_tokens,
+                    payload.accept_length_decode_forwards,
+                )
+            }
+            SimulationWorkerStage::Aggregated => {
+                bail!("offline disagg replay received an aggregated completion event")
+            }
+        }
     }
 
     /// Drain transfer completions scheduled for the current logical timestamp.
@@ -1942,6 +1952,10 @@ where
                 .decode_engine
                 .drive_ready(self.now_ms, Some(&mut self.collector))?;
             if effects.is_empty() {
+                #[cfg(test)]
+                self.stats
+                    .transition_log
+                    .push(DisaggTransition::DecodeDriveQuiesced);
                 return Ok(changed);
             }
             changed = true;
@@ -1956,23 +1970,10 @@ where
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
-            let payload = self.prefill_engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.prefill_fpm_buffer
-                    .insert(payload.worker_idx, fpm, self.now_ms);
-            }
-            self.process_prefill_pass(
-                payload.worker_idx,
-                payload.completed_requests,
-                payload.output_signals,
-                payload.lifecycle_events,
-                payload.engine_events,
-            )?;
+            self.apply_worker_completion(payload)?;
         }
-        for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
-            push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
+        if let Some(scheduled) = effects.scheduled_completion {
+            push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
         Ok(())
     }
@@ -2020,23 +2021,10 @@ where
     ) -> Result<()> {
         self.record_decode_admissions(effects.admissions)?;
         for payload in effects.immediate_completions {
-            let payload = self.decode_engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.decode_fpm_buffer
-                    .insert(payload.worker_idx, fpm, self.now_ms);
-            }
-            self.process_decode_pass(
-                payload.output_signals,
-                payload.lifecycle_events,
-                payload.engine_events,
-                payload.accept_length_output_tokens,
-                payload.accept_length_decode_forwards,
-            )?;
+            self.apply_worker_completion(payload)?;
         }
-        for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
-            push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
+        if let Some(scheduled) = effects.scheduled_completion {
+            push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
         Ok(())
     }
@@ -2146,11 +2134,9 @@ where
                 self.dispatch_decode_placements(placements)?;
             }
             changed |= !removed_decode.is_empty();
-            // Planner ticks fire LAST so the planner observes a fully settled
-            // timestamp (matching the old advance-then-tick ordering). Any scaling
-            // it applies is picked up by the next loop iteration.
-            if self.planner_hook.is_some() {
-                changed |= self.apply_planner_ticks()?;
+            // Scaling ticks fire last so the policy observes a settled timestamp.
+            if self.scaling_policy.is_some() {
+                changed |= self.apply_scaling_ticks()?;
             }
 
             if !changed {
@@ -2194,18 +2180,17 @@ where
         removed
     }
 
-    /// Seed the first `PlannerTick` event from the hook's requested start time.
-    /// A non-finite time means "no tick" (e.g. `NoopPlannerHook`) and is skipped.
-    fn seed_first_planner_tick(&mut self) -> Result<()> {
-        let Some(mut hook) = self.planner_hook.take() else {
+    /// Seed the first `ScalingTick` from the policy's requested start time.
+    fn seed_first_scaling_tick(&mut self) -> Result<()> {
+        let Some(mut policy) = self.scaling_policy.take() else {
             return Ok(());
         };
-        let first_ms = hook.initial_tick_ms();
-        self.planner_hook = Some(hook);
+        let first_ms = policy.initial_tick_ms();
+        self.scaling_policy = Some(policy);
         let first_ms = first_ms?;
         if first_ms.is_finite() {
             let at_ms = first_ms.max(self.now_ms);
-            push_planner_tick(&mut self.events, &mut self.next_event_seq, at_ms);
+            push_scaling_tick(&mut self.events, &mut self.next_event_seq, at_ms);
         } else {
             // No tick will ever fire to drain the FPM buffers; stop collecting them.
             self.collect_fpm = false;
@@ -2213,12 +2198,10 @@ where
         Ok(())
     }
 
-    /// Fire every `PlannerTick` scheduled for the current timestamp: gather the
-    /// drained metrics, call the planner, apply its scaling decision, and re-arm
-    /// the next tick. Called only when a hook is attached.
-    fn apply_planner_ticks(&mut self) -> Result<bool> {
+    /// Fire every `ScalingTick`, apply the policy decision, and re-arm.
+    fn apply_scaling_ticks(&mut self) -> Result<bool> {
         let mut changed = false;
-        while pop_ready_planner_tick(&mut self.events, self.now_ms) {
+        while pop_ready_scaling_tick(&mut self.events, self.now_ms) {
             // Once the workload is finished, drop the tick without bothering the
             // planner and without re-arming (mirrors the Python loop's pre-tick
             // `if is_done: break`), so the heap drains and `run()` exits.
@@ -2237,33 +2220,35 @@ where
                 self.decode_engine.dp_size(),
                 self.now_ms,
             );
-            let metrics = PlannerTickMetrics {
+            let snapshot = ReplayScalingSnapshot {
                 now_ms: self.now_ms,
                 prefill_fpm: self.prefill_fpm_buffer.take(),
                 decode_fpm: self.decode_fpm_buffer.take(),
                 traffic: self.traffic.drain(self.now_ms),
                 active_prefill_ids,
                 active_decode_ids,
-                total_prefill: self.total_prefill_count(),
-                total_decode: self.total_decode_count(),
+                starting_prefill_ids: self.prefill_engine.starting_group_ids(),
+                starting_decode_ids: self.decode_engine.starting_group_ids(),
+                draining_prefill_ids: self.prefill_engine.draining_group_ids(),
+                draining_decode_ids: self.decode_engine.draining_group_ids(),
             };
-            // Borrow the hook out so the runtime stays mutably available for
+            // Borrow the policy out so the runtime stays mutably available for
             // apply_scaling; restore it before propagating any error.
-            let mut hook = self
-                .planner_hook
+            let mut policy = self
+                .scaling_policy
                 .take()
-                .expect("planner tick fired without a hook");
-            let decision = hook.on_tick(metrics);
-            self.planner_hook = Some(hook);
+                .expect("scaling tick fired without a policy");
+            let decision = policy.on_tick(snapshot);
+            self.scaling_policy = Some(policy);
             let decision = decision?;
 
             if decision.target_prefill.is_some() || decision.target_decode.is_some() {
                 let target_prefill = decision
                     .target_prefill
-                    .unwrap_or_else(|| self.total_prefill_count());
+                    .unwrap_or_else(|| self.prefill_engine.non_draining_group_count());
                 let target_decode = decision
                     .target_decode
-                    .unwrap_or_else(|| self.total_decode_count());
+                    .unwrap_or_else(|| self.decode_engine.non_draining_group_count());
                 self.apply_scaling(target_prefill, target_decode)?;
             }
 
@@ -2278,7 +2263,7 @@ where
             if let Some(next_ms) = next_tick
                 && !self.is_workload_done()
             {
-                push_planner_tick(&mut self.events, &mut self.next_event_seq, next_ms);
+                push_scaling_tick(&mut self.events, &mut self.next_event_seq, next_ms);
             } else {
                 self.collect_fpm = false;
             }
@@ -2314,8 +2299,7 @@ where
     }
 
     // ------------------------------------------------------------------
-    // Planner integration: scaling + worker-count accessors used by the
-    // in-loop `PlannerTick` handler (apply_planner_ticks).
+    // Scaling integration used by the in-loop `ScalingTick` handler.
     // ------------------------------------------------------------------
 
     /// Advance the sim clock to `new_now_ms`, integrating provisioned
@@ -2338,10 +2322,12 @@ where
         self.decode_engine.active_worker_ids().len()
     }
 
+    #[cfg(test)]
     pub(in crate::replay) fn total_prefill_count(&self) -> usize {
         self.prefill_engine.worker_count()
     }
 
+    #[cfg(test)]
     pub(in crate::replay) fn total_decode_count(&self) -> usize {
         self.decode_engine.worker_count()
     }
@@ -2360,6 +2346,11 @@ where
         target_prefill: usize,
         target_decode: usize,
     ) -> Result<()> {
+        if target_prefill != self.prefill_engine.non_draining_group_count()
+            || target_decode != self.decode_engine.non_draining_group_count()
+        {
+            self.collector.clear_static_worker_count();
+        }
         // -- prefill --
         let (added, newly_marked, removed) = self.prefill_engine.apply_target_count(target_prefill);
         let prefill_delay = self.prefill_engine.startup_time_ms();
@@ -2549,8 +2540,8 @@ where
         }
         self.drain_current_timestamp()?;
         // With a planner attached, seed the recurring heartbeat; ticks then fire as
-        // events inside drain_current_timestamp (see apply_planner_ticks).
-        self.seed_first_planner_tick()?;
+        // events inside drain_current_timestamp.
+        self.seed_first_scaling_tick()?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {

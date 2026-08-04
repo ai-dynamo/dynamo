@@ -179,6 +179,18 @@ pub(super) fn synthesize_trace_tokens(
 ) -> Result<Vec<u32>> {
     validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
 
+    Ok(synthesize_validated_trace_tokens(
+        input_length,
+        hash_ids,
+        trace_block_size,
+    ))
+}
+
+pub(super) fn synthesize_validated_trace_tokens(
+    input_length: usize,
+    hash_ids: &[u32],
+    trace_block_size: usize,
+) -> Vec<u32> {
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {
         let remaining = input_length - tokens.len();
@@ -191,15 +203,8 @@ pub(super) fn synthesize_trace_tokens(
         }
     }
 
-    if tokens.len() != input_length {
-        bail!(
-            "failed to synthesize {} tokens from {} hash_ids",
-            input_length,
-            hash_ids.len()
-        );
-    }
-
-    Ok(tokens)
+    debug_assert_eq!(tokens.len(), input_length);
+    tokens
 }
 
 fn trace_to_replay_hashes(

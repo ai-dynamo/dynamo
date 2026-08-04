@@ -6,12 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 Supported manifests and cluster templates for the EKS deployment guide.
 
-**Full guide:** [docs/kubernetes/cloud-providers/eks/eks.md](../../../docs/kubernetes/cloud-providers/eks/eks.md)
+**Full guide:** [docs/kubernetes/cloud-providers/eks/eks.md](../../../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx)
 
 **Related guides:**
 
-- [Amazon EFS setup](../../../docs/kubernetes/cloud-providers/eks/efs.md)
-- [Elastic Fabric Adapter (EFA)](../../../docs/kubernetes/cloud-providers/eks/efa.md)
+- [Amazon EFS setup](../../../docs/fern/pages/kubernetes/installation/model-storage/efs.mdx)
+- [Elastic Fabric Adapter (EFA)](../../../docs/fern/pages/kubernetes/installation/rdma-setup/efa-on-aws.mdx)
 
 ## Contents
 

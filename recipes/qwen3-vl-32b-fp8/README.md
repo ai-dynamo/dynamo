@@ -16,7 +16,7 @@ Production-ready deployments for **Qwen/Qwen3-VL-32B-Instruct-FP8**, a 32B visio
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **GPU cluster** matching the configuration requirements:
    - **Aggregated**: 1x NVIDIA H100/H200
    - **Disaggregated**: 1x Intel XPU (encode) + 1x NVIDIA GPU (decode) with RDMA connectivity

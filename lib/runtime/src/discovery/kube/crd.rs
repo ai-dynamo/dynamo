@@ -6,8 +6,8 @@
 //! This module defines the Rust types for the DynamoWorkerMetadata CRD,
 //! which stores discovery metadata for Dynamo worker pods in Kubernetes.
 //!
-//! The CRD schema is defined in the Helm chart at:
-//! `deploy/helm/charts/crds/templates/nvidia.com_dynamoworkermetadatas.yaml`
+//! The CRD schema is defined at:
+//! `deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml`
 
 use anyhow::Result;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -122,7 +122,9 @@ pub async fn apply_cr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoveryInstance, DiscoveryQuery, EventScope, EventSourceQuery};
+    use crate::discovery::{
+        DiscoveryInstance, DiscoveryQuery, EventScope, EventSourceQuery, MAX_JSON_SAFE_PUBLISHER_ID,
+    };
     use crate::protocols::EndpointId;
     use kube::Resource;
 
@@ -176,12 +178,19 @@ mod tests {
                 endpoint: endpoint.clone(),
             },
             topic: "kv-events".to_string(),
-            publisher_id: 205,
+            publisher_id: MAX_JSON_SAFE_PUBLISHER_ID,
             metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
         };
         metadata.register_event_source(source.clone()).unwrap();
 
         let cr = build_cr("test-pod", "test-pod", "pod-uid", &metadata).unwrap();
+        let publisher_id = cr.spec.data["event_sources"]
+            .as_object()
+            .and_then(|sources| sources.values().next())
+            .and_then(|source| source.get("publisher_id"))
+            .expect("serialized event source publisher ID");
+        assert_eq!(publisher_id.as_u64(), Some(MAX_JSON_SAFE_PUBLISHER_ID));
+
         let round_trip: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
 
         assert_eq!(

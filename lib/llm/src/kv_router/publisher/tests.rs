@@ -21,6 +21,81 @@ mod test_event_processing {
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
     #[test]
+    fn test_publish_batch_ignores_empty_and_preserves_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+        };
+
+        publisher.publish_batch(Vec::new()).unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        publisher
+            .publish_batch(vec![
+                KvCacheEvent {
+                    event_id: 8,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 1,
+                },
+                KvCacheEvent {
+                    event_id: 9,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 2,
+                },
+            ])
+            .unwrap();
+        let batch = rx.try_recv().unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].event.event_id, 8);
+        assert_eq!(batch[0].event.dp_rank, 1);
+        assert_eq!(batch[1].event.event_id, 9);
+        assert_eq!(batch[1].event.dp_rank, 2);
+    }
+
+    #[test]
+    fn test_publish_batch_closed_channel_returns_original_events_in_order() {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+        };
+        drop(rx);
+
+        let error = publisher
+            .publish_batch(vec![
+                KvCacheEvent {
+                    event_id: 8,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 1,
+                },
+                KvCacheEvent {
+                    event_id: 9,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 2,
+                },
+            ])
+            .unwrap_err();
+
+        assert_eq!(error.0.len(), 2);
+        assert_eq!(error.0[0].event_id, 8);
+        assert_eq!(error.0[0].dp_rank, 1);
+        assert_eq!(error.0[1].event_id, 9);
+        assert_eq!(error.0[1].dp_rank, 2);
+    }
+
+    #[test]
     fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
@@ -237,6 +312,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let out = convert_event(
@@ -269,6 +345,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -283,6 +360,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -338,6 +416,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -352,6 +431,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let out1 = convert_event(
@@ -452,6 +532,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let out = convert_event(
             raw_evt,
@@ -672,7 +753,11 @@ mod tests_startup_helpers {
         GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
     };
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_runtime::discovery::{
+        Discovery, DiscoveryQuery, EventSourceQuery, MockDiscovery, SharedMockRegistry,
+    };
     use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
 
     // Type alias to resolve clippy::type_complexity warning
     type PublishedEvents = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -713,6 +798,85 @@ mod tests_startup_helpers {
 
     fn local_gpu_event(worker_id: WorkerId, event: KvCacheEvent) -> Vec<PlacementEvent> {
         vec![PlacementEvent::local_gpu(worker_id, event)]
+    }
+
+    #[tokio::test]
+    async fn unexpected_zmq_listener_exit_retracts_advertised_source() {
+        let discovery = Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()));
+        let kv_state_endpoint = EndpointId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            name: "generate".to_string(),
+        };
+        let source_instance = discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: kv_state_endpoint.clone(),
+                },
+                topic: KV_EVENT_SUBJECT.to_string(),
+                publisher_id: 11,
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let source_query = || {
+            DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+                kv_state_endpoint.clone(),
+                KV_EVENT_SUBJECT,
+            ))
+        };
+        assert_eq!(discovery.list(source_query()).await.unwrap().len(), 1);
+
+        let cancellation_token = CancellationToken::new();
+        let processor_token = cancellation_token.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cleanup_discovery = discovery.clone();
+        let processor = tokio::spawn(async move {
+            let (publisher, _) = MockComponent::new();
+            start_event_processor(publisher, 1, processor_token, rx, None, None).await;
+            cleanup_discovery.unregister(source_instance).await.unwrap();
+        });
+        let listener_handle = tokio::spawn(async {});
+
+        let unexpected = supervise_zmq_listener(
+            listener_handle,
+            "ipc://events".to_string(),
+            String::new(),
+            cancellation_token.clone(),
+        )
+        .await;
+
+        assert!(unexpected);
+        assert!(cancellation_token.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), processor)
+            .await
+            .expect("event processor did not stop after listener failure")
+            .unwrap();
+        assert!(discovery.list(source_query()).await.unwrap().is_empty());
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn silent_zmq_listener_remains_healthy_until_normal_shutdown() {
+        let cancellation_token = CancellationToken::new();
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let listener_handle = tokio::spawn(async move {
+            let _ = exit_rx.await;
+        });
+        let supervisor = tokio::spawn(supervise_zmq_listener(
+            listener_handle,
+            "ipc://events".to_string(),
+            String::new(),
+            cancellation_token.clone(),
+        ));
+
+        tokio::task::yield_now().await;
+        assert!(!cancellation_token.is_cancelled());
+        assert!(!supervisor.is_finished());
+
+        cancellation_token.cancel();
+        exit_tx.send(()).unwrap();
+        assert!(!supervisor.await.unwrap());
     }
 
     //--------------------------------------------------------------------
@@ -1336,6 +1500,7 @@ mod tests_startup_helpers {
                 group_idx: None,
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
+                locality: None,
             }],
             data_parallel_rank: Some(0),
         };

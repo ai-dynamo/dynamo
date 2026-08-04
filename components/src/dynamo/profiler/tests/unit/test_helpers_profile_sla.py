@@ -381,7 +381,7 @@ class TestValidateDgdrDynamoFeatures:
         with caplog.at_level(logging.WARNING):
             validate_dgdr_dynamo_features(dgdr, aic_supported=False)
         assert "AIC does not support" in caplog.text
-        assert "Rust perf shim fallback" in caplog.text
+        assert "AIC core fallback" in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

@@ -1,0 +1,19 @@
+{
+  "source": {
+    "repo": "fern-api/docs",
+    "branch": "main",
+    "navigation_dir": "fern/products/docs/pages/navigation"
+  },
+  "fetched_at": "2026-07-21",
+  "page_count": 8,
+  "pages": {
+    "fern/products/docs/pages/navigation/changelogs.mdx": "bc22b3bdb89057ef71ba8d0924539bb332e32202",
+    "fern/products/docs/pages/navigation/frontmatter.mdx": "700d6e263273da926408de7ffeeee2a206e711df",
+    "fern/products/docs/pages/navigation/navigation.mdx": "b77526ef2a6f22b1c1b0a79a5f4798bfe82e50f1",
+    "fern/products/docs/pages/navigation/overview.mdx": "8ca0f10aeddd36ff13d90c7ca2258156218eff3b",
+    "fern/products/docs/pages/navigation/products.mdx": "ba8b735da1d982ec17735412526c9dad0e09980e",
+    "fern/products/docs/pages/navigation/site-level-settings.mdx": "0367dbb13c914f3e728b5ef170446a3623ea764c",
+    "fern/products/docs/pages/navigation/tabs.mdx": "723affa49b5b0283909dfcf4f2682f7390477f9a",
+    "fern/products/docs/pages/navigation/versions.mdx": "f20560f00fe8ca1ae61342f804beeb0b5f522016"
+  }
+}

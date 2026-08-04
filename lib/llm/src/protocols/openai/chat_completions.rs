@@ -152,6 +152,7 @@ impl NvCreateChatCompletionRequest {
             match mode {
                 OpenAiThinkingMode::Enabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("enabled".to_string()),
@@ -159,6 +160,10 @@ impl NvCreateChatCompletionRequest {
                 }
                 OpenAiThinkingMode::Disabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+                    args.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("disabled".to_string()),
@@ -387,8 +392,8 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
                 }
                 ResponseFormat::JsonSchema { json_schema } => {
                     // validate_response_format ensures schema is present when type=json_schema
-                    if let Some(schema) = json_schema.schema.clone() {
-                        return Some(schema);
+                    if !json_schema.schema.is_null() {
+                        return Some(json_schema.schema.clone());
                     }
                 }
             }
@@ -541,7 +546,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
         validate::validate_top_logprobs(self.inner.top_logprobs)?;
-        // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
+        // `max_tokens` is deprecated but still accepted as a fallback for
+        // `max_completion_tokens`, so it must be validated too.
+        #[allow(deprecated)]
+        validate::validate_max_tokens(self.inner.max_tokens)?;
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
@@ -855,6 +863,33 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_zero_max_tokens() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 0
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("max_tokens: 0 must be rejected");
+        assert!(err.to_string().contains("Max tokens"));
+    }
+
+    #[test]
+    fn test_validate_accepts_positive_max_tokens() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
     fn test_truncate_prompt_tokens_rejected_until_supported() {
         let request_json = json!({
             "model": "test-model",
@@ -1138,6 +1173,44 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tools_rejects_non_object_parameters() {
+        for parameters in [json!("not-an-object"), json!([]), json!(42), json!(true)] {
+            let tools = vec![ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: "broken_tool".to_string(),
+                    description: None,
+                    parameters: Some(parameters),
+                    strict: None,
+                },
+            }];
+
+            let error = validate::validate_tools(&Some(&tools))
+                .expect_err("non-object function parameters must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "Function parameters at index 0 for \"broken_tool\" must be a JSON Schema object"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_tools_accepts_omitted_parameters() {
+        let tools = vec![ChatCompletionTool {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionObject {
+                name: "parameterless_tool".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+            },
+        }];
+
+        validate::validate_tools(&Some(&tools))
+            .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
     fn test_openai_thinking_payload_normalizes_to_template_args() {
         let json_str = json!({
             "model": "deepseek-ai/DeepSeek-V4-Pro",
@@ -1159,6 +1232,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("max")));
     }
@@ -1209,6 +1283,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
     }
 
@@ -1239,6 +1314,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());
