@@ -248,6 +248,19 @@ spec:
                 - --max-num-batched-tokens=16384
                 - --gpu-memory-utilization=0.9
                 - --disaggregation-mode=decode
+                # REQUIRED on the decode worker for hybrid Mamba/GDN models.
+                # vLLM zeroes newly allocated attention blocks only when the model
+                # has Mamba layers; under async scheduling that zeroing kernel races
+                # the NIXL RDMA write and can erase the KV that prefill just
+                # transferred. Silent - no error, no failed transfer - but the decode
+                # worker then attends to zeros while GDN state survives, so output
+                # stays fluent but ignores the prompt. Measured on the H200 FP8
+                # sibling recipe: IFEval 91.31 -> 51.02, GPQA-Diamond 85.35 -> 19.19
+                # (below random); ~36% of requests answered as if the prompt were
+                # empty. Upstream: vllm-project/vllm#42182, #37285. Fixed by #45357
+                # (vLLM 0.24.0) and #48481 (vLLM 0.26.0); no Dynamo release ships
+                # >= 0.26.0 yet. Prefill-side async scheduling is unaffected.
+                - --no-async-scheduling
                 - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
               command:
                 - python3
