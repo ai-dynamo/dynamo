@@ -299,6 +299,35 @@ def changed_paths(repo: Path, base: str) -> list[str]:
     return [p for p in out.splitlines() if p.strip()]
 
 
+def merge_base_tree(repo: Path, base: str) -> list[str]:
+    """Tracked files at the merge-base of ``base`` and HEAD.
+
+    The diff-aware gate compares staleness against the same reference frame
+    ``changed_paths`` diffs against (three-dot = merge-base), so "this branch
+    deleted the last file a glob matched" is judged on what the branch
+    actually changed, not on unrelated history that landed on ``base`` after
+    it forked. Like ``changed_paths``, this reads the tree and lives only in
+    the coverage tool, never in emission.
+    """
+    try:
+        merge_base = subprocess.check_output(
+            ["git", "-C", str(repo), "merge-base", base, "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        out = subprocess.check_output(
+            ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", merge_base],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as err:
+        raise SystemExit(
+            f"git merge-base/ls-tree failed in {repo!r} "
+            f"(not a checkout, or base {base!r} unavailable): {err}"
+        ) from err
+    return [p for p in out.splitlines() if p.strip()]
+
+
 # ----------------------------------------------------------------------
 # Resolution pipeline
 # ----------------------------------------------------------------------
@@ -329,17 +358,23 @@ def _owner_rule_values(rule: object, section: str) -> tuple[str, list[object]]:
     """Extract a structurally valid owner rule from untrusted YAML."""
     if not isinstance(rule, Mapping):
         raise SystemExit(f"areas.yaml: {section} entry {rule!r} must be a mapping")
+    if "inherits" in rule:
+        raise SystemExit(
+            f"areas.yaml: {section} entry {rule!r} uses the removed key "
+            "'inherits' -- list every owner (retained and added) under "
+            "'owners'. The strict gate rejects a shared rule that drops an "
+            "owner an enclosing rule grants, so the complete list is checked, "
+            "not trusted."
+        )
     glob = rule.get("glob")
     owners = rule.get("owners", []) or []
-    inherits = rule.get("inherits", []) or []
     if not isinstance(glob, str) or not glob or any(char.isspace() for char in glob):
         raise SystemExit(f"areas.yaml: {section} entry {rule!r} has invalid 'glob'")
-    if not isinstance(owners, list) or not isinstance(inherits, list):
+    if not isinstance(owners, list):
         raise SystemExit(
-            f"areas.yaml: {section} entry {rule!r} requires list "
-            "'owners'/'inherits' values"
+            f"areas.yaml: {section} entry {rule!r} requires a list 'owners' value"
         )
-    return glob, [*inherits, *owners]
+    return glob, list(owners)
 
 
 def _normalize_owner_rules(
@@ -419,7 +454,8 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
     * ``required_owners`` -- validated owner-presence contracts; not emitted.
-    * ``shared``      -- ``inherits`` + ``owners`` normalize into one owner list.
+    * ``shared``      -- one complete owner list per co-owned glob; the
+      strict gate rejects a list that drops an enclosing rule's owner.
     * ``advisory``    -- normalized like shared, then emitted separately.
     * ``classify.filetype_rules`` -- each blocking rule becomes one stable
       row with the coowner as the sole owner (a single ``*Dockerfile*``
@@ -456,10 +492,13 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         for a in raw_areas
     ]
 
-    # A CODEOWNERS row always replaces earlier rows.  ``inherits`` makes the
-    # additive intent explicit without attempting unsafe, tree-dependent
-    # discovery of whichever rule happened to match before it.  Normalize to
-    # the legacy internal shape so emission remains a pure policy function.
+    # A CODEOWNERS row always replaces earlier rows, so every owner rule
+    # declares its COMPLETE final owner set. Additive intent is machine-
+    # checked, not authored: the strict gate rejects a shared rule that
+    # drops an owner an enclosing rule grants (see
+    # shared_additivity_violations in build_codeowners.py). Discovery stays
+    # pure -- enclosure is judged against the other policy rules, never the
+    # live tree, so emission remains a pure policy function.
     normalized_shared = _normalize_owner_rules(spec.get("shared", []), areas, "shared")
     required_owners = _normalize_owner_rules(
         spec.get("required_owners", []), areas, "required_owners"

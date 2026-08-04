@@ -3,9 +3,11 @@
 Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
 pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
 and reports how much of the live tree is EXPLICITLY owned vs. falls to the
-catch-all. It also rejects stale globs (in full-tree runs) and verifies that
-final last-match resolution retains every owner promised by required and
-blocking file-type declarations.
+catch-all. It also rejects stale globs (all of them in full-tree runs; in
+diff-aware runs, the ones this branch itself orphaned), rejects shared rules
+that drop an enclosing rule's owners, and verifies that final last-match
+resolution retains every owner promised by required and blocking file-type
+declarations.
 
 This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
 is a pure function of the policy YAML; the tree only enters here, in the
@@ -23,7 +25,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -36,6 +38,7 @@ from codeowners_match import (  # noqa: E402
     compute_resolution,
     load_tree,
     match,
+    merge_base_tree,
     parse_codeowners,
     resolve_owners,
 )
@@ -120,6 +123,93 @@ def ownership_contract_violations(
     return violations
 
 
+@dataclass(frozen=True)
+class SharedAdditivityViolation:
+    """A shared rule that drops an owner granted by the rules above it."""
+
+    glob: str
+    missing: tuple[str, ...]
+    declared: tuple[str, ...]
+
+
+def _probe_path(glob: str) -> str | None:
+    """A path prefix every file matched by ``glob`` is guaranteed to share.
+
+    Directory globs probe a synthetic direct child, exact paths probe
+    themselves, and a wildcard glob probes a synthetic child of its static
+    directory prefix. Returns ``None`` for basename globs (no anchored
+    prefix), which imply no enclosing rule and are skipped.
+    """
+    wildcard = min((i for i in (glob.find(c) for c in "*?[") if i != -1), default=-1)
+    if wildcard != -1:
+        prefix = glob[:wildcard].rpartition("/")[0]
+        return f"{prefix}/\x00" if prefix else None
+    if glob.endswith("/"):
+        return f"{glob}\x00"
+    return glob
+
+
+def shared_additivity_violations(
+    model: ResolvedModel,
+) -> list[SharedAdditivityViolation]:
+    """Shared rules whose owner list drops what an enclosing rule grants.
+
+    ``shared`` rows are co-ownership by definition, but CODEOWNERS is
+    last-match-wins, so each row must restate the owners it keeps. This is
+    the machine check that makes the restatement trustworthy: resolve a
+    representative probe path for each shared glob against everything the
+    emitter renders BEFORE that row (areas, file-type defaults, overrides,
+    and shorter shared rules) and require the row to retain every owner it
+    finds. The catch-all is a default, not a grant, so replacing it is fine.
+
+    Pure function of the policy -- enclosure is judged against the other
+    rules, never the live tree, so the check cannot flap with base churn.
+    """
+    label_to_team = model.label_to_team()
+    # Render WITHOUT shared rows or the catch-all: what remains is exactly
+    # the explicit-grant tier a shared row may not silently shrink.
+    lines, _ = render_codeowners(
+        replace(model, shared=[], catch_all=""), group=True, external=[]
+    )
+    rules = parse_codeowners("\n".join(lines))
+    ordered = sorted(
+        model.shared, key=lambda s: (len(anchor(s["glob"])), anchor(s["glob"]))
+    )
+    violations: list[SharedAdditivityViolation] = []
+    for rule in ordered:
+        declared = [label_to_team.get(o, o) for o in rule["owners"]]
+        probe = _probe_path(rule["glob"])
+        if probe is not None:
+            missing = set(resolve_owners(rules, probe)) - set(declared)
+            if missing:
+                violations.append(
+                    SharedAdditivityViolation(
+                        glob=rule["glob"],
+                        missing=tuple(sorted(missing)),
+                        declared=tuple(declared),
+                    )
+                )
+        rules.append((anchor(rule["glob"]), declared))
+    return violations
+
+
+def print_additivity_violations(
+    violations: list[SharedAdditivityViolation],
+) -> None:
+    """Print a bounded shared-rule owner-drop report."""
+    if not violations:
+        return
+    print(
+        f"shared rules dropping enclosing owners: {len(violations)} "
+        "(restate the owner in the rule's 'owners' list):"
+    )
+    for violation in violations[:15]:
+        print(
+            f"    {violation.glob}: missing {list(violation.missing)}; "
+            f"declared {list(violation.declared)}"
+        )
+
+
 def print_ownership_violations(
     violations: list[OwnershipContractViolation],
 ) -> None:
@@ -137,22 +227,47 @@ def print_ownership_violations(
         )
 
 
+def newly_stale_patterns(
+    dead: list[str], base_paths: list[str] | None
+) -> list[str] | None:
+    """Split THIS change's stale globs from staleness inherited off the base.
+
+    A dead pattern (matches nothing at HEAD) that still matched something at
+    the merge-base went stale because this branch deleted or renamed its last
+    matching file -- the branch must prune the declaration too, so ``main``
+    never inherits a stale glob from a merged deletion PR. A pattern that was
+    already dead at the merge-base is base staleness this PR did not cause;
+    blocking on it would red-X every open PR the moment the base goes stale
+    (the cascade diff-aware mode exists to prevent), so it stays a warning
+    until a policy PR or full-tree run prunes it.
+
+    Returns ``None`` in full-tree mode (``base_paths is None``), where every
+    stale glob blocks and the split is meaningless.
+    """
+    if base_paths is None:
+        return None
+    return [p for p in dead if any(match(p, path) for path in base_paths)]
+
+
 def strict_failure(
     strict: bool,
     gate: CoverageGate,
     changed: list[str] | None,
     ownership_violations: list[OwnershipContractViolation],
     dead: list[str],
+    newly_stale: list[str] | None,
+    additivity: list[SharedAdditivityViolation],
 ) -> str | None:
     """Return the fail-closed message for the active strict gate.
 
-    Stale globs block only full-tree runs (``changed is None``: policy PRs
-    and scheduled runs). Blocking them in diff-aware mode would let base
-    churn red-X unrelated PRs: deleting the last file a glob matches would
-    force an areas.yaml edit, which reclassifies the PR as a policy change
-    and judges it full-tree -- exactly the cascade ``--changed-only`` exists
-    to prevent. Diff-aware runs surface them as a non-fatal report line;
-    the next policy PR (or scheduled run) must prune them.
+    Stale-glob blocking is scope-aware. Full-tree runs (``changed is None``:
+    policy PRs, push-to-main, scheduled) block on EVERY stale glob -- the
+    maintenance assertion. Diff-aware runs block only on ``newly_stale``
+    globs, the ones this branch itself orphaned (see
+    ``newly_stale_patterns``); staleness inherited from the base branch
+    surfaces as a non-fatal report line so base churn cannot red-X
+    unrelated PRs. Shared-rule additivity is a pure policy property, so it
+    is judged (and can only change) on full-tree runs.
     """
     if not strict:
         return None
@@ -166,6 +281,17 @@ def strict_failure(
         return (
             f"!! strict: {len(dead)} glob(s) match no tracked files -- "
             "remove them from areas.yaml"
+        )
+    if newly_stale:
+        return (
+            f"!! strict: {len(newly_stale)} ownership glob(s) match no "
+            "tracked files after this change's deletions -- prune them from "
+            "areas.yaml and regenerate CODEOWNERS in this PR"
+        )
+    if additivity:
+        return (
+            f"!! strict: {len(additivity)} shared rule(s) drop owner(s) "
+            "granted by an enclosing rule -- restate them under 'owners'"
         )
     if ownership_violations:
         return (
@@ -282,16 +408,39 @@ def _parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def _print_dead_patterns(dead: list[str]) -> None:
-    """Print a bounded stale-pattern report."""
+def _print_dead_patterns(dead: list[str], newly_stale: list[str] | None) -> None:
+    """Print a bounded stale-pattern report, split by who must prune it.
+
+    ``newly_stale is None`` means full-tree mode (every stale glob blocks).
+    In diff-aware mode the globs this change orphaned block THIS PR; the
+    rest are inherited base staleness and only warn here.
+    """
     if not dead:
         return
-    print(
-        f"globs matching no files: {len(dead)} "
-        "(prune from areas.yaml; blocks policy PRs and full-tree runs):"
-    )
-    for pattern in dead[:10]:
-        print(f"    {pattern}")
+    if newly_stale is None:
+        print(
+            f"globs matching no files: {len(dead)} "
+            "(prune from areas.yaml; blocks policy PRs and full-tree runs):"
+        )
+        for pattern in dead[:10]:
+            print(f"    {pattern}")
+        return
+    inherited = [p for p in dead if p not in set(newly_stale)]
+    if newly_stale:
+        print(
+            f"globs matching no files: {len(newly_stale)} orphaned by this "
+            "change (prune from areas.yaml in this PR; blocking):"
+        )
+        for pattern in newly_stale[:10]:
+            print(f"    {pattern}")
+    if inherited:
+        print(
+            f"globs matching no files: {len(inherited)} inherited from the "
+            "base branch (not blocking here; a policy PR or full-tree run "
+            "must prune them):"
+        )
+        for pattern in inherited[:10]:
+            print(f"    {pattern}")
 
 
 def _print_summary(
@@ -299,6 +448,7 @@ def _print_summary(
     tree: list[str],
     unmatched: list[str],
     dead: list[str],
+    newly_stale: list[str] | None,
     violations: list[OwnershipContractViolation],
 ) -> None:
     """Print coverage, stale-pattern, contract, and per-area summaries."""
@@ -312,7 +462,7 @@ def _print_summary(
     if unmatched:
         print("catch-all-only sample (add an explicit glob to cover these):")
         print("   ", unmatched[:15])
-    _print_dead_patterns(dead)
+    _print_dead_patterns(dead, newly_stale)
     print_ownership_violations(violations)
     print("\nper-area glob counts:")
     counts = Counter({a.label: len(a.path_globs) for a in model.areas})
@@ -342,10 +492,23 @@ def main() -> int:
     )
     violations = ownership_contract_violations(model, contract_tree)
     dead = _dead_patterns(model, tree)
-    _print_summary(model, tree, unmatched, dead, violations)
+    if changed is None:
+        newly_stale = None
+        # Pure policy property; only a policy edit (always judged full-tree)
+        # can change it, so diff-aware runs skip it entirely.
+        additivity = shared_additivity_violations(model)
+    else:
+        # One git call, and only when something is stale to attribute.
+        base_paths = merge_base_tree(Path(args.repo), args.base) if dead else []
+        newly_stale = newly_stale_patterns(dead, base_paths)
+        additivity = []
+    _print_summary(model, tree, unmatched, dead, newly_stale, violations)
+    print_additivity_violations(additivity)
     gate = split_coverage(unmatched, changed)
     _print_warnings(gate, args.base)
-    failure = strict_failure(args.strict, gate, changed, violations, dead)
+    failure = strict_failure(
+        args.strict, gate, changed, violations, dead, newly_stale, additivity
+    )
     if failure:
         print(failure)
         return 1

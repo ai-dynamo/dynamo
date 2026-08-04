@@ -73,10 +73,12 @@ since a policy edit can orphan any path.
 5. Commit `areas.yaml` and `CODEOWNERS` together (same commit), signed
    (`git commit -s`).
 
-Removals fail the stale-policy gate when a deletion removes the final tracked
-file matched by a declared ownership glob. Prune the dead declaration from
-`areas.yaml`, run step 4, and commit the policy and regenerated artifacts with
-the deletion.
+Removals fail the stale-policy gate on the deleting PR itself: when your PR
+removes (or renames away) the final tracked file matched by a declared
+ownership glob, the gate blocks until the same PR prunes the dead declaration.
+Prune it from `areas.yaml`, run step 4, and commit the policy and regenerated
+artifacts with the deletion. Stale globs your PR merely inherited from `main`
+are reported as warnings and never block ordinary PRs.
 
 ## Flow 3: Change review routing
 
@@ -103,6 +105,11 @@ Semantics worth knowing before you file one:
   must never be dropped are declared under `required_owners:` in
   `areas.yaml`; the CI gate fails any policy change that removes a declared
   owner from a matching path.
+- **`shared` rows are additive by contract.** A `shared` entry lists its
+  complete owner set (owners kept plus owners added); the gate rejects a
+  list that drops an owner an enclosing rule grants and names the missing
+  team. To narrow ownership on purpose, use an area `path_globs` override,
+  not a `shared` entry.
 
 ## Flow 4: Grant an external contributor area-scoped ownership
 

@@ -52,20 +52,22 @@ adding required approvals.
 ### Add owners without dropping existing accountability
 
 GitHub uses last-match-wins semantics, so a narrower row replaces the complete
-owner set from earlier rows. For an additive change, use `inherits` to name the
-area owners the new rule must retain and `owners` for the owners being added:
+owner set from earlier rows. A `shared` entry therefore lists its **complete**
+owner set -- the enclosing owners it keeps, then the ones being added:
 
 ```yaml
 shared:
   - glob: deploy/inference-gateway/epp/Dockerfile
-    inherits: [epp, ops]
-    owners: [operator]
+    owners: [epp, ops, operator]   # epp+ops kept, operator added
 ```
 
-The resolver stably combines those labels and emits one ordinary CODEOWNERS
-row containing EPP, Ops, and Operator. `inherits` is deliberately explicit:
-the generator does not guess an enclosing owner from the live tree, so output
-remains a pure function of the policy files.
+You do not have to trust that restatement: `shared` rows are co-ownership by
+definition, and the strict gate rejects any shared rule whose owner list drops
+an owner granted by an enclosing rule (the failure names the missing team).
+Forgetting `epp` above is a red X, not a silent takeover. The check compares
+policy rules against each other -- never the live tree -- so output remains a
+pure function of the policy files. Narrowing ownership on purpose belongs in
+an area's `path_globs` (a nested override), not in `shared`.
 
 For an invariant that should not emit another CODEOWNERS row, use
 `required_owners`. The strict gate checks every matching tracked file against
@@ -82,6 +84,11 @@ under `deploy/operator/` may add GMS or Observability, but it cannot silently
 remove Operator. Each `required_owners` glob must match at least one tracked
 path; strict validation rejects stale contracts after their final path is
 deleted.
+
+Removing a `required_owners` entry lifts the requirement -- deliberately, or a
+contract could never be retired. The edit is itself a policy change: it is
+judged full-tree and reviewed by this directory's owners, so lifting a
+guarantee is always a visible, owned decision.
 
 ## External contributors
 
@@ -119,7 +126,13 @@ generated outputs together.
 - any tracked file falls through to no owner (**coverage gate**) - a new
   directory no area claims blocks the PR until `areas.yaml` is updated; or
 - any declared ownership glob matches no tracked file (**stale policy gate**) -
-  deleting the final matching path also requires pruning its declaration; or
+  a PR that deletes or renames a glob's final matching path must prune the
+  declaration in the same PR. Staleness a PR merely inherited from its base
+  is a warning there and blocks only policy PRs and full-tree runs, so base
+  churn never red-Xes unrelated work; or
+- a `shared` rule's owner list drops an owner granted by an enclosing rule
+  (**additivity gate**) - co-ownership rows add owners; they cannot silently
+  take a path over; or
 - final last-match resolution removes an owner promised by `required_owners`,
   or a blocking file-type declaration (**ownership contract gate**) - coverage
   by the wrong team no longer counts as success; or

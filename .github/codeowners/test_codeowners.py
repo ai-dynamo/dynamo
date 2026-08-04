@@ -29,8 +29,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     _dead_patterns,
+    _probe_path,
     is_policy_change,
     ownership_contract_violations,
+    shared_additivity_violations,
     split_coverage,
     strict_failure,
 )
@@ -478,13 +480,12 @@ class TestComputeResolution:
         assert len(rows) == 1
         assert rows[0]["owners"] == ["runtime", "docs"]
 
-    def test_shared_inherits_are_retained_and_stably_deduplicated(self) -> None:
+    def test_shared_owner_lists_are_stably_deduplicated(self) -> None:
         spec = self._spec()
         spec["shared"].append(
             {
                 "glob": "lib/llm/metrics/",
-                "inherits": ["runtime", "docs"],
-                "owners": ["kvbm", "runtime"],
+                "owners": ["runtime", "docs", "kvbm", "runtime"],
             }
         )
         model = compute_resolution(spec)
@@ -494,17 +495,34 @@ class TestComputeResolution:
             "owners": ["runtime", "docs", "kvbm"],
         }
 
+    @pytest.mark.parametrize("section", ["shared", "required_owners", "advisory"])
+    def test_removed_inherits_key_is_rejected_with_guidance(self, section: str) -> None:
+        # The inherits/owners split is gone: an owner rule declares its
+        # complete owner set under 'owners', and the additivity gate (not a
+        # second authoring key) catches a list that drops an enclosing
+        # rule's owner. Stale authoring muscle-memory gets a pointed error.
+        spec = self._spec()
+        spec[section] = [
+            {
+                "glob": "lib/llm/metrics/",
+                "inherits": ["runtime"],
+                "owners": ["kvbm"],
+            }
+        ]
+        with pytest.raises(SystemExit, match="removed key 'inherits'"):
+            compute_resolution(spec)
+
     @pytest.mark.parametrize(
         "rule",
         [
             {"owners": ["runtime"]},
             {"glob": "lib/llm/metrics/", "owners": "runtime"},
-            {"glob": "lib/llm/metrics/", "owners": [], "inherits": []},
+            {"glob": "lib/llm/metrics/", "owners": []},
             {"glob": "lib/llm/metrics/", "owners": ["typoed-owner"]},
             {"glob": "lib/llm/ metrics/", "owners": ["runtime"]},
             {"glob": "lib/llm/metrics/", "owners": ["@org/team extra"]},
             {"glob": "lib/llm/metrics/", "owners": ["owner @example.com"]},
-            {"glob": "lib/llm/metrics/", "inherits": ["runtime docs"]},
+            {"glob": "lib/llm/metrics/", "owners": ["runtime docs"]},
             {"glob": "lib/llm/metrics/", "owners": [["not-hashable"]]},
             ["not", "a", "mapping"],
         ],
@@ -522,8 +540,7 @@ class TestComputeResolution:
         spec["shared"] = [
             {
                 "glob": "lib/llm/metrics/",
-                "inherits": ["runtime"],
-                "owners": ["@org/team", "owner@example.com"],
+                "owners": ["runtime", "@org/team", "owner@example.com"],
             }
         ]
         model = compute_resolution(spec)
@@ -540,7 +557,7 @@ class TestComputeResolution:
             {"glob": "lib/llm/ metrics/", "owners": ["runtime"]},
             {"glob": "lib/llm/metrics/", "owners": ["@org/team extra"]},
             {"glob": "lib/llm/metrics/", "owners": ["owner @example.com"]},
-            {"glob": "lib/llm/metrics/", "inherits": ["runtime docs"]},
+            {"glob": "lib/llm/metrics/", "owners": ["runtime docs"]},
         ],
     )
     def test_owner_rule_sections_reject_whitespace_tokens(
@@ -752,13 +769,15 @@ class TestEmissionIsTreeIndependent:
             "@xpu",
         ]
 
-    def test_shared_inherits_make_filetype_override_additive(self) -> None:
+    def test_shared_restatement_makes_filetype_override_additive(self) -> None:
+        # A shared row lists its COMPLETE owner set: the retained enclosing
+        # owners first, then the added ones. The row replaces the file-type
+        # default under last-match, so restating is what keeps it additive.
         spec = self._spec()
         spec["shared"].append(
             {
                 "glob": "lib/llm/Dockerfile",
-                "inherits": ["runtime", "ops"],
-                "owners": ["docs"],
+                "owners": ["runtime", "ops", "docs"],
             }
         )
 
@@ -857,9 +876,11 @@ class TestOwnershipContracts:
         assert violations[0].glob == "lib/"
         assert violations[0].missing == ("@docs",)
 
-    def test_shared_rule_may_be_overridden_by_more_specific_rule(self) -> None:
-        # shared entries are additive co-ownership lines, not hard contracts.
-        # A more-specific area or shared rule may legitimately override them.
+    def test_shared_rule_is_not_a_tree_level_contract(self) -> None:
+        # The tree-level contract check enforces only required_owners and
+        # blocking file-type declarations; a shared drop is a POLICY-shape
+        # problem and is caught by shared_additivity_violations instead
+        # (see TestSharedAdditivity), not by per-file contract validation.
         spec = self._spec()
         spec["shared"].append({"glob": "lib/private/", "owners": ["runtime"]})
         model = compute_resolution(spec)
@@ -881,6 +902,25 @@ class TestOwnershipContracts:
         assert violations[0].path == "lib/private/a.rs"
         assert violations[0].missing == ("@docs",)
         assert violations[0].actual == ("@runtime",)
+
+    def test_removing_a_required_owner_contract_lifts_the_requirement(self) -> None:
+        # "What happens if I remove this section in a PR?" -- the contract is
+        # policy, not history: deleting the entry deletes the requirement, on
+        # purpose (an un-removable requirement could never be retired). The
+        # protection is WHERE the edit happens, not the entry itself:
+        # areas.yaml edits are policy changes, judged full-tree and reviewed
+        # by the ops team that owns .github/codeowners/, so lifting a
+        # contract is a visible, owned policy decision -- never a side
+        # effect of an unrelated PR.
+        spec = self._spec()
+        spec["required_owners"] = [{"glob": "lib/", "owners": ["docs"]}]
+        spec["shared"] = [{"glob": "lib/private/", "owners": ["runtime"]}]
+        model = compute_resolution(spec)
+        assert ownership_contract_violations(model, ["lib/private/a.rs"])
+
+        del spec["required_owners"]
+        model = compute_resolution(spec)
+        assert ownership_contract_violations(model, ["lib/private/a.rs"]) == []
 
     def test_filetype_owner_cannot_be_silently_removed(self) -> None:
         spec = self._spec()
@@ -904,7 +944,7 @@ class TestOwnershipContracts:
         model = compute_resolution(self._spec())
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
-            True, CoverageGate(blocking=[], warnings=[]), None, violations, []
+            True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None, []
         )
         assert message is None
 
@@ -913,9 +953,126 @@ class TestOwnershipContracts:
         model.shared.append({"glob": "lib/private/", "owners": ["runtime"]})
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
-            True, CoverageGate(blocking=[], warnings=[]), None, violations, []
+            True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None, []
         )
         assert message and "lost declared owners" in message
+
+
+class TestSharedAdditivity:
+    """shared rows are co-ownership BY DEFINITION: the pure policy gate
+    rejects a shared owner list that drops what an enclosing rule grants.
+    Narrowing ownership is still possible -- through an area path_globs
+    override, which this check deliberately does not police."""
+
+    def _spec(self) -> dict:
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": ["lib/"],
+                },
+                {"label": "docs", "github_team": "@docs", "path_globs": []},
+                {"label": "ops", "github_team": "@ops", "path_globs": []},
+            ],
+        }
+
+    def test_restated_enclosing_owner_passes(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["runtime", "docs"]}]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
+    def test_dropped_enclosing_owner_is_flagged(self) -> None:
+        # The Harrison case: "docs now co-owns lib/metrics/" authored as the
+        # complete truth minus the enclosing area = an accidental takeover.
+        spec = self._spec()
+        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["docs"]}]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/metrics/"
+        assert violations[0].missing == ("@runtime",)
+
+    def test_catch_all_is_a_default_not_a_grant(self) -> None:
+        # A shared row over an otherwise-uncovered path replaces only the
+        # catch-all; requiring the catch-all team restated would make every
+        # top-level shared row carry dead weight.
+        spec = self._spec()
+        spec["shared"] = [{"glob": "tools/lint.py", "owners": ["docs"]}]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
+    def test_wildcard_glob_checks_its_static_prefix(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [{"glob": "lib/**/*checkpoint*", "owners": ["docs"]}]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        assert len(violations) == 1
+        assert violations[0].missing == ("@runtime",)
+
+    def test_basename_glob_has_no_enclosing_rule(self) -> None:
+        # A bare basename glob applies tree-wide; no static enclosure exists,
+        # so the check skips it rather than guessing against the tree.
+        spec = self._spec()
+        spec["shared"] = [{"glob": "*.proto", "owners": ["docs"]}]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
+    def test_nested_shared_must_restate_shallower_shared(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [
+            {"glob": "lib/metrics/", "owners": ["runtime", "docs"]},
+            {"glob": "lib/metrics/dash/", "owners": ["runtime", "ops"]},
+        ]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/metrics/dash/"
+        assert violations[0].missing == ("@docs",)
+
+    def test_area_override_may_still_narrow(self) -> None:
+        # Reassignment stays possible where it belongs: an area path_globs
+        # override. The additivity gate polices only the shared tier.
+        spec = self._spec()
+        spec["areas"][1]["path_globs"] = ["lib/docs_owned/"]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
+    def test_exact_file_glob_probes_itself(self) -> None:
+        spec = self._spec()
+        spec["areas"][2]["path_globs"] = ["lib/ops_tool.py"]
+        spec["shared"] = [{"glob": "lib/ops_tool.py", "owners": ["docs"]}]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        assert len(violations) == 1
+        assert set(violations[0].missing) == {"@ops"}
+
+    def test_strict_gate_blocks_on_additivity_violation(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["docs"]}]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        message = strict_failure(
+            True,
+            CoverageGate(blocking=[], warnings=[]),
+            None,
+            [],
+            [],
+            None,
+            violations,
+        )
+        assert message and "drop owner(s) granted by an enclosing rule" in message
+
+
+class TestProbePath:
+    def test_dir_glob_probes_synthetic_child(self) -> None:
+        assert _probe_path("lib/metrics/") == "lib/metrics/\x00"
+
+    def test_exact_path_probes_itself(self) -> None:
+        assert _probe_path("lib/ops_tool.py") == "lib/ops_tool.py"
+
+    def test_wildcard_glob_probes_static_prefix(self) -> None:
+        assert _probe_path("deploy/operator/samples/*gms*") == (
+            "deploy/operator/samples/\x00"
+        )
+        assert _probe_path("deploy/**/*checkpoint*") == "deploy/\x00"
+
+    def test_basename_glob_probes_nothing(self) -> None:
+        assert _probe_path("*.proto") is None
+        assert _probe_path("Dockerfile?") is None
 
 
 def test_dead_patterns_include_advisory_rules() -> None:
@@ -1067,14 +1224,12 @@ class TestDiffAwareStrictGateE2E:
         # (c) full-tree strict still FAILS on that same inherited gap.
         assert _run_build(repo, areas).returncode == 1
 
-    def test_deleting_last_matched_file_warns_diff_aware_blocks_full_tree(
-        self, tmp_path
-    ) -> None:
-        # A deletion PR is NOT blocked by the glob it orphans -- blocking it
-        # would force an areas.yaml edit, reclassify the PR as a policy
-        # change, and judge it full-tree (the base-churn cascade diff-aware
-        # mode exists to prevent). The stale glob still surfaces in the
-        # report, and full-tree runs (policy PRs, scheduled) block on it.
+    def test_deleting_last_matched_file_blocks_diff_aware(self, tmp_path) -> None:
+        # A PR that deletes the last file a glob matches orphaned that glob
+        # ITSELF, so the diff-aware gate blocks it: the same PR must prune
+        # the declaration, or main inherits a stale glob that fails the next
+        # full-tree run. (Staleness inherited from the base branch still
+        # only warns -- see test_stale_glob_inherited_from_base_warns_only.)
         areas = self._areas(tmp_path)
         repo, base = self._repo_with_base(tmp_path)
         (repo / "owned" / "a.txt").unlink()
@@ -1082,17 +1237,29 @@ class TestDiffAwareStrictGateE2E:
         _git(repo, "commit", "-q", "-m", "delete last owned file")
 
         diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
-        assert diff_aware.returncode == 0
-        assert "globs matching no files" in diff_aware.stdout
+        assert diff_aware.returncode == 1
+        assert "orphaned by this change" in diff_aware.stdout
         assert "/owned/" in diff_aware.stdout
+        assert "prune them from areas.yaml" in diff_aware.stdout
 
-        # Full-tree still blocks (here on the coverage gap the same deletion
-        # exposes; the stale glob is surfaced in the report either way).
+        # Full-tree blocks as before (here also on the coverage gap the same
+        # deletion exposes; the stale glob is surfaced either way).
         full_tree = _run_build(repo, areas)
         assert full_tree.returncode == 1
         assert "globs matching no files" in full_tree.stdout
 
-    def test_deleting_required_owner_target_warns_diff_aware(self, tmp_path) -> None:
+        # Pruning the dead glob in the same change satisfies the gate.
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            "    path_globs: []\n"
+        )
+        pruned = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert pruned.returncode == 0
+
+    def test_deleting_required_owner_target_blocks_diff_aware(self, tmp_path) -> None:
+        # required_owners contracts go stale the same way: deleting the
+        # contract's final matching file blocks until the PR prunes it.
         areas = self._areas(tmp_path)
         areas.write_text(
             areas.read_text()
@@ -1105,13 +1272,40 @@ class TestDiffAwareStrictGateE2E:
         _git(repo, "commit", "-q", "-m", "delete required target")
 
         diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
-        assert diff_aware.returncode == 0
-        assert "globs matching no files" in diff_aware.stdout
+        assert diff_aware.returncode == 1
+        assert "orphaned by this change" in diff_aware.stdout
         assert "/base_unowned/x.txt" in diff_aware.stdout
 
         full_tree = _run_build(repo, areas)
         assert full_tree.returncode == 1
         assert "glob(s) match no tracked files" in full_tree.stdout
+
+    def test_stale_glob_inherited_from_base_warns_only(self, tmp_path) -> None:
+        # The anti-cascade guarantee: a glob that was ALREADY dead at the
+        # merge-base is base staleness this PR did not cause. Blocking on it
+        # would red-X every open PR the moment the base goes stale; it stays
+        # a warning for diff-aware runs and blocks only full-tree ones.
+        areas = tmp_path / "areas.yaml"
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/", "ghost/"]\n'  # ghost/ never existed
+        )
+        repo, base = self._repo_with_base(tmp_path)
+        (repo / "owned" / "b.txt").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds owned file only")
+
+        diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert diff_aware.returncode == 0
+        assert "inherited from the base branch" in diff_aware.stdout
+        assert "/ghost/" in diff_aware.stdout
+
+        # Full-tree still blocks on it (coverage of base_unowned/ fails
+        # first, but the stale-glob report names /ghost/ either way).
+        full_tree = _run_build(repo, areas)
+        assert full_tree.returncode == 1
+        assert "globs matching no files" in full_tree.stdout
 
     def test_inherited_contract_only_blocks_full_tree(self, tmp_path) -> None:
         areas = tmp_path / "areas.yaml"
@@ -1188,6 +1382,156 @@ class TestPolicyChangeFallback:
         result = _run_build(repo, areas, "--changed-only", "--base", base)
         assert result.returncode == 1
         assert "owned/b.txt" in result.stdout
+
+
+# ------------------------------------------------------------------
+# Contributor action matrix -- the common ownership-affecting actions,
+# end-to-end against the strict gate (requested in PR #11869 review)
+# ------------------------------------------------------------------
+
+
+class TestContributorActionMatrix:
+    """One test per common contributor action:
+
+    1. add a file inside a covered folder      -> PASS (nothing to declare)
+    2. add a file in an uncovered location     -> BLOCK until an area claims it
+    3. delete the last file a glob matches     -> BLOCK until the PR prunes the glob
+    4. add shared ownership to a path          -> PASS; both teams routed
+    5. remove the added co-owner again         -> PASS (a policy decision)
+       remove the ENCLOSING owner instead      -> BLOCK (shared rows are additive)
+    6. add an area claiming a new directory    -> PASS; new team routed
+    7. remove an area while its files live on  -> BLOCK until paths are reassigned
+
+    Ordinary PRs (1-3) run diff-aware, as CI does on pull_request events.
+    Policy edits (4-7) run full-tree, exactly how the gate judges any PR
+    that touches areas.yaml (see TestPolicyChangeFallback for the
+    reclassification itself).
+    """
+
+    BASE_AREAS = (
+        'meta:\n  catch_all: "@root"\n'
+        "areas:\n"
+        '  - label: owned\n    github_team: "@org/owned"\n'
+        '    path_globs: ["owned/"]\n'
+        '  - label: docs\n    github_team: "@docs"\n    path_globs: []\n'
+    )
+
+    def _fixture(self, tmp_path: Path) -> tuple[Path, Path, str]:
+        areas = tmp_path / "areas.yaml"
+        areas.write_text(self.BASE_AREAS)
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "owned").mkdir()
+        (repo / "owned" / "a.txt").write_text("x")
+        (repo / "owned" / "tool.py").write_text("x")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        return areas, repo, _head(repo)
+
+    def _routing(self, areas: Path, path: str) -> list[str]:
+        model = compute_resolution(yaml.safe_load(areas.read_text()))
+        lines, _ = render_codeowners(model, group=True, external=[])
+        return resolve_owners(parse_codeowners("\n".join(lines)), path)
+
+    def test_1_add_file_in_covered_folder_passes(self, tmp_path) -> None:
+        areas, repo, base = self._fixture(tmp_path)
+        (repo / "owned" / "new_feature.py").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add covered file")
+        assert _run_build(repo, areas, "--changed-only", "--base", base).returncode == 0
+
+    def test_2_add_file_in_uncovered_location_blocks(self, tmp_path) -> None:
+        areas, repo, base = self._fixture(tmp_path)
+        (repo / "rogue").mkdir()
+        (repo / "rogue" / "new.py").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add uncovered file")
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert result.returncode == 1
+        assert "rogue/new.py" in result.stdout
+        assert "cover them in areas.yaml" in result.stdout
+
+    def test_3_delete_last_matched_file_blocks_until_pruned(self, tmp_path) -> None:
+        areas, repo, base = self._fixture(tmp_path)
+        areas.write_text(
+            self.BASE_AREAS
+            + 'shared:\n  - glob: "owned/tool.py"\n    owners: [owned, docs]\n'
+        )
+        (repo / "owned" / "tool.py").unlink()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "delete the shared rule's only file")
+
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert result.returncode == 1
+        assert "orphaned by this change" in result.stdout
+
+        areas.write_text(self.BASE_AREAS)  # ...and the PR prunes the rule
+        assert _run_build(repo, areas, "--changed-only", "--base", base).returncode == 0
+
+    def test_4_add_shared_ownership_passes_and_routes_both(self, tmp_path) -> None:
+        areas, repo, _ = self._fixture(tmp_path)
+        areas.write_text(
+            self.BASE_AREAS
+            + 'shared:\n  - glob: "owned/tool.py"\n    owners: [owned, docs]\n'
+        )
+        assert _run_build(repo, areas).returncode == 0
+        assert self._routing(areas, "owned/tool.py") == ["@org/owned", "@docs"]
+
+    def test_5_remove_added_coowner_passes(self, tmp_path) -> None:
+        areas, repo, _ = self._fixture(tmp_path)
+        # docs was granted co-ownership earlier; a later policy PR retires
+        # the grant by dropping the whole shared row -- a reviewed decision.
+        areas.write_text(self.BASE_AREAS)
+        assert _run_build(repo, areas).returncode == 0
+        assert self._routing(areas, "owned/tool.py") == ["@org/owned"]
+
+    def test_5b_remove_enclosing_owner_blocks(self, tmp_path) -> None:
+        areas, repo, _ = self._fixture(tmp_path)
+        # Writing the shared row WITHOUT the enclosing area is a silent
+        # takeover, not co-ownership -- the additivity gate rejects it.
+        areas.write_text(
+            self.BASE_AREAS + 'shared:\n  - glob: "owned/tool.py"\n    owners: [docs]\n'
+        )
+        result = _run_build(repo, areas)
+        assert result.returncode == 1
+        assert "drop owner(s) granted by an enclosing rule" in result.stdout
+        assert "@org/owned" in result.stdout
+
+    def test_6_add_area_claiming_new_directory_passes(self, tmp_path) -> None:
+        areas, repo, _ = self._fixture(tmp_path)
+        (repo / "newdir").mkdir()
+        (repo / "newdir" / "x.py").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "new subsystem")
+        areas.write_text(
+            self.BASE_AREAS
+            + '  - label: newarea\n    github_team: "@org/newarea"\n'
+            + '    path_globs: ["newdir/"]\n'
+        )
+        assert _run_build(repo, areas).returncode == 0
+        assert self._routing(areas, "newdir/x.py") == ["@org/newarea"]
+
+    def test_7_remove_area_with_live_files_blocks_until_reassigned(
+        self, tmp_path
+    ) -> None:
+        areas, repo, _ = self._fixture(tmp_path)
+        # Dropping the owned area orphans owned/* -- coverage blocks.
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: docs\n    github_team: "@docs"\n    path_globs: []\n'
+        )
+        result = _run_build(repo, areas)
+        assert result.returncode == 1
+        assert "fall to the catch-all" in result.stdout
+
+        # Reassigning the globs to a surviving area satisfies the gate.
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: docs\n    github_team: "@docs"\n'
+            '    path_globs: ["owned/"]\n'
+        )
+        assert _run_build(repo, areas).returncode == 0
+        assert self._routing(areas, "owned/a.txt") == ["@docs"]
 
 
 # ------------------------------------------------------------------

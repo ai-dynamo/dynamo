@@ -46,10 +46,14 @@ jobs:
       # tree, so git ls-files sees paths that only ever landed on the base
       # branch. --changed-only gates just the paths THIS PR adds/renames/
       # modifies vs base.sha; unowned paths inherited unchanged from the base
-      # are a non-fatal warning. That stops unrelated base churn from red-Xing
-      # long-running PRs while still requiring the PR's own surface to be 100%
-      # owned. A PR that edits ownership policy (areas/scripts/CODEOWNERS) is
-      # judged full-tree, since a policy edit can orphan any path. base.sha is
+      # are a non-fatal warning. Stale globs split the same way: a glob this
+      # PR orphans (its last matching file deleted/renamed here) blocks until
+      # the PR prunes it, while staleness inherited from the base only warns.
+      # That stops unrelated base churn from red-Xing long-running PRs while
+      # still requiring the PR's own surface to be 100% owned -- and keeps a
+      # merged deletion PR from failing the next full-tree run on main. A PR
+      # that edits ownership policy (areas/scripts/CODEOWNERS) is judged
+      # full-tree, since a policy edit can orphan any path. base.sha is
       # fetched by fetch-depth: 0 above.
       - name: Validate coverage and ownership contracts (diff-aware, PR)
         if: github.event_name == 'pull_request'
