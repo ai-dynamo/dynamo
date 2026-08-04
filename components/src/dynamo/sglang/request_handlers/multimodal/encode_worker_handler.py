@@ -525,13 +525,30 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         return model_type not in _NVDEC_UNSAFE_MODEL_TYPES
 
     async def _maybe_nvdec_decoder(self, url: str) -> Optional[Any]:
-        """Wrap an H.264/H.265 video URL in an NVDEC-backed decoder for SGLang.
+        """Resolve a video URL to what SGLang should decode.
 
         Reads the URL (SSRF-validated for http(s); policy-gated for ``file://``
-        and ``data:``), probes the container codec, and returns an
-        ``NvdecVideoDecoder`` only for H.264/H.265. Returns ``None`` to fall back
-        to URL passthrough (unsupported scheme, other codec, or any failure) --
-        NVDEC is purely additive and never blocks the existing path.
+        and ``data:``), probes the container codec, and returns:
+
+        * an ``NvdecVideoDecoder`` for H.264/H.265 -- hardware decode;
+        * the **fetched bytes** for any other codec, or if building the decoder
+          fails -- SGLang decodes what we already have;
+        * ``None`` only when nothing was fetched (unsupported scheme, or the
+          fetch itself failed), leaving the caller to pass the URL through.
+
+        Returning the bytes rather than the URL matters for three reasons, all
+        reported by Codex on #11836. SGLang would otherwise download the same
+        payload a second time, doubling ingress and latency for every non-NVDEC
+        video. A one-use signed URL would fail on that second fetch. And SGLang
+        applies no URL policy of its own -- ``_normalize_video_input`` fetches
+        http(s) straight through ``get_mm_http_session`` -- so the bytes it
+        decoded were never the validated ones, and a redirect could resolve
+        differently between the two fetches. Handing over the bytes we validated
+        and already hold closes all three.
+
+        ``load_video`` takes ``Union[str, bytes, VideoData]`` and
+        ``_normalize_video_input`` returns ``bytes`` untouched (sglang v0.5.16),
+        so this needs no shim on the SGLang side.
 
         A decoder rather than decoded frames: SGLang's ``preprocess_video`` reads
         the source frame count and fps off the decoder and applies the model's
@@ -550,6 +567,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         schemes have no decoder at all, so excluding them here would drop local
         and inline video entirely rather than merely skipping acceleration.
         """
+        content: bytes | None = None
         try:
             normalized = await validate_media_url(url, self._url_policy)
             scheme = urlparse(normalized).scheme
@@ -560,7 +578,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             else:
                 return None
             if not should_use_nvdec(probe_video_codec(content)):
-                return None
+                # Not a hardware codec, but the bytes are already here and were
+                # fetched under policy. Hand them over instead of the URL.
+                return content
             # Constructing the decoder opens the container and reads its frame
             # index, so keep it off the event loop.
             return await asyncio.to_thread(NvdecVideoDecoder, content)
@@ -580,20 +600,27 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # handler already reports a bad request, so the caller surfaces it
             # as one instead of silently widening what the deployment accepts.
             raise
-        except Exception as exc:  # noqa: BLE001 - additive; fall back to URL
+        except Exception as exc:  # noqa: BLE001 - additive; never blocks the path
+            # If the fetch itself failed there are no bytes and the URL is all
+            # the caller has. If it succeeded and only the decoder construction
+            # failed, pass the validated bytes on rather than making SGLang
+            # fetch them again.
             logger.warning(
-                "NVDEC decode failed for video URL (%s); using URL passthrough",
+                "NVDEC decode failed for video URL (%s); falling back to %s",
                 exc,
+                "the fetched bytes" if content is not None else "URL passthrough",
             )
-            return None
+            return content
 
     async def _build_encode_inputs(
         self, urls: list[str], modality_name: str
     ) -> list[Any]:
         """Map video URLs to NVDEC-backed decoders where applicable.
 
-        Returns a list positionally aligned with ``urls``: each entry is either
-        an ``NvdecVideoDecoder`` (H.264/H.265) or the original URL string.
+        Returns a list positionally aligned with ``urls``: each entry is an
+        ``NvdecVideoDecoder`` (H.264/H.265), the fetched bytes (any other codec,
+        so SGLang does not re-download what we already validated and hold), or
+        the original URL string when nothing was fetched.
         Non-video modalities and disabled/ineligible cases return the URLs
         unchanged.
 
