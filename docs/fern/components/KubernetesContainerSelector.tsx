@@ -49,12 +49,6 @@ const FORMS: Option<InstallForm>[] = [
   { id: "wheel", label: "Wheel" },
 ];
 
-const RUNTIME_IMAGES: Record<InstallBackend, string> = {
-  sglang: "sglang-runtime",
-  trtllm: "tensorrtllm-runtime",
-  vllm: "vllm-runtime",
-};
-
 function backendEnabled(hardware: Hardware, backend: InstallBackend): boolean {
   return hardware === "nvidia" || backend === "vllm";
 }
@@ -106,6 +100,7 @@ function commandFor(
   if (hardware === "intel") {
     const imageRegistry = normalizeRegistry(registry) || "<your-registry>/<namespace>";
     return [
+      `export DYNAMO_VERSION=${CURRENT_TAG}`,
       `export IMAGE_REGISTRY=${shellQuote(imageRegistry)}`,
       'export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"',
       "",
@@ -119,11 +114,10 @@ function commandFor(
     ].join("\n");
   }
 
-  const runtimeImage = RUNTIME_IMAGES[backend];
   if (channel === "nightly") {
     return [
-      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:latest"',
-      `export RUNTIME_IMAGE="nvcr.io/nvidia/ai-dynamo/${runtimeImage}-nightly:latest"`,
+      `export DYNAMO_VERSION=${CURRENT_TAG}`,
+      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly"',
     ].join("\n");
   }
 
@@ -131,7 +125,6 @@ function commandFor(
   return [
     `export DYNAMO_VERSION=${version}`,
     'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"',
-    `export RUNTIME_IMAGE="nvcr.io/nvidia/ai-dynamo/${runtimeImage}:\${DYNAMO_VERSION}"`,
   ].join("\n");
 }
 
