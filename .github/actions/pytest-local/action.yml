@@ -183,8 +183,17 @@ runs:
         # expression to remember: callers pass framework/lifecycle terms only,
         # and a `k8s` test that gained e.g. a `vllm` marker would otherwise be
         # collected here and hang until its 20-minute timeout.
-        MARKERS="(${{ inputs.pytest_marks }}) and not k8s"
-        echo "🏷️  Marker expression: ${MARKERS}"
+        #
+        # run_gpu_tests defaults to true while gpu_test_markers has no default,
+        # so an empty expression is reachable; `()` would make pytest exit on a
+        # parse error, so fall back to the bare exclusion.
+        CALLER_MARKS="${{ inputs.pytest_marks }}"
+        if [[ -n "${CALLER_MARKS// /}" ]]; then
+          MARKERS="(${CALLER_MARKS}) and not k8s"
+        else
+          MARKERS="not k8s"
+        fi
+        echo "Marker expression: ${MARKERS}"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then

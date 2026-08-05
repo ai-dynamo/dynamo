@@ -132,7 +132,16 @@ runs:
         # belong to the separate cluster job (.github/actions/dynamo-deploy-test).
         # Exclude them centrally rather than expecting every caller's marker
         # expression to remember.
-        MARKERS="(${{ inputs.pytest_marks }}) and not k8s"
+        #
+        # An empty expression is reachable (several marker inputs have no default),
+        # and `()` would make pytest exit on a parse error, so fall back to the
+        # bare exclusion.
+        CALLER_MARKS="${{ inputs.pytest_marks }}"
+        if [[ -n "${CALLER_MARKS// /}" ]]; then
+          MARKERS="(${CALLER_MARKS}) and not k8s"
+        else
+          MARKERS="not k8s"
+        fi
         echo "Marker expression: ${MARKERS}"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
@@ -232,7 +241,16 @@ runs:
         # belong to the separate cluster job (.github/actions/dynamo-deploy-test).
         # Exclude them centrally rather than expecting every caller's marker
         # expression to remember.
-        MARKERS="(${{ inputs.pytest_marks }}) and not k8s"
+        #
+        # An empty expression is reachable (several marker inputs have no default),
+        # and `()` would make pytest exit on a parse error, so fall back to the
+        # bare exclusion.
+        CALLER_MARKS="${{ inputs.pytest_marks }}"
+        if [[ -n "${CALLER_MARKS// /}" ]]; then
+          MARKERS="(${CALLER_MARKS}) and not k8s"
+        else
+          MARKERS="not k8s"
+        fi
         echo "Marker expression: ${MARKERS}"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
