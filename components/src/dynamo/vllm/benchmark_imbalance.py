@@ -123,19 +123,24 @@ def work_columns(
 ) -> tuple[float, float, float]:
     """``(x_idx, x_mla_sparse, x_mla_dense)`` against the cell's uniform batch.
 
-    Each row's attention work is credited to the column for the kernel that row
-    actually runs on. The subtrahend goes to whichever pair of columns the
-    UNIFORM batch runs on -- that is decided by the average point's own length,
-    not by the calibration batch's regime -- so an unsaturated average point
-    contributes nothing to the indexer column and its attention work is
-    subtracted from the dense one.
+    The indexer column carries EVERY row, on both sides of the subtraction:
+    ``idx_work`` is not gated on ``topk`` (see its docstring -- the scoring pass
+    runs for a request at or below the budget too), so gating the column would
+    reintroduce exactly the error that docstring records, and it would do it
+    where it hurts most: a mixed batch is mostly short rows.
+
+    Attention is different, and is credited per row to the column for the kernel
+    that row actually runs on. Its subtrahend goes to whichever column the
+    UNIFORM batch runs on -- decided by the average point's own length, not by
+    the calibration batch's regime.
     """
     b = len(rows)
-    x_idx = sum(idx_work(s, p, topk) for s, p in rows if runs_sparse(s, p, topk))
+    x_idx = sum(idx_work(s, p, topk) for s, p in rows) - b * idx_work(
+        s_bar, p_bar, topk
+    )
     x_sp = sum(mla_work(s, p, topk) for s, p in rows if runs_sparse(s, p, topk))
     x_dn = sum(mla_work(s, p, topk) for s, p in rows if not runs_sparse(s, p, topk))
     if runs_sparse(s_bar, p_bar, topk):
-        x_idx -= b * idx_work(s_bar, p_bar, topk)
         x_sp -= b * mla_work(s_bar, p_bar, topk)
     else:
         x_dn -= b * mla_work(s_bar, p_bar, topk)
@@ -239,6 +244,43 @@ MIN_RELATIVE_DELTA = 0.05
 def uniform_rows(b: int, s_bar: int, p_bar: int) -> list[tuple[int, int]]:
     """The equal-length batch of the cell: the subtrahend every label uses."""
     return [(s_bar, p_bar)] * b
+
+
+def reference_rows(
+    b: int, total_new: int, total_kv: int, kv_block: int
+) -> list[tuple[int, int]] | None:
+    """The cell's own coordinate as rows that conserve both totals exactly.
+
+    ``uniform_rows`` takes the floor of each average and drops the remainder,
+    which is wrong here for two separate reasons. It moves the emitted
+    coordinate off the one the sweep chose -- by up to ``b - 1`` tokens on each
+    axis, enough to fall off the CUDA-graph capture size the point was picked
+    for -- so this manifest would no longer be a superset of the sweep it
+    replaces. And it leaves every row's prefix at ``total_kv // b``, which need
+    not be a whole cache block; the loader that reads this manifest back
+    rejects ragged KV lengths, so such a cell aborts the run rather than
+    measuring it.
+
+    The remainder is spread one unit per row instead, in whole blocks on the KV
+    axis. Where the totals divide, this is exactly the equal batch; where they
+    do not, it is within one token and one block of it, and both totals hold.
+    """
+    if b < 1 or kv_block < 1 or total_new < b or total_kv < 0:
+        return None
+    if total_kv % kv_block:
+        # Not expressible at all: no split of the total into whole blocks can
+        # reach it. Reported by the caller rather than emitted and rejected
+        # later by the loader.
+        return None
+    s_lo, s_extra = divmod(total_new, b)
+    blk_lo, blk_extra = divmod(total_kv // kv_block, b)
+    return [
+        (
+            s_lo + (1 if i < s_extra else 0),
+            (blk_lo + (1 if i < blk_extra else 0)) * kv_block,
+        )
+        for i in range(b)
+    ]
 
 
 def _settle(
@@ -584,7 +626,15 @@ def build_manifest(
         # manifest REPLACES the generated grid: a cell dropped here is a
         # coordinate the switch-off run would have measured and this one
         # silently would not.
-        emit(uniform_rows(batch_size, s_bar, p_bar))
+        reference = reference_rows(batch_size, total_new, total_kv, kv_block)
+        if reference is None:
+            notes.append(
+                f"b={batch_size} new={total_new} kv={total_kv}: the cell's own "
+                f"coordinate is not expressible in whole {kv_block}-token "
+                "blocks; skipped rather than emitted for the loader to reject"
+            )
+            continue
+        emit(reference)
         if batch_size < 2:
             continue  # a single request has no spread
         plan = plan_cell(

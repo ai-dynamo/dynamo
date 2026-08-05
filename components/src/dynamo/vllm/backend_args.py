@@ -666,6 +666,16 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:
             raise ValueError("--benchmark-timeout must be positive")
+        # Fail at startup rather than at manifest-writing time: a repeat count
+        # of zero produces a manifest with no prefill rows, and the run that
+        # reads it back looks like one that simply had nothing to measure.
+        if self.benchmark_imbalance_repeats < 1:
+            raise ValueError("--benchmark-imbalance-repeats must be at least 1")
+        if (
+            self.benchmark_imbalance_topk is not None
+            and self.benchmark_imbalance_topk < 1
+        ):
+            raise ValueError("--benchmark-imbalance-topk must be positive")
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""

@@ -188,6 +188,17 @@ def _bench_point_is_imbalanced(candidate: PrefillPointCandidate) -> bool:
     return len({tuple(row) for row in candidate.rows}) > 1
 
 
+def _bench_origin_reason(generated: bool) -> str:
+    """The sample reason that records where a manifest point came from.
+
+    ``explicit`` is load-bearing downstream: it means the operator asked for
+    this exact point, so an infeasible one is an error and a run-time failure
+    aborts rather than skips. A point this class planned itself carries no such
+    request and must not borrow that promise.
+    """
+    return "imbalance" if generated else "explicit"
+
+
 class _BenchPhase(enum.Enum):
     IDLE = "idle"
     WARMUP = "warmup"
@@ -2054,16 +2065,42 @@ class InstrumentedScheduler(AsyncScheduler):
             "decode_max_kv_read_token_samples",
             "decode_max_batch_size_samples",
             "prefix_max_batch_size_samples",
+            "imbalance_repeats",
         }
         for k in _INT_FIELDS:
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
+        # Optional, so it cannot join the set above: None is a value here, not a
+        # missing key -- it selects the model-config probe.
+        if cfg.get("imbalance_topk") is not None and not isinstance(
+            cfg["imbalance_topk"], int
+        ):
+            cfg["imbalance_topk"] = int(cfg["imbalance_topk"])
+        # A bool that arrives as JSON text: "false" is a non-empty string and
+        # would otherwise turn the collection on.
+        if "collect_imbalanced" in cfg and isinstance(cfg["collect_imbalanced"], str):
+            cfg["collect_imbalanced"] = cfg["collect_imbalanced"].strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
         known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
         config_values = {k: v for k, v in cfg.items() if k in known}
         config_values["mode"] = mode
         self._bench_config = BenchmarkConfig(**config_values)
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
+        # The env and additional_config paths never went through the CLI
+        # validator, so the bound is enforced here as well: zero repeats writes
+        # a manifest with no prefill rows, which reads as a finished run.
+        if self._bench_config.imbalance_repeats < 1:
+            raise ValueError("benchmark imbalance_repeats must be at least 1")
+        if (
+            self._bench_config.imbalance_topk is not None
+            and self._bench_config.imbalance_topk < 1
+        ):
+            raise ValueError("benchmark imbalance_topk must be positive when set")
         uniform_sample_limits = {
             "prefill_max_new_token_samples": (
                 self._bench_config.prefill_max_new_token_samples
@@ -2433,7 +2470,20 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
 
-    def _bench_build_explicit_grid(self, points: BenchmarkPoints) -> None:
+    def _bench_build_explicit_grid(
+        self, points: BenchmarkPoints, *, generated: bool = False
+    ) -> None:
+        """Materialize a manifest into grid points.
+
+        ``generated`` marks a manifest this class planned itself rather than one
+        the operator wrote. The distinction is not cosmetic: an explicit point
+        is a request, so an infeasible one is an error and a failure at run time
+        aborts, whereas a planned point is this code's own guess at what the
+        scheduler will accept. The planner does not model every scheduler limit,
+        so it can emit a point this scheduler rejects -- and with no user
+        manifest that would stop engine startup on a run the ordinary generated
+        grid would have completed by skipping the same point.
+        """
         mode = self._bench_config.mode
         if mode in ("prefill", "agg"):
             prefill_points = list(enumerate(points.prefill))
@@ -2457,24 +2507,39 @@ class InstrumentedScheduler(AsyncScheduler):
                         ENV_FPM_BENCH_COLLECT_IMBALANCED,
                     )
                 prefill_points = kept
-            self._bench_grid.extend(
+            materialized = [
                 self._bench_materialize_prefill_candidate(
-                    candidate, f"prefill[{index}]"
+                    candidate, f"prefill[{index}]", generated=generated
                 )
                 for index, candidate in prefill_points
-            )
+            ]
+            dropped = sum(1 for point in materialized if point is None)
+            if dropped:
+                # Only reachable on a planned manifest; an explicit one raises.
+                logger.warning(
+                    "benchmark: %d/%d planned prefill points are infeasible for "
+                    "this scheduler and were skipped",
+                    dropped,
+                    len(materialized),
+                )
+            self._bench_grid.extend(point for point in materialized if point is not None)
         if mode in ("decode", "agg"):
             self._bench_feasible_max_decode_batch_size = (
                 self._bench_decode_feasible_max_batch_size()
             )
-            self._bench_grid.extend(
-                self._bench_materialize_decode_candidate(candidate, f"decode[{index}]")
+            decode_points = [
+                self._bench_materialize_decode_candidate(
+                    candidate, f"decode[{index}]", generated=generated
+                )
                 for index, candidate in enumerate(points.decode)
+            ]
+            self._bench_grid.extend(
+                point for point in decode_points if point is not None
             )
 
     def _bench_materialize_prefill_candidate(
-        self, candidate: PrefillPointCandidate, path: str
-    ) -> BenchmarkPoint:
+        self, candidate: PrefillPointCandidate, path: str, *, generated: bool = False
+    ) -> BenchmarkPoint | None:
         if (
             candidate.total_kv_read_tokens > 0
             and not self.cache_config.enable_prefix_caching
@@ -2489,6 +2554,8 @@ class InstrumentedScheduler(AsyncScheduler):
             else None,
             candidate.rows,
         ):
+            if generated:
+                return None
             self._bench_raise_explicit_infeasible(path, candidate)
 
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
@@ -2514,18 +2581,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 else None
             ),
             rows=candidate.rows,
-            sample_reasons=["explicit", *reasons],
+            sample_reasons=[_bench_origin_reason(generated), *reasons],
         )
 
     def _bench_materialize_decode_candidate(
-        self, candidate: DecodePointCandidate, path: str
-    ) -> BenchmarkPoint:
+        self, candidate: DecodePointCandidate, path: str, *, generated: bool = False
+    ) -> BenchmarkPoint | None:
         if (
             candidate.batch_size > self._bench_feasible_max_decode_batch_size
             or not self._bench_decode_point_feasible(
                 candidate.batch_size, candidate.total_kv_read_tokens
             )
         ):
+            if generated:
+                return None
             self._bench_raise_explicit_infeasible(path, candidate)
 
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
@@ -2544,7 +2613,7 @@ class InstrumentedScheduler(AsyncScheduler):
             ),
             expected_capture_size=capture_size,
             padding_tokens=padding_tokens,
-            sample_reasons=["explicit", *reasons],
+            sample_reasons=[_bench_origin_reason(generated), *reasons],
         )
 
     def _bench_raise_explicit_infeasible(
@@ -2591,7 +2660,12 @@ class InstrumentedScheduler(AsyncScheduler):
             topk,
             repeats=self._bench_config.imbalance_repeats,
             max_model_len=self.vllm_config.model_config.max_model_len,
-            kv_block=self.cache_config.block_size,
+            # The unit the loader validates against, not the cache block: a row
+            # this planner emits is read back through
+            # ``_bench_prefill_kv_read_lengths``, which rejects KV lengths that
+            # are not whole hash blocks. Planning in a different unit lets the
+            # planner build rows its own reader refuses.
+            kv_block=max(1, self._bench_hash_block_size),
         )
         for note in notes:
             # A cell with no constructible spread pins no coefficient. Say so
@@ -2611,7 +2685,9 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_config.imbalance_repeats,
             path,
         )
-        self._bench_build_explicit_grid(load_benchmark_points_file(path))
+        self._bench_build_explicit_grid(
+            load_benchmark_points_file(path), generated=True
+        )
         if mode == "agg":
             self._bench_generate_decode_grid()
 
