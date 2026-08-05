@@ -31,6 +31,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
+use crate::lifecycle::RequestTracker;
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -137,14 +138,25 @@ pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
     first_token_source: Option<FirstTokenSource>,
+    request_tracker: Arc<RequestTracker>,
 }
 
 impl EngineAdapter {
+    #[cfg(test)]
     pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
+        Self::with_request_tracker(engine, mode, RequestTracker::new())
+    }
+
+    pub(crate) fn with_request_tracker(
+        engine: Arc<dyn LLMEngine>,
+        mode: DisaggregationMode,
+        request_tracker: Arc<RequestTracker>,
+    ) -> Self {
         Self {
             engine,
             mode,
             first_token_source: None,
+            request_tracker,
         }
     }
 
@@ -212,6 +224,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         input: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let request_guard = self.request_tracker.try_acquire()?;
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
@@ -390,6 +403,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_handoff_terminal_mode = self.mode.is_prefill() || self.mode.is_encode();
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
+            let _request_guard = request_guard;
             let _guard = guard;
             let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = chunks;
@@ -512,11 +526,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 /// `JsonProbeAdapter` wrapper needed.
 pub(crate) struct RawEngineAdapter {
     engine: Arc<dyn RawEngine>,
+    request_tracker: Arc<RequestTracker>,
 }
 
 impl RawEngineAdapter {
+    #[cfg(test)]
     pub(crate) fn new(engine: Arc<dyn RawEngine>) -> Self {
-        Self { engine }
+        Self::with_request_tracker(engine, RequestTracker::new())
+    }
+
+    pub(crate) fn with_request_tracker(
+        engine: Arc<dyn RawEngine>,
+        request_tracker: Arc<RequestTracker>,
+    ) -> Self {
+        Self {
+            engine,
+            request_tracker,
+        }
     }
 }
 
@@ -528,6 +554,7 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         &self,
         input: SingleIn<serde_json::Value>,
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let request_guard = self.request_tracker.try_acquire()?;
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
@@ -587,6 +614,7 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         let stream_ctx = ctx.clone();
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
+            let _request_guard = request_guard;
             let _guard = guard;
             let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = chunks;
@@ -729,6 +757,29 @@ mod tests {
             0,
             "clean completion must not call engine.abort"
         );
+    }
+
+    #[tokio::test]
+    async fn adapter_tracks_request_until_response_stream_is_dropped() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(11)]);
+        let tracker = RequestTracker::new();
+        let adapter = EngineAdapter::with_request_tracker(
+            engine,
+            DisaggregationMode::Aggregated,
+            Arc::clone(&tracker),
+        );
+
+        let input = Context::new(make_request(vec![1]));
+        let stream = adapter.generate(input).await.unwrap();
+        assert_eq!(tracker.inflight(), 1);
+
+        tracker.stop_accepting();
+        let rejected = adapter.generate(Context::new(make_request(vec![2]))).await;
+        assert!(rejected.is_err());
+        assert_eq!(tracker.inflight(), 1);
+
+        drop(stream);
+        assert_eq!(tracker.inflight(), 0);
     }
 
     #[tokio::test]

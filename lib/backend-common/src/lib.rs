@@ -17,6 +17,7 @@ pub mod args;
 pub mod disagg;
 pub mod engine;
 pub mod error;
+mod lifecycle;
 pub mod metrics;
 mod publisher;
 mod rl;
