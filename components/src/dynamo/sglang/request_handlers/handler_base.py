@@ -27,7 +27,10 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.manager import get_lora_manager
-from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.model_taints import (
+    MODEL_TAINT_ROUTE,
+    register_model_taint_route,
+)
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
@@ -890,8 +893,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weights_from_ipc": self.update_weights_from_ipc,
             "control/update_weight_version": self.update_weight_version,
         }
+        reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
         for path, _ in configured_routes:
-            if path in built_in_routes:
+            if path in reserved_routes:
                 raise ValueError(
                     f"Configured SGLang engine route /engine/{path} collides "
                     "with a built-in route"
