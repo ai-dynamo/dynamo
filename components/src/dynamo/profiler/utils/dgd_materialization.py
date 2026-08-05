@@ -10,6 +10,7 @@ import logging
 from enum import Enum
 from typing import Any
 
+from dynamo.profiler.utils.config import get_main_container_dict
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
 from dynamo.profiler.utils.model_info import (
@@ -139,27 +140,27 @@ def _materialize_dgd_document(
 # Backends whose worker engines read `--trust-remote-code` as a CLI flag.
 _TRUST_REMOTE_CODE_BACKENDS = frozenset({"vllm", "sglang"})
 _TRUST_REMOTE_CODE_FLAG = "--trust-remote-code"
-_NON_WORKER_SERVICES = frozenset({"Frontend", "Planner"})
+_WORKER_COMPONENT_TYPES = frozenset({"worker", "prefill", "decode"})
 
 
 def _all_workers_already_have_trust_flag(config: dict) -> bool:
-    """Return True when every worker service already carries --trust-remote-code.
+    """Return True when every worker component carries --trust-remote-code.
 
     When the user has opted in explicitly via ``spec.overrides.dgd``, all
     worker args will already contain the flag after the override merge step.
     In that case we skip both auto-injection *and* the mutable-ref error so
     the stated manual escape hatch works for remote HF model IDs.
     """
-    services = config.get("spec", {}).get("services", {})
+    components = config.get("spec", {}).get("components", [])
     workers_seen = False
-    for svc_name, svc in services.items():
-        if not isinstance(svc, dict) or svc_name in _NON_WORKER_SERVICES:
+    for component in components:
+        if (
+            not isinstance(component, dict)
+            or component.get("type") not in _WORKER_COMPONENT_TYPES
+        ):
             continue
-        extra_pod_spec = svc.get("extraPodSpec")
-        if not isinstance(extra_pod_spec, dict):
-            continue
-        main_container = extra_pod_spec.get("mainContainer")
-        if not isinstance(main_container, dict):
+        main_container = get_main_container_dict(component)
+        if main_container is None:
             continue
         workers_seen = True
         args = main_container.get("args") or []
@@ -191,7 +192,7 @@ def _all_workers_already_have_trust_flag(config: dict) -> bool:
 
 
 def _inject_trust_remote_code_flag(config: dict) -> None:
-    """Append --trust-remote-code to all worker services that don't already have it.
+    """Append --trust-remote-code to worker components that do not have it.
 
     Shell-form workers (``command: ["sh", "-c"]`` with a single-string args
     list) are handled correctly: the flag is appended inside the shell string
@@ -201,15 +202,15 @@ def _inject_trust_remote_code_flag(config: dict) -> None:
     Mocker workers (``python3 -m dynamo.mocker``) are skipped because their
     argparse does not accept ``--trust-remote-code``.
     """
-    services = config.get("spec", {}).get("services", {})
-    for svc_name, svc in services.items():
-        if not isinstance(svc, dict) or svc_name in _NON_WORKER_SERVICES:
+    components = config.get("spec", {}).get("components", [])
+    for component in components:
+        if (
+            not isinstance(component, dict)
+            or component.get("type") not in _WORKER_COMPONENT_TYPES
+        ):
             continue
-        extra_pod_spec = svc.get("extraPodSpec")
-        if not isinstance(extra_pod_spec, dict):
-            continue
-        main_container = extra_pod_spec.get("mainContainer")
-        if not isinstance(main_container, dict):
+        main_container = get_main_container_dict(component)
+        if main_container is None:
             continue
 
         args = main_container.get("args") or []

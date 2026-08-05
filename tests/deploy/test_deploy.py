@@ -8,6 +8,7 @@ These tests verify that deployments can be created, become ready, and respond
 to chat completion requests correctly.
 """
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -48,6 +49,9 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+# The install script deploys the Gateway into agentgateway-system; the
+# controller provisions the proxy Service in that same namespace.
+GAIE_AGW_NAMESPACE = "agentgateway-system"
 
 
 def validate_chat_response(
@@ -377,12 +381,29 @@ async def test_gaie_deployment(
         assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
         logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
 
-        gateway_svcs = list(
-            kr8s.get("services", "inference-gateway", namespace=namespace)
-        )
+        # Gateway Programmed != Service exists; poll until the controller catches up.
+        # The proxy Service lives in GAIE_AGW_NAMESPACE (where the Gateway was created),
+        # not in the workload namespace.
+        gateway_svcs = []
+        for attempt in range(30):
+            gateway_svcs = list(
+                kr8s.get(
+                    "services",
+                    "inference-gateway",
+                    namespace=GAIE_AGW_NAMESPACE,
+                )
+            )
+            if gateway_svcs:
+                break
+            logger.info(
+                f"Waiting for inference-gateway service in namespace {GAIE_AGW_NAMESPACE}"
+                f" (attempt {attempt + 1}/30)..."
+            )
+            if attempt < 29:
+                await asyncio.sleep(10)
         assert (
             len(gateway_svcs) > 0
-        ), f"inference-gateway service not found in namespace {namespace}"
+        ), f"inference-gateway service not found in namespace {GAIE_AGW_NAMESPACE}"
         gateway_pf = gateway_svcs[0].portforward(remote_port=80, local_port=0)
         gateway_pf.start()
         time.sleep(2)

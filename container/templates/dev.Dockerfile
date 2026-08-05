@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         pybind11-dev \
         pkg-config \
         protobuf-compiler \
+        libprotobuf-dev \
         # Debugging / tracing
         gdb \
         valgrind \
@@ -134,13 +135,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Add external repos (NVIDIA devtools, GitHub CLI) and install in one pass.
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
-#
-# ==================== TEMPORARY WORKAROUND ====================
-# The devtools repo index lists "Filename: ./nsight-systems-...deb", so apt
-# requests the "/./" literally and that bucket 404s on it (the CUDA repo
-# normalizes fine). Fetch the normalized URL directly instead of by name.
-# Revert to a plain apt-get install once NVIDIA fixes the bucket.
-# ==============================================================
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
@@ -151,10 +145,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
-    curl --retry 3 --retry-delay 5 -fsSL -o /tmp/nsys.deb \
-        "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nsight-systems-2025.5.1_2025.5.1.121-1_${TARGETARCH}.deb" && \
-    apt-get install -y --no-install-recommends /tmp/nsys.deb gh && \
-    rm -f /tmp/nsys.deb && \
+    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
     rm -rf /var/lib/apt/lists/*
 
 # ======================================================================
@@ -495,6 +486,16 @@ RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dyna
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% elif framework == "vllm" %}
+# The upstream vllm/vllm-openai base does not ship /opt/nvidia/nvidia_entrypoint.sh,
+# so setting it here makes every `docker run` of the vLLM dev image fail with
+# "stat /opt/nvidia/nvidia_entrypoint.sh: no such file or directory".
+# vllm_runtime.Dockerfile already resets ENTRYPOINT for that reason — keep dev
+# aligned with it instead of clobbering it back. (local_dev.Dockerfile does the same.)
+# CMD must be non-empty here: with both ENTRYPOINT and CMD empty, a bare
+# `docker run <image>` fails with "no command specified".
+ENTRYPOINT []
+CMD ["/bin/bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

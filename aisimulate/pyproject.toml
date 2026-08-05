@@ -29,7 +29,8 @@ classifiers = [
 ]
 dependencies = [
     "ai-dynamo>=1.3.0,<2.0.0",
-    "aiconfigurator>=0.9.0,<0.10.0",
+    "aiconfigurator==0.11.0.dev20260728",
+    "aiconfigurator-core==0.11.0.dev20260728",
     "chex==0.1.87",
     "filterpy==1.4.5",
     "flax==0.10.0",

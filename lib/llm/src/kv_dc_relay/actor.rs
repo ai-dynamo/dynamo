@@ -31,7 +31,8 @@ use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::kv_router::indexer::{RecoveryResetReason, RecoveryTarget, SourceEpoch};
+use crate::discovery::PublisherId;
+use crate::kv_router::indexer::{RecoveryResetReason, RecoveryTarget};
 
 use super::host::KvDcRelayError;
 
@@ -211,7 +212,7 @@ pub(super) enum ActorFaultCategory {
 pub(super) struct ActorFault {
     pub(super) worker_id: WorkerId,
     pub(super) dp_rank: DpRank,
-    pub(super) source_epoch: SourceEpoch,
+    pub(super) publisher_id: PublisherId,
     pub(super) event_id: Option<u64>,
     pub(super) category: ActorFaultCategory,
     pub(super) disposition: CkfFailureDisposition,
@@ -436,7 +437,7 @@ impl KvDcRelayHandle {
 
     pub(crate) async fn admit_event(
         &self,
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         event: RouterEvent,
     ) -> Result<(), KvDcRelayError> {
         let weight = event_payload_weight(&event).min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
@@ -450,7 +451,7 @@ impl KvDcRelayHandle {
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
         self.sender
             .send(ActorCommand::Apply {
-                source_epoch,
+                publisher_id,
                 event,
                 _payload_permit: permit,
             })
@@ -488,13 +489,13 @@ impl KvDcRelayHandle {
     #[cfg(test)]
     async fn replace_rank(
         &self,
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> Result<(), KvDcRelayError> {
         self.replace_ranks(vec![RankReplacement {
-            source_epoch,
+            publisher_id,
             worker_id,
             dp_rank,
             events,
@@ -504,13 +505,13 @@ impl KvDcRelayHandle {
 
     async fn reset_rank(
         &self,
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         degraded: bool,
     ) -> Result<(), KvDcRelayError> {
         self.submit(|response| ActorCommand::ResetRank {
-            source_epoch,
+            publisher_id,
             worker_id,
             dp_rank,
             degraded,
@@ -579,7 +580,7 @@ impl KvDcRelayHandle {
 
 #[derive(Debug)]
 struct RankReplacement {
-    source_epoch: SourceEpoch,
+    publisher_id: PublisherId,
     worker_id: WorkerId,
     dp_rank: DpRank,
     events: Vec<RouterEvent>,
@@ -731,18 +732,18 @@ impl KvDcRelayRecoveryTarget {
 impl RecoveryTarget for KvDcRelayRecoveryTarget {
     async fn admit_event(
         &self,
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         event: RouterEvent,
     ) -> anyhow::Result<()> {
         self.handle
-            .admit_event(source_epoch, event)
+            .admit_event(publisher_id, event)
             .await
             .map_err(Into::into)
     }
 
     async fn replace_rank(
         &self,
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
@@ -753,7 +754,7 @@ impl RecoveryTarget for KvDcRelayRecoveryTarget {
             let mut state = self.replacement_batcher.state.lock().await;
             state.pending.push(PendingRankReplacement {
                 replacement: RankReplacement {
-                    source_epoch,
+                    publisher_id,
                     worker_id,
                     dp_rank,
                     events,
@@ -806,14 +807,14 @@ impl RecoveryTarget for KvDcRelayRecoveryTarget {
 
     async fn reset_rank(
         &self,
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         reason: RecoveryResetReason,
     ) -> anyhow::Result<()> {
         self.handle
             .reset_rank(
-                source_epoch,
+                publisher_id,
                 worker_id,
                 dp_rank,
                 reason == RecoveryResetReason::TreeDumpFailed,
@@ -828,7 +829,7 @@ type ActorStatsResult = Result<(DcCkfStats, u64, Vec<(WorkerWithDpRank, usize)>)
 
 enum ActorCommand {
     Apply {
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         event: RouterEvent,
         _payload_permit: OwnedSemaphorePermit,
     },
@@ -838,7 +839,7 @@ enum ActorCommand {
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
     ResetRank {
-        source_epoch: SourceEpoch,
+        publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         degraded: bool,
@@ -867,6 +868,8 @@ enum ActorCommand {
         entered: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
     },
+    #[cfg(test)]
+    InjectFault { fault: ActorFault },
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -897,6 +900,8 @@ impl ActorCommand {
             Self::Shutdown { .. } => "shutdown",
             #[cfg(test)]
             Self::Pause { .. } => "test_pause",
+            #[cfg(test)]
+            Self::InjectFault { .. } => "test_fault",
         }
     }
 }
@@ -913,7 +918,6 @@ async fn run_actor(
     stopped: CancellationToken,
 ) {
     let _stopped_guard = CancelOnDrop(stopped);
-    let mut source_epochs = HashMap::<WorkerWithDpRank, SourceEpoch>::new();
     let mut unknown_removal_events = 0u64;
     let mut capacity_omission_events = 0u64;
     let mut shutdown_response = None;
@@ -945,59 +949,13 @@ async fn run_actor(
         diagnostics.start_command(&command);
         match command {
             ActorCommand::Apply {
-                source_epoch,
+                publisher_id,
                 event,
                 ..
             } => {
                 let worker_id = event.worker_id;
                 let dp_rank = event.event.dp_rank;
                 let event_id = event.event.event_id;
-                let key = WorkerWithDpRank::new(worker_id, dp_rank);
-                let current_epoch = source_epochs.get(&key).copied();
-                if current_epoch.is_some_and(|current| source_epoch < current) {
-                    tracing::debug!(
-                        worker_id,
-                        dp_rank,
-                        event_id,
-                        source_epoch = source_epoch.get(),
-                        current_epoch = current_epoch.expect("guarded current epoch").get(),
-                        "Dropping an admitted KV mutation from a superseded source epoch"
-                    );
-                    diagnostics.finish_command();
-                    continue;
-                }
-                if let Some(current_epoch) = current_epoch
-                    && source_epoch > current_epoch
-                {
-                    let disposition = CkfFailurePoint::SourceProtocolFailure.disposition();
-                    let message = format!(
-                        "source epoch advanced from {} to {} without a reset or replacement barrier",
-                        current_epoch.get(),
-                        source_epoch.get()
-                    );
-                    diagnostics.record_error(&message);
-                    if !send_actor_fault(
-                        &fault_tx,
-                        &fence,
-                        ActorFault {
-                            worker_id,
-                            dp_rank,
-                            source_epoch,
-                            event_id: Some(event_id),
-                            category: actor_fault_category(disposition),
-                            disposition,
-                            message,
-                        },
-                    )
-                    .await
-                    {
-                        discard_tail = fence.is_cancelled();
-                        break;
-                    }
-                    diagnostics.finish_command();
-                    continue;
-                }
-                source_epochs.entry(key).or_insert(source_epoch);
                 // NOTE: Subscriber-free Relay operation is transitional or diagnostic, not an
                 // optimized steady-state mode. Keep one publication path until an unsubscribed
                 // deployment is measured; a useful Relay is expected to have a consumer.
@@ -1078,7 +1036,7 @@ async fn run_actor(
                         ActorFault {
                             worker_id,
                             dp_rank,
-                            source_epoch,
+                            publisher_id,
                             event_id: Some(event_id),
                             category,
                             disposition,
@@ -1097,25 +1055,9 @@ async fn run_actor(
                 _payload_permit: _,
                 response,
             } => {
-                let stale = replacements.iter().find_map(|replacement| {
-                    let key = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
-                    let current = source_epochs.get(&key).copied()?;
-                    (replacement.source_epoch < current).then_some((replacement, current))
-                });
-                if let Some((replacement, current)) = stale {
-                    let _ = response.send(Err(KvDcRelayError::StaleSourceEpoch {
-                        worker_id: replacement.worker_id,
-                        dp_rank: replacement.dp_rank,
-                        current: current.get(),
-                        received: replacement.source_epoch.get(),
-                    }));
-                    diagnostics.finish_command();
-                    continue;
-                }
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let mut committed_epochs = Vec::with_capacity(replacements.len());
-                let result = replacement_batch_hashes(replacements, &mut committed_epochs)
+                let result = replacement_batch_hashes(replacements)
                     .and_then(|hashes| state.replace_ranks(hashes).map_err(Into::into))
                     .and_then(|publication| {
                         if let Some(batch) = publication {
@@ -1125,9 +1067,6 @@ async fn run_actor(
                         }
                         Ok(())
                     });
-                if result.is_ok() {
-                    source_epochs.extend(committed_epochs);
-                }
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics.record_rebuild(rebuild_started);
                 // The whole cold-start batch is built off-side. A pre-swap failure leaves every
@@ -1135,25 +1074,13 @@ async fn run_actor(
                 let _ = response.send(result);
             }
             ActorCommand::ResetRank {
-                source_epoch,
+                publisher_id,
                 worker_id,
                 dp_rank,
                 degraded,
                 response,
             } => {
                 let key = WorkerWithDpRank::new(worker_id, dp_rank);
-                if let Some(current) = source_epochs.get(&key).copied()
-                    && source_epoch < current
-                {
-                    let _ = response.send(Err(KvDcRelayError::StaleSourceEpoch {
-                        worker_id,
-                        dp_rank,
-                        current: current.get(),
-                        received: source_epoch.get(),
-                    }));
-                    diagnostics.finish_command();
-                    continue;
-                }
                 let mut removal = state.remove_rank(key);
                 if let Err(error) = removal {
                     // Clear may have committed earlier hashes while remaining exact. Retry the
@@ -1162,7 +1089,7 @@ async fn run_actor(
                     tracing::warn!(
                         worker_id,
                         dp_rank,
-                        source_epoch = source_epoch.get(),
+                        publisher_id,
                         %error,
                         "Retrying the remaining tracked hashes after a partial rank reset"
                     );
@@ -1181,9 +1108,6 @@ async fn run_actor(
                         }
                         Ok(())
                     });
-                if result.is_ok() {
-                    source_epochs.insert(key, source_epoch);
-                }
                 let _ = response.send(result);
             }
             ActorCommand::Flush { response } => {
@@ -1229,6 +1153,13 @@ async fn run_actor(
             ActorCommand::Pause { entered, release } => {
                 let _ = entered.send(());
                 let _ = release.await;
+            }
+            #[cfg(test)]
+            ActorCommand::InjectFault { fault } => {
+                if !send_actor_fault(&fault_tx, &fence, fault).await {
+                    discard_tail = fence.is_cancelled();
+                    break;
+                }
             }
         }
         if !state.has_pending_publication() {
@@ -1283,7 +1214,6 @@ fn replacement_hashes(
 
 fn replacement_batch_hashes(
     replacements: Vec<RankReplacement>,
-    committed_epochs: &mut Vec<(WorkerWithDpRank, SourceEpoch)>,
 ) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
     let mut hashes_by_rank = HashMap::new();
     for replacement in replacements {
@@ -1292,7 +1222,10 @@ fn replacement_batch_hashes(
             return Err(KvDcRelayError::InvalidTreeDump {
                 worker_id: replacement.worker_id,
                 dp_rank: replacement.dp_rank,
-                message: "replacement batch contains the same rank more than once".to_string(),
+                message: format!(
+                    "replacement batch contains the same rank more than once (publisher {})",
+                    replacement.publisher_id
+                ),
             });
         }
         let hashes = replacement_hashes(
@@ -1301,7 +1234,6 @@ fn replacement_batch_hashes(
             replacement.events,
         )?;
         hashes_by_rank.insert(member, hashes);
-        committed_epochs.push((member, replacement.source_epoch));
     }
     Ok(hashes_by_rank)
 }
@@ -1357,17 +1289,45 @@ fn event_payload_weight(event: &RouterEvent) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
+    use anyhow::Result;
+    use async_trait::async_trait;
     use dynamo_kv_router::identity::{
         CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
-    use dynamo_kv_router::indexer::cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId};
+    use dynamo_kv_router::indexer::{
+        WorkerKvQueryResponse,
+        cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId},
+    };
     use dynamo_kv_router::protocols::{
         KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
     };
+    use dynamo_runtime::{component::Instance, protocols::EndpointId};
+    use tokio::sync::watch;
 
     use super::*;
+    use crate::discovery::{
+        KvEventSource, KvSourceMembershipView, KvSourceStatus, KvStateEndpointResolution,
+    };
+    use crate::kv_router::indexer::{WorkerQueryClient, WorkerQueryTransport};
+
+    struct UnusedWorkerQueryTransport;
+
+    #[async_trait]
+    impl WorkerQueryTransport for UnusedWorkerQueryTransport {
+        async fn query_worker(
+            &self,
+            _worker_id: WorkerId,
+            _dp_rank: DpRank,
+            _target: Instance,
+            _start_event_id: Option<u64>,
+            _end_event_id: Option<u64>,
+        ) -> Result<WorkerKvQueryResponse> {
+            panic!("live-only source must not start worker recovery")
+        }
+    }
 
     fn scope(_name: &str) -> StreamScope {
         let dc_id = DcId::new(2);
@@ -1432,7 +1392,7 @@ mod tests {
             KvDcRelayHandle::spawn(CkfConfig::new(32), scope("diagnostics")).unwrap();
 
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1, 2]))
+            .admit_event(0, stored(worker, 1, &[1, 2]))
             .await
             .unwrap();
         handle.flush().await.unwrap();
@@ -1464,7 +1424,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(50),
-            handle.admit_event(SourceEpoch::new(0), stored(worker, 1, &[1])),
+            handle.admit_event(0, stored(worker, 1, &[1])),
         )
         .await
         .expect("queue admission should not await CKF mutation")
@@ -1485,16 +1445,15 @@ mod tests {
                 .unwrap();
         let release = pause_actor(&handle).await;
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
+            .admit_event(0, stored(worker, 1, &[1]))
             .await
             .unwrap();
 
         let second_handle = handle.clone();
-        let mut second = tokio::spawn(async move {
-            second_handle
-                .admit_event(SourceEpoch::new(0), stored(worker, 2, &[2]))
-                .await
-        });
+        let mut second =
+            tokio::spawn(
+                async move { second_handle.admit_event(0, stored(worker, 2, &[2])).await },
+            );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), &mut second)
                 .await
@@ -1515,7 +1474,7 @@ mod tests {
         let (handle, _faults) =
             KvDcRelayHandle::spawn(CkfConfig::new(32), scope("replace")).unwrap();
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1, 2]))
+            .admit_event(0, stored(worker, 1, &[1, 2]))
             .await
             .unwrap();
         handle.flush().await.unwrap();
@@ -1524,7 +1483,7 @@ mod tests {
 
         handle
             .replace_rank(
-                SourceEpoch::new(0),
+                0,
                 worker.worker_id,
                 worker.dp_rank,
                 vec![stored(worker, 0, &[3, 4])],
@@ -1556,7 +1515,7 @@ mod tests {
         let mut first_replacement = tokio::spawn(async move {
             first_target
                 .replace_rank(
-                    SourceEpoch::new(1),
+                    1,
                     first.worker_id,
                     first.dp_rank,
                     vec![stored(first, 0, &[1, 2])],
@@ -1571,7 +1530,7 @@ mod tests {
         );
         target
             .replace_rank(
-                SourceEpoch::new(1),
+                1,
                 second.worker_id,
                 second.dp_rank,
                 vec![stored(second, 0, &[3])],
@@ -1592,7 +1551,7 @@ mod tests {
             KvDcRelayHandle::spawn_with_capacity(CkfConfig::new(32), scope("shutdown"), 4).unwrap();
         let release = pause_actor(&handle).await;
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
+            .admit_event(0, stored(worker, 1, &[1]))
             .await
             .unwrap();
         let shutdown_handle = handle.clone();
@@ -1601,9 +1560,7 @@ mod tests {
 
         shutdown.await.unwrap().unwrap();
         assert!(matches!(
-            handle
-                .admit_event(SourceEpoch::new(0), stored(worker, 2, &[2]))
-                .await,
+            handle.admit_event(0, stored(worker, 2, &[2])).await,
             Err(KvDcRelayError::ShuttingDown)
         ));
     }
@@ -1621,7 +1578,7 @@ mod tests {
         .unwrap();
         let mut subscription = handle.subscribe(lease(1)).await.unwrap();
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
+            .admit_event(0, stored(worker, 1, &[1]))
             .await
             .unwrap();
 
@@ -1631,9 +1588,7 @@ mod tests {
             Err(broadcast::error::RecvError::Closed)
         ));
         assert!(matches!(
-            handle
-                .admit_event(SourceEpoch::new(0), stored(worker, 2, &[2]))
-                .await,
+            handle.admit_event(0, stored(worker, 2, &[2])).await,
             Err(KvDcRelayError::ShuttingDown)
         ));
     }
@@ -1643,15 +1598,22 @@ mod tests {
         let worker = WorkerWithDpRank::new(1, 0);
         let (handle, faults) =
             KvDcRelayHandle::spawn(CkfConfig::new(32), scope("fault-backpressure")).unwrap();
-        handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
-            .await
-            .unwrap();
-        handle.flush().await.unwrap();
+        let disposition = event_failure_point(KvCacheEventError::ParentBlockNotFound).disposition();
 
-        for event_id in 2..=(DEFAULT_FAULT_CAPACITY as u64 + 2) {
+        for event_id in 1..=(DEFAULT_FAULT_CAPACITY as u64 + 1) {
             handle
-                .admit_event(SourceEpoch::new(1), stored(worker, event_id, &[event_id]))
+                .sender
+                .send(ActorCommand::InjectFault {
+                    fault: ActorFault {
+                        worker_id: worker.worker_id,
+                        dp_rank: worker.dp_rank,
+                        publisher_id: 100,
+                        event_id: Some(event_id),
+                        category: ActorFaultCategory::SourceProtocol,
+                        disposition,
+                        message: format!("fault {event_id}"),
+                    },
+                })
                 .await
                 .unwrap();
         }
@@ -1679,7 +1641,7 @@ mod tests {
 
         for event_id in 1..=15 {
             handle
-                .admit_event(SourceEpoch::new(0), stored(worker, event_id, &[7]))
+                .admit_event(0, stored(worker, event_id, &[7]))
                 .await
                 .unwrap();
         }
@@ -1689,7 +1651,7 @@ mod tests {
         assert!(subscription.deltas.try_recv().is_err());
 
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 16, &[7]))
+            .admit_event(0, stored(worker, 16, &[7]))
             .await
             .unwrap();
         let delta = subscription.deltas.recv().await.unwrap();
@@ -1714,7 +1676,7 @@ mod tests {
         let mut subscription = handle.subscribe(lease(1)).await.unwrap();
 
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[7]))
+            .admit_event(0, stored(worker, 1, &[7]))
             .await
             .unwrap();
         let delta = tokio::time::timeout(Duration::from_millis(100), subscription.deltas.recv())
@@ -1739,7 +1701,7 @@ mod tests {
         .unwrap();
         let mut old = handle.subscribe(lease(1)).await.unwrap();
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[7]))
+            .admit_event(0, stored(worker, 1, &[7]))
             .await
             .unwrap();
 
@@ -1750,7 +1712,7 @@ mod tests {
         assert!(replacement.deltas.try_recv().is_err());
 
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 2, &[8]))
+            .admit_event(0, stored(worker, 2, &[8]))
             .await
             .unwrap();
         handle.flush().await.unwrap();
@@ -1772,7 +1734,7 @@ mod tests {
         let hashes: Vec<_> = (1..=32).collect();
 
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 1, &hashes))
+            .admit_event(0, stored(worker, 1, &hashes))
             .await
             .unwrap();
         let (stats, _, _) = handle.state_stats().await.unwrap();
@@ -1787,7 +1749,7 @@ mod tests {
         );
 
         handle
-            .admit_event(SourceEpoch::new(0), stored(worker, 2, &[1]))
+            .admit_event(0, stored(worker, 2, &[1]))
             .await
             .unwrap();
         handle.flush().await.unwrap();
@@ -1809,7 +1771,7 @@ mod tests {
         assert!(
             handle
                 .replace_rank(
-                    SourceEpoch::new(0),
+                    0,
                     worker.worker_id,
                     worker.dp_rank,
                     vec![stored(foreign, 1, &[1])],
@@ -1852,58 +1814,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_source_epoch_cannot_mutate_or_fault_a_replacement_rank() {
+    async fn worker_query_replacement_orders_old_apply_before_reset_and_fences_old_source() {
         let worker = WorkerWithDpRank::new(1, 0);
-        let (handle, mut faults) =
-            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("stale-epoch")).unwrap();
+        let serving_endpoint = EndpointId::from("ns.worker.ordering");
+        let kv_state_endpoint = EndpointId::from("ns.worker.kv");
+        let source = |publisher_id| KvEventSource {
+            kv_state_endpoint: kv_state_endpoint.clone(),
+            worker,
+            publisher_id,
+            recovery_target: None,
+        };
+        let view = |source| KvSourceMembershipView {
+            serving_endpoint: serving_endpoint.clone(),
+            endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
+            sources: HashMap::from([(worker, KvSourceStatus::ActiveLiveOnly(source))]),
+            kv_event_publishing_enabled: HashMap::new(),
+            recovery_expected: HashMap::new(),
+        };
 
-        handle
-            .admit_event(SourceEpoch::new(1), stored(worker, 1, &[1]))
-            .await
-            .unwrap();
-        handle
-            .reset_rank(SourceEpoch::new(2), worker.worker_id, worker.dp_rank, false)
-            .await
-            .unwrap();
+        let mut config = CkfConfig::new(32);
+        config.publish_every_n_events = 1;
+        let (handle, mut faults) = KvDcRelayHandle::spawn_with_publication_delay(
+            config,
+            scope("worker-query-ordering"),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let mut subscription = handle.subscribe(lease(1)).await.unwrap();
+        let target = KvDcRelayRecoveryTarget::new(
+            handle.clone(),
+            Arc::new(Semaphore::new(1)),
+            HashSet::new(),
+            Duration::from_secs(1),
+        );
+        let source_a = source(100);
+        let source_b = source(200);
+        let (membership_tx, membership_rx) = watch::channel(view(source_a));
+        let client = WorkerQueryClient::new_target_for_test(
+            target,
+            membership_rx,
+            Arc::new(UnusedWorkerQueryTransport),
+        );
+        client.sync_membership().await;
 
-        handle
-            .admit_event(SourceEpoch::new(1), stored(worker, 2, &[2]))
-            .await
-            .unwrap();
+        let release = pause_actor(&handle).await;
+        client
+            .handle_live_batch(100, vec![stored(worker, 1, &[1])])
+            .await;
+        membership_tx.send(view(source_b)).unwrap();
+        let sync_client = client.clone();
+        let replacement = tokio::spawn(async move { sync_client.sync_membership().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handle.mailbox_depth() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("A apply and A reset were not both accepted by the actor");
+        assert!(!replacement.is_finished());
+
+        release.send(()).unwrap();
+        replacement.await.unwrap();
+        let applied = subscription.deltas.recv().await.unwrap();
+        let reset = subscription.deltas.recv().await.unwrap();
+        assert_eq!((applied.base_sequence(), applied.sequence()), (0, 1));
+        assert_eq!((reset.base_sequence(), reset.sequence()), (1, 2));
+
+        client
+            .handle_live_batch(100, vec![stored(worker, 2, &[2])])
+            .await;
+        client
+            .handle_live_batch(200, vec![stored(worker, 1, &[3])])
+            .await;
         handle.flush().await.unwrap();
         let (stats, _, _) = handle.state_stats().await.unwrap();
-        assert_eq!(stats.aggregation().unique_block_count(), 0);
+        assert_eq!(stats.aggregation().unique_block_count(), 1);
 
-        assert!(matches!(
-            handle
-                .reset_rank(SourceEpoch::new(1), worker.worker_id, worker.dp_rank, false)
-                .await,
-            Err(KvDcRelayError::StaleSourceEpoch {
-                current: 2,
-                received: 1,
-                ..
-            })
-        ));
-        assert!(matches!(
-            handle
-                .replace_rank(
-                    SourceEpoch::new(1),
-                    worker.worker_id,
-                    worker.dp_rank,
-                    vec![stored(worker, 3, &[3])],
-                )
-                .await,
-            Err(KvDcRelayError::StaleSourceEpoch {
-                current: 2,
-                received: 1,
-                ..
-            })
-        ));
         assert!(
             tokio::time::timeout(Duration::from_millis(20), faults.recv())
                 .await
                 .is_err(),
-            "stale traffic must not fault the replacement epoch"
+            "stale traffic must not fault the replacement source"
         );
     }
 }
