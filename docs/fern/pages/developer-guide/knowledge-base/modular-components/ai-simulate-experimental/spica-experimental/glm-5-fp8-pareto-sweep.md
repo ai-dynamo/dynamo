@@ -10,14 +10,6 @@ subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 > treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
-{/* Separate the adjacent admonitions for Markdown and MDX renderers. */}
-
-> [!IMPORTANT]
-> This experiment uses `kv_load_ratio` and the KV-cache estimator from
-> `aiconfigurator_core.sdk.memory`. The default `dynamo-planner` image includes the matching AI
-> Configurator application and core packages. The B200/SGLang target requires a matching AI
-> Configurator performance database.
-
 This replay-backed sweep targets the InferenceX/SemiAnalysis (SA) **GLM-5-FP8 / B200 /
 Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Spica can discover competitive
 deployment mappings without pinning the parallel shape or replica count.
