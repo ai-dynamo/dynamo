@@ -19,7 +19,7 @@ This guide deploys Dynamo aggregated vLLM serving on Kubernetes with KV cache of
 <Step title="Install the Dynamo platform" id="install-the-dynamo-platform">
 
 ```bash
-export RELEASE_VERSION=1.2.1
+export RELEASE_VERSION=1.3.0
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$RELEASE_VERSION.tgz
 helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace dynamo-system --create-namespace \
@@ -113,7 +113,7 @@ Mismatched versions do not speak the same MP wire protocol.
 Verify with:
 ```bash
 kubectl -n dynamo-lmcache get lmcacheengine lmcache-mp
-# expect: STATUS  Running
+# expect: PHASE  Running
 ```
 
 </Step>
