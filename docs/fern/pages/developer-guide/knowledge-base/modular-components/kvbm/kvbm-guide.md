@@ -52,7 +52,7 @@ Pick one of the following to get a Dynamo vLLM container with KVBM built in. The
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
-See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx#container-images) for available versions.
+See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx) for available versions.
 
 **Option B: Build from source**
 
@@ -121,7 +121,7 @@ Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 ```
 
-See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx#container-images) for available versions.
+See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx) for available versions.
 
 **Option B: Build from source**
 

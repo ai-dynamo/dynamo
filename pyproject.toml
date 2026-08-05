@@ -279,6 +279,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "wheel_smoke: marks tests that validate wheels copied from runtime images",
+    "installs_extra_dependencies: marks tests that pip-install a package the runtime image intentionally omits (via DYN_TEST_ONLY_PIP_INSTALL). The feature under test may not work in an unmodified shipped image",
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
@@ -383,6 +384,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tensorrt_llm", "tensorrt_llm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyNvVideoCodec: GPU-only NVDEC codec (common/multimodal/nvdec_decoder.py).
+# Absent from the CPU lint env and ships no type stubs, so mypy would raise
+# import-not-found on the guarded `import PyNvVideoCodec`.
+module = ["PyNvVideoCodec", "PyNvVideoCodec.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 

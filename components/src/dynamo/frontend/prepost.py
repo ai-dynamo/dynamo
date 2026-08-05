@@ -554,6 +554,8 @@ class StreamingPostProcessor:
         if self._should_buffer_for_non_streaming_tool_parse():
             return self._process_non_streaming_tool_output(output)
 
+        # TODO: Emit the role only once per choice here instead of relying on
+        # HTTP stream deduplication to remove repeated postprocessor roles.
         delta_token_ids = list(output.token_ids or [])
         # vLLM output_processor already applies stop-token/stop-string trimming
         # to text. Re-detokenizing from token_ids can reintroduce stop markers.
