@@ -84,6 +84,14 @@ const HEADER_RETRY_ATTEMPT: &str = "x-dynamo-retry-attempt";
 
 /// Envoy's own retry counter, honored so a router retry needs no extra wiring.
 /// Envoy counts the first attempt as `1`, so only values above 1 are retries.
+///
+/// Caveat: within a single Envoy hop, the HTTP filter chain — including this
+/// ext_proc filter — is not re-executed for the router's own retry policy, so
+/// this filter only ever observes the header if it was already set when the
+/// request first arrived (e.g. forwarded from an upstream Envoy/mesh hop that
+/// performed the retry). Verify against the actual gateway topology before
+/// relying on this signal; where it doesn't apply, `HEADER_RETRY_ATTEMPT` set
+/// by the client remains the reliable path to the retry family.
 const HEADER_ENVOY_ATTEMPT_COUNT: &str = "x-envoy-attempt-count";
 
 /// Policy family a retried request is classified under. Must match a
@@ -121,6 +129,23 @@ static SHED_RETRY_AFTER_SECS: LazyLock<Option<u64>> = LazyLock::new(|| {
 /// gateway knows and the router cannot see. `None` lets the router apply its
 /// configured default family, which keeps deployments without a policy config
 /// unchanged.
+///
+/// Trust model: this header is a self-declared classification hint, not an
+/// authorization decision, and it is intentionally not in
+/// `STRIPPED_REQUEST_HEADERS` — a caller is meant to be able to set it
+/// directly (see `examples/router/policy-class-shedding.yaml`), the same way
+/// the standard Frontend already trusts it via `x-dynamo-meta-*` metadata
+/// extraction. Worst case for a caller lying about its own class is that it
+/// avoids being shed itself; it cannot claim another caller's capacity or
+/// bypass any other request's admission. Two caveats operators should know:
+/// (1) `PolicyProfile::resolve_class_index` checks a *explicit* class name
+/// (one configured with a bare `name:`, no `policy_family`/`cache_bucket`)
+/// before family+bucket derivation, so a caller who knows an explicit class
+/// name can select it directly, skipping retry/size classification entirely —
+/// avoid explicit classes if the header is reachable by untrusted callers.
+/// (2) Deployments that must enforce (not just advise) classification should
+/// have the gateway overwrite this header at the edge with a
+/// `RequestHeaderModifier` `set` action rather than relying on caller input.
 fn policy_class_from_headers(headers: &[(String, String)]) -> Option<String> {
     if let Some(class) = find_header(headers, HEADER_POLICY_CLASS)
         .map(str::trim)
@@ -1375,6 +1400,10 @@ mod tests {
         );
     }
 
+    /// Documents the trust model (see `policy_class_from_headers`): the caller's
+    /// explicit header always wins over an inferred retry marker, including
+    /// when the two disagree. This is intentional — the header is a
+    /// self-declared hint, not an authorization decision — not an oversight.
     #[test]
     fn explicit_policy_class_header_wins_over_retry_marker() {
         let headers = vec![

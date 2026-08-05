@@ -67,6 +67,7 @@ areas:
   - tests/router/
   - tests/router/configs/
   - examples/router/policy-class-queues.yaml
+  - examples/router/policy-class-shedding.yaml
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:

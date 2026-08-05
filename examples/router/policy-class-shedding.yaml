@@ -25,6 +25,19 @@
 #                                   holding the request until admission rather
 #                                   than answering 429.
 # A class that sets no busy threshold is never shed.
+#
+# Trust model: `x-dynamo-meta-policy-class` is a self-declared hint from the
+# caller, not an authenticated claim — the EPP does not strip or gate it (see
+# `policy_class_from_headers` in epp.rs). A caller who names a *family*
+# (`first_attempt`/`retry`) still goes through this file's bucket derivation
+# by uncached ISL. The classes below are all defined by (`policy_family`,
+# `cache_bucket`), never by a bare `name:` alone, precisely so that no class
+# is directly selectable by name — every caller-supplied family still gets
+# bucketed by the router's own measurement of prompt size. Do not add a class
+# with only `name:` (no `policy_family`/`cache_bucket`) to this file unless
+# the gateway also overwrites `x-dynamo-meta-policy-class` at the edge, since
+# a caller who learns that name could select it directly and skip
+# retry/size classification.
 
 default_policy_family: first_attempt
 
