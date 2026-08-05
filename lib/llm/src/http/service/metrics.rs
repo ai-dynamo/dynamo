@@ -560,7 +560,10 @@ pub struct ResponseMetricCollector {
     // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
-    isl: usize,
+    // `None` until the input sequence length is known. Requests that fail during
+    // preprocessing never learn one, and stamping a zero for them would be a
+    // fabricated value rather than a measurement.
+    isl: Option<usize>,
     ttft_ms: Option<f64>,
     itl_sum_secs: f64,
     itl_count: u64,
@@ -1608,7 +1611,7 @@ impl ResponseMetricCollector {
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
-            isl: 0,
+            isl: None,
             ttft_ms: None,
             itl_sum_secs: 0.0,
             itl_count: 0,
@@ -1779,7 +1782,7 @@ impl ResponseMetricCollector {
         }
 
         // Store ISL for span recording on drop
-        self.isl = isl;
+        self.isl = Some(isl);
 
         // Increment the real-time output tokens counter
         self.output_tokens_counter.inc_by(num_tokens as u64);
@@ -1911,7 +1914,12 @@ impl Drop for ResponseMetricCollector {
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
         let span = tracing::Span::current();
-        span.record("input_tokens", self.isl as u32);
+        // Only stamp ISL once known. Leaving the field empty keeps "we never got
+        // far enough to tokenize" distinguishable from a real zero, and lets a
+        // value recorded earlier in preprocessing survive this drop.
+        if let Some(isl) = self.isl {
+            span.record("input_tokens", isl as u32);
+        }
         span.record("output_tokens", self.osl as u32);
         // Only record once observed, so requests that never carried a metrics
         // annotation (e.g. errored before the first chunk) don't stamp a false zero.
@@ -2464,6 +2472,89 @@ mod tests {
 
         drop(collector);
         assert_eq!(global.get_sample_count(), 1);
+    }
+
+    #[test]
+    fn drop_stamps_input_tokens_only_once_isl_is_known() {
+        // A request that fails during preprocessing never learns an ISL. Stamping
+        // zero for it would put a fabricated value in the log line (and the OTel
+        // span attribute), indistinguishable from a request whose prompt really
+        // did tokenize to nothing. It would also clobber a value recorded earlier
+        // by the preprocessor, which is how rejected requests get a real ISL.
+        use std::sync::Mutex;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct CaptureRecords(Arc<Mutex<Vec<(String, u64)>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureRecords {
+            fn on_record(
+                &self,
+                _id: &tracing::span::Id,
+                values: &tracing::span::Record<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visitor<'a>(&'a mut Vec<(String, u64)>);
+                impl tracing::field::Visit for Visitor<'_> {
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        self.0.push((field.name().to_string(), value));
+                    }
+                    fn record_debug(
+                        &mut self,
+                        _field: &tracing::field::Field,
+                        _value: &dyn std::fmt::Debug,
+                    ) {
+                    }
+                }
+                values.record(&mut Visitor(&mut self.0.lock().unwrap()));
+            }
+        }
+
+        let recorded = CaptureRecords::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+        let input_tokens = || {
+            recorded
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == "input_tokens")
+                .map(|(_, value)| *value)
+        };
+
+        let metrics = Arc::new(Metrics::new());
+
+        // Errored before any response chunk: ISL never observed.
+        {
+            let span = tracing::info_span!(
+                "http-request",
+                input_tokens = tracing::field::Empty,
+                output_tokens = tracing::field::Empty
+            );
+            let _enter = span.enter();
+            let collector = metrics.clone().create_response_collector("isl-guard");
+            assert_eq!(collector.isl, None);
+        }
+        assert_eq!(
+            input_tokens(),
+            None,
+            "ISL must stay unset when the request never produced a response"
+        );
+
+        // Normal request: ISL arrives with the first chunk and is stamped on drop.
+        {
+            let span = tracing::info_span!(
+                "http-request",
+                input_tokens = tracing::field::Empty,
+                output_tokens = tracing::field::Empty
+            );
+            let _enter = span.enter();
+            let mut collector = metrics.create_response_collector("isl-guard");
+            collector.observe_response(4096, 1);
+            assert_eq!(collector.isl, Some(4096));
+        }
+        assert_eq!(input_tokens(), Some(4096));
     }
 
     #[test]
