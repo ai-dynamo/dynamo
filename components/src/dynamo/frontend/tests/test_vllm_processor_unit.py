@@ -1174,3 +1174,59 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+# Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
+# attribute; a direct read used to crash vLLM preprocessing.
+
+
+def _make_mistral_tokenizer():
+    # Bare instance: these tests only touch attribute access, not tokenization.
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    return MistralTokenizer.__new__(MistralTokenizer)
+
+
+def test_mistral_tokenizer_has_no_chat_template_attribute():
+    """Direct read raises; getattr is safe; the attribute is assignable."""
+    tok = _make_mistral_tokenizer()
+
+    with pytest.raises(AttributeError):
+        _ = tok.chat_template
+
+    assert getattr(tok, "chat_template", None) is None
+    tok.chat_template = "x"
+    assert tok.chat_template == "x"
+
+
+def test_ensure_chat_template_mistral_no_crash(vllm_processor_module, tmp_path):
+    """_ensure_chat_template leaves a MistralTokenizer untouched (no attribute)."""
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_mistral_ignores_on_disk_template(
+    vllm_processor_module, tmp_path
+):
+    """A chat_template.jinja beside a Mistral model is not attached to it."""
+    (tmp_path / "chat_template.jinja").write_text("{{ messages }}")
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_preserves_existing_hf_template(
+    vllm_processor_module, tokenizer, tmp_path
+):
+    """An HF tokenizer's existing chat_template is left untouched."""
+    existing = tokenizer.chat_template
+    assert existing is not None
+
+    vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
+
+    assert tokenizer.chat_template == existing

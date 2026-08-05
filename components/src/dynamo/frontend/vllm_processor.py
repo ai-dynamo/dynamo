@@ -88,6 +88,23 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     return context_length
 
 
+def _ensure_chat_template(
+    tokenizer: Any, local_dir: str, chat_template_flag: str | None
+) -> None:
+    """Set tokenizer.chat_template so vLLM's renderer handles tool calls.
+
+    Skipped for MistralTokenizer (--tokenizer-mode mistral): it has no
+    chat_template attribute and renders via mistral_common, so leave it
+    untouched rather than attach an HF template it never uses.
+    """
+    if not hasattr(tokenizer, "chat_template"):
+        return
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
+    if chat_template_flag:
+        tokenizer.chat_template = load_chat_template(chat_template_flag)
+
+
 def _mm_feature_modality(feature: Any) -> str:
     return getattr(feature, "modality", None) or "image"
 
@@ -983,16 +1000,9 @@ class EngineFactory:
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
 
-        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
-        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
-        if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
-
-        # --chat-template overrides; load_chat_template accepts either a file path
-        # or an inline Jinja template string.
-        chat_template_flag = getattr(self.flags, "chat_template", None)
-        if chat_template_flag:
-            tokenizer.chat_template = load_chat_template(chat_template_flag)
+        _ensure_chat_template(
+            tokenizer, local_dir, getattr(self.flags, "chat_template", None)
+        )
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval

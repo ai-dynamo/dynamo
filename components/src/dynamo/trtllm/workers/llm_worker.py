@@ -168,6 +168,31 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
             setattr(config, field_name, engine_args[field_name])
 
 
+def _strip_postprocess_workers(engine_args: dict) -> None:
+    """Remove num_postprocess_workers from engine args, warning if it was > 0.
+
+    Dynamo manages its own post-processing pipeline; TRT-LLM's
+    num_postprocess_workers is not effective in this context.
+    """
+    value = engine_args.pop("num_postprocess_workers", None)
+    if value is None:
+        return
+    try:
+        if int(value) > 0:
+            logging.warning(
+                "num_postprocess_workers=%r was set in engine config but will be ignored: "
+                "Dynamo manages its own post-processing pipeline and does not make "
+                "TRT-LLM's num_postprocess_workers effective. The setting has been removed.",
+                value,
+            )
+    except (TypeError, ValueError):
+        logging.warning(
+            "num_postprocess_workers=%r was set in engine config with an unrecognised value "
+            "and has been removed.",
+            value,
+        )
+
+
 def _populate_kv_cache_capacity(
     runtime_config: ModelRuntimeConfig,
     engine: TensorRTLLMEngine,
@@ -364,6 +389,7 @@ async def init_llm_worker(
             sys.exit(1)
 
     _sync_config_from_engine_args(config, arg_map)
+    _strip_postprocess_workers(arg_map)
 
     event_buffer_max_size = 0
     if config.publish_events_and_metrics:

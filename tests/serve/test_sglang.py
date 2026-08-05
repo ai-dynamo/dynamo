@@ -9,11 +9,20 @@ from typing import Optional
 
 import pytest
 
+from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
+)
+from tests.serve.conftest import (
+    MULTIMODAL_MEDIA_DIR,
+    MULTIMODAL_VIDEO_EXPECTED,
+    MULTIMODAL_VIDEO_H264_FILE_URI,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
+    MULTIMODAL_VIDEO_URL,
 )
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
@@ -71,9 +80,15 @@ class SGLangConfig(EngineConfig):
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
-REMOTE_VIDEO_TEST_URI = (
-    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
-)
+# Video clips are served by the image_server fixture from the in-repo media
+# fixtures. This used to point at a third-party host, which made the SGLang
+# video tests depend on that host being reachable: a read timeout fetching the
+# clip failed the run with no relation to the code under test.
+VIDEO_TEST_URI = MULTIMODAL_VIDEO_URL
+
+# Evaluated once at collection, like the vLLM profile's guard: NVDEC needs
+# the container's driver "video" capability, which CI runners do not grant.
+_NVDEC_UNAVAILABLE = not nvdec_available()
 
 # Generated multimodal configs from profile definitions (mirrors test_vllm.py).
 # Each profile expands into one config per MmCase per topology with the
@@ -513,6 +528,10 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
+            # Installs decord below, which the shipped image omits: this proves
+            # the routing works given a decoder, not that the codec decodes in a
+            # shipped image.
+            pytest.mark.installs_extra_dependencies,
             # Bisected with tests/utils/profile_pytest.py: minimum = 4368
             # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
             # the cap, sglang's default 65% fraction allocates ~278k tokens
@@ -528,6 +547,10 @@ sglang_configs = {
             "Qwen/Qwen2-VL-7B-Instruct",
         ],
         timeout=360,
+        # SGLang's video path decodes with decord; the shipped image omits it as
+        # a media-codec carrier, so install it for this test only.
+        # See common._install_test_only_packages.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": "decord2"},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -535,13 +558,99 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
+            )
+        ],
+    ),
+    "video_e_pd_qwen_nvdec": SGLangConfig(
+        # H.264/H.265 video input decoded on the GPU by NVDEC, which is the only
+        # video decoder in the shipped image -- so unlike the cases above this
+        # installs nothing and exercises what a deployment actually gets. It is
+        # the only end-to-end cover for the video_metadata shim in
+        # encode_worker_handler, which SGLang's pre-decoded-frame path needs.
+        #
+        # Must be the E/PD topology: NVDEC is wired into the encode worker, and
+        # the aggregated path hands the URL to SGLang, which resolves and decodes
+        # it internally with no interception point.
+        #
+        # Must also be a qwen2-family model. Qwen3-VL is in
+        # _NVDEC_UNSAFE_MODEL_TYPES (its preprocessing cannot take pre-decoded
+        # frames), so NVDEC is deliberately skipped for it and the request would
+        # fall back to the URL path, which has no decoder here.
+        name="video_e_pd_qwen_nvdec",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            # CI runners lack the driver "video" capability libnvcuvid needs, so
+            # this skips there and is exercised on GPU hardware instead.
+            pytest.mark.skipif(
+                _NVDEC_UNAVAILABLE,
+                reason=(
+                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
+                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                ),
+            ),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        # Deliberately does NOT set --multimodal-embedding-cache-capacity-gb, so
+        # the embedding cache stays at its default of 0 (disabled) and this
+        # exercises the branch a stock deployment actually takes. An earlier
+        # revision set 0.1 here, which routed the request through the cached
+        # encode path -- the only path that performed the NVDEC conversion --
+        # and so passed while default deployments failed outright. The cached
+        # path keeps its coverage in the encode-worker unit tests.
+        script_args=[
+            "--model",
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+            "--single-gpu",
+        ],
+        timeout=420,
+        env={
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # The clips come from the image_server over plain http on localhost,
+            # which the URL policy rejects by default. Without this the encode
+            # worker refuses the URL before NVDEC sees it and falls back to the
+            # URL path, which has no decoder in this image.
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            # Permits the file:// payload below. The local branch reads through
+            # read_local_media_bytes instead of fetching, then joins the same
+            # NVDEC routing, so without a file:// case that read, its policy
+            # gate, and its hand-off to the decoder are never exercised.
+            "DYN_MM_LOCAL_PATH": MULTIMODAL_MEDIA_DIR,
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {"type": "video_url", "video_url": {"url": url}},
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+            # The same clip over http and as a local file. All three are the
+            # identical triangle footage, so a difference in the answer points at
+            # the transport rather than at the model or the encoding.
+            for url in (
+                MULTIMODAL_VIDEO_H264_URL,
+                MULTIMODAL_VIDEO_H265_URL,
+                MULTIMODAL_VIDEO_H264_FILE_URI,
             )
         ],
     ),
@@ -554,6 +663,9 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
+            # See video_agg_qwen: installs decord, so likewise a
+            # installs_extra_dependencies case.
+            pytest.mark.installs_extra_dependencies,
             # No profiled_vram_gib: multimodal_epd.sh uses explicit
             # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
             pytest.mark.timeout(360),
@@ -574,6 +686,9 @@ sglang_configs = {
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # SGLang's video path decodes with decord; the shipped image omits it
+            # as a media-codec carrier, so install it for this test only.
+            "DYN_TEST_ONLY_PIP_INSTALL": "decord2",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -582,11 +697,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             ),
@@ -595,11 +710,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 expected_log=["Embedding cache hit for VIDEO URL index 0"],
                 temperature=0.0,
                 max_tokens=100,
