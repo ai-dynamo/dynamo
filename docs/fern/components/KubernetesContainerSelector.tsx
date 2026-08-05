@@ -90,6 +90,11 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function runtimeVersionFor(version: string | undefined): string {
+  const semver = version?.match(/^(\d+\.\d+\.\d+)/)?.[1];
+  return semver ?? CURRENT_TAG;
+}
+
 function commandFor(
   hardware: Hardware,
   backend: InstallBackend,
@@ -117,6 +122,7 @@ function commandFor(
   if (channel === "nightly") {
     return [
       `export DYNAMO_VERSION=${CURRENT_TAG}`,
+      `export DYNAMO_RUNTIME_VERSION=${runtimeVersionFor(dynamoVersion)}`,
       'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly"',
     ].join("\n");
   }

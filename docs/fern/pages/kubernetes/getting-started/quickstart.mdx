@@ -115,6 +115,7 @@ spec:
   model: Qwen/Qwen3-0.6B
   backend: auto
   image: ${DYNAMO_IMAGE}
+  runtimeVersionOverride: "${DYNAMO_RUNTIME_VERSION:-${DYNAMO_VERSION}}"
 EOF
 ```
       </Tab>
