@@ -282,6 +282,12 @@ dynamo-operator:
 # Grove component - distributed inference orchestration
 # Installation is controlled by global.grove.install above.
 grove:
+  # -- Run 2 Grove operator replicas so a single pod restart (e.g. the expected
+  # cert-resync restart, grove issue #701) never leaves the PodCliqueSet webhook
+  # without a serving endpoint. Grove enables leader election by default, so only
+  # one replica reconciles; the webhook is stateless and served by all replicas.
+  # Paired with a PodDisruptionBudget (templates/grove-poddisruptionbudget.yaml).
+  replicaCount: 2
   # -- Node tolerations for Grove pods
   tolerations: []
   # -- Affinity for Grove pods

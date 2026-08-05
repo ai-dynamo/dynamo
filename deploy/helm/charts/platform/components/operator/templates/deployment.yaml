@@ -32,7 +32,18 @@ metadata:
 spec:
   replicas: {{ .Values.controllerManager.replicas }}
   strategy:
+    {{- if gt (int .Values.controllerManager.replicas) 1 }}
+    # With >1 replica, roll one pod at a time and never drop below the desired
+    # count so the admission webhook always has a serving endpoint during updates.
+    # Leader election (see operator-config.yaml) keeps only one active manager;
+    # the webhook is stateless, so multiple serving replicas do not conflict.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+    {{- else }}
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       control-plane: controller-manager
