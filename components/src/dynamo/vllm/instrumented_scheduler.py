@@ -2522,7 +2522,9 @@ class InstrumentedScheduler(AsyncScheduler):
                     dropped,
                     len(materialized),
                 )
-            self._bench_grid.extend(point for point in materialized if point is not None)
+            self._bench_grid.extend(
+                point for point in materialized if point is not None
+            )
         if mode in ("decode", "agg"):
             self._bench_feasible_max_decode_batch_size = (
                 self._bench_decode_feasible_max_batch_size()
