@@ -80,7 +80,7 @@ def _gpu_memory_free_bytes(device: int = 0) -> int:
         import torch
 
         free_bytes, _total = torch.xpu.mem_get_info(device)
-        # Workaround: NEO driver does not reflect VMM allocations in
+        # Workaround: GPU runtime does not reflect VMM allocations in
         # free-memory queries. Subtract internally tracked VMM usage.
         try:
             from gpu_memory_service.common.vmm import _sycl_vmm
@@ -249,7 +249,11 @@ def running_gms(monkeypatch, tmp_path):
     # Inject fake VMM into the process-global singleton so that
     # GMSAllocationManager and GMSClientMemoryManager both use it.
     monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
-    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.XPU)
+    monkeypatch.setattr(
+        _vmm_module,
+        "_vmm_device_type",
+        VMMDeviceType.XPU if HAS_XPU else VMMDeviceType.CUDA,
+    )
 
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
@@ -904,7 +908,7 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
+def test_scratch_reallocation_keeps_committed_allocation_on_vmm_granularity(
     running_gms,
 ):
     _, socket_path = running_gms
@@ -945,7 +949,11 @@ async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
 
     fake_vmm = _CountingVMM()
     monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
-    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.XPU)
+    monkeypatch.setattr(
+        _vmm_module,
+        "_vmm_device_type",
+        VMMDeviceType.XPU if HAS_XPU else VMMDeviceType.CUDA,
+    )
 
     allocations = GMSAllocationManager(device=0)
     info = await allocations.allocate(size=4096, tag="weights")

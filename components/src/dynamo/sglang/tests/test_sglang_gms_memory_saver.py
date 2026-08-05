@@ -24,9 +24,8 @@ from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
 
 # Expected device type for parametrized assertions — matches what
 # GMSMemorySaverImpl will produce via get_vmm_device_type().
-_EXPECTED_DEVICE = (
-    torch.device("xpu", 0) if torch.xpu.is_available() else torch.device("cuda", 0)
-)
+_HAS_XPU = hasattr(torch, "xpu") and torch.xpu.is_available()
+_EXPECTED_DEVICE = torch.device("xpu", 0) if _HAS_XPU else torch.device("cuda", 0)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -74,7 +73,7 @@ class _FakeManager:
 def build_impl(monkeypatch, tmp_path):
     # Ensure get_vmm_device_type() returns the correct type for
     # GMSMemorySaverImpl.__init__ which calls it to determine self._device.
-    _dev_type = VMMDeviceType.XPU if torch.xpu.is_available() else VMMDeviceType.CUDA
+    _dev_type = VMMDeviceType.XPU if _HAS_XPU else VMMDeviceType.CUDA
     monkeypatch.setattr(
         gms_memory_saver,
         "get_vmm_device_type",

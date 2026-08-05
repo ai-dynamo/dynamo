@@ -80,12 +80,6 @@ check_cxx_source_compiles("
 " HAS_SYCL_HOST_REGISTER_HEADER)
 message(STATUS "_sycl_vmm: Host register header:        ${HAS_SYCL_HOST_REGISTER_HEADER}")
 
-# --- Intel free_memory ---
-check_cxx_source_compiles("
-    #include <sycl/ext/intel/info/device.hpp>
-    int main() {}
-" HAS_SYCL_FREE_MEMORY_HEADER)
-message(STATUS "_sycl_vmm: Intel free_memory header:    ${HAS_SYCL_FREE_MEMORY_HEADER}")
 
 # Done with probes
 unset(CMAKE_REQUIRED_FLAGS)
@@ -205,7 +199,6 @@ macro(_yn var out)
 endmacro()
 _yn(HAS_SYCL_IPC_HEADER          _IPC_YN)
 _yn(HAS_SYCL_HOST_REGISTER_HEADER _HREG_YN)
-_yn(HAS_SYCL_FREE_MEMORY_HEADER   _FMEM_YN)
 _yn(HAS_LEVEL_ZERO                 _L0_YN)
 
 message(STATUS "")
@@ -214,6 +207,5 @@ message(STATUS "  Compiler:        ${CMAKE_CXX_COMPILER}")
 message(STATUS "  VMM core:        YES")
 message(STATUS "  IPC phys mem:    ${_IPC_YN}")
 message(STATUS "  Host register:   ${_HREG_YN}")
-message(STATUS "  Free memory:     ${_FMEM_YN}")
 message(STATUS "  Level-Zero:      ${_L0_YN}")
 message(STATUS "")
