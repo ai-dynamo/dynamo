@@ -30,7 +30,7 @@ bundles its own FFmpeg, so the support can be added by a plain ``pip install``
 Nothing here runs implicitly. There is no environment switch and no startup
 hook: the operator runs the installer as a deliberate step --
 
-    python -m dynamo.common.utils.media_decoders vllm
+    python -m dynamo.common.utils.install_media_decoders vllm
 
 -- so a deployment that changes the image's codec surface says so where it can
 be seen (a Dockerfile RUN line, a pod command, a runbook step), not in an
@@ -41,7 +41,10 @@ organization's distribution and security policies before rolling it out.
 Each package installs at a version validated against Dynamo's multimodal test
 suite (see the specs below): the lower bound is the exact validated version and
 the upper bound excludes the next major, so a fresh install cannot silently
-pick up an unvalidated release. Pass explicit ``--packages`` specs to override.
+pick up an unvalidated release. This installer deliberately covers ONLY those
+tested combinations; to pin different versions or install a custom subset, run
+pip directly with the tool of your choice (see the docs for the equivalent
+commands).
 
 The default install runs with ``--no-deps`` so it cannot change the image's
 pinned dependency stack (e.g. numpy under torch/vLLM); the carriers need only
@@ -54,7 +57,7 @@ therefore not extended by an install here -- backend decode is.
 
 For air-gapped or allowlisted-network hosts, point pip at a local wheelhouse:
 
-    python -m dynamo.common.utils.media_decoders vllm \\
+    python -m dynamo.common.utils.install_media_decoders vllm \\
         --pip-args="--no-index --find-links /wheels"
 """
 
@@ -222,7 +225,6 @@ def _pip_install(
     packages: Sequence[str],
     extra_args: Sequence[str],
     *,
-    with_deps: bool,
     timeout_s: int | None,
 ) -> None:
     cmd = [
@@ -232,12 +234,11 @@ def _pip_install(
         "install",
         "--break-system-packages",  # runtime images use a PEP 668 system python
         "--no-input",
-    ]
-    if not with_deps:
-        # Default carriers bundle their own FFmpeg and need only numpy, which the
+        # The carriers bundle their own FFmpeg and need only numpy, which the
         # backend already pins -- installing without deps avoids bumping the
         # image's pinned stack (e.g. numpy) out from under torch/vLLM.
-        cmd.append("--no-deps")
+        "--no-deps",
+    ]
     cmd += [*extra_args, *packages]
     logger.info("Running: %s", _redact(" ".join(cmd)))
     subprocess.run(cmd, check=True, timeout=timeout_s)
@@ -246,50 +247,39 @@ def _pip_install(
 def install_media_decoders(
     backend: str,
     *,
-    packages: Sequence[str] | None = None,
     pip_args: Sequence[str] = (),
     timeout_s: int | None = DEFAULT_TIMEOUT_S,
     dry_run: bool = False,
 ) -> list[str]:
     """Install `backend`'s media-decoder package(s); return the specs installed.
 
-    With ``packages``, those specs replace the per-backend defaults and are
-    installed with dependency resolution (pin transitive versions if that
-    matters). Otherwise the backend's validated, version-bounded specs install
-    with ``--no-deps``, skipping any package whose module already imports.
+    Installs the backend's validated, version-bounded specs with ``--no-deps``,
+    skipping any package whose module already imports. Deliberately covers only
+    the tested combinations: for custom versions or subsets, run pip directly.
 
     Returns the list of pip specs actually installed (empty when everything was
     already present). ``dry_run`` returns what would install without running
     pip. Raises on failure -- this is a deliberate operator action, so a broken
     install must be loud, not a log line a worker scrolls past.
     """
-    if packages:
-        # Operator-specified specs (pinning / curated set). Trust them verbatim,
-        # resolve dependencies, and let pip skip already-satisfied specs.
-        specs = list(packages)
-        verify_modules: list[str] = []
-        with_deps = True
-    else:
-        decoders = _BACKEND_DECODERS.get(backend)
-        if decoders is None:
-            raise ValueError(
-                f"unknown backend {backend!r}; expected one of "
-                f"{sorted(_BACKEND_DECODERS)}"
-            )
-        # Install only what does not already import cleanly. The probe does a
-        # real import in a fresh interpreter, so a present-but-broken package
-        # counts as missing rather than being silently skipped.
-        missing_names = set(_modules_missing_fresh([d.module for d in decoders]))
-        missing = [d for d in decoders if d.module in missing_names]
-        if not missing:
-            logger.info(
-                "media decoder package(s) already present for %s; nothing to do",
-                backend,
-            )
-            return []
-        specs = [d.spec for d in missing]
-        verify_modules = [d.module for d in missing]
-        with_deps = False  # default carriers install --no-deps (see _pip_install)
+    decoders = _BACKEND_DECODERS.get(backend)
+    if decoders is None:
+        raise ValueError(
+            f"unknown backend {backend!r}; expected one of {sorted(_BACKEND_DECODERS)}"
+        )
+    # Install only what does not already import cleanly. The probe does a
+    # real import in a fresh interpreter, so a present-but-broken package
+    # counts as missing rather than being silently skipped.
+    missing_names = set(_modules_missing_fresh([d.module for d in decoders]))
+    missing = [d for d in decoders if d.module in missing_names]
+    if not missing:
+        logger.info(
+            "media decoder package(s) already present for %s; nothing to do",
+            backend,
+        )
+        return []
+    specs = [d.spec for d in missing]
+    verify_modules = [d.module for d in missing]
 
     if dry_run:
         logger.info(
@@ -303,21 +293,20 @@ def install_media_decoders(
         _redact(" ".join(specs)),
     )
     with _cross_process_lock():
-        if verify_modules:
-            # Another process may have installed while we waited on the lock.
-            still = set(_modules_missing_fresh(verify_modules))
-            pending = [
-                (spec, mod) for spec, mod in zip(specs, verify_modules) if mod in still
-            ]
-            if not pending:
-                logger.info(
-                    "media decoder package(s) already installed by another "
-                    "process; nothing to do"
-                )
-                return []
-            specs = [spec for spec, _ in pending]
-            verify_modules = [mod for _, mod in pending]
-        _pip_install(specs, pip_args, with_deps=with_deps, timeout_s=timeout_s)
+        # Another process may have installed while we waited on the lock.
+        still = set(_modules_missing_fresh(verify_modules))
+        pending = [
+            (spec, mod) for spec, mod in zip(specs, verify_modules) if mod in still
+        ]
+        if not pending:
+            logger.info(
+                "media decoder package(s) already installed by another "
+                "process; nothing to do"
+            )
+            return []
+        specs = [spec for spec, _ in pending]
+        verify_modules = [mod for _, mod in pending]
+        _pip_install(specs, pip_args, timeout_s=timeout_s)
 
     importlib.invalidate_caches()
     still_missing = _modules_missing_fresh(verify_modules)
@@ -326,19 +315,19 @@ def install_media_decoders(
             "media decoder module(s) still not importable after install: "
             + " ".join(still_missing)
             + ". If a package is present but broken, pip may have treated the "
-            "requirement as already satisfied -- rerun with --packages "
-            "'<spec>' --pip-args=--force-reinstall, or pip uninstall it first."
+            "requirement as already satisfied -- pip uninstall it and rerun, "
+            "or pip install --force-reinstall the spec directly."
         )
     logger.info("media decoder package(s) ready: %s", _redact(" ".join(specs)))
     return specs
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry: ``python -m dynamo.common.utils.media_decoders <backend>``."""
+    """CLI entry: ``python -m dynamo.common.utils.install_media_decoders <backend>``."""
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="python -m dynamo.common.utils.media_decoders",
+        prog="python -m dynamo.common.utils.install_media_decoders",
         description=(
             "Install a Dynamo backend's media-decoder package(s) at validated, "
             "version-bounded releases. Explicit by design: nothing installs "
@@ -349,15 +338,6 @@ def main(argv: list[str] | None = None) -> int:
         "backend",
         choices=sorted(_BACKEND_DECODERS),
         help="backend whose media-decoder package(s) to install",
-    )
-    parser.add_argument(
-        "--packages",
-        nargs="+",
-        metavar="SPEC",
-        help=(
-            "pip requirement spec(s) replacing the validated defaults; installed "
-            "WITH dependency resolution, so pin transitive versions if needed"
-        ),
     )
     parser.add_argument(
         "--pip-args",
@@ -397,7 +377,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         install_media_decoders(
             args.backend,
-            packages=args.packages,
             pip_args=extra_args,
             timeout_s=timeout_s,
             dry_run=args.dry_run,

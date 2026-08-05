@@ -160,7 +160,7 @@ pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
 
 Nothing installs automatically — this is a deliberate operator step. The images also ship
 an installer with the same bounds plus idempotency and air-gap support
-(`python -m dynamo.common.utils.media_decoders <backend>`); see
+(`python -m dynamo.common.utils.install_media_decoders <backend>`); see
 [Additional Media Decoders](additional-media-decoders.md) for the full workflow,
 including baking the install into an image layer for Kubernetes.
 
