@@ -63,7 +63,7 @@ python -m dynamo.frontend \
   --tool-call-parser hermes
 ```
 
-Any parser supported by SGLang can be used. See the [SGLang documentation](https://docs.sglang.ai/) for the full list of available tool call parsers.
+Any parser supported by SGLang can be used. See the [SGLang documentation](https://docs.sglang.io/) for the full list of available tool call parsers.
 
 ### Example: Tool Call Request
 

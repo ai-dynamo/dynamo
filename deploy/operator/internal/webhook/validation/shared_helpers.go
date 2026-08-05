@@ -130,6 +130,13 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 	return false
 }
 
+func podTemplateContainers(podTemplate *corev1.PodTemplateSpec) []corev1.Container {
+	if podTemplate == nil {
+		return nil
+	}
+	return podTemplate.Spec.Containers
+}
+
 func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]string) (string, bool) {
 	value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]
 	if !exists {

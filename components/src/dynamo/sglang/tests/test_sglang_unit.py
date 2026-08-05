@@ -67,6 +67,33 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
+def test_configured_engine_route_cannot_replace_built_in_route():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace(custom_method=lambda: None)
+    handler.config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(
+            engine_routes=["control/start_profile=custom_method"]
+        )
+    )
+
+    registered_routes = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Configured SGLang engine route /engine/control/start_profile "
+            "collides with a built-in route"
+        ),
+    ):
+        handler.register_engine_routes(Runtime())
+
+    assert registered_routes == []
+
+
 def _make_sglang_config(**overrides):
     config = DynamoSGLangConfig()
     config.use_sglang_tokenizer = False
