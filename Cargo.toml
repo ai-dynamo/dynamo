@@ -59,7 +59,7 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.4.0" }
 dynamo-memory = { path = "lib/memory", version = "1.4.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.4.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.4.0" }
-dynamo-protocols = { version = "=5.0.1" }
+dynamo-protocols = { version = "=5.1.0" }
 dynamo-parsers = { version = "7.0.1" }
 
 # Published on crates.io. To see all available versions:
@@ -110,8 +110,8 @@ futures-util = { version = "0.3.32" }
 hf-hub = { version = "0.4.2", default-features = false }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.3.0" }
-modelexpress-common = { version = "0.3.0" }
+modelexpress-client = { version = "0.5.0" }
+modelexpress-common = { version = "0.5.0" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }

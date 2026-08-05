@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Route Requests with Gateway API
-sidebar-title: Gateway API
+title: Using GAIE with Dynamo
+sidebar-title: Using GAIE with Dynamo
 subtitle: Add a Dynamo Endpoint Picker Plugin and HTTPRoute to an existing DynamoGraphDeployment.
 ---
 
@@ -11,7 +11,7 @@ Gateway API Inference Extension (GAIE) calls the Dynamo Endpoint Picker Plugin (
 forwards each request to the worker selected by the EPP.
 
 Use this topology when Gateway API should own traffic entry, policy, and gateway-level observability.
-For direct-to-Frontend routing, use [KV-Aware Routing with the Dynamo Frontend](dynamo-frontend.md).
+For direct-to-Frontend routing, use [the Dynamo Frontend](dynamo-frontend.md).
 
 ## Before You Begin
 
@@ -20,7 +20,7 @@ You need:
 - A working DGD whose workers can serve requests.
 - The Dynamo operator installed.
 - Gateway API, GAIE, and a compatible Gateway implementation installed. See
-  [Install Gateway API Routing](../installation/gateway-api-routing.mdx).
+  [Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx).
 - A `Gateway` named `inference-gateway` in the DGD namespace.
 
 This page modifies an existing DGD named `qwen` that serves `Qwen/Qwen3-0.6B`. Keep your existing

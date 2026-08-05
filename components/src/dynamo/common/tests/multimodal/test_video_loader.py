@@ -151,3 +151,56 @@ async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch)
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_maybe_decode_with_nvdec_routes_h264(monkeypatch):
+    loader = VideoLoader()
+    frames = np.zeros((2, 4, 6, 3), dtype=np.uint8)
+    meta = {"fps": 30.0, "frames_indices": [0, 1], "total_num_frames": 2}
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "h264")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
+    monkeypatch.setattr(
+        video_loader_module, "decode_video_nvdec", lambda b, n: (frames, meta)
+    )
+
+    result = await loader._maybe_decode_with_nvdec(b"h264-bytes")
+
+    assert result is not None
+    got_frames, got_meta = result
+    np.testing.assert_array_equal(got_frames, frames)
+    assert got_meta == meta
+
+
+@pytest.mark.asyncio
+async def test_maybe_decode_with_nvdec_skips_royalty_free(monkeypatch):
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    called = {"decode": False}
+
+    def _decode(*a, **k):
+        called["decode"] = True
+
+    monkeypatch.setattr(video_loader_module, "decode_video_nvdec", _decode)
+
+    result = await loader._maybe_decode_with_nvdec(b"vp9-bytes")
+
+    assert result is None  # VP9 stays on the software path
+    assert called["decode"] is False  # NVDEC not invoked
+
+
+@pytest.mark.asyncio
+async def test_maybe_decode_with_nvdec_falls_back_on_failure(monkeypatch):
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "hevc")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("nvdec session limit")
+
+    monkeypatch.setattr(video_loader_module, "decode_video_nvdec", _boom)
+
+    result = await loader._maybe_decode_with_nvdec(b"hevc-bytes")
+
+    assert result is None  # a NVDEC failure falls back, never raises

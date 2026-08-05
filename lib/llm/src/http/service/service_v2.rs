@@ -27,6 +27,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -49,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -540,6 +542,11 @@ impl State {
             .streaming_dispatch()
             .reasoning_dispatch()
     }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
+    }
 }
 
 #[derive(Clone)]
@@ -696,6 +703,13 @@ impl HttpService {
 
     pub fn generate_api_enabled(&self) -> bool {
         self.generate_api_enabled
+    }
+
+    pub(crate) fn generate_engine_capabilities(&self) -> Vec<&'static str> {
+        self.generate_api_enabled
+            .then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .into_iter()
+            .collect()
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -967,6 +981,22 @@ static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
     "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
 
+/// Environment variable to set the vLLM Generate endpoint path
+/// (default: `/inference/v1/generate`).
+pub(super) static HTTP_SVC_VLLM_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_VLLM_GENERATE_PATH";
+fn validate_generate_route_path(path: &str) -> Result<()> {
+    if !path.starts_with("/") {
+        anyhow::bail!("Generate route path must start with '/': {path:?}");
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.starts_with([':', '*']))
+    {
+        anyhow::bail!("Generate route path segment must not start with ':' or '*': {path:?}");
+    }
+    Ok(())
+}
+
 fn append_route_docs(
     all_docs: &mut Vec<RouteDoc>,
     seen_routes: &mut HashSet<RouteDoc>,
@@ -1162,7 +1192,7 @@ impl HttpServiceConfigBuilder {
             &config.request_template,
             anthropic_endpoints_enabled,
             generate_endpoint_enabled,
-        );
+        )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
@@ -1276,12 +1306,19 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
         enable_generate_endpoint: bool,
-    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -1333,8 +1370,12 @@ impl HttpServiceConfigBuilder {
 
         if enable_generate_endpoint {
             tracing::warn!("The vLLM-compatible /inference/v1/generate API is experimental.");
+            let generate_path = var(HTTP_SVC_VLLM_GENERATE_PATH_ENV).ok();
+            if let Some(path) = generate_path.as_deref() {
+                validate_generate_route_path(path)?;
+            }
             let (generate_docs, generate_route) =
-                super::generate::generate_router(state.clone(), None);
+                super::generate::generate_router(state.clone(), generate_path);
             endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
@@ -1362,7 +1403,7 @@ impl HttpServiceConfigBuilder {
             ));
             routes.push((docs, route));
         }
-        routes
+        Ok(routes)
     }
 }
 
@@ -1895,17 +1936,62 @@ mod tests {
         temp_env::with_var_unset(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
             let disabled = HttpService::builder().build().unwrap();
             assert!(!disabled.generate_api_enabled());
+            assert!(disabled.generate_engine_capabilities().is_empty());
 
             let enabled = HttpService::builder()
                 .enable_engine_apis(true)
                 .build()
                 .unwrap();
             assert!(enabled.generate_api_enabled());
+            assert_eq!(
+                enabled.generate_engine_capabilities(),
+                vec![VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+            );
         });
 
         temp_env::with_var(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1"), || {
             let enabled = HttpService::builder().build().unwrap();
             assert!(enabled.generate_api_enabled());
+            assert_eq!(
+                enabled.generate_engine_capabilities(),
+                vec![VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+            );
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn vllm_generate_route_path_follows_env_override() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some("/native/vllm")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let route_docs: Vec<_> = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+
+                assert!(route_docs.contains(&"POST /native/vllm".to_string()));
+                assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
+            },
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn vllm_generate_route_path_rejects_invalid_env_override() {
+        for path in ["", "native/vllm", "/:model", "/*path"] {
+            temp_env::with_var(HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some(path), || {
+                assert!(
+                    HttpService::builder()
+                        .enable_engine_apis(true)
+                        .build()
+                        .is_err()
+                );
+            });
+        }
     }
 }

@@ -189,6 +189,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     m.add_class::<DistributedRuntime>()?;
+    m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
@@ -900,9 +901,29 @@ impl ModelType {
     const Realtime: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Realtime,
     };
+    #[classattr]
+    const Classify: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Classify,
+    };
+    #[classattr]
+    const Pooling: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Pooling,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
+    }
+
+    fn supports_embedding(&self) -> bool {
+        self.inner.supports_embedding()
+    }
+
+    fn supports_classify(&self) -> bool {
+        self.inner.supports_classify()
+    }
+
+    fn supports_pooling(&self) -> bool {
+        self.inner.supports_pooling()
     }
 
     fn __or__(&self, other: &Self) -> Self {
