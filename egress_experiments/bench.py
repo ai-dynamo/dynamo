@@ -302,6 +302,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="baseline-push",
         help="architecture the ratios are taken against",
     )
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help="pin the ladder to one rung. Ladder CHOICE is a free variable in a "
+        "cross-architecture comparison -- a faster architecture escalates and is "
+        "then scored on a rung with different ingress amortisation and a shorter "
+        "window. Pin it when comparing.",
+    )
     parser.add_argument("--warmup-s", type=float, default=WARMUP_S)
     parser.add_argument("--cost-scale", type=float, default=1.0)
     parser.add_argument("--json", action="store_true")
@@ -315,7 +324,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     wanted = args.architecture or architectures.names()
     costs = Costs().with_scale(args.cost_scale)
-    results = [run_bench(name, costs, warmup_s=args.warmup_s) for name in wanted]
+    ladder = (args.batch,) if args.batch else BATCH_LADDER
+    results = [
+        run_bench(name, costs, ladder=ladder, warmup_s=args.warmup_s) for name in wanted
+    ]
     baseline = next((r for r in results if r.architecture == args.baseline), None)
 
     if args.json:
