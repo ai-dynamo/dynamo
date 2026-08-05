@@ -283,6 +283,14 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Predicted KV cache hit rate at routing time (0.0–1.0).
 </ParamField>
 
+<ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+</ParamField>
+
+<ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
+  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
+</ParamField>
+
 ### Per-request routing overhead
 
 `dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
