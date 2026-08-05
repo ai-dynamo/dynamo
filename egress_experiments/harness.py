@@ -36,22 +36,22 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from egress_experiments.costs import SERVE_LOOP_US_PER_RESPONSE, Costs
+from egress_experiments import architectures, loop_meter
+from egress_experiments.costs import (
+    SERVE_LOOP_US_PER_RESPONSE,
+    Costs,
+    reset_spin_ledger,
+    spin_ledger,
+)
 from egress_experiments.dynamo_sim.gil_noise import GilNoise, GilNoiseConfig
 from egress_experiments.dynamo_sim.probes import LoopProbe, RequestRecord, summarize
-from egress_experiments.dynamo_sim.rust_bridge import (
-    PullDriver,
-    PushDriver,
-    TokioRuntime,
-)
-from egress_experiments.dynamo_sim.worker import TrtllmWorkerHandler
+from egress_experiments.dynamo_sim.rust_bridge import TokioRuntime
 from egress_experiments.fake_trtllm.engine import (
     BatchConfig,
     ConstantIteration,
     EngineConfig,
     IterationModel,
 )
-from egress_experiments.fake_trtllm.llm import FakeLLM
 
 _perf = time.perf_counter_ns
 
@@ -62,7 +62,12 @@ ARRIVALS = ("constant", "poisson", "closed")
 @dataclass
 class SimConfig:
     #: "pull" (default Rust behaviour) or "push" (DYN_TRTLLM_PUSH_EGRESS=1).
+    #: Ignored when :attr:`architecture` is set to something else -- the
+    #: architecture owns the driver shape.
     egress: str = "push"
+    #: Response-path architecture, from ``egress_experiments.architectures``.
+    #: ``None`` means "baseline-{egress}".
+    architecture: Optional[str] = None
     #: Total requests to run.
     requests: int = 500
     #: Output tokens per request; each one is a response.
@@ -100,6 +105,11 @@ class SimConfig:
     #: them is the event loop. The capture's app interpreter had 50
     #: GIL-capable threads in total.
     blocking_threads: int = 8
+    #: Hard wall-clock bound on the run, seconds. Without it a saturation
+    #: benchmark that does NOT saturate never ends: closed-loop requests never
+    #: complete, arrivals never stop, and the backlog -- the only other stop
+    #: condition -- stays flat precisely because the loop is keeping up.
+    duration_s: Optional[float] = None
     #: Abort once the loop is this far behind the engine. An overloaded loop
     #: (si=1 at a real batch) otherwise queues responses until the process
     #: dies, which is a worse demonstration than a clean stop.
@@ -112,6 +122,10 @@ class SimConfig:
     #: dynamo_sim/gil_noise.py -- required to reproduce the pull/push
     #: latency difference, which is a contention effect.
     gil_noise: GilNoiseConfig = field(default_factory=GilNoiseConfig)
+
+    @property
+    def architecture_name(self) -> str:
+        return self.architecture or f"baseline-{self.egress}"
 
     def __post_init__(self) -> None:
         if self.arrival not in ARRIVALS:
@@ -232,8 +246,26 @@ class SimResult:
     backlog_growth_per_s: float = 0.0
     #: True when --max-backlog tripped and the run was stopped early.
     backlog_aborted: bool = False
+    #: True when the run hit :attr:`SimConfig.duration_s` instead. Distinct
+    #: from backlog_aborted: a timed-out run was NOT necessarily saturated.
+    timed_out: bool = False
     #: Responses per IPC message as EMITTED by the engine, in the window.
     window_emitted_per_message: float = 0.0
+    #: perf_counter_ns at which the run began, and one timestamp per delivered
+    #: response. bench.py windows these itself -- a saturation run never
+    #: reaches the arrival-driven steady window this module computes.
+    started_ns: int = 0
+    response_times: List[int] = field(default_factory=list)
+    #: One timestamp per item AS IT LEAVES THE LOOP -- the benchmark's score.
+    #: Distinct from response_times, which is measured after the tokio-side
+    #: consumer and therefore reflects that consumer when it is the laggard.
+    loop_item_times: List[int] = field(default_factory=list)
+    #: Which thread ticked the meter. Should be the loop and nothing else.
+    loop_meter_threads: Dict[str, int] = field(default_factory=dict)
+    #: Modelled work by thread, from costs.spin_ledger().
+    spin_us_by_thread: Dict[str, float] = field(default_factory=dict)
+    #: Whatever the architecture wants to report.
+    arch_report: Dict[str, Any] = field(default_factory=dict)
 
     # -- observed engine behaviour ----------------------------------------
 
@@ -326,6 +358,9 @@ class SimResult:
     def backlog_growing(self) -> bool:
         if self.backlog_aborted:
             return True
+        if self.timed_out and self.backlog_max < 1000:
+            # Ran the clock out with the loop keeping up: not saturated.
+            return False
         capacity = self.loop_capacity_per_s
         return self.backlog_growth_per_s > self.BACKLOG_GROWTH_TOLERANCE * capacity
 
@@ -345,17 +380,21 @@ async def _run_async(cfg: SimConfig) -> SimResult:
     probe = LoopProbe(lag_ms=cfg.lag_ms)
     probe.install(py_loop)
 
-    llm = FakeLLM(cfg.engine_config, costs=cfg.costs)
+    arch = architectures.get(cfg.architecture_name)
+
+    reset_spin_ledger()
+    loop_meter.reset()
+    llm = arch.build_llm(cfg.engine_config, cfg.costs)
     llm.start(py_loop)
 
     records: Dict[str, RequestRecord] = {}
-    handler = TrtllmWorkerHandler(llm, costs=cfg.costs, records=records)
+    handler = arch.build_handler(llm, cfg.costs, records)
 
     tokio = TokioRuntime(blocking_threads=cfg.blocking_threads)
     tokio.start()
 
-    driver_cls = PushDriver if cfg.egress == "push" else PullDriver
-    driver = driver_cls(handler, py_loop, tokio, cfg.costs)
+    driver = arch.build_driver(handler, py_loop, tokio, cfg.costs)
+    arch.on_started(llm, driver)
 
     done = asyncio.Event()
     started_ns = _perf()
@@ -421,12 +460,22 @@ async def _run_async(cfg: SimConfig) -> SimResult:
     backlog_samples: List[int] = []
     backlog_stop = threading.Event()
     backlog_tripped = [False]
+    timed_out = [False]
 
     def sample_backlog() -> None:
+        deadline = started_ns + int(cfg.duration_s * 1e9) if cfg.duration_s else None
         while not backlog_stop.wait(0.1):
             backlog_samples.append(llm.responses_dispatched - driver.delivered)
-            if cfg.max_backlog is not None and backlog_samples[-1] > cfg.max_backlog:
+            over_backlog = (
+                cfg.max_backlog is not None and backlog_samples[-1] > cfg.max_backlog
+            )
+            # A saturation benchmark that does NOT saturate has no other stop
+            # condition: closed-loop requests never finish, arrivals never end,
+            # and the backlog stays flat precisely because the loop is coping.
+            expired = deadline is not None and _perf() > deadline
+            if over_backlog or expired:
                 backlog_tripped[0] = True
+                timed_out[0] = expired and not over_backlog
                 # Cancel the orchestrator rather than stopping the engine:
                 # killing the engine would strand every in-flight request
                 # waiting for a final response that never arrives, and the
@@ -460,6 +509,7 @@ async def _run_async(cfg: SimConfig) -> SimResult:
     backlog_stop.set()
     sampler.join(timeout=2.0)
 
+    arch.on_finished(llm, driver)
     report = probe.report()
     probe.uninstall()
     noise.stop()
@@ -545,7 +595,14 @@ async def _run_async(cfg: SimConfig) -> SimResult:
         backlog_final=backlog_samples[-1] if backlog_samples else 0,
         backlog_max=max(backlog_samples) if backlog_samples else 0,
         backlog_growth_per_s=growth,
-        backlog_aborted=backlog_tripped[0],
+        backlog_aborted=backlog_tripped[0] and not timed_out[0],
+        timed_out=timed_out[0],
+        started_ns=started_ns,
+        response_times=list(driver.response_times),
+        loop_item_times=loop_meter.timestamps(),
+        loop_meter_threads=loop_meter.report(),
+        spin_us_by_thread=spin_ledger(),
+        arch_report=arch.extra_report(),
     )
 
 

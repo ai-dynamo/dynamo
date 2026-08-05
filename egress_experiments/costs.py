@@ -35,10 +35,48 @@ against ``trtllm-serve``'s 1.94 us of pure bookkeeping -- the 44.0x.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, replace
+from typing import Dict, List, Tuple
 
 _perf = time.perf_counter_ns
+
+# ---------------------------------------------------------------------------
+# Work-conservation ledger
+# ---------------------------------------------------------------------------
+#
+# Every microsecond of modelled work is charged to the thread that burned it.
+# An architecture is allowed to MOVE work off the loop, batch it, or amortise
+# it; it is not allowed to quietly delete it and call the result a speedup.
+# The benchmark prints this breakdown next to the throughput number so the two
+# can be read together.
+_LEDGERS: List[Tuple[str, List[float]]] = []
+_ledger_local = threading.local()
+
+
+def _cell() -> List[float]:
+    cell = getattr(_ledger_local, "cell", None)
+    if cell is None:
+        cell = [0.0]
+        _ledger_local.cell = cell
+        # list.append is atomic under the GIL, so no lock is needed here.
+        _LEDGERS.append((threading.current_thread().name, cell))
+    return cell
+
+
+def reset_spin_ledger() -> None:
+    del _LEDGERS[:]
+    if hasattr(_ledger_local, "cell"):
+        del _ledger_local.cell
+
+
+def spin_ledger() -> Dict[str, float]:
+    """Microseconds of modelled work, per thread name."""
+    totals: Dict[str, float] = {}
+    for name, cell in list(_LEDGERS):
+        totals[name] = totals.get(name, 0.0) + cell[0]
+    return {k: v for k, v in sorted(totals.items(), key=lambda kv: -kv[1]) if v}
 
 
 def spin(microseconds: float) -> None:
@@ -50,6 +88,7 @@ def spin(microseconds: float) -> None:
     """
     if microseconds <= 0:
         return
+    _cell()[0] += microseconds
     deadline = _perf() + int(microseconds * 1000)
     while _perf() < deadline:
         pass

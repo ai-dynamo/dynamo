@@ -70,6 +70,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from egress_experiments import loop_meter
 from egress_experiments.costs import Costs, pad_to, spin
 from egress_experiments.dynamo_sim.probes import RequestRecord
 
@@ -136,8 +137,13 @@ class ResponseSender:
         self._tokio_loop.call_soon_threadsafe(self._sink.put_nowait, item)
 
     def send(self, obj: Any) -> None:
-        """One call per response. Converts under the GIL we already hold."""
+        """One call per response. Converts under the GIL we already hold.
+
+        This is where the loop is finished with the item, so this is where the
+        benchmark's tick goes -- NOT after the tokio consumer has drained it.
+        """
         start = _perf()
+        loop_meter.item()
         self.sends += 1
         self.send_threads.append(threading.current_thread().name)
         self._deliver(obj)
@@ -166,7 +172,11 @@ async def anext_call(anext: Callable[[], Any]) -> Any:
     ``run_coroutine_threadsafe`` requires an actual coroutine and
     ``agen.__anext__()`` returns an ``async_generator_asend``.
     """
-    return await anext()
+    item = await anext()
+    # The loop is done with this item; StopAsyncIteration skips the tick,
+    # which is correct -- it is not an item.
+    loop_meter.item()
+    return item
 
 
 async def push_pump(anext: Callable[[], Any], counter: List[int]) -> None:
