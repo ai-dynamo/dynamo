@@ -6,7 +6,7 @@ import os
 import pytest
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
-from dynamo.common.utils.media_decoders import VALIDATED_SPECS
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
 from tests.utils.multimodal import (

@@ -10,7 +10,7 @@ from typing import Optional
 import pytest
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
-from dynamo.common.utils.media_decoders import VALIDATED_SPECS
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,

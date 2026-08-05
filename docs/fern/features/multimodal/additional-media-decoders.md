@@ -33,29 +33,9 @@ Each backend decodes such input through a specific Python package whose wheel bu
 
 The lower bound of each spec is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because the images already ship it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
 
-## Install with the bundled installer
+## Install with pip
 
-The installer ships in every runtime image as part of the `ai-dynamo` package. Run it in the worker container (not the frontend) for the backend you deploy:
-
-```bash
-python -m dynamo.common.utils.media_decoders vllm
-```
-
-It installs the table's validated specs with `--no-deps`, skips packages that already import, serializes concurrent runs with a file lock, and exits non-zero if the install fails or the module still does not import afterwards. To see what it would do first:
-
-```bash
-python -m dynamo.common.utils.media_decoders vllm --dry-run
-```
-
-To pin different versions or install a curated subset, pass explicit specs (this install resolves dependencies, so pin transitive versions if that matters):
-
-```bash
-python -m dynamo.common.utils.media_decoders vllm --packages "opencv-python-headless==4.13.0.92"
-```
-
-## Install with plain pip
-
-The installer is a convenience; the equivalent pip commands work anywhere:
+The table above is the contract; these commands are its direct translation, and work with the installer of your choice (`pip`, `uv pip`, ...):
 
 ```bash
 # vLLM: video + audio input
@@ -68,7 +48,21 @@ pip install --no-deps 'decord2>=3.4.0,<4'
 pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
 ```
 
-`--no-deps` keeps the install from changing the image's pinned dependency stack (for example numpy under PyTorch/vLLM); the carriers only need numpy, which the backend already provides.
+`--no-deps` keeps the install from changing the image's pinned dependency stack (for example numpy under PyTorch/vLLM); the carriers only need numpy, which the backend already provides. To pin different versions or install a custom subset, adjust these commands directly — that is the intended customization path.
+
+## Install with the bundled installer
+
+For exactly the tested combinations above, every runtime image also ships an installer as part of the `ai-dynamo` package. Run it in the worker container (not the frontend) for the backend you deploy:
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm
+```
+
+Compared to the raw pip commands it adds: skip-if-already-importable, a cross-process lock for concurrent runs, a post-install import verification in a fresh interpreter, and a non-zero exit if anything did not land. It deliberately installs only the validated specs — it has no package-selection flags. To see what it would do first:
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm --dry-run
+```
 
 ## Kubernetes
 
@@ -76,7 +70,7 @@ Prefer baking the install into an image layer, so the deployment manifest deploy
 
 ```dockerfile
 FROM nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
-RUN python -m dynamo.common.utils.media_decoders vllm
+RUN python -m dynamo.common.utils.install_media_decoders vllm
 ```
 
 For a quick evaluation without an image build, run the installer ahead of the worker in the pod command, where it is visible in the manifest:
@@ -84,7 +78,7 @@ For a quick evaluation without an image build, run the installer ahead of the wo
 ```yaml
 command: ["sh", "-c"]
 args:
-  - python -m dynamo.common.utils.media_decoders vllm &&
+  - python -m dynamo.common.utils.install_media_decoders vllm &&
     exec python -m dynamo.vllm --model $MODEL
 ```
 
@@ -93,7 +87,7 @@ args:
 The install needs a package index or a local wheelhouse. Point pip at one with `--pip-args` (use the `=` form, so a value starting with a dash is not mistaken for an option):
 
 ```bash
-python -m dynamo.common.utils.media_decoders vllm \
+python -m dynamo.common.utils.install_media_decoders vllm \
   --pip-args="--no-index --find-links /opt/wheels"
 ```
 
