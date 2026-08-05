@@ -69,11 +69,17 @@ pytestmark = [
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
+BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
 @pytest.fixture(scope="module")
 def tokenizer():
     return get_tokenizer(MODEL)
+
+
+@pytest.fixture(scope="module")
+def byte_fallback_tokenizer():
+    return get_tokenizer(BYTE_FALLBACK_MODEL)
 
 
 # ---------------------------------------------------------------------------
@@ -2819,7 +2825,14 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
 
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
-    """Test the sliding-window incremental detokenizer."""
+    """Test safe-boundary incremental detokenization."""
+
+    class ByteTokenizer:
+        """Decode each token as one byte to exercise split UTF-8 sequences."""
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            del skip_special_tokens
+            return bytes(token_ids).decode("utf-8", errors="replace")
 
     def test_basic_decode(self, tokenizer):
         """Tokens decode to expected text."""
@@ -2850,6 +2863,71 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             if choice and "content" in choice.get("delta", {}):
                 content += choice["delta"]["content"]
         assert text in content
+
+    def test_split_multibyte_character_is_not_replaced(self):
+        """A UTF-8 character split across chunks is emitted once completed."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        content = ""
+        encoded = "한".encode("utf-8")
+        for index, token_id in enumerate(encoded):
+            choice = post.process_output(
+                {
+                    "token_ids": [token_id],
+                    "finish_reason": "stop" if index == len(encoded) - 1 else None,
+                }
+            )
+            if choice and "content" in choice["delta"]:
+                content += choice["delta"]["content"]
+
+        assert content == "한"
+        assert "\ufffd" not in content
+
+    def test_byte_fallback_sequence_longer_than_six_tokens(
+        self, byte_fallback_tokenizer
+    ):
+        """A long byte-fallback sequence remains pending until it is complete."""
+        token_ids = byte_fallback_tokenizer.encode("🙂🙂", add_special_tokens=False)
+        assert len(token_ids) == 9
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=byte_fallback_tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        pending = post.process_output(
+            {"token_ids": token_ids[:8], "finish_reason": None}
+        )
+        finished = post.process_output(
+            {"token_ids": token_ids[8:], "finish_reason": "stop"}
+        )
+
+        assert pending is None
+        assert finished is not None
+        assert finished["delta"]["content"] == "🙂🙂"
+        assert "\ufffd" not in finished["delta"]["content"]
+
+    def test_trailing_replacement_character_is_flushed_on_finish(self):
+        """A legitimate trailing U+FFFD is delayed, not dropped."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        pending = post.process_output(
+            {"token_ids": list("\ufffd".encode("utf-8")), "finish_reason": None}
+        )
+        finished = post.process_output({"token_ids": [], "finish_reason": "stop"})
+
+        assert pending is None
+        assert finished is not None
+        assert finished["delta"]["content"] == "\ufffd"
 
     def test_empty_token_ids(self, tokenizer):
         """Empty token_ids with no finish_reason returns None."""
@@ -2986,16 +3064,18 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert len(items) == 1
         assert "error" in items[0]
 
-    def test_lookback_trimming(self, tokenizer):
-        """Verify _all_token_ids doesn't grow unbounded."""
+    def test_completed_batches_replace_decode_context(self):
+        """Completed batches replace context instead of accumulating history."""
         post = SglangStreamingPostProcessor(
-            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
         )
-        # Send enough tokens to trigger trimming (LOOKBACK * 16 = 96)
         for _ in range(200):
-            post.process_output({"token_ids": [1], "finish_reason": None})
-        # Should be trimmed, not 200 tokens
-        assert len(post._all_token_ids) < 200
+            post.process_output({"token_ids": [ord("a")], "finish_reason": None})
+
+        assert post._decode_context_ids == [ord("a")]
+        assert post._pending_decode_ids == []
 
     def test_strips_all_configured_trailing_eos_token_ids(self, tokenizer):
         """Any configured EOS id is stripped from the final chunk before decode."""
