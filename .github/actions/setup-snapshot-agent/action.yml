@@ -128,7 +128,7 @@ runs:
         echo "::endgroup::"
 
     - name: Debug snapshot-agent failure
-      if: failure() || cancelled()
+      if: failure()
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
