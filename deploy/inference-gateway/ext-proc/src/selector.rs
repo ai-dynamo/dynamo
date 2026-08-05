@@ -156,12 +156,17 @@ impl Selector {
             .queueing_enabled(&cfg.model_name)
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         Self::validate_queueing_requirements(cfg, queueing_enabled)?;
-        if cfg.peer_service.is_some() && !service.replica_sync_enabled() {
-            anyhow::bail!(
-                "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
-            );
-        }
-        let replication = Self::replication(cfg).await?;
+        let replication = match &cfg.peer_service {
+            Some(name) => Some((
+                name.clone(),
+                service.replica_sync_port().ok_or_else(|| {
+                    anyhow!(
+                        "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
+                    )
+                })?,
+            )),
+            None => None,
+        };
         Self::from_service_with_replication(cfg, service, replication).await
     }
 
@@ -211,8 +216,7 @@ impl Selector {
         };
 
         tracing::info!(
-            indexer_threads = cfg.selector_threads,
-            replicated = cfg.peer_service.is_some(),
+            replicated = peer_ready.is_some(),
             "Initialized in-process selection service"
         );
 

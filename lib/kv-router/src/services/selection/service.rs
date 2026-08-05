@@ -140,6 +140,7 @@ impl SelectionServiceBuilder {
             core,
             peer_manager,
             replica_runtime,
+            replica_sync_port: self.replica_sync_port,
             cancel_token,
         })
     }
@@ -188,6 +189,7 @@ pub struct SelectionService {
     core: Arc<SelectionCore>,
     peer_manager: Option<PeerManager>,
     replica_runtime: Option<ReplicaSyncRuntime>,
+    replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
 }
 
@@ -207,6 +209,7 @@ impl SelectionService {
             )),
             peer_manager: None,
             replica_runtime: None,
+            replica_sync_port: None,
             cancel_token,
         }
     }
@@ -226,9 +229,9 @@ impl SelectionService {
         self.core.queueing_enabled(model_name)
     }
 
-    /// Whether this service was built with replica synchronization enabled.
-    pub fn replica_sync_enabled(&self) -> bool {
-        self.peer_manager.is_some()
+    /// The port this service uses for replica synchronization, if enabled.
+    pub fn replica_sync_port(&self) -> Option<u16> {
+        self.replica_sync_port
     }
 
     pub async fn patch_worker(
@@ -450,6 +453,7 @@ mod tests {
         assert!(failed.is_err());
 
         let service = build_on_port(port).await;
+        assert_eq!(service.replica_sync_port(), Some(port));
         let weak_core = Arc::downgrade(&service.core);
         service.shutdown().await;
         let replacement = build_on_port(port).await;
