@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Legacy worker-factory LoRA lifecycle tests.
-
-The unified vLLM engine has separate lifecycle coverage. These tests protect
-the still-supported ``BaseWorkerHandler`` path used by release images.
-"""
+"""Worker-factory LoRA lifecycle tests for ``BaseWorkerHandler``."""
 
 import asyncio
 import gc

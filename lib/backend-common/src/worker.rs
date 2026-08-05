@@ -1625,7 +1625,7 @@ async fn build_local_model(
 
     // Decode workers don't host the WorkerKvQuery endpoint, so they must not
     // advertise the local indexer regardless of the operator-supplied flag.
-    // Mirrors the legacy non-unified vLLM path (worker_factory.py).
+    // Mirrors the vLLM worker-factory path.
     let enable_local_indexer = config.effective_enable_local_indexer();
 
     // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
