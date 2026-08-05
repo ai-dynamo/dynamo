@@ -37,6 +37,20 @@ Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-
   Set to `true` on a dedicated minimal request when the session ends. Lifecycle-aware consumers can release per-session state immediately instead of waiting for an idle timeout. This works with canonical or agent-native session identity and maps to `agent_context.session_final`.
 </ParamField>
 
+## OpenAI `user` Affinity Fallback
+
+For `/v1/chat/completions` and `/v1/completions`, Dynamo uses a non-empty
+OpenAI request body `user` value as the router affinity ID when
+`X-Dynamo-Session-ID` is absent. An explicit `X-Dynamo-Session-ID` always wins.
+When both `user` and a supported agent-native session header are present,
+`user` supplies routing affinity while the native header continues to supply
+agent and tracing identity.
+
+This fallback is routing-only. It does not create `agent_context`, establish
+agent lineage, or replace the session headers used by tracing and other
+agent-aware consumers. Clients that need the same value for affinity and agent
+identity should continue to send `X-Dynamo-Session-ID`.
+
 ## Native Agent Headers
 
 Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve. See [Agent Harnesses](agent-harnesses.mdx) for packaged setup.

@@ -197,11 +197,13 @@ class EngineLoadReporter:
         engine_base_url: str,
         *,
         total_kv_blocks: int | None,
+        data_parallel_size: int | None = None,
         interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
     ) -> None:
         self._endpoint = endpoint
         self._metrics_url = _engine_url(engine_base_url, "/metrics")
         self._total_kv_blocks = total_kv_blocks
+        self._data_parallel_size = max(data_parallel_size or 1, 1)
         self._interval = interval_seconds
         self._publisher = WorkerMetricsPublisher()
         self._client: httpx.AsyncClient | None = None
@@ -210,9 +212,10 @@ class EngineLoadReporter:
 
     async def start(self) -> None:
         await self._publisher.create_endpoint(self._endpoint)
-        # Bootstrap the load signal so the frontend monitor sees this worker
-        # before the first scrape (same dummy-init pattern as dynamo.sglang).
-        self._publisher.publish(0, kv_used_blocks=0, num_waiting_reqs=0)
+        # Bootstrap every advertised rank so all of them are routable before
+        # the first metrics scrape.
+        for dp_rank in range(self._data_parallel_size):
+            self._publisher.publish(dp_rank, kv_used_blocks=0, num_waiting_reqs=0)
         self._client = httpx.AsyncClient(trust_env=False, timeout=FETCH_TIMEOUT_SECONDS)
         self._task = asyncio.create_task(self._run())
         LOGGER.info(

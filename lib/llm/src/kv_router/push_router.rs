@@ -25,7 +25,8 @@ use crate::{
         timing::{RequestPhase, RoutingData},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, ScaleUpMigrationTracker, affinity_id,
+        explicit_target,
     },
 };
 
@@ -107,7 +108,15 @@ impl KvPushRouter {
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(AffinityCoordinator::new)
+            .map(|ttl| {
+                AffinityCoordinator::new_with_scale_up(
+                    ttl,
+                    ScaleUpMigrationTracker::new(
+                        chooser.routing_scope().to_string(),
+                        chooser.runtime_configs(),
+                    ),
+                )
+            })
             .transpose()?;
 
         Ok(Self::new_with_coordinator(inner, chooser, affinity))
@@ -154,6 +163,7 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
         affinity_worker: Option<WorkerWithDpRank>,
+        migration_worker_ids: Option<std::collections::HashSet<u64>>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -172,6 +182,7 @@ impl KvPushRouter {
                 is_query_only,
                 SelectionOptions {
                     affinity_worker,
+                    migration_worker_ids,
                     policy_class,
                     session_id,
                 },
@@ -189,14 +200,14 @@ impl KvPushRouter {
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((
-                self.select_request(request, phase, is_query_only, None)
+                self.select_request(request, phase, is_query_only, None, None)
                     .await?,
                 None,
             ));
         };
         let Some(session_id) = affinity_id(request)? else {
             return Ok((
-                self.select_request(request, phase, is_query_only, None)
+                self.select_request(request, phase, is_query_only, None, None)
                     .await?,
                 None,
             ));
@@ -206,7 +217,8 @@ impl KvPushRouter {
             let target = affinity.query_target(&session_id, explicit)?;
             let worker = target.and_then(affinity_worker);
             return Ok((
-                self.select_request(request, phase, true, worker).await?,
+                self.select_request(request, phase, true, worker, None)
+                    .await?,
                 None,
             ));
         }
@@ -216,8 +228,21 @@ impl KvPushRouter {
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
         let worker = operation.target().and_then(affinity_worker);
-        match self.select_request(request, phase, false, worker).await {
-            Ok(selection) => Ok((selection, Some(operation))),
+        let migration_worker_ids = operation.migration_worker_ids().cloned();
+        match self
+            .select_request(request, phase, false, worker, migration_worker_ids)
+            .await
+        {
+            Ok(selection) => {
+                tracing::debug!(
+                    session_id = %session_id.as_str(),
+                    worker_id = selection.instance_id,
+                    dp_rank = selection.dp_rank,
+                    affinity_action = operation.action_name(),
+                    "Selected token-input KV target"
+                );
+                Ok((selection, Some(operation)))
+            }
             Err(error) if is_cancelled(&error) => Err(error),
             Err(_) if operation.target().is_some() && explicit.is_none() => {
                 operation.invalidate();
@@ -225,11 +250,21 @@ impl KvPushRouter {
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
                 let retry_worker = retry.target().and_then(affinity_worker);
+                let migration_worker_ids = retry.migration_worker_ids().cloned();
                 match self
-                    .select_request(request, phase, false, retry_worker)
+                    .select_request(request, phase, false, retry_worker, migration_worker_ids)
                     .await
                 {
-                    Ok(selection) => Ok((selection, Some(retry))),
+                    Ok(selection) => {
+                        tracing::debug!(
+                            session_id = %session_id.as_str(),
+                            worker_id = selection.instance_id,
+                            dp_rank = selection.dp_rank,
+                            affinity_action = retry.action_name(),
+                            "Selected token-input KV target"
+                        );
+                        Ok((selection, Some(retry)))
+                    }
                     Err(retry_error) => {
                         retry.invalidate();
                         Err(retry_error)

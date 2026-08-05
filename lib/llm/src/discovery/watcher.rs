@@ -13,7 +13,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::{PrefillLoadEstimator, config::min_initial_workers_from_env};
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -33,10 +33,13 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{
+        KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet, model_runtime_config_watch,
+        wait_for_initial_runtime_configs,
+    },
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{EncoderRouter, PrefillRouter},
+    kv_router::{EncoderRouter, PrefillRouter, TextKvPushRouter, TextKvRouter},
     local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -57,6 +60,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
+    session_affinity::{ScaleUpMigrationTracker, create_affinity_coordinator},
     types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
@@ -1926,24 +1930,53 @@ impl ModelWatcher {
         } else if card.model_input == ModelInput::Text
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
-            // Text-input workers receive OpenAI-shaped requests directly, so add
-            // a direct router for every endpoint type the worker advertises.
+            // Text-input workers receive OpenAI-shaped requests directly. In
+            // KV mode the frontend cannot inspect prompt tokens, so it chooses
+            // an exact worker/rank from backend-reported KV load instead.
             //
             // Text workers publish ActiveLoad like Tokens workers do, so give this
             // WorkerSet a monitor too: it consumes load reports, drives the
             // overload/busy gate, and exports the worker load gauges (Text models
-            // never use the KV router, so the monitor owns the gauges here).
+            // have no token-path sequence bookkeeping, so the monitor owns the
+            // gauges even when reported-load KV routing is active).
             let worker_monitor = KvWorkerMonitor::new(
                 client.clone(),
                 router_config.load_threshold_config.clone(),
-                router_config.router_mode != RouterMode::KV,
+                true,
             );
+            worker_monitor.seed_worker_runtime_config(mcid.instance_id, &card.runtime_config);
             let monitor_arc = Arc::new(worker_monitor.clone())
                 as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>;
-            worker_set.worker_monitor = Some(worker_monitor);
+            worker_set.worker_monitor = Some(worker_monitor.clone());
+            let (text_kv_router, text_kv_affinity) = if router_config.router_mode == RouterMode::KV
+            {
+                let mut runtime_configs =
+                    model_runtime_config_watch(&endpoint, card.name()).await?;
+                wait_for_initial_runtime_configs(
+                    &mut runtime_configs,
+                    min_initial_workers_from_env()?,
+                )
+                .await?;
+                let text_kv_router = Arc::new(TextKvRouter::new(
+                    client.clone(),
+                    worker_monitor.clone(),
+                    runtime_configs.clone(),
+                ));
+                let affinity_ttl = router_config
+                    .session_affinity_ttl_secs
+                    .map(Duration::from_secs);
+                let scale_up = affinity_ttl.map(|_| {
+                    ScaleUpMigrationTracker::new(card.name().to_string(), runtime_configs)
+                });
+                let affinity =
+                    create_affinity_coordinator(affinity_ttl, client.clone(), scale_up).await?;
+                (Some(text_kv_router), affinity)
+            } else {
+                (None, None)
+            };
 
             if card.model_type.supports_chat() {
-                let push_router = PushRouter::<
+                let inner = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_monitor(
@@ -1952,19 +1985,31 @@ impl ModelWatcher {
                     Some(monitor_arc.clone()),
                 )
                 .await?;
-                worker_set.chat_engine = Some(Arc::new(push_router));
+                worker_set.chat_engine = Some(match text_kv_router.as_ref() {
+                    Some(selector) => Arc::new(TextKvPushRouter::new(
+                        inner,
+                        selector.clone(),
+                        text_kv_affinity.clone(),
+                    )),
+                    None => Arc::new(inner),
+                });
                 tracing::info!("Chat completions is ready");
             }
 
             if card.model_type.supports_completions() {
-                let push_router = PushRouter::<
+                let inner = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
                 >::from_client_with_monitor(
                     client, router_config.router_mode, Some(monitor_arc)
                 )
                 .await?;
-                worker_set.completions_engine = Some(Arc::new(push_router));
+                worker_set.completions_engine = Some(match text_kv_router {
+                    Some(selector) => {
+                        Arc::new(TextKvPushRouter::new(inner, selector, text_kv_affinity))
+                    }
+                    None => Arc::new(inner),
+                });
                 tracing::info!("Completions is ready");
             }
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {

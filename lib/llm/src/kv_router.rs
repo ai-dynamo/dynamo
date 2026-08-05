@@ -53,6 +53,7 @@ mod route_lookup;
 pub mod scheduler;
 pub mod sequence;
 pub mod shared_cache;
+pub(crate) mod text_router;
 
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
@@ -61,9 +62,10 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub(crate) use text_router::{TextKvPushRouter, TextKvRouter};
 
 use crate::{
-    discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
+    discovery::{KvSourceMembershipWatch, RuntimeConfigWatch, wait_for_initial_runtime_configs},
     kv_router::{
         scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
@@ -293,6 +295,7 @@ where
     indexer: Indexer,
     scheduler: KvScheduler<Sel, TieredOverlapRefresher<Indexer>>,
     workers_with_configs: RuntimeConfigWatch,
+    routing_scope: String,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -383,6 +386,9 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let routing_scope = model_name
+            .clone()
+            .unwrap_or_else(|| endpoint.id().to_string());
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
@@ -405,17 +411,9 @@ where
         )
         .await?;
 
-        if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
+        if !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
-            let _ = startup_watch
-                .wait_for(|m| m.len() >= min_initial_workers)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "runtime config watch closed before {} workers appeared",
-                        min_initial_workers
-                    )
-                })?;
+            wait_for_initial_runtime_configs(&mut startup_watch, min_initial_workers).await?;
         }
 
         let overlap_scores_refresh = indexer.supports_overlap_refresh().then(|| {
@@ -500,6 +498,7 @@ where
             indexer,
             scheduler,
             workers_with_configs,
+            routing_scope,
             block_size,
             kv_router_config,
             prefill_load_estimator,
@@ -522,6 +521,14 @@ where
 
     pub fn indexer(&self) -> &Indexer {
         &self.indexer
+    }
+
+    pub(crate) fn runtime_configs(&self) -> RuntimeConfigWatch {
+        self.workers_with_configs.clone()
+    }
+
+    pub(crate) fn routing_scope(&self) -> &str {
+        &self.routing_scope
     }
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {

@@ -115,8 +115,10 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 Session affinity is disabled by default. On the frontend, set
 `--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
 a value from `1` through `31536000` to enable it, then send
-`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
-without the TTL option provides session identity but does not enable router affinity.
+`X-Dynamo-Session-ID` to keep related requests on one worker. For OpenAI chat and
+completion requests only, a non-empty body `user` value is used as the affinity
+ID when that header is absent; an explicit header wins. Supplying an affinity ID
+without the TTL option does not enable router affinity.
 
 The first successfully dispatched request binds the session ID to its selected
 worker and, when available, data-parallel rank. Later requests exact-dispatch to
@@ -125,6 +127,20 @@ Active requests prevent expiry. When a request lease ends after EOF, early drop,
 error, or cancellation, the idle timer restarts. A missing bound worker or a
 non-cancellation selection, setup, dispatch, or target-validation failure invalidates
 the binding.
+
+When KV routing and session affinity are both enabled, adding ready workers for
+a model triggers a lazy, capacity-proportional rebalance. Dynamo measures each
+worker's KV capacity as `total_kv_blocks * data_parallel_size` and
+deterministically selects approximately `added capacity / new total capacity`
+of the existing session IDs. Each selected session migrates on its next
+unpinned request: routing is restricted to the newly added workers, then the
+normal token-input KV scheduler or text-input reported-load selector chooses
+the worker and data-parallel rank. The new binding is committed only after a
+successful dispatch; otherwise the old binding is retained and migration is
+retried on a later request. Non-selected sessions retain their binding, and
+each session evaluates a scale-up event once. Dynamo skips the event when any
+participating worker has missing or zero KV-capacity metadata. Query-only
+requests and explicit worker or rank pins do not trigger migration.
 
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
