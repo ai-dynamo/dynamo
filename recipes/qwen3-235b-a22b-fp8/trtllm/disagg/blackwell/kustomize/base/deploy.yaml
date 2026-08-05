@@ -102,6 +102,10 @@ spec:
       resources:
         limits:
           gpu: "2"
+        requests:
+          gpu: "2"
+          custom: &ephemeralStorage
+            ephemeral-storage: 2Gi
       # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
         size: 256Gi
@@ -159,6 +163,9 @@ spec:
       resources:
         limits:
           gpu: "4"
+        requests:
+          gpu: "4"
+          custom: *ephemeralStorage
       # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
         size: 256Gi
