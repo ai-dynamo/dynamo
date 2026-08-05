@@ -5,19 +5,20 @@ title: TLS
 subtitle: Encrypt the TCP request/response streams and NATS connections
 ---
 
-Dynamo supports opt-in TLS encryption on the TCP request and response streams
-between frontends and workers. When enabled, both the **request plane**
+Dynamo supports opt-in TLS encryption on the network transports between its
+components: the TCP request and response streams between frontends and workers,
+and connections to NATS. On the TCP transport, both the **request plane**
 (frontend → worker inference requests) and the **response stream** (worker →
 frontend inference output) are encrypted using
 [rustls](https://github.com/rustls/rustls) with the `ring` cryptographic
-provider. When no TLS configuration is provided, these streams operate in
+provider. When no TLS configuration is provided, these transports operate in
 plaintext exactly as before.
 
-The same `DYN_TCP_TLS_*` environment variables apply to both transports — a
-single set of certificates encrypts the frontend↔worker TCP request and
-response streams. This does **not** cover the KV event plane, which is carried
-over ZMQ or NATS Core depending on setup and is a separate transport; those
-paths are not encrypted by this configuration.
+The `DYN_TCP_TLS_*` environment variables encrypt the frontend↔worker TCP
+request and response streams; NATS traffic is encrypted separately via NATS TLS
+(see the NATS TLS section below). The KV event plane is a separate transport:
+when it runs over ZMQ it is **not** encrypted, and when it runs over NATS it is
+encrypted only if NATS TLS is configured.
 
 ## Environment variables
 
@@ -143,8 +144,9 @@ server and client depending on the stream direction.
 
 ## NATS TLS
 
-NATS is used for JetStream indexer recovery/replay and the audit sink. TLS
-is configured separately from TCP:
+NATS carries JetStream indexer recovery/replay, the audit sink, and — when the
+request plane is set to NATS (`--request-plane nats`) — inference request
+distribution. TLS is configured separately from TCP:
 
 | Variable | Description |
 |---|---|
@@ -158,22 +160,25 @@ The `NATS_SERVER` URL accepts both `nats://` and `tls://` schemes.
 
 CLI flags (all backends via `DynamoRuntimeArgGroup`):
 
-```
+```text
 --nats-tls-ca-cert-path PATH   CA certificate for NATS server verification (PEM)
 --nats-tls-insecure             Disable NATS certificate verification
 ```
 
+The frontend (`dynamo.frontend`) also accepts `--nats-tls-ca-cert-path` and
+`--nats-tls-insecure`.
+
 ## Encrypted paths
 
-When TLS is configured, all communication between Dynamo components is
-encrypted:
+When TLS is configured, the following transports are encrypted (the ZMQ event
+plane is not covered):
 
 | Path | Direction | Data | Transport |
 |---|---|---|---|
 | Request plane | Frontend → Worker | User prompts, request metadata | `egress/tcp_client` → `ingress/shared_tcp_endpoint` |
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
-| NATS | Frontend/Worker ↔ NATS | JetStream recovery, audit logs | `transports/nats` |
+| NATS | Frontend/Worker ↔ NATS | Inference requests (when `--request-plane nats`), JetStream recovery, audit logs | `transports/nats` |
 
 ## Design notes
 
