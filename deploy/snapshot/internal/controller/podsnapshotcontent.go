@@ -25,6 +25,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
+	snapshottypes "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -193,10 +194,9 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 
-	// Resume: a present artifact with unwritten status means a prior dump finished but the
-	// status write did not. The artifact dir exists only after the executor's atomic rename,
-	// so its presence means a completed dump.
-	if artifactPresent(loc.HostPath) {
+	// Resume after a completed dump whose status write was interrupted. Only a
+	// validated completion record is accepted; a leftover directory is not enough.
+	if _, err := snapshottypes.ValidateArtifact(loc.HostPath, id); err == nil {
 		return w.setSnapshotContentSucceeded(ctx, content)
 	}
 
@@ -480,12 +480,6 @@ func isContentTerminal(content *nvidiacomv1alpha1.PodSnapshotContent) bool {
 		}
 	}
 	return false
-}
-
-// artifactPresent reports whether a completed checkpoint directory already exists on disk.
-func artifactPresent(destination string) bool {
-	info, err := os.Stat(destination)
-	return err == nil && info.IsDir()
 }
 
 // contentNameFromInformerObj extracts the object name from a dynamic informer object,

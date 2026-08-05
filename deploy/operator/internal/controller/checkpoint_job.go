@@ -171,7 +171,6 @@ func buildCheckpointJob(
 		defaultDeadline := int64(3600)
 		activeDeadlineSeconds = &defaultDeadline
 	}
-
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
@@ -180,5 +179,6 @@ func buildCheckpointJob(
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		WrapLaunchJob:         wrapLaunchJob,
+		PriorityClassName:     config.Checkpoint.JobPriorityClassName,
 	})
 }

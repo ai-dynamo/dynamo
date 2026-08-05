@@ -52,6 +52,8 @@ import (
 
 const checkpointDisabledMessage = "checkpoint functionality is disabled in the operator configuration"
 
+const checkpointConcurrencyRequeue = 5 * time.Second
+
 var errCheckpointCleanupPending = errors.New("checkpoint cleanup pending")
 
 // CheckpointReconciler reconciles a DynamoCheckpoint object
@@ -275,6 +277,26 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, err
 		}
 	}
+	if !interruptedCreate && r.Config.Checkpoint.MaxConcurrentJobs > 0 {
+		active, err := r.countActiveCheckpointJobs(ctx, ckpt.Namespace, jobName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if active >= r.Config.Checkpoint.MaxConcurrentJobs {
+			message := fmt.Sprintf("waiting for checkpoint capacity: %d of %d jobs active", active, r.Config.Checkpoint.MaxConcurrentJobs)
+			ckpt.Status.Message = message
+			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+				Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+				Status:  metav1.ConditionFalse,
+				Reason:  "ConcurrencyLimit",
+				Message: message,
+			})
+			if err := r.Status().Update(ctx, ckpt); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: checkpointConcurrencyRequeue}, nil
+		}
+	}
 
 	// Use SyncResource to create/update the checkpoint Job
 	if !interruptedCreate {
@@ -481,7 +503,6 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 	if !checkpointJobComplete(job) {
 		return ctrl.Result{}, nil
 	}
-
 	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
 }
 
@@ -558,6 +579,30 @@ func (r *CheckpointReconciler) cleanupTerminalCheckpointJob(ctx context.Context,
 		return fmt.Errorf("delete terminal checkpoint job %s/%s: %w", job.Namespace, job.Name, err)
 	}
 	return nil
+}
+
+// countActiveCheckpointJobs returns the durable namespace-local capture count.
+// The current deterministic Job is excluded so interrupted creates remain idempotent.
+func (r *CheckpointReconciler) countActiveCheckpointJobs(ctx context.Context, namespace, currentJobName string) (int32, error) {
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(namespace)); err != nil {
+		return 0, fmt.Errorf("list checkpoint jobs for concurrency limit: %w", err)
+	}
+	var active int32
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		if job.Name == currentJobName || job.Spec.Template.Labels[snapshotprotocol.CheckpointSourceLabel] != consts.KubeLabelValueTrue {
+			continue
+		}
+		if checkpointJobComplete(job) {
+			continue
+		}
+		if failed, _ := checkpointJobFailed(job); failed {
+			continue
+		}
+		active++
+	}
+	return active, nil
 }
 
 // removeCheckpointJobTTL migrates operator-owned Jobs created before terminal cleanup became

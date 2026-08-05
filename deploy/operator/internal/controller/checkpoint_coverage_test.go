@@ -415,7 +415,7 @@ func TestCheckpointDeleteFailureRetriesBeforeArtifactNormalization(t *testing.T)
 	ckpt.Status.JobName = defaultCheckpointJobName
 	// Use an artifact version that differs from the default so the checkpoint
 	// requires normalization; the default-versioned job name would already match.
-	const nonDefaultArtifactVersion = "3"
+	const nonDefaultArtifactVersion = "4"
 	require.NotEqual(t, snapshotprotocol.DefaultCheckpointArtifactVersion, nonDefaultArtifactVersion)
 	ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: nonDefaultArtifactVersion}
 	job := markCheckpointJobComplete(newCheckpointJob(defaultCheckpointJobName))

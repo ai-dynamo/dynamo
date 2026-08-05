@@ -22,6 +22,7 @@ type CheckpointJobOptions struct {
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
 	WrapLaunchJob         bool
+	PriorityClassName     string
 }
 
 func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
@@ -39,6 +40,9 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	podTemplate.Annotations = DisableCheckpointJobSidecarInjection(podTemplate.Annotations)
 	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.ArtifactVersion)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
+	if opts.PriorityClassName != "" {
+		podTemplate.Spec.PriorityClassName = opts.PriorityClassName
+	}
 	if opts.SeccompProfile != "" {
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}

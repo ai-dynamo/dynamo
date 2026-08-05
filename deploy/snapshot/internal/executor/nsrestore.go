@@ -41,6 +41,9 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	)
 
 	manifestReadStart := time.Now()
+	if err := types.ValidateArtifactForRestore(opts.CheckpointPath, ""); err != nil {
+		return nil, fmt.Errorf("checkpoint artifact is incomplete or invalid: %w", err)
+	}
 	m, err := types.ReadManifest(opts.CheckpointPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)

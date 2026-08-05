@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -64,6 +65,14 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	)
 	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
+	}
+	for _, name := range []string{"inventory.img", "pstree.img"} {
+		if err := os.WriteFile(checkpointDir+"/"+name, []byte("test"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := types.WriteArtifactCompletion(checkpointDir, &types.ArtifactCompletion{CheckpointID: "checkpoint-123"}); err != nil {
+		t.Fatalf("WriteArtifactCompletion: %v", err)
 	}
 
 	rt := &restoreFakeRuntime{}
