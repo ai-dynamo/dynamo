@@ -40,9 +40,6 @@ docs:
 examples:
   - 'recipes/**'
   - 'examples/**'
-  - 'scripts/generate_kustomize_openapi.py'
-  - 'scripts/kustomize-matrix.py'
-  - 'scripts/kustomize_matrix.py'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
@@ -115,6 +112,9 @@ core:
   - '*.lock'
   - '*.py'
   - '*.rs'
+  - 'scripts/generate_kustomize_openapi.py'
+  - 'scripts/kustomize-matrix.py'
+  - 'scripts/kustomize_matrix.py'
   - 'scripts/report_pytest_markers.py'
   # Negation patterns MUST come after positive patterns — micromatch processes
   # patterns left-to-right, so negations only filter matches accumulated by

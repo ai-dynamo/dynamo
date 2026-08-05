@@ -22,8 +22,10 @@ When adding new model recipes, ensure they follow the standard structure:
 ## Kustomize Variants
 
 Use Kustomize when a recipe has a shared deployment shape plus cloud-provider or
-network-provider variants. Keep the checked-in manifests apply-able and easy to
-review:
+network-provider variants. Recipe-local sources live under
+`<deployment>/kustomize/`; shared Components reusable by multiple recipes live
+under `recipes/kustomize/components/`. Keep the checked-in manifests apply-able
+and easy to review:
 
 ```text
 <deployment>/
@@ -48,6 +50,14 @@ review:
         └── _shared-overlay/
 ```
 
+For a matrix-backed recipe, the source of truth is
+`.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, local Components,
+intermediate `_` overlays, and any referenced Components under
+`recipes/kustomize/components/`. The generated files are public overlay
+`kustomization.yaml` files, `deploy-<name>.yaml` manifests, and the central
+`recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` schema. Commit
+the generated files for users to inspect and apply, but do not edit them by hand.
+
 The render convention is:
 
 - `kustomize/base/` is shared input and is not rendered directly.
@@ -68,11 +78,11 @@ Prefer resource-shaped Kustomize merge patches over JSON patches where possible.
 For other Custom Resource Definition (CRD) list fields, include the complete
 intended list in the merge patch unless the schema supplies an OpenAPI merge key.
 
-Edit the Kustomize source, not the generated manifests. A recipe matrix is an explicit
-`.kustomize-matrix.yaml` beside the recipe. It names the Kustomize `source`, a
-`nameTemplate`, and matrix dimensions. Every dimension value has a human-readable
-`name` and a list of Kustomize `components`; output names interpolate only the value
-names, never their paths:
+Edit the Kustomize source, not the generated manifests. A recipe matrix is an
+explicit `.kustomize-matrix.yaml` beside the recipe. It names the Kustomize
+`source`, a `nameTemplate`, and matrix dimensions. Every dimension value has a
+human-readable `name` and a list of Kustomize `components`; output names
+interpolate only the value names, never their paths:
 
 ```yaml
 source: kustomize/overlays/_rdma
@@ -84,7 +94,9 @@ matrix:
         - ../../../kustomize/components/aws-efa-p8d16
 ```
 
-Generate the checked-in Level-2 overlays, then the flattened Level-3 manifests:
+Regenerate derived artifacts in order: `unfold` writes the checked-in Level-2
+public overlay `kustomization.yaml` files; `render` invokes Kustomize and writes
+the Level-3 `deploy-<name>.yaml` manifests and central CRD schema:
 
 ```bash
 scripts/kustomize-matrix.py unfold <matrix.yaml>

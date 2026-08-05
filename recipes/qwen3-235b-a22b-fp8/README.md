@@ -57,7 +57,13 @@ Provider-specific deltas live in Kustomize Components and are selected by
 Overlay directories starting with `_` are intermediate and are not rendered. Shared Kustomize building blocks belong under
 `recipes/kustomize/components/`; the disaggregated provider Components use the
 backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
-The checked-in `deploy-*.yaml` files are rendered artifacts so you can review and apply the final manifests from GitHub.
+For cluster users, the checked-in `deploy-*.yaml` files are the stable deployment
+interface: review the matching provider manifest and apply it directly from GitHub.
+For recipe contributors, the source of truth is the matrix, `kustomize/base/`,
+recipe-local Components and intermediate `_` overlays, plus any referenced shared
+Components under `recipes/kustomize/components/`. Public overlay
+`kustomization.yaml` files and `deploy-*.yaml` files are generated artifacts:
+commit them for review, but do not edit them by hand.
 Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from the base and
 overlay YAML before matching rendered fields. Comments inside literal block scalars already render in place.
 
