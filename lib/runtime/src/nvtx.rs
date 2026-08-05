@@ -91,6 +91,44 @@ pub fn pop_impl() {
     }
 }
 
+/// Open a **correlated** NVTX range and return an opaque id to pass to
+/// [`range_end_impl`].
+///
+/// Unlike [`push_impl`]/[`pop_impl`], a correlated range is *not* tied to the
+/// calling thread's push/pop stack, so it may be opened and closed across
+/// `await` points, on different threads, and while other ranges interleave —
+/// which is exactly what async callers (e.g. the Python workers, whose
+/// coroutines interleave on one event-loop thread) need. Prefer the RAII
+/// [`NvtxRangeGuard`] / push-pop pair for synchronous scopes.
+///
+/// Returns `0` when NVTX is disabled (feature off, or `DYN_ENABLE_RUST_NVTX`
+/// unset); [`range_end_impl`] treats `0` as "no range".
+#[inline(always)]
+pub fn range_start_impl(name: &str) -> i64 {
+    #[cfg(feature = "nvtx")]
+    {
+        if NVTX_ENABLED.load(Ordering::Relaxed) {
+            return i64::from(nvtx::range_start!("{name}"));
+        }
+    }
+    let _ = name;
+    0
+}
+
+/// Close a correlated NVTX range previously opened by [`range_start_impl`].
+/// No-op for id `0`.
+#[inline(always)]
+pub fn range_end_impl(id: i64) {
+    #[cfg(feature = "nvtx")]
+    {
+        if id != 0 {
+            let range_id = id as i32;
+            nvtx::range_end!(range_id);
+        }
+    }
+    let _ = id;
+}
+
 /// Name the current OS thread in the Nsight Systems timeline.
 /// No-op (compiled out) when the `nvtx` feature is off.
 #[inline(always)]
