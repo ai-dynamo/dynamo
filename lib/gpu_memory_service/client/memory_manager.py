@@ -194,6 +194,7 @@ class GMSClientMemoryManager:
         self._last_memory_layout_hash: str = ""
 
         self._vmm.ensure_initialized()
+        self._vmm.runtime_set_device(device)
         self.granularity = self._vmm.get_allocation_granularity(device)
 
     # ==================== Properties ====================
