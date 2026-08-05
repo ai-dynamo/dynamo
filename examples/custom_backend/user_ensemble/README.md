@@ -43,6 +43,10 @@ through the user worker, for example
 immediately); batch cost, item caps, and preprocess concurrency remain encoder
 backend policy.
 
+When the decoder shares a GPU with a substantial encoder, reserve room for the
+encoder with `DYN_VLLM_GPU_MEMORY_UTILIZATION` (for example, `0.4`). The default
+is `0.8`, suitable only when the colocated encoder has enough remaining memory.
+
 Then issue a non-streaming request:
 
 ```bash

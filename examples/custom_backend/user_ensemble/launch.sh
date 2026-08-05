@@ -17,7 +17,8 @@ WORKER_GPU="${DYN_WORKER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MAX_MODEL_LEN="${DYN_MAX_MODEL_LEN:-4096}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-[[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization 0.8"
+[[ -z "$GPU_MEM_ARGS" ]] && \
+    GPU_MEM_ARGS="--gpu-memory-utilization ${DYN_VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
 
 print_launch_banner --no-curl "User Ensemble Worker" "$MODEL" "$HTTP_PORT" \
     "Worker GPU: $WORKER_GPU" \
