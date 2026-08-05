@@ -11,4 +11,6 @@ sortOptions:
 resources:
   - "../_rdma"
 components:
-  - "../../components/nebius-ib"
+  - "../../../../../../kustomize/components/disagg-workers/nebius-ib"
+  - "../../../../../../kustomize/components/vllm-disagg/nebius-ib"
+  - "../../../../../../kustomize/components/vllm-disagg/nixl-default"

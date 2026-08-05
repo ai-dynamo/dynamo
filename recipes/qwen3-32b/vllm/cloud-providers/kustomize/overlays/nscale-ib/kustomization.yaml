@@ -11,4 +11,5 @@ sortOptions:
 resources:
   - "../_rdma"
 components:
-  - "../../components/nscale-ib"
+  - "../../../../../../kustomize/components/disagg-workers/nscale-ib"
+  - "../../components/nscale-gpu-memory"

@@ -6,17 +6,23 @@ matrix:
   variant:
     - name: aks-ib
       components:
-        - kustomize/components/aks-ib
+        - ../../../kustomize/components/aks-ib
     - name: aws-efa-p16d16
       components:
         - ../../../kustomize/components/aws-efa-p16d16
-        - kustomize/components/vllm-efa
+        - ../../../kustomize/components/vllm-disagg/aws-efa
+        - kustomize/components/vllm-efa-runtime
     - name: gke-roce
       components:
-        - kustomize/components/gke-roce
+        - ../../../kustomize/components/disagg-workers/gke-roce
+        - ../../../kustomize/components/vllm-disagg/nixl-default
+        - kustomize/components/gke-image-pull-secret
     - name: nebius-ib
       components:
-        - kustomize/components/nebius-ib
+        - ../../../kustomize/components/disagg-workers/nebius-ib
+        - ../../../kustomize/components/vllm-disagg/nebius-ib
+        - ../../../kustomize/components/vllm-disagg/nixl-default
     - name: nscale-ib
       components:
-        - kustomize/components/nscale-ib
+        - ../../../kustomize/components/disagg-workers/nscale-ib
+        - kustomize/components/nscale-gpu-memory

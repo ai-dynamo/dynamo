@@ -12,4 +12,5 @@ resources:
   - "../_rdma"
 components:
   - "../../../../../../kustomize/components/aws-efa-p16d16"
-  - "../../components/vllm-efa"
+  - "../../../../../../kustomize/components/vllm-disagg/aws-efa"
+  - "../../components/vllm-efa-runtime"

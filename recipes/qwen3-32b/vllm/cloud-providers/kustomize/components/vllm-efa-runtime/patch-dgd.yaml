@@ -9,14 +9,8 @@ spec:
     PrefillWorker:
       extraPodSpec:
         mainContainer:
-          env:
-            - &nebiusTransfer
-              name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          image: &vllmEfaImage nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
     DecodeWorker:
       extraPodSpec:
         mainContainer:
-          env:
-            - *nebiusTransfer
-            - name: UCX_RNDV_THRESH
-              value: "8192"
+          image: *vllmEfaImage

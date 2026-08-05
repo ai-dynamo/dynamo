@@ -11,4 +11,4 @@ sortOptions:
 resources:
   - "../_rdma"
 components:
-  - "../../components/aks-ib"
+  - "../../../../../../kustomize/components/aks-ib"
