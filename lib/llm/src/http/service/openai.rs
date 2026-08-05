@@ -1825,7 +1825,6 @@ fn push_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
-/// `role` is excluded; backends set it on every delta.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -1836,7 +1835,7 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 content,
                 function_call,
                 tool_calls,
-                role: _,
+                role,
                 refusal,
                 reasoning_content,
             } = &c.delta;
@@ -1852,9 +1851,22 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 && content_empty
                 && function_call.is_none()
                 && tool_calls.is_none()
+                && role.is_none()
                 && refusal.is_none()
                 && reasoning_content.is_none()
         })
+}
+
+/// Preserve the first role delta for each choice and remove parser-generated repeats.
+fn deduplicate_stream_roles(
+    resp: &mut NvCreateChatCompletionStreamResponse,
+    emitted_roles: &mut HashSet<u32>,
+) {
+    for choice in &mut resp.inner.choices {
+        if choice.delta.role.is_some() && !emitted_roles.insert(choice.index) {
+            choice.delta.role = None;
+        }
+    }
 }
 
 /// Completions variant of [`is_empty_stream_response`].
@@ -1956,6 +1968,23 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
+fn apply_chat_completions_request_template(
+    request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
+    template: Option<&RequestTemplate>,
+) {
+    if let Some(template) = template {
+        if request.model.is_empty() {
+            request.model = template.model.clone();
+        }
+        if request.temperature.is_none() {
+            request.temperature = Some(template.temperature);
+        }
+        if request.max_completion_tokens.unwrap_or(0) == 0 {
+            request.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+}
+
 /// OpenAI Chat Completions Request Handler
 ///
 /// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
@@ -1980,17 +2009,7 @@ async fn chat_completions(
     let streaming = request.inner.stream.unwrap_or(false);
 
     // Apply template values first to resolve the model before creating metrics guards
-    if let Some(template) = template {
-        if request.inner.model.is_empty() {
-            request.inner.model = template.model.clone();
-        }
-        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
-            request.inner.temperature = Some(template.temperature);
-        }
-        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
-            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
-        }
-    }
+    apply_chat_completions_request_template(&mut request.inner, template.as_ref());
     // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -2149,8 +2168,10 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
+        let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -2175,6 +2196,10 @@ async fn chat_completions(
                             }
                         }
                     }
+                }
+
+                if let Some(data) = response.data.as_mut() {
+                    deduplicate_stream_roles(data, &mut emitted_roles);
                 }
 
                 // Drop empty chunks from multi-byte token assembly.
@@ -2202,6 +2227,7 @@ async fn chat_completions(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
+                    reasoning_field,
                 );
 
                 // Side-channel events come first, then the regular data event.
@@ -2269,7 +2295,11 @@ async fn chat_completions(
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
-        Ok(Json(response).into_response())
+        Ok(Json(crate::reasoning_field::RoutedReasoning::new(
+            response,
+            state.reasoning_field(),
+        ))
+        .into_response())
     }
 }
 
@@ -3796,6 +3826,29 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn test_chat_completions_template_preserves_explicit_zero_temperature() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        assert_eq!(request.temperature, Some(0.0));
+        assert_eq!(request.model, "template-model");
+        assert_eq!(request.max_completion_tokens, Some(128));
+
+        request.temperature = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.temperature, Some(0.7));
+    }
 
     #[test]
     fn test_is_json_content_type() {
@@ -6340,9 +6393,9 @@ mod tests {
             "usage present → not empty",
         );
 
-        // Role-only: still empty (backends repeat role on every chunk)
+        // Role-only: not empty; duplicate roles are removed before this predicate.
         assert!(
-            is_empty_stream_response(&make_delta(
+            !is_empty_stream_response(&make_delta(
                 None,
                 None,
                 None,
@@ -6352,7 +6405,7 @@ mod tests {
                 None,
                 None,
             )),
-            "role-only → empty",
+            "role-only → not empty",
         );
 
         // Not empty: has refusal
@@ -6387,6 +6440,69 @@ mod tests {
             )),
             "function_call present → not empty",
         );
+    }
+
+    #[test]
+    fn test_deduplicate_stream_roles_preserves_only_first_role_per_choice() {
+        let mut emitted_roles = HashSet::new();
+        let mut first_choice_zero = make_delta(
+            None,
+            Some("thinking"),
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        let mut first_choice_one = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        first_choice_one.inner.choices[0].index = 1;
+        let mut second_choice_zero = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        let mut second_choice_one = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        second_choice_one.inner.choices[0].index = 1;
+
+        deduplicate_stream_roles(&mut first_choice_zero, &mut emitted_roles);
+        deduplicate_stream_roles(&mut first_choice_one, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second_choice_zero, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second_choice_one, &mut emitted_roles);
+
+        assert_eq!(
+            first_choice_zero.inner.choices[0].delta.role,
+            Some(Role::Assistant)
+        );
+        assert_eq!(
+            first_choice_one.inner.choices[0].delta.role,
+            Some(Role::Assistant)
+        );
+        assert_eq!(second_choice_zero.inner.choices[0].delta.role, None);
+        assert_eq!(second_choice_one.inner.choices[0].delta.role, None);
     }
 
     #[test]
