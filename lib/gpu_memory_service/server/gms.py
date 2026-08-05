@@ -44,8 +44,6 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListResponse,
     MetadataPutRequest,
     MetadataPutResponse,
-    ReleaseLayoutRequest,
-    ReleaseLayoutResponse,
 )
 
 from .allocations import AllocationInfo, GMSAllocationManager
@@ -309,27 +307,6 @@ class GMS:
                 CommitLayoutResponse(
                     success=True, memory_layout_hash=self._memory_layout_hash
                 ),
-                -1,
-                False,
-            )
-
-        if msg_type is ReleaseLayoutRequest:
-            if self.state != ServerState.RW:
-                raise AssertionError("RW state is not active")
-
-            # Abandon the layout wholesale. The session is deliberately kept -- dropping
-            # it would release the lock and let another writer in mid-recovery -- and the
-            # caller is upgraded back to RW, since there is no longer a sealed layout to
-            # protect. Callers must have unmapped first: the server's cuMemRelease only
-            # reclaims memory once every mapping of it is gone.
-            released = self._clear_layout_state()
-            self._sessions.on_layout_release(conn)
-            logger.info("Released layout: freed %d allocations", released)
-            self._events.append(
-                GMSRuntimeEvent(kind="layout_released", allocation_count=released)
-            )
-            return (
-                ReleaseLayoutResponse(success=True, released_count=released),
                 -1,
                 False,
             )

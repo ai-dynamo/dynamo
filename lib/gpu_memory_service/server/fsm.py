@@ -27,7 +27,6 @@ class StateEvent(Enum):
     RW_COMMIT = auto()
     RW_ABORT = auto()
     LAYOUT_COMMIT = auto()
-    LAYOUT_RELEASE = auto()
     RO_CONNECT = auto()
     RO_DISCONNECT = auto()
 
@@ -82,13 +81,6 @@ TRANSITIONS: list[Transition] = [
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.LAYOUT_COMMIT,
-        to_state=ServerState.RW,
-    ),
-    # Abandon the layout wholesale, returning to an unsealed pool the writer may
-    # reshape. The escape hatch for a standby that adopted an incompatible layout.
-    Transition(
-        from_states=frozenset({ServerState.RW}),
-        event=StateEvent.LAYOUT_RELEASE,
         to_state=ServerState.RW,
     ),
     # Resolves to ALLOCATED when the layout was committed, EMPTY otherwise. The
@@ -203,9 +195,6 @@ class GMSFSM:
             self._rw_conn = None
         elif event == StateEvent.LAYOUT_COMMIT:
             self._layout_committed = True
-        elif event == StateEvent.LAYOUT_RELEASE:
-            self._layout_committed = False
-            self._committed = False
         elif event == StateEvent.RW_ABORT:
             self._rw_conn = None
         elif event == StateEvent.RO_CONNECT:

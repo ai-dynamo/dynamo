@@ -40,8 +40,6 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListResponse,
     MetadataPutRequest,
     MetadataPutResponse,
-    ReleaseLayoutRequest,
-    ReleaseLayoutResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,26 +153,6 @@ class _GMSClientSession:
             response.memory_layout_hash[:16],
         )
         return response.memory_layout_hash
-
-    def release_layout(self) -> int:
-        """Free the whole layout and unseal. Returns the number freed.
-
-        Keeps the session -- dropping it would release the lock and let another writer
-        in mid-recovery -- and widens back to RW, since there is no sealed layout left
-        to protect. Callers must unmap first; see GMSClientMemoryManager.release_layout.
-        """
-        response = self._transport.request(
-            ReleaseLayoutRequest(), ReleaseLayoutResponse
-        )
-        if not response.success:
-            raise RuntimeError("GMS release_layout returned failure")
-        self._granted_lock_type = GrantedLockType.RW
-        self._committed = False
-        logger.info(
-            "Released layout (%d allocations freed); session widened to RW",
-            response.released_count,
-        )
-        return response.released_count
 
     def allocate_info(self, size: int, tag: str = "default") -> AllocateResponse:
         return self._transport.request(

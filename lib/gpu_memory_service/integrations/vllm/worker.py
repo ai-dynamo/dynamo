@@ -473,26 +473,13 @@ class GMSWorker(Worker):
                     "from a prior engine (skipping fresh reallocation)",
                     len(kv_cache_manager.list_handles(tag="kv_cache")),
                 )
-                try:
-                    kv_cache_manager.remap_all_vas()
-                except StaleMemoryLayoutError as exc:
-                    # The inherited layout does not fit this engine -- e.g. a standby
-                    # that profiled a different num_gpu_blocks. Release it wholesale,
-                    # which frees the pages and widens us back to RW, then build our own.
-                    # Without the release the stale pool would be orphaned and the new
-                    # one stacked on top of it.
-                    logger.warning(
-                        "[GMS] KV reuse: inherited layout is incompatible (%s); "
-                        "releasing it and allocating a fresh pool",
-                        exc,
-                    )
-                    logger.info(
-                        "[GMS] KV reuse: released %d allocations",
-                        kv_cache_manager.release_layout(),
-                    )
-                    adopted = False
-                    kv_cache_manager.reallocate_all_handles(tag="kv_cache")
-                    kv_cache_manager.remap_all_vas()
+                # If the inherited layout does not fit this engine (a standby that
+                # profiled a different num_gpu_blocks), remap raises and the wake fails.
+                # Recovering in place needs a way to give the layout back, which is a
+                # follow-up; today an operator reclaims it by starting an engine that
+                # connects RW, which clears the layout on connect. Pin identical geometry
+                # across engines to stay off this path.
+                kv_cache_manager.remap_all_vas()
             else:
                 kv_cache_manager.reallocate_all_handles(tag="kv_cache")
                 kv_cache_manager.remap_all_vas()

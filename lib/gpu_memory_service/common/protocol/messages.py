@@ -43,21 +43,6 @@ class CommitLayoutResponse(msgspec.Struct, tag="commit_layout_response"):
     memory_layout_hash: str = ""
 
 
-class ReleaseLayoutRequest(msgspec.Struct, tag="release_layout_request"):
-    """Abandon the whole layout: free every allocation and unseal.
-
-    The session is kept (so the lock is never dropped mid-recovery) and the caller is
-    upgraded back to RW, since there is no longer a sealed layout to protect.
-    """
-
-    pass
-
-
-class ReleaseLayoutResponse(msgspec.Struct, tag="release_layout_response"):
-    success: bool
-    released_count: int = 0
-
-
 class GetLockStateRequest(msgspec.Struct, tag="get_lock_state_request"):
     pass
 
@@ -222,8 +207,6 @@ Message = Union[
     CommitResponse,
     CommitLayoutRequest,
     CommitLayoutResponse,
-    ReleaseLayoutRequest,
-    ReleaseLayoutResponse,
     GetLockStateRequest,
     GetLockStateResponse,
     GetAllocationStateRequest,

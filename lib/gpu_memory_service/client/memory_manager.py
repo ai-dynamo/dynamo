@@ -357,7 +357,7 @@ class GMSClientMemoryManager:
         and a writer that dies after it leaves a layout a standby can adopt by name.
 
         The server narrows this session to RW_DATA, so allocate/free/metadata-put now
-        raise. Use :meth:`release_layout` to reshape.
+        raise. Reconnect with RW to build a different layout.
         """
         self._require_rw()
         # Publish barrier, matching commit(): make this process's GPU writes visible
@@ -367,31 +367,6 @@ class GMSClientMemoryManager:
         self._granted_lock_type = GrantedLockType.RW_DATA
         self._last_memory_layout_hash = layout_hash
         return layout_hash
-
-    def release_layout(self) -> int:
-        """Abandon the whole layout: unmap locally, then free it server-side.
-
-        The escape hatch for a caller that adopted a layout it cannot use -- typically a
-        standby whose geometry does not match the pool it inherited. Unmapping first is
-        required, not tidiness: the server's ``cuMemRelease`` only reclaims memory once
-        every mapping of it is gone, so releasing while still mapped would leave the
-        memory logically freed but resident.
-
-        VA *reservations* are preserved, so the caller can immediately
-        ``reallocate_all_handles()`` + ``remap_all_vas()`` and land fresh physical at the
-        same addresses -- which is why tensors already bound to those VAs survive this.
-
-        The session is kept throughout (the lock is never dropped mid-recovery) and the
-        caller is widened back to RW, since there is no longer a sealed layout to protect.
-        """
-        if self._client is None:
-            raise RuntimeError("Not connected")
-        if not self.is_unmapped:
-            self.unmap_all_vas()
-        released = self._client.release_layout()
-        self._granted_lock_type = GrantedLockType.RW
-        self._last_memory_layout_hash = ""
-        return released
 
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()

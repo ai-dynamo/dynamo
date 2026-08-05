@@ -1187,29 +1187,6 @@ def test_requesting_rw_replaces_a_committed_layout(gms_thread):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_release_layout_frees_pages_and_widens_caller_back_to_rw(gms_thread):
-    """The mismatch escape: recover in-session, without ever dropping the lock."""
-    server, socket_path, thread = gms_thread
-    _writer, _ = _build_sealed_layout(socket_path)
-    thread.disconnect_rw_session()
-
-    standby = GMSClientMemoryManager(socket_path, device=0)
-    standby.connect(RequestedLockType.RW_DATA_OR_RW)
-    assert standby.granted_lock_type == GrantedLockType.RW_DATA
-
-    released = standby.release_layout()
-
-    assert released == 1
-    assert server._gms._allocations.allocation_count == 0
-    assert not server._gms._sessions.layout_committed
-    # State went down; capability went up -- RW_DATA only exists to protect a sealed
-    # layout, so with none left the restriction is meaningless and reshaping is allowed.
-    assert standby.granted_lock_type == GrantedLockType.RW
-    standby.create_mapping(size=4096, tag="kv_cache")
-    assert server._gms._allocations.allocation_count == 1
-
-
-@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
     """The one failure ALLOCATED exists to prevent: a reader on a live, mutating pool."""
     _server, socket_path, thread = gms_thread

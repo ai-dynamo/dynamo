@@ -25,7 +25,6 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataGetRequest,
     MetadataListRequest,
     MetadataPutRequest,
-    ReleaseLayoutRequest,
 )
 
 from .fsm import GMSFSM, Connection, ServerState, StateEvent
@@ -43,7 +42,6 @@ RW_REQUIRED: frozenset[type] = frozenset(
         MetadataDeleteRequest,
         CommitRequest,
         CommitLayoutRequest,
-        ReleaseLayoutRequest,
     }
 )
 
@@ -72,11 +70,12 @@ LAYOUT_MUTATING: frozenset[type] = frozenset(
     }
 )
 
-# A sealed-layout writer: everything a reader may do, plus writing bytes (which never
-# reaches the server) and abandoning the layout wholesale. Notably excludes CommitRequest
-# -- publishing contents that were never intended as a publication is deliberately not
-# reachable from here.
-RW_DATA_ALLOWED: frozenset[type] = RO_ALLOWED | {ReleaseLayoutRequest}
+# A sealed-layout writer. This being equal to RO_ALLOWED is meaningful rather than
+# accidental: everything an RW_DATA session actually does -- writing bytes into its own
+# mappings -- bypasses the server entirely, so its *RPC* surface really is a reader's.
+# The mode still differs from RO in the two places that matter: it holds the exclusive
+# writer slot, and its mappings are mapped PROT_READWRITE.
+RW_DATA_ALLOWED: frozenset[type] = RO_ALLOWED
 
 RW_ALLOWED: frozenset[type] = RW_REQUIRED | RO_ALLOWED
 
@@ -292,17 +291,6 @@ class GMSSessionManager:
         self._locking.transition(StateEvent.LAYOUT_COMMIT, conn)
         conn.mode = GrantedLockType.RW_DATA
 
-    def on_layout_release(self, conn: Connection) -> None:
-        """Unseal, and widen the caller back to RW.
-
-        The state drops (there is no longer a durable layout) while the caller's
-        capability rises -- RW_DATA exists only to protect a sealed layout, so once
-        there is none the restriction is meaningless. That is what lets a standby which
-        adopted an incompatible layout recover in-session, without ever dropping the lock.
-        """
-        self._locking.transition(StateEvent.LAYOUT_RELEASE, conn)
-        conn.mode = GrantedLockType.RW
-
     def check_operation(self, msg_type: type, conn: Connection) -> None:
         allowed = _ALLOWED_BY_MODE.get(conn.mode, frozenset())
         if msg_type not in allowed:
@@ -312,7 +300,7 @@ class GMSSessionManager:
             if conn.mode == GrantedLockType.RW_DATA and msg_type in LAYOUT_MUTATING:
                 raise OperationNotAllowed(
                     f"{msg_type.__name__} not allowed: the layout is committed. "
-                    f"Call release_layout() first to reshape it."
+                    f"Reconnect with RW to replace it."
                 )
             raise OperationNotAllowed(
                 f"{msg_type.__name__} not allowed for {conn.mode.name} session "
