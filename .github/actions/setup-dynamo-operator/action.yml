@@ -123,11 +123,16 @@ runs:
           BRANCH_SANITIZED="${BRANCH//\//-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-          if [[ ${#BRANCH_SANITIZED} -gt 10 ]]; then
+          BRANCH_SANITIZED="$(printf '%s' "${BRANCH_SANITIZED}" | sed -E 's/[^A-Za-z0-9_.-]+/-/g; s/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9]+$//')"
+          if [[ -z "${BRANCH_SANITIZED}" || ${#BRANCH_SANITIZED} -gt 10 ]]; then
             # Keep truncated cleanup keys valid and distinct across similarly named branches.
             BRANCH_HASH="$(printf '%s' "${BRANCH}" | sha256sum | cut -c1-6)"
             BRANCH_PREFIX="$(printf '%s' "${BRANCH_SANITIZED:0:10}" | sed -E 's/[^[:alnum:]]+$//')"
-            BRANCH_SANITIZED="${BRANCH_PREFIX}-${BRANCH_HASH}"
+            if [[ -n "${BRANCH_PREFIX}" ]]; then
+              BRANCH_SANITIZED="${BRANCH_PREFIX}-${BRANCH_HASH}"
+            else
+              BRANCH_SANITIZED="${BRANCH_HASH}"
+            fi
           fi
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
           echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
