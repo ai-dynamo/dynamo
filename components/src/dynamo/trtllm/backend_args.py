@@ -26,6 +26,11 @@ from .constants import DisaggregationMode, Modality
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 CANONICAL_AGGREGATED_MODE = "agg"
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+# Short-term compatibility knob for TRT-LLM versions with different
+# disagg_request_id node/machine id widths. Long term, import this from
+# tensorrt_llm.llmapi.disagg_utils.DISAGG_NODE_ID_BITS once Dynamo's
+# supported TRT-LLM baseline exposes it.
+DEFAULT_DISAGG_NODE_ID_MODULUS = 1021
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -227,6 +232,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "Worker disaggregation mode. Use 'agg' for aggregated serving, "
                 "'pd' for a combined prefill+decode worker, 'prefill', "
                 "'decode', or 'encode'."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--disagg-node-id-modulus",
+            env_var="DYN_TRTLLM_DISAGG_NODE_ID_MODULUS",
+            default=DEFAULT_DISAGG_NODE_ID_MODULUS,
+            arg_type=int,
+            help=(
+                "Modulo used to map Dynamo worker ids into TRT-LLM "
+                "disaggregated request-id node ids. Defaults to 1021 for "
+                "TRT-LLM versions that use a 10-bit machine_id. Set to 256 "
+                "for newer TRT-LLM versions that use an 8-bit node_id."
             ),
         )
         add_negatable_bool_argument(
@@ -505,6 +523,7 @@ class DynamoTrtllmConfig(ConfigBase):
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
+    disagg_node_id_modulus: int
     enable_multimodal: bool
     modality: Modality
     encode_endpoint: str
@@ -552,6 +571,8 @@ class DynamoTrtllmConfig(ConfigBase):
                 self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
+        if self.disagg_node_id_modulus <= 0:
+            raise ValueError("--disagg-node-id-modulus must be a positive integer")
         if self.enable_multimodal:
             if Modality.is_diffusion(self.modality):
                 raise ValueError(
