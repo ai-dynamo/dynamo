@@ -877,7 +877,7 @@ mod tests {
         config
             .set_engine_specific(
                 ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-                r#"{"0":"tcp://127.0.0.1:23280"}"#,
+                serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
             )
             .unwrap();
         let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
