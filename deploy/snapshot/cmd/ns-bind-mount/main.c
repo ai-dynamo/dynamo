@@ -49,8 +49,8 @@
  *   agentBinDir    = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
  *   SnapshotBinDir = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
  * Keep them in sync when either changes. */
-#define ALLOWED_SRC_PREFIX "/snapshot-binaries"      /* = injection.agentBinDir */
-#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries"  /* = injection.SnapshotBinDir */
+#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = injection.agentBinDir */
+#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = injection.SnapshotBinDir */
 
 /* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
 static int
@@ -61,8 +61,7 @@ check_path_prefix(const char* path, const char* allowed_prefix, const char* labe
     return -1;
   }
   size_t plen = strlen(allowed_prefix);
-  if (strncmp(path, allowed_prefix, plen) != 0 ||
-      (path[plen] != '\0' && path[plen] != '/')) {
+  if (strncmp(path, allowed_prefix, plen) != 0 || (path[plen] != '\0' && path[plen] != '/')) {
     fprintf(stderr, "%s must start with %s: %s\n", label, allowed_prefix, path);
     return -1;
   }
