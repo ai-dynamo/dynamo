@@ -18,7 +18,7 @@ You can provide multimodal inputs in the following ways:
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Full support for all image models |
 | **Image** | Pre-computed Embeddings (.safetensors) | Yes | Yes | Direct embedding files |
-| **Video** | HTTP/HTTPS URL | No | No | Not implemented |
+| **Video** | HTTP/HTTPS URL | Yes | Yes | Decoded per request; H.264/H.265 on NVDEC, other codecs via the TensorRT-LLM loader |
 | **Audio** | HTTP/HTTPS URL | No | No | Not implemented |
 
 ### Supported URL Formats
@@ -434,8 +434,11 @@ await register_model(
 
 ## Known Limitations
 
-- **No video support** - No video encoder implementation
 - **No audio support** - No audio encoder implementation
+- **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
+  runtime image ships no software video decoder. This needs a GPU with a video
+  decode engine and a container granted the `video` driver capability — see
+  [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
 - **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibility with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.
