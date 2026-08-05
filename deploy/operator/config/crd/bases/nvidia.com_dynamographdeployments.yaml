@@ -1446,7 +1446,9 @@ spec:
                         description: |-
                           ExtraPodSpec allows to override the main pod spec configuration.
                           It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
-                          that allows overriding the main container configuration.
+                          that allows overriding the main container configuration. New components must set
+                          extraPodSpec and provide a non-empty mainContainer image. Existing components created
+                          without extraPodSpec may remain unchanged.
                         properties:
                           activeDeadlineSeconds:
                             description: |-
@@ -11223,8 +11225,7 @@ spec:
                               DGD/DCD services apply this to service pods. Auto-created checkpoints
                               apply checkpoint job clients before creating the DynamoCheckpoint; manual
                               DynamoCheckpoint users must provide an already-prepared pod template.
-                              In each rendered pod, only matching container names are wired; absent
-                              names are ignored.
+                              Every name must match a user-declared container in the enclosing pod spec.
                             items:
                               maxLength: 63
                               minLength: 1
@@ -11747,6 +11748,15 @@ spec:
                                 type: string
                             type: object
                         type: object
+                      runtimeVersionOverride:
+                        description: |-
+                          RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+                          main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
+                          semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
+                          not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+                          It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+                        pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                        type: string
                       scalingAdapter:
                         description: |-
                           ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
@@ -11951,6 +11961,27 @@ spec:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                placement:
+                  description: |-
+                    Placement groups DGD-level scheduler placement signals (score, reporting
+                    state, and any future placement fields).
+                  properties:
+                    score:
+                      description: |-
+                        Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]
+                        where higher is better and 1.0 is the best possible placement.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    state:
+                      description: State indicates placement score reporting state.
+                      enum:
+                        - Reported
+                        - Partial
+                        - Unsupported
+                        - Unknown
+                      type: string
+                  type: object
                 restart:
                   description: Restart contains the status of the restart of the graph deployment.
                   properties:
@@ -12564,8 +12595,8 @@ spec:
                                 description: |-
                                   extraClientContainers lists additional user-declared containers that should
                                   be wired as GMS clients in service pods. Checkpoint Job clients are declared
-                                  under checkpoint.job.gmsClientContainers. In each rendered pod, only
-                                  matching container names are wired; absent names are ignored.
+                                  under checkpoint.job.gmsClientContainers. Every name must match a container
+                                  in the enclosing component's podTemplate.spec.containers.
                                 items:
                                   maxLength: 63
                                   minLength: 1
@@ -12699,16 +12730,15 @@ spec:
                         type: string
                       podTemplate:
                         description: |-
-                          podTemplate is the pod template used to create the component's pods.
-                          The operator injects its defaults (image, command, env, ports, probes,
-                          resources, volume mounts) into the container named `"main"` inside
-                          `podTemplate.spec.containers`, merging user overrides by name. If no
-                          container named `"main"` is present, the operator auto-generates it
-                          with standard defaults. All other containers in `podTemplate.spec.containers`
-                          are treated as user-managed sidecars: the operator does not inject
-                          defaults into them, so sidecars must specify required fields (e.g. `image`)
-                          themselves. The validation webhook rejects pod templates where a
-                          non-`"main"` container is missing a required field such as `image`.
+                          podTemplate defines the component's Pod configuration. New components must
+                          include a container named "main" with a non-empty image. Existing components
+                          created without a podTemplate may remain unchanged. The operator merges
+                          defaults into the main container.
+                          For DGD components whose main image tag is not a Dynamo semantic version,
+                          set runtimeVersionOverride explicitly.
+
+                          All other containers are user-managed sidecars and must specify their
+                          required fields, including image.
                         properties:
                           metadata:
                             description: |-
@@ -20840,6 +20870,16 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      runtimeVersionOverride:
+                        description: |-
+                          RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+                          main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
+                          no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
+                          parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
+                          example "1.4.0". It does not change the image or rendered Pod, and changing only this field does
+                          not trigger a rollout.
+                        pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                        type: string
                       scalingAdapter:
                         description: |-
                           scalingAdapter opts this component into using the
@@ -21370,6 +21410,33 @@ spec:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                placement:
+                  description: |-
+                    placement groups DGD-level scheduler placement signals (score, reporting
+                    state, and any future placement fields).
+                  properties:
+                    score:
+                      description: |-
+                        score is the DGD-level scheduler placement score aggregated from
+                        relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+                        is better and 1.0 represents the best possible placement. Aggregation
+                        uses the minimum across placement units so the value is a worst-placement
+                        signal for the graph. Scores are only comparable across DGDs that share
+                        the same scheduler scoring contract and version.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    state:
+                      description: |-
+                        state indicates placement score reporting state. See PlacementScoreState
+                        for the semantics of each value.
+                      enum:
+                        - Reported
+                        - Partial
+                        - Unsupported
+                        - Unknown
+                      type: string
+                  type: object
                 restart:
                   description: restart contains the status of a graph-level restart.
                   properties:

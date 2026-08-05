@@ -5,7 +5,92 @@
 
 use crate::common::protocols::{PrefillCost, SchedulingPolicy};
 use crate::common::sequence::ActiveSequence;
-use crate::kv_manager::KvManager;
+use crate::kv_manager::G1Manager;
+use crate::scheduler::vllm::request::RequestKvState;
+
+pub(super) trait PolicySequence {
+    fn len(&self) -> usize;
+    fn max_output_tokens(&self) -> usize;
+    fn generated_tokens(&self) -> usize;
+    fn num_input_tokens(&self) -> usize;
+    fn num_allocated_tokens(&self) -> usize;
+    fn current_known_blocks(&self) -> usize;
+    fn to_completion_blocks(&self) -> usize;
+    fn prefill_cost(&self, kv_manager: &G1Manager) -> PrefillCost;
+}
+
+impl PolicySequence for ActiveSequence {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        self.max_output_tokens()
+    }
+
+    fn generated_tokens(&self) -> usize {
+        self.generated_tokens()
+    }
+
+    fn num_input_tokens(&self) -> usize {
+        self.num_input_tokens()
+    }
+
+    fn num_allocated_tokens(&self) -> usize {
+        self.num_allocated_tokens()
+    }
+
+    fn current_known_blocks(&self) -> usize {
+        self.current_known_blocks()
+    }
+
+    fn to_completion_blocks(&self) -> usize {
+        self.to_completion_blocks()
+    }
+
+    fn prefill_cost(&self, kv_manager: &G1Manager) -> PrefillCost {
+        kv_manager.get_prefill_cost(self)
+    }
+}
+
+impl PolicySequence for RequestKvState {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        self.max_output_tokens()
+    }
+
+    fn generated_tokens(&self) -> usize {
+        self.generated_tokens()
+    }
+
+    fn num_input_tokens(&self) -> usize {
+        self.num_input_tokens()
+    }
+
+    fn num_allocated_tokens(&self) -> usize {
+        self.num_allocated_tokens()
+    }
+
+    fn current_known_blocks(&self) -> usize {
+        self.current_known_blocks()
+    }
+
+    fn to_completion_blocks(&self) -> usize {
+        self.to_completion_blocks()
+    }
+
+    fn prefill_cost(&self, kv_manager: &G1Manager) -> PrefillCost {
+        match self {
+            RequestKvState::Native { sequence, lease } => {
+                kv_manager.get_native_prefill_cost(sequence, lease)
+            }
+            RequestKvState::Kvbm(sequence) => kv_manager.get_prefill_cost(sequence),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum AdmissionDecision {
@@ -25,9 +110,9 @@ pub(super) struct WaitingAdmissionConfig {
     pub(super) mtp_enabled: bool,
 }
 
-pub(super) fn should_reject_for_model_len(
+pub(super) fn should_reject_for_model_len<S: PolicySequence>(
     policy: SchedulingPolicy,
-    sequence: &ActiveSequence,
+    sequence: &S,
     max_model_len: Option<usize>,
 ) -> bool {
     policy == SchedulingPolicy::Vllm
@@ -36,8 +121,8 @@ pub(super) fn should_reject_for_model_len(
 
 /// Number of additional tokens the request may generate before reaching
 /// either its requested output length or the model sequence-length limit.
-pub(super) fn remaining_generation_tokens(
-    sequence: &ActiveSequence,
+pub(super) fn remaining_generation_tokens<S: PolicySequence>(
+    sequence: &S,
     max_model_len: Option<usize>,
 ) -> usize {
     let requested_remaining = sequence
@@ -49,7 +134,10 @@ pub(super) fn remaining_generation_tokens(
     requested_remaining.min(context_remaining)
 }
 
-pub(super) fn generation_complete(sequence: &ActiveSequence, max_model_len: Option<usize>) -> bool {
+pub(super) fn generation_complete<S: PolicySequence>(
+    sequence: &S,
+    max_model_len: Option<usize>,
+) -> bool {
     remaining_generation_tokens(sequence, max_model_len) == 0
 }
 
@@ -78,17 +166,62 @@ pub(super) fn apply_mtp_prefix_recompute(
     prefill_cost
 }
 
+/// Apply the ordinary vLLM prefix-cache rule before any speculative-decoding
+/// adjustment. A request whose complete known context is cached must still
+/// recompute its final token to produce logits. For a preempted request this
+/// context includes retained generated tokens, matching vLLM's
+/// `request.num_tokens - 1` lookup bound. Because the shared scheduler
+/// allocates whole blocks, an exactly block-aligned context recomputes its
+/// final block.
+///
+/// TensorRT-LLM uses the same physical G1 manager but owns its compute policy,
+/// so this adjustment is deliberately selected by [`SchedulingPolicy`] rather
+/// than embedded in the block manager.
+pub(super) fn apply_prefix_recompute(
+    policy: SchedulingPolicy,
+    known_tokens: usize,
+    block_size: usize,
+    mtp_enabled: bool,
+    requires_logits: bool,
+    mut prefill_cost: PrefillCost,
+) -> PrefillCost {
+    if !requires_logits {
+        return prefill_cost;
+    }
+
+    if policy == SchedulingPolicy::Vllm {
+        let max_cached_tokens = known_tokens
+            .saturating_sub(1)
+            .checked_div(block_size)
+            .unwrap_or(0)
+            .saturating_mul(block_size);
+        if prefill_cost.cached_tokens > max_cached_tokens {
+            let recompute_tokens = prefill_cost.cached_tokens - max_cached_tokens;
+            debug_assert_eq!(recompute_tokens % block_size, 0);
+            prefill_cost.cached_tokens = max_cached_tokens;
+            prefill_cost.active_cached_tokens =
+                prefill_cost.active_cached_tokens.min(max_cached_tokens);
+            prefill_cost.new_tokens = prefill_cost.new_tokens.saturating_add(recompute_tokens);
+            prefill_cost.new_blocks = prefill_cost
+                .new_blocks
+                .saturating_add(recompute_tokens / block_size);
+        }
+    }
+
+    apply_mtp_prefix_recompute(policy, block_size, mtp_enabled, prefill_cost)
+}
+
 /// Decide whether the FIFO head can enter the shared scheduler core.
 ///
 /// vLLM reserves only the current known sequence. TRT-LLM
 /// `GUARANTEED_NO_EVICT` reserves the request through its maximum completion
 /// and accounts for the completion reservations of running requests.
-pub(super) fn decide_waiting_admission<'a>(
+pub(super) fn decide_waiting_admission<'a, S: PolicySequence + 'a>(
     config: WaitingAdmissionConfig,
-    sequence: &ActiveSequence,
+    sequence: &S,
     is_fresh: bool,
-    running: impl Iterator<Item = &'a ActiveSequence>,
-    kv_manager: &KvManager,
+    running: impl Iterator<Item = &'a S>,
+    kv_manager: &G1Manager,
 ) -> AdmissionDecision {
     let WaitingAdmissionConfig {
         policy,
@@ -114,10 +247,16 @@ pub(super) fn decide_waiting_admission<'a>(
         }
     }
 
-    let raw_prefill_cost = kv_manager.get_prefill_cost(sequence);
+    let raw_prefill_cost = sequence.prefill_cost(kv_manager);
     let g1_cached_tokens = raw_prefill_cost.cached_tokens;
-    let prefill_cost =
-        apply_mtp_prefix_recompute(policy, block_size, mtp_enabled, raw_prefill_cost);
+    let prefill_cost = apply_prefix_recompute(
+        policy,
+        sequence.len(),
+        block_size,
+        mtp_enabled,
+        !generation_complete(sequence, None),
+        raw_prefill_cost,
+    );
     let available = match policy {
         SchedulingPolicy::Vllm => num_gpu_blocks.saturating_sub(kv_manager.num_active_blocks()),
         SchedulingPolicy::TrtllmGuaranteedNoEvict => {
@@ -156,17 +295,17 @@ pub(super) fn decide_waiting_admission<'a>(
 /// the KV manager's active blocks), so only the remaining footprint is reserved.
 /// For a waiting candidate, only the active cached prefix is discounted
 /// (`active_cached_tokens`).
-fn blocks_needed_to_finish(
-    sequence: &ActiveSequence,
+fn blocks_needed_to_finish<S: PolicySequence>(
+    sequence: &S,
     block_size: usize,
-    kv_manager: &KvManager,
+    kv_manager: &G1Manager,
     prefill_cost: Option<&PrefillCost>,
 ) -> usize {
     let full_blocks = sequence.to_completion_blocks();
     if sequence.num_allocated_tokens() == 0 {
         let reusable_blocks = prefill_cost
             .map(|cost| cost.active_cached_tokens)
-            .unwrap_or_else(|| kv_manager.get_prefill_cost(sequence).active_cached_tokens)
+            .unwrap_or_else(|| sequence.prefill_cost(kv_manager).active_cached_tokens)
             / block_size;
         full_blocks.saturating_sub(reusable_blocks)
     } else {
@@ -182,11 +321,11 @@ fn blocks_needed_to_finish(
 /// `running` yields the active sequence of each currently-running request;
 /// `num_gpu_blocks` is the KV pool size and `kv_manager` supplies the count of
 /// physically allocated blocks.
-fn available_blocks<'a>(
-    running: impl Iterator<Item = &'a ActiveSequence>,
+fn available_blocks<'a, S: PolicySequence + 'a>(
+    running: impl Iterator<Item = &'a S>,
     num_gpu_blocks: usize,
     block_size: usize,
-    kv_manager: &KvManager,
+    kv_manager: &G1Manager,
 ) -> usize {
     let reserved: usize = running
         .map(|sequence| blocks_needed_to_finish(sequence, block_size, kv_manager, None))

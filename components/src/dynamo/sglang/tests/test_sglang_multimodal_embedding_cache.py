@@ -308,3 +308,368 @@ async def test_video_cache_key_includes_sampling_config(
     assert cache_handler.encoder.encode_mock.await_count == 2
     assert cache_handler._embedding_cache.get(first_key) is not None
     assert cache_handler._embedding_cache.get(second_key) is not None
+
+
+# --- NVDEC video routing -------------------------------------------------------
+
+_HANDLER_MOD = "dynamo.sglang.request_handlers.multimodal.encode_worker_handler"
+
+
+@pytest.fixture
+def nvdec_handler(cache_handler) -> MultimodalEncodeWorkerHandler:
+    """cache_handler wired with the attributes the NVDEC path reads."""
+    cache_handler.num_video_frames = 32
+    cache_handler._url_policy = SimpleNamespace()
+    return cache_handler
+
+
+def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+
+    # Disabled explicitly.
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    assert nvdec_handler._nvdec_video_enabled() is False
+    monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+
+    # No PyNvVideoCodec / CUDA.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: False)
+    assert nvdec_handler._nvdec_video_enabled() is False
+
+    # Available + a model type whose pre-decoded video path crashes upstream.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen3_vl"
+    assert nvdec_handler._nvdec_video_enabled() is False
+
+    # Available + a safe model type.
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    assert nvdec_handler._nvdec_video_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_build_encode_inputs_non_video_passthrough(
+    nvdec_handler, monkeypatch
+) -> None:
+    """Image modality never touches NVDEC; URLs pass through unchanged."""
+    called = False
+
+    async def _fail(_url):
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(nvdec_handler, "_maybe_nvdec_decoder", _fail)
+    urls = ["https://x/a.jpg", "https://x/b.jpg"]
+    out = await nvdec_handler._build_encode_inputs(urls, "IMAGE")
+    assert out == urls
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_build_encode_inputs_swaps_only_nvdec_hits(
+    nvdec_handler, monkeypatch
+) -> None:
+    """Each URL maps positionally to a decoder, bytes, or the URL itself.
+
+    Three outcomes, not two: a decoder for H.264/H.265, the already-fetched
+    bytes when the codec is not hardware-routed, and the URL only when nothing
+    was fetched at all.
+    """
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    decoder = object()  # stand-in for the NvdecVideoDecoder
+
+    async def _decode(url):
+        if url.endswith("h264.mp4"):
+            return decoder
+        if url.endswith("vp9.webm"):
+            return b"vp9-bytes"  # fetched under policy, handed straight over
+        return None  # nothing fetched (unsupported scheme)
+
+    monkeypatch.setattr(nvdec_handler, "_maybe_nvdec_decoder", _decode)
+    urls = ["https://x/h264.mp4", "https://x/vp9.webm", "ftp://x/other.mkv"]
+    out = await nvdec_handler._build_encode_inputs(urls, "VIDEO")
+    assert out[0] is decoder
+    assert out[1] == b"vp9-bytes"
+    assert out[2] == "ftp://x/other.mkv"
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_decoder_wraps_h264_only(nvdec_handler, monkeypatch) -> None:
+    """H.264 yields a decoder built from the fetched bytes, not decoded frames."""
+    decoder = object()
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
+    seen: dict = {}
+
+    def _make(data):
+        seen["data"] = data
+        return decoder
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _make)
+    assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") is decoder
+    # The decoder is handed the validated bytes, so SGLang never refetches the URL.
+    assert seen["data"] == b"bytes"
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
+    nvdec_handler, monkeypatch
+) -> None:
+    """VP9 (not HW-routed) yields the fetched bytes, never the URL.
+
+    Returning the URL made SGLang download the same payload a second time: it
+    doubles ingress and latency, fails outright on a one-use signed URL, and --
+    because SGLang applies no URL policy of its own, fetching http(s) straight
+    through ``get_mm_http_session`` -- means the bytes it decoded were never the
+    ones this handler validated, with a redirect free to resolve differently
+    between the two fetches.
+
+    Reported by Codex on #11836. Measured on GPU against a counting HTTP server:
+    two origin fetches for one request before this change, one after.
+    """
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.webm"),
+    )
+    fetch = AsyncMock(return_value=b"vp9-bytes")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "vp9")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
+
+    out = await nvdec_handler._maybe_nvdec_decoder("https://x/clip.webm")
+
+    assert out == b"vp9-bytes"
+    assert fetch.await_count == 1  # fetched once, and that copy is what travels on
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_decoder_rejects_non_http_scheme(
+    nvdec_handler, monkeypatch
+) -> None:
+    """A scheme that is neither http(s) nor a permitted local source is skipped.
+
+    Note file:// and data: are *not* in that group -- they are read through
+    read_local_media_bytes when the policy allows -- so this uses a scheme with
+    no reader at all. Validation is stubbed as succeeding so the assertion is
+    about scheme dispatch rather than about the policy refusing it.
+    """
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="ftp://example.invalid/clip.mp4"),
+    )
+    fetch = AsyncMock()
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    assert (
+        await nvdec_handler._maybe_nvdec_decoder("ftp://example.invalid/clip.mp4")
+        is None
+    )
+    fetch.assert_not_called()
+    fetch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_decoder_falls_back_on_error(
+    nvdec_handler, monkeypatch
+) -> None:
+    """A failed FETCH degrades to URL passthrough, because there are no bytes.
+
+    Distinct from a failed decoder build, which returns the bytes it already has
+    (see test_decode_failure_falls_back_to_the_fetched_bytes). The URL is the
+    fallback only when nothing was retrieved.
+    """
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") is None
+
+
+@pytest.mark.asyncio
+async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
+    nvdec_handler, monkeypatch
+) -> None:
+    """A refused URL must fail the request, not fall through to SGLang.
+
+    SGLang applies no URL policy: it fetches http(s) directly and resolves
+    file:// to a bare path. Returning None here restores the original URL, so a
+    refusal became an unvalidated fetch. Verified on GPU before the guard
+    existed -- a loopback URL the policy rejected was fetched anyway, and a
+    refused file:// path resolved to a readable local file.
+    """
+    from dynamo.common.http.url_validator import UrlValidationError
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(side_effect=UrlValidationError("blocked IP")),
+    )
+    fetch = AsyncMock()
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+
+    with pytest.raises(UrlValidationError):
+        await nvdec_handler._maybe_nvdec_decoder(
+            "http://169.254.169.254/latest/meta-data"
+        )
+    fetch.assert_not_called()
+
+    # ...and it propagates through the batch builder rather than being mapped
+    # back to the URL there.
+    with pytest.raises(UrlValidationError):
+        await nvdec_handler._build_encode_inputs(
+            ["http://169.254.169.254/latest/meta-data"], "VIDEO"
+        )
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_falls_back_to_the_fetched_bytes(
+    nvdec_handler, monkeypatch
+) -> None:
+    """A genuine decode failure degrades to the bytes, not to an error or the URL.
+
+    Two things at once: the refusal guard must not turn a decode failure into a
+    raised error, and the fallback must not hand back the URL -- the bytes are
+    already here and were fetched under policy, so making SGLang refetch them
+    would reintroduce the second request for the one case NVDEC was meant to
+    help.
+    """
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
+
+    def _boom(_data):
+        raise RuntimeError("NVDEC init failed")
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _boom)
+    assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") == b"bytes"
+    out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+    assert out == [b"bytes"]
+
+
+@pytest.mark.asyncio
+async def test_video_routes_through_nvdec_with_cache_disabled(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC must run when the embedding cache is off -- the default config.
+
+    Regression for the case where the NVDEC conversion lived only inside
+    ``_encode_with_cache``. ``--multimodal-embedding-cache-capacity-gb`` defaults
+    to 0, so a stock deployment took the no-cache branch, handed SGLang the raw
+    URL, and every H.264/H.265 request failed for want of a decoder in the
+    codec-compliant image. The earlier serve tests all set a non-zero capacity,
+    which hid it.
+    """
+    nvdec_handler._embedding_cache = None  # the default
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+
+    decoder = object()  # stand-in for the NvdecVideoDecoder
+
+    async def _decode(_url):
+        return decoder
+
+    monkeypatch.setattr(nvdec_handler, "_maybe_nvdec_decoder", _decode)
+
+    video_url = "https://example.com/clip.mp4"
+    nvdec_handler.encoder.encode_mock.return_value = (
+        torch.tensor([2, 3, 4]),
+        torch.arange(24, dtype=torch.float32).reshape(6, 4),
+        {"second_per_grid_ts": [0.5], "video_timestamps": [[0.25, 0.75]]},
+    )
+
+    transfer_future = asyncio.get_running_loop().create_future()
+    transfer_future.set_result(None)
+
+    class _DummyEmbeddingSender:
+        async def send_embeddings(self, embeddings):
+            return (
+                TransferRequest(
+                    embeddings_shape=list(embeddings.shape),
+                    embedding_dtype_str=str(embeddings.dtype),
+                    serialized_request={"kind": "mock-transfer"},
+                ),
+                transfer_future,
+            )
+
+    class _DummyPdWorkerClient:
+        async def round_robin(self, request_json, context=None):
+            async def _responses():
+                yield json.dumps({"token_ids": [7], "finished": True, "text": ""})
+
+            return _responses()
+
+    nvdec_handler.embedding_sender = _DummyEmbeddingSender()
+    nvdec_handler.pd_worker_client = _DummyPdWorkerClient()
+
+    raw_request = {
+        "token_ids": [101, nvdec_handler.video_token_id, 102],
+        "stop_conditions": {"max_tokens": 8},
+        "sampling_options": {"temperature": 0.0},
+        "multi_modal_data": {"video_url": [{"Url": video_url}]},
+    }
+
+    async for _ in nvdec_handler.generate(raw_request, context=None):
+        pass
+
+    # The decoder reaches SGLang, not the URL. Asserting on the URL would pass
+    # against the buggy version.
+    nvdec_handler.encoder.encode_mock.assert_awaited_once_with(
+        [decoder], Modality.VIDEO
+    )
+
+
+def test_load_video_passthrough_patches_the_encode_server_binding() -> None:
+    """The passthrough must reach the binding encode_server actually calls.
+
+    Regression: an earlier revision patched base_processor and sglang.srt.utils
+    but not encode_server, which does its own ``from sglang.srt.utils import
+    load_video``. Every unit test passed -- they stubbed the decoder factory, so
+    load_video was never reached -- while the deployed encode worker rejected
+    each video request with "Unsupported video input type" and returned 400.
+    """
+    encode_server = pytest.importorskip(
+        "sglang.srt.disaggregation.encode_server",
+        reason="SGLang required to verify the patch target",
+    )
+    from sglang.srt.utils.video_decoder import VideoDecoderWrapper
+
+    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+        _install_load_video_passthrough,
+    )
+
+    _install_load_video_passthrough()
+    patched = encode_server.load_video
+    assert getattr(patched, "_dynamo_nvdec_passthrough", False), (
+        "encode_server.load_video is unpatched; NVDEC decoders will be rejected "
+        "by SGLang at request time"
+    )
+
+    # A pre-built decoder passes straight through instead of raising.
+    # __new__ skips __init__, so set _tmp_path explicitly: the finaliser reads it
+    # and would otherwise raise AttributeError during GC, which pytest surfaces
+    # as PytestUnraisableExceptionWarning -- an error under this repo's
+    # filterwarnings=error.
+    sentinel = VideoDecoderWrapper.__new__(VideoDecoderWrapper)
+    sentinel._tmp_path = None
+    assert patched(sentinel) is sentinel
+
+    # Anything else still goes to the original implementation.
+    with pytest.raises(Exception):
+        patched(object())
+
+    _install_load_video_passthrough()  # idempotent
+    assert encode_server.load_video is patched

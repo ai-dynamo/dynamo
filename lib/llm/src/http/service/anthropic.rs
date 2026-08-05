@@ -390,6 +390,14 @@ async fn anthropic_messages(
                 format!("{e:#}"),
             );
         }
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Validation);
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                dynamo_err.message(),
+            );
+        }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
             inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
@@ -439,6 +447,9 @@ async fn anthropic_messages(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let mut engine_stream = engine_stream;
+        // Clone for the inner cancellation watch; the original `ctx` is handed
+        // to `monitor_for_disconnects` below.
+        let cancel_ctx = ctx.clone();
 
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
@@ -448,24 +459,48 @@ async fn anthropic_messages(
             }
 
             let mut saw_error = false;
+            let mut cancelled = false;
 
-            while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
-                    &annotated_chunk,
-                    &mut response_collector,
-                    &mut http_queue_guard,
-                );
+            // Keep a single cancellation future alive across chunks — recreating
+            // it per token churns the underlying Notify (see disconnect.rs).
+            let stopped = cancel_ctx.stopped();
+            tokio::pin!(stopped);
 
-                let Some(stream_resp) = annotated_chunk.data else {
-                    if annotated_chunk.event.as_deref() == Some("error") {
-                        saw_error = true;
+            loop {
+                tokio::select! {
+                    // Prefer draining a ready backend chunk before honoring a
+                    // cancel so no already-generated token is dropped.
+                    biased;
+                    maybe_chunk = engine_stream.next() => {
+                        let Some(annotated_chunk) = maybe_chunk else {
+                            break; // backend stream ended normally
+                        };
+                        process_response_and_observe_metrics(
+                            &annotated_chunk,
+                            &mut response_collector,
+                            &mut http_queue_guard,
+                        );
+
+                        let Some(stream_resp) = annotated_chunk.data else {
+                            if annotated_chunk.event.as_deref() == Some("error") {
+                                saw_error = true;
+                            }
+                            continue;
+                        };
+
+                        converter.append_chunk_events(&stream_resp, &mut events);
+                        for event in events.drain(..) {
+                            yield event.map_err(axum::Error::new);
+                        }
                     }
-                    continue;
-                };
-
-                converter.append_chunk_events(&stream_resp, &mut events);
-                for event in events.drain(..) {
-                    yield event.map_err(axum::Error::new);
+                    _ = &mut stopped => {
+                        // Client disconnected (or the request was otherwise
+                        // cancelled). Best-effort flush the terminal usage +
+                        // message_stop below so a still-writable proxy records
+                        // the final token counts for the tokens produced so far.
+                        cancelled = true;
+                        break;
+                    }
                 }
             }
 
@@ -476,6 +511,14 @@ async fn anthropic_messages(
             }
             for event in events.drain(..) {
                 yield event.map_err(axum::Error::new);
+            }
+
+            if cancelled {
+                // Park so the outer `monitor_for_disconnects` (whose select is
+                // biased toward the stream) forwards the finalizer events above,
+                // then observes the stop itself and records the request as
+                // cancelled rather than completed.
+                std::future::pending::<()>().await;
             }
         };
 
@@ -491,7 +534,7 @@ async fn anthropic_messages(
         // Non-streaming path: aggregate stream into single response
 
         // Check first event for backend errors using the openai helper
-        let stream_with_check = super::openai::check_for_backend_error(engine_stream)
+        let stream_with_check = super::openai::check_for_backend_error(engine_stream, None)
             .await
             .map_err(|(status, _json_err)| {
                 // check_for_backend_error has already sanitized the body and
@@ -859,6 +902,31 @@ fn anthropic_sanitized_error_with_details(
         .into_response()
 }
 
+/// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
+/// error chain. Request validation surfaces `InvalidArgument`, while backends
+/// that reject bad input (e.g. Python `ValueError`/`TypeError` wrapped by
+/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`; both are client
+/// input errors and warrant an HTTP 400 rather than a generic 500.
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return Some(dynamo_error);
+        }
+        current = error.source();
+    }
+    None
+}
+
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
 fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
@@ -967,5 +1035,23 @@ mod tests {
 
         assert_eq!(nvext.backend_instance_id, None);
         assert_eq!(nvext.decode_worker_id, None);
+    }
+
+    #[test]
+    fn anthropic_invalid_argument_is_found_through_error_context() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("invalid request")
+                .build(),
+        )
+        .context("request validation failed");
+
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(|error| error.message()),
+            Some("invalid request")
+        );
     }
 }

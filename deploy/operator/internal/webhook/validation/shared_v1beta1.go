@@ -36,9 +36,11 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx      context.Context
-	mgr      ctrl.Manager
-	warnings admission.Warnings
+	ctx                                context.Context
+	mgr                                ctrl.Manager
+	warnings                           admission.Warnings
+	runtimeVersionSource               runtimeVersionValidationSource
+	allowMissingRuntimeVersionOverride bool
 }
 
 func (v *sharedValidation) warn(message string) {
@@ -121,7 +123,22 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			fldPath.Child("experimental"),
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
+			podTemplateContainers(spec.PodTemplate),
 		)...)
+	}
+
+	// Validate runtime compatibility against the source-version fields.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
 	}
 
 	return allErrs
@@ -179,28 +196,17 @@ func (v *sharedValidation) validateExperimentalSpec(
 	fldPath *field.Path,
 	componentType nvidiacomv1beta1.ComponentType,
 	resources corev1.ResourceRequirements,
+	containers []corev1.Container,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if experimental.GPUMemoryService != nil {
-		gpuMemoryServicePath := fldPath.Child("gpuMemoryService")
-		switch componentType {
-		case nvidiacomv1beta1.ComponentTypeWorker,
-			nvidiacomv1beta1.ComponentTypePrefill,
-			nvidiacomv1beta1.ComponentTypeDecode:
-		default:
-			allErrs = append(allErrs, field.Forbidden(
-				gpuMemoryServicePath,
-				"GPU memory service is only supported for worker, prefill, or decode components",
-			))
-		}
-
-		gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
-		if err != nil || gpuCount < 1 {
-			allErrs = append(allErrs, field.Forbidden(
-				gpuMemoryServicePath,
-				"GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
-			))
-		}
+		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
+			experimental.GPUMemoryService,
+			fldPath.Child("gpuMemoryService"),
+			componentType,
+			resources,
+			containers,
+		)...)
 	}
 	if experimental.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpec(
@@ -226,6 +232,64 @@ func (v *sharedValidation) validateExperimentalSpec(
 			"GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
 		))
 	}
+	return allErrs
+}
+
+// validateGPUMemoryServiceSpec validates gpuMemoryService. gpuMemoryService and fldPath must not be nil.
+func (v *sharedValidation) validateGPUMemoryServiceSpec(
+	gpuMemoryService *nvidiacomv1beta1.GPUMemoryServiceSpec,
+	fldPath *field.Path,
+	componentType nvidiacomv1beta1.ComponentType,
+	resources corev1.ResourceRequirements,
+	containers []corev1.Container,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Restrict GMS to component types that own GPU-backed workloads.
+	switch componentType {
+	case nvidiacomv1beta1.ComponentTypeWorker,
+		nvidiacomv1beta1.ComponentTypePrefill,
+		nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"GPU memory service is only supported for worker, prefill, or decode components",
+		))
+	}
+
+	// Require the main container to expose at least one GPU to GMS.
+	gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
+	if err != nil || gpuCount < 1 {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
+		))
+	}
+
+	// Skip container-client validation for the inter-pod topology.
+	if effectiveGMSMode(gpuMemoryService.Mode) != nvidiacomv1beta1.GMSModeIntraPod {
+		return allErrs
+	}
+
+	// Validate every GMS client reference at its indexed field path.
+	seen := make(map[string]struct{}, len(gpuMemoryService.ExtraClientContainers))
+	extraClientContainersPath := fldPath.Child("extraClientContainers")
+	for i, name := range gpuMemoryService.ExtraClientContainers {
+		clientPath := extraClientContainersPath.Index(i)
+		if _, exists := seen[name]; exists {
+			allErrs = append(allErrs, field.Duplicate(clientPath, name))
+			continue
+		}
+		seen[name] = struct{}{}
+		if !hasContainerNamed(containers, name) {
+			allErrs = append(allErrs, field.Invalid(
+				clientPath,
+				name,
+				"does not name a container in podTemplate.spec.containers",
+			))
+		}
+	}
+
 	return allErrs
 }
 
@@ -330,6 +394,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	fldPath *field.Path,
 	canModifyReplicas bool,
 	ownerKind schema.GroupKind,
+	validateGPUMemoryServiceNewState bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
@@ -369,7 +434,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.Experimental,
 			oldComponent.Experimental,
 			fldPath.Child("experimental"),
-			ownerKind,
+			experimentalSpecUpdateValidationOptions{
+				ownerKind:                        ownerKind,
+				componentType:                    newComponent.ComponentType,
+				resources:                        dynamo.GetMainContainerResources(newComponent),
+				containers:                       podTemplateContainers(newComponent.PodTemplate),
+				validateGPUMemoryServiceNewState: validateGPUMemoryServiceNewState,
+			},
 		)...)
 	} else if oldComponent.Experimental != nil {
 		oldGMS := gpuMemoryServiceForExperimental(oldComponent.Experimental)
@@ -386,6 +457,22 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				fldPath.Child("experimental", "failover"),
 				nil,
 				fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			))
+		}
+	}
+
+	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		if newImage == "" && oldImage != "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
 			))
 		}
 	}
@@ -410,22 +497,40 @@ func (v *sharedValidation) validateTopologyConstraintUpdate(
 	)}
 }
 
+type experimentalSpecUpdateValidationOptions struct {
+	ownerKind                        schema.GroupKind
+	componentType                    nvidiacomv1beta1.ComponentType
+	resources                        corev1.ResourceRequirements
+	containers                       []corev1.Container
+	validateGPUMemoryServiceNewState bool
+}
+
 // validateExperimentalSpecUpdate validates an experimental spec update.
-// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and ownerKind.Kind must not be empty.
+// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and options.ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateExperimentalSpecUpdate(
 	newExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	oldExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
-	ownerKind schema.GroupKind,
+	options experimentalSpecUpdateValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newGMS := newExperimental.GPUMemoryService
+	if newGMS != nil && options.validateGPUMemoryServiceNewState {
+		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
+			newGMS,
+			fldPath.Child("gpuMemoryService"),
+			options.componentType,
+			options.resources,
+			options.containers,
+		)...)
+	}
+
 	oldGMS := gpuMemoryServiceForExperimental(oldExperimental)
 	if isInterPodGMS(newGMS) != isInterPodGMS(oldGMS) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("gpuMemoryService", "mode"),
 			k8sptr.Deref(newGMS, nvidiacomv1beta1.GPUMemoryServiceSpec{}).Mode,
-			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
 		))
 	}
 
@@ -435,7 +540,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover"),
 			newFailover,
-			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
 		))
 	}
 	if isInterPodFailover(newFailover) && isInterPodFailover(oldFailover) &&
@@ -443,7 +548,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
-			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
+			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", options.ownerKind.Kind),
 		))
 	}
 	return allErrs

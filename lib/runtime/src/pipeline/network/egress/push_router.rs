@@ -13,7 +13,7 @@ use crate::{
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
-        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn,
+        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
@@ -149,9 +149,10 @@ where
     /// Number of round robin requests handled. Used to decide which server is next.
     round_robin_counter: Arc<AtomicU64>,
 
-    /// The next step in the chain. PushRouter (this object) picks an instances,
-    /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
-    addressed: Arc<AddressedPushRouter>,
+    /// The final hop: after selecting an instance, `PushRouter` hands it to this
+    /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
+    /// A trait object so an alternate transport can swap it out.
+    addressed: Arc<dyn StreamingDispatch<T, U>>,
 
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
@@ -320,11 +321,14 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
 /// a migratable `Disconnected` error. Uses raw `list_and_watch` events
 /// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
 /// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
-fn spawn_instance_removal_watcher(
+fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
-    addressed: Arc<AddressedPushRouter>,
+    dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) {
+) where
+    T: Data + Serialize + 'static,
+    U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
+{
     use crate::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
@@ -388,23 +392,12 @@ fn spawn_instance_removal_watcher(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    let n = addressed.cancel_instance_streams(eid).await;
-                                    if n > 0 {
-                                        tracing::warn!(
-                                            namespace = %eid.namespace,
-                                            component = %eid.component,
-                                            endpoint = %eid.endpoint,
-                                            instance_id = eid.instance_id,
-                                            cancelled = n,
-                                            "Cancelled pending response streams for removed \
-                                             instance (discovery-driven cleanup)"
-                                        );
-                                    }
+                                    dispatch.on_instance_removed(eid).await;
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                addressed.clear_instance_tombstone(&eid).await;
+                                dispatch.on_instance_added(&eid).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -558,7 +551,8 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -619,7 +613,8 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -649,6 +644,49 @@ where
         };
 
         Ok(router)
+    }
+
+    /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
+    /// as the final hop. Fault detection is on, so the dispatch's `ErrorType`
+    /// mapping drives report-down / overload / migration as usual.
+    ///
+    /// Wires frontend-local occupancy only — no `WorkerLoadMonitor` and no
+    /// multimodal cache indexer, so `RouterMode::DeviceAwareWeighted` is
+    /// non-functional; a caller needing those must extend it.
+    pub async fn from_client_with_dispatch(
+        client: Client,
+        router_mode: RouterMode,
+        dispatch: Arc<dyn StreamingDispatch<T, U>>,
+    ) -> anyhow::Result<Self> {
+        let occupancy_state = if matches!(
+            router_mode,
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
+        ) {
+            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            dispatch.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
+        Ok(PushRouter {
+            client,
+            addressed: dispatch,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            fault_detection_enabled: true,
+            response_timeout: response_inactivity_timeout(),
+            occupancy_state,
+            multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
+            _phantom: PhantomData,
+        })
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
@@ -776,19 +814,27 @@ where
             .await
     }
 
-    /// Issue a request to a specific endpoint
+    /// Issue a request to exactly one endpoint without transport fallback.
     pub async fn direct(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        self.direct_within(request, instance_id, None).await
+        tracing::info!(
+            router_mode = "direct",
+            worker_id = instance_id,
+            "Selected worker"
+        );
+        self.generate_with_fault_detection(instance_id, request, TransportFallback::Deny)
+            .await
     }
 
-    /// Like [`direct`], but if the selected instance disappears between selection and dispatch,
-    /// the internal reselection is constrained to `allowed_fallback` (when `Some`). Callers that
-    /// pre-narrowed the candidate set (e.g. LoRA replica-set filtering) pass that set so the
-    /// vanished-instance fallback cannot escape it and route to an arbitrary worker.
+    /// Dispatch to a selected endpoint with transport fallback.
+    ///
+    /// Unlike [`Self::direct`], if the selected instance disappears between selection and
+    /// dispatch, this method may reselect another worker. When `allowed_fallback` is `Some`,
+    /// reselection is constrained to that set; callers that pre-narrowed the candidates (e.g.
+    /// LoRA replica-set filtering) use it to prevent fallback to an arbitrary worker.
     pub async fn direct_within(
         &self,
         request: SingleIn<T>,
@@ -812,19 +858,10 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // When fault detection is disabled, check the raw discovery list
-        // (not filtered by report_instance_down) so transient failures
-        // don't poison the instance for subsequent retries.
-        let found = {
-            if self.fault_detection_enabled {
-                let routing_instances = self.client.routing_instances();
-                routing_instances.routable_ids().contains(&instance_id)
-            } else {
-                self.client.instance_ids().contains(&instance_id)
-            }
-        };
-
-        if !found {
+        // Fallback-enabled dispatch still honors a selected worker while it remains in
+        // discovery. Local inhibition only filters worker selection owned by this router;
+        // fallback is considered only if the selected worker disappears after this check.
+        if !self.client.instance_ids().contains(&instance_id) {
             return Err(DynamoError::builder()
                 .error_type(ErrorType::CannotConnect)
                 .message(format!(
@@ -1342,10 +1379,10 @@ where
             )
         };
 
-        self.check_workers_available(instance_id, &request_id)?;
-
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, fallback)?;
+        self.check_workers_available(instance_id, &request_id)?;
+
         let metadata = prepare(&mut request, instance_id)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
@@ -1407,10 +1444,10 @@ where
     }
 
     /// Resolve `(instance_id, address, transport_kind_label, Instance)` for
-    /// the selected worker. If the instance has disappeared between selection
-    /// and dispatch, fall back to one other instance from `free_ids` (same
-    /// filter as pre-selection) and return the updated id so the caller can
-    /// `report_instance_down` the right worker on later failures.
+    /// the selected worker. If that worker has disappeared, apply the caller's
+    /// fallback policy. `CannotConnect` is returned when fallback is forbidden
+    /// or when a selected fallback disappears before its transport can be
+    /// resolved.
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1440,11 +1477,14 @@ where
         let allowed_fallback = match fallback {
             TransportFallback::Allow => None,
             TransportFallback::Deny => {
-                return Err(anyhow::anyhow!(
-                    "Instance {} not found for endpoint {}",
-                    instance_id,
-                    self.client.endpoint.id()
-                ));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "instance_id={instance_id} not found for endpoint {}",
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
             }
             TransportFallback::Within(allowed) => Some(allowed),
         };
@@ -1461,14 +1501,20 @@ where
                     "Instance disappeared during routing, reselecting"
                 );
                 let (addr, kind, inst) = lookup(id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Fallback instance {} also not found for endpoint {}",
-                        id,
-                        self.client.endpoint.id()
-                    )
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Fallback instance {} also not found for endpoint {}",
+                            id,
+                            self.client.endpoint.id()
+                        ))
+                        .build()
                 })?;
                 Ok((id, addr, kind, inst))
             }
+            // TODO(https://github.com/ai-dynamo/dynamo/issues/12383): Distinguish
+            // no discoverable fallback from pool-wide overload and return the
+            // appropriate typed error for each case.
             None => Err(anyhow::anyhow!(
                 "Instance {} not found and no other instances available for endpoint {}",
                 instance_id,
@@ -1615,9 +1661,9 @@ where
             router_mode = ?self.router_mode,
         );
 
-        self.check_workers_available(instance_id, &request_id)?;
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, TransportFallback::Allow)?;
+        self.check_workers_available(instance_id, &request_id)?;
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1765,6 +1811,24 @@ mod tests {
         fn err(&self) -> Option<DynamoError> {
             self.error.clone()
         }
+    }
+
+    fn assert_cannot_connect(error: &anyhow::Error) {
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
+            "expected CannotConnect error, got: {error}"
+        );
+        assert!(
+            !match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]),
+            "CannotConnect failure must not be masked as ResourceExhausted: {error}"
+        );
+    }
+
+    fn assert_not_cannot_connect(error: &anyhow::Error) {
+        assert!(
+            !match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
+            "fallback-enabled failure must preserve its existing error semantics: {error}"
+        );
     }
 
     struct StaticMultimodalCacheIndex {
@@ -2157,6 +2221,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_resolution_precedes_stale_overload_check() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_transport_precedes_stale_overload".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let stale_id = 99999;
+        client.override_instance_avail(vec![stale_id]);
+        client.set_overloaded_instances(&[stale_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let unary_error = router
+            .direct(SingleIn::new(42), stale_id)
+            .await
+            .unwrap_err();
+        assert_cannot_connect(&unary_error);
+
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
+        let bidirectional_error = router
+            .bidirectional_dispatch(stale_id, input)
+            .await
+            .unwrap_err();
+        assert_not_cannot_connect(&bidirectional_error);
+        assert!(
+            !match_error_chain(
+                bidirectional_error.as_ref(),
+                &[ErrorType::ResourceExhausted],
+                &[]
+            ),
+            "transport resolution must precede the stale overload check: {bidirectional_error}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn selected_overloaded_worker_is_rejected_before_dispatch() {
         const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -2491,6 +2600,70 @@ mod tests {
         rt.shutdown();
     }
 
+    /// Direct dispatch honors an upstream-selected worker even after local inhibition.
+    #[tokio::test]
+    async fn direct_dispatch_ignores_local_inhibition() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_bypasses_inhibition".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        // KV routing selects upstream and dispatches through PushRouter::direct.
+        let router = PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::KV)
+            .await
+            .unwrap();
+
+        client.report_instance_down(instance_id);
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "precondition: worker should be locally inhibited"
+        );
+
+        let result = router
+            .direct_within_prepared(
+                SingleIn::new(42),
+                instance_id,
+                None,
+                |_, selected_instance_id| {
+                    assert_eq!(selected_instance_id, instance_id);
+                    Err::<(), _>(anyhow::anyhow!("direct prepare sentinel"))
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("direct dispatch should reach request preparation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "direct prepare sentinel");
+
+        let missing_instance_id = instance_id.wrapping_add(1);
+        let result = router
+            .direct_within_prepared(SingleIn::new(42), missing_instance_id, None, |_, _| {
+                Ok::<(), anyhow::Error>(())
+            })
+            .await;
+        let error = match result {
+            Ok(_) => panic!("direct dispatch should reject a worker absent from discovery"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("instance_id={missing_instance_id} not found")),
+            "unexpected missing-worker error: {error}"
+        );
+
+        rt.shutdown();
+    }
+
     /// When the router selects an instance that has deregistered between selection
     /// and transport resolution, it should fall back to another available instance
     /// rather than returning a 500 error.
@@ -2519,32 +2692,18 @@ mod tests {
         let stale_id = real_id + 1000;
         client.override_instance_avail(vec![stale_id, real_id]);
 
-        // Build a router and call direct() targeting the *real* instance to
-        // verify the router can still resolve transport for known instances.
         let router =
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
-        // Round robin should succeed — even if it picks stale_id first, the
-        // fallback logic should resolve transport via real_id.
-        // We cannot fully test the network send without a worker, but we can
-        // verify it doesn't fail at the transport resolution stage by checking
-        // that the error (if any) is a transport/network error, not
-        // "Instance not found".
-        let request = SingleIn::new(42u64);
-        let result = router.generate(request).await;
-
-        // The request may fail at the network level (no actual worker), but it
-        // must NOT fail with "Instance X not found" — that would mean the
-        // fallback did not work.
-        if let Err(err) = &result {
-            let msg = format!("{err}");
-            assert!(
-                !msg.contains("not found"),
-                "Transport resolution should have fallen back, but got: {msg}"
-            );
-        }
+        // Exercise transport resolution directly. Sending a request to this
+        // registration would wait forever because the test intentionally has
+        // no worker handler.
+        let (resolved_id, _, _, _) = router
+            .resolve_transport(stale_id, TransportFallback::Allow)
+            .expect("normal routing should fall back from a stale worker");
+        assert_eq!(resolved_id, real_id);
 
         rt.shutdown();
     }
@@ -2625,7 +2784,9 @@ mod tests {
         let result = router.generate(request).await;
 
         assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
+        let error = result.unwrap_err();
+        assert_not_cannot_connect(&error);
+        let msg = error.to_string();
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
             "Expected clear error about missing instance with no fallback, got: {msg}"
@@ -2671,18 +2832,27 @@ mod tests {
             "constrained dispatch should fall back within the allowed worker set"
         );
         let disallowed = HashSet::new();
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
-                .is_err(),
-            "constrained dispatch must not fall back outside the allowed worker set"
-        );
-        let error = router
+        let disallowed_error = router
+            .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+            .unwrap_err();
+        assert_not_cannot_connect(&disallowed_error);
+
+        let exact_error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
             .unwrap_err();
+        assert_cannot_connect(&exact_error);
+
+        let second_stale_id = stale_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_id, second_stale_id]);
+        let stale_fallback_error = router
+            .resolve_transport(stale_id, TransportFallback::Allow)
+            .unwrap_err();
+        assert_cannot_connect(&stale_fallback_error);
         assert!(
-            error.to_string().contains("not found"),
-            "exact dispatch must reject the missing selected worker"
+            stale_fallback_error
+                .to_string()
+                .contains("Fallback instance"),
+            "expected fallback lookup failure, got: {stale_fallback_error}"
         );
 
         rt.shutdown();
@@ -2765,5 +2935,153 @@ mod tests {
         .unwrap();
 
         assert!(!map.contains_key(&endpoint_id));
+    }
+
+    /// A `StreamingDispatch` that records what the router hands the seam, so the
+    /// test can assert a *caller-supplied* dispatch (not just the default
+    /// `AddressedPushRouter`) receives the selected address/instance and the
+    /// discovery lifecycle events.
+    #[derive(Default)]
+    struct RecordingDispatch {
+        unary: std::sync::Mutex<Vec<(u64, String, Option<u64>)>>,
+        bidi: std::sync::Mutex<Vec<(String, u64)>>,
+        added: std::sync::Mutex<Vec<u64>>,
+        removed: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl RecordingDispatch {
+        fn canned_stream() -> ManyOut<TestResponse> {
+            let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+            ResponseStream::new(
+                Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
+                ctx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingDispatch<u64, TestResponse> for RecordingDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<u64>>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            let (addressed, _ctx) = request.transfer(());
+            let (payload, address, instance) = addressed.into_parts();
+            self.unary
+                .lock()
+                .unwrap()
+                .push((payload, address, instance.map(|i| i.id())));
+            Ok(Self::canned_stream())
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            instance: Instance,
+            address: String,
+            _input: ManyIn<u64>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            self.bidi.lock().unwrap().push((address, instance.id()));
+            Ok(Self::canned_stream())
+        }
+
+        async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+            self.removed.lock().unwrap().push(id.instance_id);
+        }
+
+        async fn on_instance_added(&self, id: &EndpointInstanceId) {
+            self.added.lock().unwrap().push(id.instance_id);
+        }
+    }
+
+    /// The transport seam must deliver to a caller-supplied `StreamingDispatch`:
+    /// unary and bidirectional requests arrive with the selected address and
+    /// instance, and discovery removal/re-addition reach its lifecycle hooks.
+    #[tokio::test]
+    async fn from_client_with_dispatch_delivers_requests_and_lifecycle() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_dispatch_seam".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Unary hop reaches the supplied dispatch with the selected worker.
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let unary = dispatch.unary.lock().unwrap();
+            assert_eq!(unary.len(), 1, "one unary dispatch expected");
+            let (payload, address, dispatched) = &unary[0];
+            assert_eq!(*payload, 42);
+            assert_eq!(*dispatched, Some(instance_id));
+            assert!(!address.is_empty(), "selected transport address expected");
+        }
+
+        // Bidirectional hop reaches the supplied dispatch with the same worker.
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+                1u64, 2u64,
+            ]))));
+        let mut stream = router.generate(input).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let bidi = dispatch.bidi.lock().unwrap();
+            assert_eq!(bidi.len(), 1, "one bidirectional dispatch expected");
+            assert_eq!(bidi[0].1, instance_id);
+            assert!(!bidi[0].0.is_empty());
+        }
+
+        // Gate on the initial-snapshot add before mutating discovery: this both
+        // asserts on_instance_added is delivered and guarantees the watcher is
+        // subscribed, so the removal broadcast can't race ahead of it.
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added (initial snapshot) not delivered to the supplied dispatch"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_removed not delivered to the supplied dispatch"
+        );
+
+        // A fresh add after re-registration must also reach the hook.
+        let adds_before = dispatch.added.lock().unwrap().len();
+        endpoint.register_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
+            "on_instance_added (re-registration) not delivered to the supplied dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Poll a predicate until it holds or a short deadline elapses; discovery
+    /// events reach the watcher's spawned task asynchronously.
+    async fn poll_until(mut pred: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if pred() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        pred()
     }
 }

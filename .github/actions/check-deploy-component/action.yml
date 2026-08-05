@@ -37,6 +37,7 @@ runs:
           --progress=plain \
           --build-context snapshot=../snapshot \
           --build-context operator=../operator \
+          --build-context operator-chart=../helm/charts/platform/components/operator \
           .
 
     - name: Set up Go
