@@ -9,7 +9,7 @@ kind: Kustomization
 sortOptions:
   order: fifo
 resources:
-  - "../_rdma"
+  - "../../base"
 components:
   - "../../../../../../kustomize/components/disagg-workers/nscale-ib"
   - "../../components/nscale-gpu-memory"

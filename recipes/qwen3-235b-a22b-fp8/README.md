@@ -54,18 +54,18 @@ kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 The Blackwell disaggregated recipe keeps the shared deployment in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`.
 Provider-specific deltas live in Kustomize Components and are selected by
 `trtllm/disagg/blackwell/.kustomize-matrix.yaml`.
-Overlay directories starting with `_` are intermediate and are not rendered. Shared Kustomize building blocks belong under
-`recipes/kustomize/components/`; the disaggregated provider Components use the
+Shared Kustomize building blocks belong under `recipes/kustomize/components/`;
+the disaggregated provider Components use the
 backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
 For cluster users, the checked-in `deploy-*.yaml` files are the stable deployment
 interface: review the matching provider manifest and apply it directly from GitHub.
 For recipe contributors, the source of truth is the matrix, `kustomize/base/`,
-recipe-local Components and intermediate `_` overlays, plus any referenced shared
-Components under `recipes/kustomize/components/`. Public overlay
+recipe-local Components, plus any referenced shared Components under
+`recipes/kustomize/components/`. Public overlay
 `kustomization.yaml` files and `deploy-*.yaml` files are generated artifacts:
 commit them for review, but do not edit them by hand.
-Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from the base and
-overlay YAML before matching rendered fields. Comments inside literal block scalars already render in place.
+Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from source YAML before matching rendered fields.
+Comments inside literal block scalars already render in place.
 
 | Rendered manifest | Provider fabric | Patch source |
 |-------------------|-----------------|--------------|

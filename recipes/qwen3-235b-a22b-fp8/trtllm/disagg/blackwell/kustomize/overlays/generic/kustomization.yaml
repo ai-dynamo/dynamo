@@ -9,4 +9,4 @@ kind: Kustomization
 sortOptions:
   order: fifo
 resources:
-  - "../_rdma"
+  - "../../base"
