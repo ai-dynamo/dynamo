@@ -35,7 +35,10 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
-from dynamo.common.multimodal.codec_errors import video_decoder_missing
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    video_decoder_missing,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -508,12 +511,15 @@ class MultimodalRequestProcessor:
                                 except ImportError as exc:
                                     # The vendor loader needs cv2, which the
                                     # image deliberately omits; its bare error
-                                    # names neither codec nor remedy.
+                                    # names neither codec nor remedy. Carry its
+                                    # text as the cause so the underlying
+                                    # reason still reaches the client.
                                     raise video_decoder_missing(
                                         "trtllm",
                                         "opencv-python-headless",
                                         "cv2",
                                         codec,
+                                        cause=str(exc),
                                     ) from exc
                     else:
                         try:
@@ -525,12 +531,24 @@ class MultimodalRequestProcessor:
                         except ImportError as exc:
                             # No bytes fetched on this branch, so no codec probe.
                             raise video_decoder_missing(
-                                "trtllm", "opencv-python-headless", "cv2", None
+                                "trtllm",
+                                "opencv-python-headless",
+                                "cv2",
+                                None,
+                                cause=str(exc),
                             ) from exc
                 except UrlValidationError as e:
                     raise HttpStatusError(400, str(e), url) from e
                 except HttpStatusError:
                     raise
+                except MissingMediaDecoderError as e:
+                    # A missing decoder is deployment configuration, not a bad
+                    # request: 500, not the 400 the generic handler below
+                    # assigns. The actionable text (codec, bounded spec,
+                    # installer command, vendor cause) is the message.
+                    raise HttpStatusError(
+                        500, f"Failed to load video ({url}): {e}", url
+                    ) from e
                 except Exception as e:
                     status = getattr(e, "status", None) or getattr(e, "code", None)
                     raise HttpStatusError(

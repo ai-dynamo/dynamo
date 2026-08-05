@@ -256,6 +256,22 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_load_video_batch_preserves_missing_decoder_error():
+    """The batch aggregate wraps failures in a generic Exception; the
+    missing-decoder type must survive it (review finding)."""
+    loader = VideoLoader()
+    err = video_loader_module.video_decoder_missing(
+        "vllm", "opencv-python-headless", "cv2", "vp9"
+    )
+    loader.load_video = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader.load_video_batch([{"Url": "https://example.com/x.mp4"}])
+
+    assert exc_info.value is err
+
+
+@pytest.mark.asyncio
 async def test_load_video_preserves_missing_decoder_error(monkeypatch):
     """The generic ValueError wrap must not erase the decoder-missing type.
 

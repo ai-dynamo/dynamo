@@ -239,8 +239,10 @@ async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None
             ep_disaggregated_params=None,
         )
 
-    # A client-visible 400, not a 500: the input is unsupported, not broken server.
-    assert excinfo.value.status == 400
+    # Contract change with the actionable-error work: a missing DECODER is
+    # deployment configuration, not a bad request, so this is now a 500 (the
+    # ImportError wrap classifies it), not the generic 400.
+    assert excinfo.value.status == 500
     message = str(excinfo.value)
     # Ours: the prefix and the offending URL, so the client knows which input failed.
     assert "Failed to load video" in message
@@ -248,6 +250,8 @@ async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None
     # The upstream reason is preserved verbatim rather than swallowed. Asserted as
     # "whatever the cause said survives", not as specific vendor wording.
     assert str(upstream_error) in message
+    # And the actionable guidance is present alongside it.
+    assert "install_media_decoders trtllm" in message
 
     nvdec.assert_not_called()  # VP9 must never take the hardware path
 
@@ -284,8 +288,10 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
             ep_disaggregated_params=None,
         )
 
-    # The processor maps everything to HttpStatusError; the actionable text
-    # must survive inside it.
+    # A missing decoder is a deployment gap: 500, never the generic 400.
+    assert exc_info.value.status == 500
     msg = str(exc_info.value)
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
     assert "install_media_decoders trtllm" in msg
+    # The vendor loader's own text survives as the cause.
+    assert "OpenCV (cv2) is required for video decoding" in msg

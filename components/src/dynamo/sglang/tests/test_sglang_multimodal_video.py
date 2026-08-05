@@ -205,14 +205,19 @@ def _bare_handler():
     return handler
 
 
-def _selective_find_spec(present: set[str]):
-    import importlib.util as _ilu
+def _selective_import(present: set[str]):
+    """Fake importlib.import_module for the preflight's real-import probe:
+    decoder modules import only when listed in `present` (a broken native
+    install behaves exactly like an absent one -- ImportError either way)."""
+    import importlib as _il
 
-    real = _ilu.find_spec
+    real = _il.import_module
 
     def fake(name, *args, **kwargs):
         if name in ("torchcodec", "decord"):
-            return object() if name in present else None
+            if name in present:
+                return object()
+            raise ImportError(f"No module named '{name}' (or broken install)")
         return real(name, *args, **kwargs)
 
     return fake
@@ -228,8 +233,6 @@ async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
     except-clause does not swallow the preflight error and pass the bytes on
     anyway.
     """
-    import importlib.util as _ilu
-
     import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
     from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
     from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -244,7 +247,7 @@ async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
     monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
-    monkeypatch.setattr(_ilu, "find_spec", _selective_find_spec(set()))
+    monkeypatch.setattr(ewh.importlib, "import_module", _selective_import(set()))
 
     handler = _bare_handler()
     with pytest.raises(MissingMediaDecoderError) as exc_info:
@@ -260,8 +263,6 @@ async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
 async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     """With decord importable the preflight stays silent and the validated
     bytes are handed to SGLang exactly as before."""
-    import importlib.util as _ilu
-
     import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
 
     async def fake_validate(url, policy):
@@ -274,7 +275,7 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
-    monkeypatch.setattr(_ilu, "find_spec", _selective_find_spec({"decord"}))
+    monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))
 
     handler = _bare_handler()
     result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")

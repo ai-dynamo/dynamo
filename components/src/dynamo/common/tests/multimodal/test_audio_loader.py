@@ -197,3 +197,17 @@ async def test_load_audio_missing_decoder_is_actionable():
     assert VALIDATED_SPECS["av"] in msg
     assert "install_media_decoders vllm" in msg
     assert "NVDEC does not decode audio" in msg
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_preserves_missing_decoder_error():
+    """The batch aggregate wraps failures in a generic Exception; the
+    missing-decoder type must survive it (review finding)."""
+    loader = AudioLoader()
+    err = audio_loader_module.audio_decoder_missing("vllm")
+    loader.load_audio = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/x.mp3"}])
+
+    assert exc_info.value is err

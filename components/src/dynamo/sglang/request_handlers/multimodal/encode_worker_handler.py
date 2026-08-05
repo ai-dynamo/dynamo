@@ -3,7 +3,6 @@
 
 import asyncio
 import importlib
-import importlib.util
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, Optional
@@ -84,6 +83,19 @@ except ImportError as e:
 
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
+
+
+def _software_video_decoder_imports() -> bool:
+    """True when SGLang's software video decoder (torchcodec or decord)
+    actually imports -- not merely resolves to a spec."""
+    for module in ("torchcodec", "decord"):
+        try:
+            importlib.import_module(module)
+            return True
+        except Exception:  # noqa: BLE001 - broken installs count as absent
+            continue
+    return False
+
 
 # SGLang model types whose video preprocessing needs per-frame timestamps from
 # ``video_metadata``. For these, ``_process_video_items`` runs
@@ -592,10 +604,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 # the codec is known and the message can be actionable. Runs
                 # only for an already-validated video URL, after fetch, so
                 # payload-validation errors keep precedence.
-                if (
-                    importlib.util.find_spec("torchcodec") is None
-                    and importlib.util.find_spec("decord") is None
-                ):
+                #
+                # Real import, not find_spec: a package whose files exist but
+                # whose native libraries cannot load has a spec and would pass
+                # a find_spec preflight only to fail deep in SGLang anyway.
+                # Success is cached in sys.modules, so the cost is first
+                # request only.
+                if not _software_video_decoder_imports():
                     raise video_decoder_missing("sglang", "decord2", "decord", codec)
                 # A software decoder exists; the bytes are already here and
                 # were fetched under policy. Hand them over instead of the URL.
@@ -629,7 +644,15 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # If the fetch itself failed there are no bytes and the URL is all
             # the caller has. If it succeeded and only the decoder construction
             # failed, pass the validated bytes on rather than making SGLang
-            # fetch them again.
+            # fetch them again -- but only if SGLang can actually decode them:
+            # this fallback leg reaches SGLang's software path exactly like the
+            # non-hardware-codec leg above, so it needs the same preflight, or
+            # a host with broken NVDEC and no software decoder gets the deep
+            # payload-blob error back.
+            if content is not None and not _software_video_decoder_imports():
+                raise video_decoder_missing(
+                    "sglang", "decord2", "decord", probe_video_codec(content)
+                ) from exc
             logger.warning(
                 "NVDEC decode failed for video URL (%s); falling back to %s",
                 exc,

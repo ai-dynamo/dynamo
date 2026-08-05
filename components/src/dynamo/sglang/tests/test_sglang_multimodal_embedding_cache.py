@@ -440,6 +440,11 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "vp9")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
+    # The passthrough contract now holds only when SGLang can actually decode
+    # the bytes; the codec-compliant test image ships no software decoder, so
+    # stub the preflight probe. The absent-decoder leg (actionable error) is
+    # covered in test_sglang_multimodal_video.py.
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
     out = await nvdec_handler._maybe_nvdec_decoder("https://x/clip.webm")
 
@@ -555,9 +560,47 @@ async def test_decode_failure_falls_back_to_the_fetched_bytes(
         raise RuntimeError("NVDEC init failed")
 
     monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _boom)
+    # Bytes fallback is only valid when SGLang can decode them; stub the
+    # preflight probe (the image ships no software decoder).
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
     assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") == b"bytes"
     out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
     assert out == [b"bytes"]
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_without_software_decoder_is_actionable(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC failed AND no software decoder exists: the bytes would only die
+    deep inside SGLang with the payload repr in the message, so the fallback
+    must raise the actionable error instead of passing them on."""
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
+
+    def _boom(_data):
+        raise RuntimeError("NVDEC init failed")
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _boom)
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: False
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4")
+
+    # h264 + NVDEC "available" but failing: the message still leads with the
+    # capability/hardware framing and carries the install remedy.
+    assert "install_media_decoders sglang" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

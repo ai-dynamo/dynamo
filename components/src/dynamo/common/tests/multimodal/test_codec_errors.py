@@ -77,6 +77,20 @@ def test_audio_message_has_no_hardware_alternative():
     assert "install_media_decoders vllm" in msg
 
 
+def test_cause_text_is_appended_and_optional(monkeypatch):
+    """The underlying decoder text must survive wraps whose handlers ship
+    only str(exc) to the client; absent a cause, no dangling suffix."""
+    monkeypatch.setattr(codec_errors, "nvdec_available", lambda: True)
+    with_cause = video_decoder_missing(
+        "vllm", "opencv-python-headless", "cv2", "vp9", cause="No module named 'cv2'"
+    )
+    assert "(decoder reported: No module named 'cv2')" in str(with_cause)
+    without = video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9")
+    assert "decoder reported" not in str(without)
+    audio = audio_decoder_missing("vllm", cause="Please install vllm[audio]")
+    assert "(decoder reported: Please install vllm[audio])" in str(audio)
+
+
 def test_error_is_not_a_value_error():
     """Handlers map ValueError to client 4xx; a missing decoder is deployment
     configuration and must not be blamed on the request."""

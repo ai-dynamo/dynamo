@@ -43,8 +43,24 @@ def _install_hint(backend: str, package: str) -> str:
     )
 
 
+def _with_cause(message: str, cause: str | None) -> str:
+    """Append the underlying decoder text so diagnostics survive the wrap.
+
+    ``raise ... from exc`` preserves the cause for tracebacks, but handlers
+    that ship only ``str(exc)`` to the client (HTTP error bodies) would drop
+    it -- and the underlying reason is part of this error's contract.
+    """
+    if cause:
+        return f"{message} (decoder reported: {cause})"
+    return message
+
+
 def video_decoder_missing(
-    backend: str, package: str, module: str, codec: str | None
+    backend: str,
+    package: str,
+    module: str,
+    codec: str | None,
+    cause: str | None = None,
 ) -> MissingMediaDecoderError:
     """Build the error for a video whose decode path has no decoder.
 
@@ -71,18 +87,26 @@ def video_decoder_missing(
             "Re-encode the input to H.264/H.265, or "
         )
     return MissingMediaDecoderError(
-        "Cannot decode video: " + lead + _install_hint(backend, package) + "."
+        _with_cause(
+            "Cannot decode video: " + lead + _install_hint(backend, package) + ".",
+            cause,
+        )
     )
 
 
-def audio_decoder_missing(backend: str) -> MissingMediaDecoderError:
+def audio_decoder_missing(
+    backend: str, cause: str | None = None
+) -> MissingMediaDecoderError:
     """Build the error for audio input with no decoder in the image.
 
     NVDEC never decodes audio, so unlike video there is no hardware
     alternative -- the only remedy is the PyAV install.
     """
     return MissingMediaDecoderError(
-        "Cannot decode audio: this input needs the PyAV decoder ('av'), which "
-        "this image deliberately does not ship, and NVDEC does not decode "
-        "audio. To enable audio input, " + _install_hint(backend, "av") + "."
+        _with_cause(
+            "Cannot decode audio: this input needs the PyAV decoder ('av'), which "
+            "this image deliberately does not ship, and NVDEC does not decode "
+            "audio. To enable audio input, " + _install_hint(backend, "av") + ".",
+            cause,
+        )
     )

@@ -9,11 +9,14 @@ from urllib.parse import urlparse
 import numpy as np
 
 from dynamo.common.http import HttpStatusError, fetch_bytes
-from dynamo.common.multimodal.codec_errors import audio_decoder_missing
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     validate_media_url,
+)
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    audio_decoder_missing,
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
@@ -163,7 +166,7 @@ class AudioLoader:
             # instead. NVDEC never decodes audio, so there is no hardware
             # alternative to mention.
             logger.error("No audio decoder available loading '%s'", audio_url)
-            raise audio_decoder_missing("vllm") from exc
+            raise audio_decoder_missing("vllm", cause=str(exc)) from exc
         except Exception as exc:
             logger.error("Error loading audio from %s: %s", audio_url, exc)
             raise ValueError(f"Failed to load audio from {audio_url}: {exc}") from exc
@@ -227,6 +230,7 @@ class AudioLoader:
         collective_exceptions: list[str] = []
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
+        decoder_error: MissingMediaDecoderError | None = None
         for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -240,6 +244,10 @@ class AudioLoader:
                     status_error = result
                 elif url_error is None and isinstance(result, UrlValidationError):
                     url_error = result
+                elif decoder_error is None and isinstance(
+                    result, MissingMediaDecoderError
+                ):
+                    decoder_error = result
                 continue
             loaded_audio.append(result)
 
@@ -247,6 +255,11 @@ class AudioLoader:
             raise status_error
         if url_error is not None:
             raise url_error
+        if decoder_error is not None:
+            # Keep the actionable type: the generic aggregate below would erase
+            # it, and a missing decoder is deployment configuration handlers
+            # must be able to distinguish from a bad request.
+            raise decoder_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))

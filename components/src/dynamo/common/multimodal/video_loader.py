@@ -184,7 +184,7 @@ class VideoLoader:
             return await asyncio.to_thread(media_io.load_bytes, content)
         except ImportError as exc:
             raise video_decoder_missing(
-                "vllm", "opencv-python-headless", "cv2", codec
+                "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
 
     async def load_video(self, video_url: str) -> tuple[np.ndarray, Dict[str, Any]]:
@@ -255,6 +255,7 @@ class VideoLoader:
         collective_exceptions: list[str] = []
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
+        decoder_error: MissingMediaDecoderError | None = None
         for media_item, result in zip(video_mm_items, results):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -268,6 +269,10 @@ class VideoLoader:
                     status_error = result
                 elif url_error is None and isinstance(result, UrlValidationError):
                     url_error = result
+                elif decoder_error is None and isinstance(
+                    result, MissingMediaDecoderError
+                ):
+                    decoder_error = result
                 continue
             frames, metadata = result
             loaded_videos.append((np.ascontiguousarray(frames), metadata))
@@ -276,6 +281,12 @@ class VideoLoader:
             raise status_error
         if url_error is not None:
             raise url_error
+
+        if decoder_error is not None:
+            # Keep the actionable type: the generic aggregate below would erase
+            # it, and a missing decoder is deployment configuration handlers
+            # must be able to distinguish from a bad request.
+            raise decoder_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))
