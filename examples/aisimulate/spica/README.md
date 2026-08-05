@@ -40,13 +40,7 @@ python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
-The GLM-5-FP8 Pareto-front configuration captures the setup from a previous experiment:
-
-> [!IMPORTANT]
-> This configuration uses `kv_load_ratio` and the KV-cache estimator from
-> `aiconfigurator_core.sdk.memory`. The default `dynamo-planner` image includes the matching AI
-> Configurator application and core packages. Candidate enumeration requires an AI Configurator
-> performance database for the B200/SGLang target.
+The GLM-5-FP8 Pareto-front configuration captures the setup from a previous experiment.
 
 Update `workload.trace_path` before running a trace-backed configuration.
 

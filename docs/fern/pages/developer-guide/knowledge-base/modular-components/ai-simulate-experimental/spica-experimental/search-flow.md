@@ -101,12 +101,6 @@ backends support each. `context_length` is threaded into KV feasibility.
 - A ranged `workload.kv_load_ratio` (Pareto) becomes a continuous per-trial dimension on the
   branch. A scalar ratio is injected as a constant.
 
-The default `dynamo-planner` image includes the matching AI Configurator application and core
-packages. Spica uses `aiconfigurator_core.sdk.memory` for both the pre-search KV-capacity filter and
-the candidate-specific concurrency derived from `kv_load_ratio`. A backend with no matching
-performance database follows the failure policy above; Spica does not use the naive memory
-estimator.
-
 ### 5. Per-branch Vizier study loop
 
 For each branch, a `BranchSampler` (`make_branch_sampler`, study id

@@ -59,20 +59,10 @@ Spica source, documentation, and examples were migrated from
 
 ## Current Limitations
 
-The default `dynamo-planner` image installs matching `aiconfigurator` and
-`aiconfigurator-core` packages. Spica imports the KV-cache estimator from
-`aiconfigurator_core.sdk.memory`, so the packaged dependencies support both KV-capacity filtering
-and `kv_load_ratio` workloads:
-
-- Spica applies the pre-search KV-capacity shape filter before Replay and the GPU-budget checks
-  evaluate each candidate.
-- `kv_load_ratio` uses the estimator to convert a relative load into candidate-specific
-  concurrency.
-
-KV-capacity calculation requires an AI Configurator performance database for the target
-`(hardware_sku, backend)`. If no database is available, branch enumeration removes that backend and
-continues with any viable backend or deployment mode. If none remain, Spica raises
-`NoViableParallelConfig`. Spica does not use the naive memory-estimation fallback.
+KV-capacity filtering and `kv_load_ratio` require an AI Configurator performance database for the
+target `(hardware_sku, backend)`. Branch enumeration drops targets without one and raises
+`NoViableParallelConfig` only when no backend or deployment mode remains. Spica does not use the
+naive memory-estimation fallback.
 
 Treat workloads and search modes not covered by image smoke tests as unsupported experimental paths.
 See [Traffic](traffic.md#kv_load_ratio-candidate-relative-concurrency) for the KV-load contract.

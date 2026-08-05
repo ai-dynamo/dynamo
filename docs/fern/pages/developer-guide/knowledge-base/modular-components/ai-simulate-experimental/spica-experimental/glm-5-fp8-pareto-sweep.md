@@ -147,12 +147,9 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 
 ## Reproduction Status
 
-The missing memory-estimator dependency no longer blocks this historical configuration. The default
-`dynamo-planner` image imports `estimate_kv_cache` from `aiconfigurator_core.sdk.memory`. When the AI
-Configurator performance database covers `(b200_sxm, sglang)` and `zai-org/GLM-5-FP8`, the search
-reaches the KV-capacity and candidate-concurrency calculations. Reproducing the historical frontier
-still depends on the exact performance database and Replay behavior available in the runtime
-snapshot.
+The packaged dependencies support this configuration's KV-capacity and candidate-concurrency
+calculations. Reproducing the historical frontier still depends on AI Configurator performance
+database coverage for B200/SGLang/GLM-5-FP8 and on Replay behavior in the runtime snapshot.
 
 ```bash
 python -m aisimulate.spica \

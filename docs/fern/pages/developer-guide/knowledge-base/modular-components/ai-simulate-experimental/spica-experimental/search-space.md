@@ -316,9 +316,7 @@ gpu_budget, backend)`:
    the model's max context. This is per-shape (TEP / DEP / TP differ at the same GPU count)
    and uses the real (often FP8) weights. The estimator raises `NoPerfDatabase` for a target with no
    perf DB, and branch enumeration removes that backend. Spica does not use the naive fallback. If
-   no shape is feasible within budget, `NoViableParallelConfig` is raised for that branch. The
-   default `dynamo-planner` image includes the matching AI Configurator application and core
-   packages required by this path and by `kv_load_ratio`.
+   no shape is feasible within budget, `NoViableParallelConfig` is raised for that branch.
 6. **Replicas** fill the budget: for each kept worker shape, replica counts
    `r ∈ 1..(gpu_budget // g)` such that `g * r` lies in
    `[min_gpu_budget, gpu_budget]`.
