@@ -13,7 +13,7 @@ Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dyn
 
 | Framework | Version gates | GPU | CPU RAM | Disk | Shared pool |
 | --- | --- | --- | --- | --- | --- |
-| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | 🚧 vLLM main emits FS/OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
+| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | ✅ `TieringOffloadingSpec` + self-describing STORAGE events (vLLM 0.27+; aggregated) | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
 | [**SGLang**](#sglang) | SGLang v0.5.11+; v0.5.13+ with Mooncake; Dynamo v1.2+ | ✅ KV events | ✅ HiCache + KV events | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
 | [**TensorRT-LLM**](#tensorrt-llm) | Dynamo v1.3.0+ for the current event flag | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
@@ -61,7 +61,7 @@ PYTHONHASHSEED=0 python3 -m dynamo.vllm \
 ```
 
 - Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
-- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM main emits FS and OBJ events. Dynamo tier mapping is in progress.
+- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM emits a unified `STORAGE` medium (vLLM 0.27+; #48123) that Dynamo maps to its Disk lower tier. Legacy `FS` / `OBJ` media (vLLM 0.26.0) are unrecognized and dropped (fail closed), not misrouted.
 - Shared pools: vLLM main publishes optional `LOCAL` / `REMOTE` locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress.
 
 See [Native KV Offloading](../backends/vllm/native-kv-offloading.md) for the full support matrix (including disaggregated and tensor-parallel status), setup commands, verification, and troubleshooting.
