@@ -41,6 +41,11 @@ expression: "canonicalize(serde_json::to_value(events).unwrap())"
       "delta": {
         "type": "text_delta",
         "text": "Pong."
+      },
+      "usage": {
+        "input_tokens": 2,
+        "output_tokens": 1,
+        "total_tokens": 3
       }
     }
   },
