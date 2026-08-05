@@ -104,10 +104,10 @@ spec:
           - /bin/sh
           - -c
           env:
-          - name: UCX_NET_DEVICES
-            value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
           - name: NIXL_LOG_LEVEL
             value: INFO
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER
@@ -224,11 +224,11 @@ spec:
           - /bin/sh
           - -c
           env:
+          - name: NIXL_LOG_LEVEL
+            value: INFO
           # Compute-fabric NICs only; mlx5_6..9 are side fabric on the referenced Nscale nodes.
           - name: UCX_NET_DEVICES
             value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
-          - name: NIXL_LOG_LEVEL
-            value: INFO
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER

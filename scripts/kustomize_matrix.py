@@ -468,6 +468,7 @@ def scan_yaml(text: str) -> list[DocumentScan]:
                 stack.pop()
         parent_path = stack[-1][1] if stack else ()
         line_paths: list[YamlPath] = []
+        comment_path: YamlPath | None = None
         if stripped.startswith("- "):
             sequence_key = (parent_path, indent)
             item_index = sequence_indexes.get(sequence_key, 0)
@@ -481,6 +482,9 @@ def scan_yaml(text: str) -> list[DocumentScan]:
                 key_path = (*item_path, key)
                 line_paths.append(key_path)
                 record_scalar(values, key_path, value)
+                if key == "name" and (name := scalar_value(value)):
+                    comment_path = (*parent_path, f"name={name}")
+                    line_paths.append(comment_path)
                 if starts_nested_value(value, content):
                     stack.append((indent, key_path))
                 else:
@@ -500,7 +504,7 @@ def scan_yaml(text: str) -> list[DocumentScan]:
         for item_path in line_paths:
             targets.setdefault(item_path, line_number)
         if pending_comments and line_paths:
-            comments.append((line_paths[0], pending_comments))
+            comments.append((comment_path or line_paths[0], pending_comments))
             pending_comments = []
     finish_document()
     return docs
@@ -543,17 +547,27 @@ def source_comment_paths(kustomization_dir: Path) -> list[Path]:
 
 def restore_source_comments(rendered: str, overlay_dir: Path) -> str:
     lines = rendered.splitlines()
-    targets = {
-        (doc.doc_id, path): line_number
-        for doc in scan_yaml(rendered)
-        if doc.doc_id is not None
-        for path, line_number in doc.targets.items()
-    }
+    rendered_documents = [doc for doc in scan_yaml(rendered) if doc.doc_id is not None]
+    documents_by_id = {doc.doc_id: doc for doc in rendered_documents}
+    documents_by_gvk: dict[tuple[str, str], list[DocumentScan]] = {}
+    for document in rendered_documents:
+        assert document.doc_id is not None
+        documents_by_gvk.setdefault(
+            (document.doc_id.api_version, document.doc_id.kind), []
+        ).append(document)
+
+    def target_document(source_id: DocumentId) -> DocumentScan | None:
+        if document := documents_by_id.get(source_id):
+            return document
+        candidates = documents_by_gvk.get((source_id.api_version, source_id.kind), [])
+        return candidates[0] if len(candidates) == 1 else None
+
     insertions: dict[int, list[str]] = {}
     for source_path in source_comment_paths(overlay_dir):
         for document in scan_yaml(source_path.read_text(encoding="utf-8")):
             for block in document.comments:
-                line_number = targets.get((block.doc_id, block.path))
+                target = target_document(block.doc_id)
+                line_number = target.targets.get(block.path) if target else None
                 if line_number is None:
                     continue
                 indent = " " * line_indent(lines[line_number])
