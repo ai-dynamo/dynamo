@@ -24,7 +24,7 @@ try:
     # so the fake engine outputs below must use the real type, not a plain dict.
     from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
-    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
+    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler, Turn
 except (ImportError, ModuleNotFoundError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -422,3 +422,21 @@ def test_concurrent_turns_capped():
     assert engine.peak == cap  # never more than the cap in flight at once
     done = [e for e in out if e["type"] == "response.done"]
     assert len(done) == 4 and all(e["response"]["status"] == "completed" for e in done)
+
+
+def test_scalar_step_does_not_break_the_next_delta():
+    # A list payload yields its last entry; a scalar there must flatten to 1-d
+    # so the following step's prefix comparison has a shape[0] to read.
+    turn = Turn(engine_client=None, streaming_input_factory=None)
+    first = turn.extract_audio_chunks(
+        SimpleNamespace(multimodal_output=MultimodalPayload(tensors={"audio": [0.25]}))
+    )
+    assert [c.tolist() for c in first] == [[0.25]]
+    second = turn.extract_audio_chunks(
+        SimpleNamespace(
+            multimodal_output=MultimodalPayload(
+                tensors={"audio": np.float32([0.25, 0.5])}
+            )
+        )
+    )
+    assert [c.tolist() for c in second] == [[0.5]]
