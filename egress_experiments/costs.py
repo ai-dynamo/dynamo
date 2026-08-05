@@ -35,10 +35,11 @@ against ``trtllm-serve``'s 1.94 us of pure bookkeeping -- the 44.0x.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _perf = time.perf_counter_ns
 
@@ -65,8 +66,31 @@ def _cell() -> List[float]:
     return cell
 
 
+_LEDGERS_OFFGIL: List[Tuple[str, List[float]]] = []
+
+
+def _cell_offgil() -> List[float]:
+    cell = getattr(_ledger_local, "offgil", None)
+    if cell is None:
+        cell = [0.0]
+        _ledger_local.offgil = cell
+        _LEDGERS_OFFGIL.append((threading.current_thread().name, cell))
+    return cell
+
+
+def offgil_ledger() -> Dict[str, float]:
+    """Microseconds of work done WITHOUT the GIL, per thread."""
+    totals: Dict[str, float] = {}
+    for name, cell in list(_LEDGERS_OFFGIL):
+        totals[name] = totals.get(name, 0.0) + cell[0]
+    return {k: v for k, v in sorted(totals.items(), key=lambda kv: -kv[1]) if v}
+
+
 def reset_spin_ledger() -> None:
     del _LEDGERS[:]
+    del _LEDGERS_OFFGIL[:]
+    if hasattr(_ledger_local, "offgil"):
+        del _ledger_local.offgil
     if hasattr(_ledger_local, "cell"):
         del _ledger_local.cell
 
@@ -92,6 +116,67 @@ def spin(microseconds: float) -> None:
     deadline = _perf() + int(microseconds * 1000)
     while _perf() < deadline:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Off-GIL work
+# ---------------------------------------------------------------------------
+#
+# `spin` models Python: CPU burned while HOLDING the GIL. Rust on a tokio
+# thread is the opposite -- real CPU, no GIL -- and until now the simulator had
+# no way to express it, which made "move this stage into Rust" unmeasurable and
+# left process-offload looking like the only option.
+#
+# hashlib releases the GIL above HASHLIB_GIL_MINSIZE (2047 bytes), so hashing a
+# large buffer is genuine CPU that other threads can run straight through.
+# Verified: 1 -> 8 threads, wall 0.214 -> 0.223 s while total work grows 8x
+# (perfect scaling); the same measurement with `spin` goes 0.061 -> 0.178 s.
+_OFFGIL_BUF = b"\x5a" * (1 << 20)
+_offgil_bytes_per_us: Optional[float] = None
+
+
+def _offgil_block_bytes() -> int:
+    """Bytes per hash block, sized to ~10 us of work.
+
+    Small enough that a ``spin_offgil`` of a few tens of microseconds lands
+    close to its target, large enough to stay well above hashlib's
+    GIL-release threshold (2047 bytes) and to keep the clock checks in the
+    noise.
+    """
+    global _offgil_bytes_per_us
+    if _offgil_bytes_per_us is None:
+        probe, reps = 1 << 16, 64
+        digest = hashlib.sha256()
+        start = _perf()
+        for _ in range(reps):
+            digest.update(_OFFGIL_BUF[:probe])
+        elapsed_us = (_perf() - start) / 1000.0
+        _offgil_bytes_per_us = (probe * reps) / max(elapsed_us, 1e-9)
+    return max(4096, min(len(_OFFGIL_BUF), int(_offgil_bytes_per_us * 10)))
+
+
+def spin_offgil(microseconds: float) -> None:
+    """Burn ``microseconds`` of CPU **without** holding the GIL.
+
+    What a Rust/tokio thread does. Charged to the ledger separately so a
+    report can show how much work left the GIL entirely, as opposed to merely
+    moving to another Python thread -- which the GIL serialises anyway, and
+    which measured 0.13x when tried.
+    """
+    if microseconds <= 0:
+        return
+    _cell_offgil()[0] += microseconds
+    # Deadline-driven rather than "hash N bytes from one calibration": a single
+    # up-front calibration drifts with cache state and ran 26 % short. Hashing
+    # in ~10 us blocks and re-checking the clock is self-correcting. The clock
+    # read does briefly take the GIL, which a real Rust thread would not, but
+    # it is ~100 ns against a ~10 us block -- about 1 %, and in the direction
+    # that UNDER-states the benefit of moving work off the GIL.
+    block = _offgil_block_bytes()
+    deadline = _perf() + int(microseconds * 1000)
+    digest = hashlib.sha256()
+    while _perf() < deadline:
+        digest.update(_OFFGIL_BUF[:block])
 
 
 def pad_to(start_ns: int, target_microseconds: float) -> None:
