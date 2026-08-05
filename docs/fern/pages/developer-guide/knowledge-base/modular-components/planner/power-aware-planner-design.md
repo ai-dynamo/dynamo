@@ -112,12 +112,14 @@ to applied Pod annotations. Both are required for a stable cached projection.
 ## Planner Access and RBAC
 
 The Planner needs list-only Pod access when power awareness is installed. To add `pods/list` to either
-the namespace-restricted Role or the cluster-wide ClusterRole, set the following platform Helm value:
+the namespace-restricted Role or the cluster-wide ClusterRole, set the following value on the platform
+chart's `dynamo-operator` subchart:
 
 ```yaml
-planner:
-  powerAwareness:
-    enabled: true
+dynamo-operator:
+  planner:
+    powerAwareness:
+      enabled: true
 ```
 
 The value defaults to `false`, so power-disabled installations do not gain the permission.
@@ -210,9 +212,13 @@ To change only `total_gpu_power_limit`, update the Planner configuration and res
 
 ## Runtime Rollout Safety
 
-Each power-aware refresh issues one DGD GET and one DGD-scoped Pod LIST off the event loop through
-`asyncio.to_thread`. The Pod snapshot is partitioned by component and used only to detect terminating
-Pods. Runtime refresh never validates annotations again and never changes cached watts.
+`KubernetesConnector.get_power_aware_worker_counts()` issues one DGD GET and one DGD-scoped Pod LIST
+together off the event loop through a single `asyncio.to_thread` dispatch. The Pod snapshot is
+partitioned by component and used only to detect terminating Pods.
+
+The surrounding `PlannerEnvironmentImpl.refresh()` also calls synchronous connector methods to refresh
+GPU counts and the model name. On the Kubernetes path, each call issues an additional DGD GET on the
+event-loop thread. These runtime reads do not validate annotations or recalculate the cached power caps.
 
 The connector combines Pod termination state with DGD ready counts, component stability, and the
 rolling-update phase. A terminating Pod, an unstable component, or a blocking or failed rolling-update
