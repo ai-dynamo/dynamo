@@ -272,7 +272,7 @@ _RETRYABLE_INIT_MARKERS = [
 _MAX_RETRIES = 3
 
 # Last-resort deadline behind the child's own --timeout, for when pytest-timeout
-# is swallowed by a C-level block and the wedged child stalls the whole run.
+# is swallowed by a C-level block and the stuck child stalls the whole run.
 # Must exceed 3x: Datadog Auto Test Retries gives one child up to 3 attempts
 # (DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2), each with its own --timeout window.
 # Raise the multiplier if that count is raised. Slowest of 376 observed child
@@ -790,15 +790,20 @@ def run_parallel(
             deadline = _watchdog_deadline(run_info.test.timeout)
             if elapsed <= deadline:
                 continue
+            limit_note = (
+                f"ran {elapsed:.0f}s, limit {deadline:.0f}s = "
+                f"{run_info.test.timeout:.0f}s test timeout "
+                f"x{_WATCHDOG_TIMEOUT_MULTIPLIER} + {_WATCHDOG_GRACE_S}s for "
+                f"retries and startup"
+            )
             run_info.watchdog_reason = (
-                f"watchdog: wedged for {elapsed:.0f}s against a {deadline:.0f}s "
-                f"budget (declared timeout {run_info.test.timeout:.0f}s); the "
-                f"child's own --timeout never fired"
+                f"killed by the orchestrator: hit its time limit ({limit_note}) "
+                f"and its own {run_info.test.timeout:.0f}s timeout did not stop it"
             )
             _print(
-                f"[watchdog] w{w_id} wedged for {elapsed:.0f}s against a "
-                f"{deadline:.0f}s budget (declared timeout "
-                f"{run_info.test.timeout:.0f}s) — killing the process tree"
+                f"[watchdog] w{w_id} hit its time limit ({limit_note}). Its own "
+                f"timeout did not stop it — killing the test process and "
+                f"everything it started."
             )
             try:
                 terminate_process_tree(
@@ -823,8 +828,8 @@ def run_parallel(
                 gi = test.assigned_gpu
 
                 # Detect retryable init errors (profiling race, OOM at startup)
-                # A wedge is not a transient startup failure, so never relaunch
-                # one even if its output happens to carry a retryable marker.
+                # A stuck test is not a transient startup failure, so never
+                # relaunch one even if its output carries a retryable marker.
                 if (
                     not passed
                     and run_info.watchdog_reason is None
