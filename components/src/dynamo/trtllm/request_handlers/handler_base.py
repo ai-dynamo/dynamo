@@ -1294,10 +1294,8 @@ class HandlerBase(BaseGenerativeHandler):
                             out["top_logprobs"] = top_logprobs
 
                         if prompt_logprobs_payload is None:
-                            prompt_logprobs_payload = (
-                                _shared_logprobs.extract_prompt_logprobs_from_completion_output(
-                                    output
-                                )
+                            prompt_logprobs_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                output
                             )
 
                         if output.finish_reason:
