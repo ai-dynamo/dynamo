@@ -273,12 +273,29 @@ _MAX_RETRIES = 3
 
 # Last-resort deadline behind the child's own --timeout, for when pytest-timeout
 # is swallowed by a C-level block and the stuck child stalls the whole run.
-# Must exceed 3x: Datadog Auto Test Retries gives one child up to 3 attempts
-# (DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2), each with its own --timeout window.
-# Raise the multiplier if that count is raised. Slowest of 376 observed child
-# runs was 0.78x its declared timeout, so 4x + 120s clears anything healthy.
-_WATCHDOG_TIMEOUT_MULTIPLIER = 4
+# Slowest of 376 observed child runs was 0.78x its declared timeout, so this
+# clears anything healthy by a wide margin.
 _WATCHDOG_GRACE_S = 120
+# Ceiling, so the watchdog still fires inside the job's own timeout-minutes
+# (120 in post-merge). Without it the longest test in the suite, timeout(1800),
+# would get a 122-minute budget and the runner would always die first. A test
+# that genuinely needs longer than this cannot finish inside the job anyway.
+_WATCHDOG_MAX_S = 90 * 60
+
+
+def _watchdog_multiplier() -> int:
+    """How many of a child's own --timeout windows to allow before killing it.
+
+    Datadog Auto Test Retries reruns a failed test DD_CIVISIBILITY_FLAKY_RETRY_COUNT
+    times (set in shared-test.yml), and every attempt gets a fresh --timeout
+    window, so the budget must clear retries + 1 attempts. The extra +1 is
+    headroom for interpreter start and collection.
+    """
+    try:
+        retries = max(0, int(os.environ["DD_CIVISIBILITY_FLAKY_RETRY_COUNT"]))
+    except (KeyError, ValueError):
+        return 4  # matches the shipped retry count of 2
+    return retries + 2
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -772,42 +789,48 @@ def run_parallel(
         return run_info
 
     env_base = os.environ.copy()
+    watchdog_multiplier = _watchdog_multiplier()
 
     while pending or running:
         now = time.monotonic()
 
         # Kill anything past its deadline; the completion check below reaps it
         # this same iteration and frees its GPU budget for the queued tests.
+        # Keyed on poll(), not on watchdog_reason, so a kill that fails is
+        # retried next iteration instead of leaving the child alive forever.
         for w_id, run_info in list(running.items()):
-            if run_info.watchdog_reason or run_info.proc.poll() is not None:
+            if run_info.proc.poll() is not None:
                 continue
             elapsed = now - run_info.start_time
-            deadline = (
-                run_info.test.timeout * _WATCHDOG_TIMEOUT_MULTIPLIER + _WATCHDOG_GRACE_S
+            deadline = min(
+                run_info.test.timeout * watchdog_multiplier + _WATCHDOG_GRACE_S,
+                _WATCHDOG_MAX_S,
             )
             if elapsed <= deadline:
                 continue
-            limit_note = (
-                f"ran {elapsed:.0f}s, limit {deadline:.0f}s = "
-                f"{run_info.test.timeout:.0f}s test timeout "
-                f"x{_WATCHDOG_TIMEOUT_MULTIPLIER} + {_WATCHDOG_GRACE_S}s for "
-                f"retries and startup"
-            )
-            run_info.watchdog_reason = (
-                f"killed by the orchestrator: hit its time limit ({limit_note}) "
-                f"and its own {run_info.test.timeout:.0f}s timeout did not stop it"
-            )
-            _print(
-                f"[watchdog] w{w_id} hit its time limit ({limit_note}). Its own "
-                f"timeout did not stop it — killing the test process and "
-                f"everything it started."
-            )
+            if run_info.watchdog_reason is None:
+                limit_note = (
+                    f"ran {elapsed:.0f}s, limit {deadline:.0f}s = "
+                    f"{run_info.test.timeout:.0f}s test timeout "
+                    f"x{watchdog_multiplier} + {_WATCHDOG_GRACE_S}s for retries "
+                    f"and startup, capped at {_WATCHDOG_MAX_S}s"
+                )
+                run_info.watchdog_reason = (
+                    f"killed by the orchestrator: hit its time limit "
+                    f"({limit_note}) and its own "
+                    f"{run_info.test.timeout:.0f}s timeout did not stop it"
+                )
+                _print(
+                    f"[watchdog] w{w_id} hit its time limit ({limit_note}). Its "
+                    f"own timeout did not stop it — killing the test process and "
+                    f"everything it started."
+                )
             try:
                 terminate_process_tree(
                     run_info.proc.pid, immediate_kill=True, timeout=5
                 )
             except (psutil.Error, OSError) as exc:
-                _print(f"[watchdog] w{w_id} tree kill error: {exc}")
+                _print(f"[watchdog] w{w_id} kill failed ({exc}) — retrying")
 
         # Check for completed subprocesses
         for w_id in list(running.keys()):
