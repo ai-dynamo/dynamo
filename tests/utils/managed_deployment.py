@@ -52,7 +52,6 @@ _API_CONNECTION_ERRORS = (
 def _retry_api_call(
     fn,
     *,
-    what: str,
     logger: logging.Logger,
     attempts: int = 5,
     delay: float = 2.0,
@@ -64,7 +63,7 @@ def _retry_api_call(
         except _API_CONNECTION_ERRORS as e:
             if attempt == attempts:
                 raise
-            logger.debug("%s failed (port-forward blip?), retrying: %s", what, e)
+            logger.debug("K8s API call failed (port-forward blip?), retrying: %s", e)
             time.sleep(delay)
 
 
@@ -1427,7 +1426,6 @@ class ManagedDeployment:
                 lambda ls=label_selector: list(
                     kr8s.get("pods", namespace=self.namespace, label_selector=ls)
                 ),
-                what=f"list pods for {original_name}",
                 logger=self._logger,
             )
             for pod in fetched:
@@ -1591,7 +1589,6 @@ class ManagedDeployment:
 
             port_forward = _retry_api_call(
                 _open_port_forward,
-                what=f"open port-forward for {pod.name}",
                 logger=self._logger,
             )
 
