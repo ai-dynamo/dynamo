@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
     EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
-    reconcile_discovery_snapshot, validate_event_source_reregistration,
+    model_with_updated_taints, reconcile_discovery_snapshot, validate_event_source_reregistration,
 };
 use crate::storage::kv;
 
@@ -495,20 +495,46 @@ impl Discovery for KVStoreDiscovery {
         Ok(instance)
     }
 
-    async fn update_model_taints_internal(&self, instance: DiscoveryInstance) -> Result<()> {
-        let DiscoveryInstanceId::Model(id) = instance.id() else {
-            anyhow::bail!("update_model_taints_internal requires a model discovery instance")
-        };
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
         let bucket = self
             .store
             .get_bucket(MODELS_BUCKET)
             .await?
             .ok_or_else(|| anyhow::anyhow!("model discovery bucket is not registered"))?;
         let key = kv::Key::new(id.to_path());
-        bucket
-            .replace(&key, serde_json::to_vec(&instance)?.into())
-            .await?;
-        Ok(())
+        let target_id = DiscoveryInstanceId::Model(id);
+
+        loop {
+            let existing_json = bucket
+                .get(&key)
+                .await?
+                .ok_or_else(|| kv::StoreError::MissingKey(key.to_string()))?;
+            let existing: DiscoveryInstance = serde_json::from_slice(&existing_json)?;
+            if existing.id() != target_id {
+                anyhow::bail!(
+                    "model discovery record {target_id:?} contains mismatched identity {:?}",
+                    existing.id()
+                )
+            }
+            let candidate = model_with_updated_taints(&existing, taints.clone())?;
+            if candidate == existing {
+                return Ok(());
+            }
+
+            let candidate_json = serde_json::to_vec(&candidate)?.into();
+            match bucket
+                .compare_and_replace(&key, existing_json, candidate_json)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(kv::StoreError::Retry) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {

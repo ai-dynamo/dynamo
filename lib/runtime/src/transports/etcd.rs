@@ -52,6 +52,13 @@ pub struct Client {
     rt: Arc<tokio::runtime::Runtime>,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum CompareAndPutOutcome {
+    Updated,
+    Missing,
+    Conflict,
+}
+
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "etcd::Client primary_lease={}", self.primary_lease)
@@ -311,6 +318,60 @@ impl Client {
             .put(key.as_ref(), value.as_ref(), Some(options))
             .await
             .map_err(|err| err.into())
+    }
+
+    /// Replace an existing value with a compare-on-mod-revision transaction.
+    pub async fn kv_compare_and_put(
+        &self,
+        key: impl AsRef<str>,
+        expected: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        lease_id: Option<u64>,
+    ) -> Result<CompareAndPutOutcome> {
+        let key = key.as_ref();
+        let current = self
+            .connector
+            .get_client()
+            .kv_client()
+            .get(key, None)
+            .await?;
+        let Some(current) = current.kvs().first() else {
+            return Ok(CompareAndPutOutcome::Missing);
+        };
+        if current.value() != expected.as_ref() {
+            return Ok(CompareAndPutOutcome::Conflict);
+        }
+        let expected_mod_revision = current.mod_revision();
+
+        let put_options = PutOptions::new().with_lease(lease_id.unwrap_or(self.lease_id()) as i64);
+        let txn = Txn::new()
+            .when(vec![Compare::mod_revision(
+                key,
+                CompareOp::Equal,
+                expected_mod_revision,
+            )])
+            .and_then(vec![TxnOp::put(
+                key,
+                value.as_ref().to_vec(),
+                Some(put_options),
+            )])
+            .or_else(vec![TxnOp::get(key, None)]);
+
+        let result = self.connector.get_client().kv_client().txn(txn).await?;
+        if result.succeeded() {
+            return Ok(CompareAndPutOutcome::Updated);
+        }
+
+        match result.op_responses().into_iter().next() {
+            Some(TxnOpResponse::Get(response)) if response.kvs().is_empty() => {
+                Ok(CompareAndPutOutcome::Missing)
+            }
+            Some(TxnOpResponse::Get(_)) => Ok(CompareAndPutOutcome::Conflict),
+            response => {
+                tracing::warn!(?response, "unexpected compare-and-put response");
+                anyhow::bail!("Unable to compare and replace key. Check etcd server status")
+            }
+        }
     }
 
     pub async fn kv_get(

@@ -3,12 +3,12 @@
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, reconcile_discovery_snapshot,
-    validate_event_source_reregistration,
+    DiscoverySpec, DiscoveryStream, ModelCardInstanceId, model_with_updated_taints,
+    reconcile_discovery_snapshot, validate_event_source_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -209,8 +209,12 @@ impl Discovery for MockDiscovery {
         Ok(instance)
     }
 
-    async fn update_model_taints_internal(&self, instance: DiscoveryInstance) -> Result<()> {
-        let target_id = instance.id();
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
+        let target_id = DiscoveryInstanceId::Model(id);
         let mut instances = self.registry.instances.lock().unwrap();
         let existing = instances
             .iter_mut()
@@ -218,7 +222,7 @@ impl Discovery for MockDiscovery {
             .ok_or_else(|| {
                 anyhow::anyhow!("model discovery record {target_id:?} is not registered")
             })?;
-        *existing = instance;
+        *existing = model_with_updated_taints(existing, taints)?;
         Ok(())
     }
 
@@ -361,6 +365,62 @@ mod tests {
             }),
             model_suffix: Some(lora_name.to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn model_taint_updates_use_the_authoritative_registry() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let model = client
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+                card_json: serde_json::json!({
+                    "display_name": "model",
+                    "runtime_config": {"taints": ["a"]}
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+        let DiscoveryInstanceId::Model(id) = model.id() else {
+            unreachable!()
+        };
+
+        client
+            .update_model_taints(id.clone(), HashSet::from(["b".to_string()]))
+            .await
+            .unwrap();
+        client
+            .update_model_taints(id.clone(), HashSet::from(["a".to_string()]))
+            .await
+            .unwrap();
+
+        let stored = client
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["a"])
+        );
+
+        client.unregister(model).await.unwrap();
+        assert!(
+            client
+                .update_model_taints(id, HashSet::new())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

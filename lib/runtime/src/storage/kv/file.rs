@@ -5,9 +5,9 @@ use std::cmp;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -203,6 +203,33 @@ pub struct Directory {
     owned_files: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
+struct DirectoryMutationLock(File);
+
+impl DirectoryMutationLock {
+    fn acquire(path: &Path) -> Result<Self, StoreError> {
+        let file = File::open(path).map_err(to_fs_err)?;
+        // SAFETY: `file` owns a valid descriptor for the lifetime of this guard.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(to_fs_err(std::io::Error::last_os_error()));
+        }
+        Ok(Self(file))
+    }
+}
+
+impl Drop for DirectoryMutationLock {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor remains valid until after this `Drop` completes.
+        let result = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        if result != 0 {
+            tracing::error!(
+                error = %std::io::Error::last_os_error(),
+                "Failed to release FileStore mutation lock"
+            );
+        }
+    }
+}
+
 impl Directory {
     fn new(root: PathBuf, p: PathBuf, ttl: Duration) -> Self {
         // Keep watched paths and event paths in the same form across symlinked roots.
@@ -245,6 +272,7 @@ impl Directory {
     /// Returns an error if we cannot open the directory. Errors inside the directory are logged
     /// but non-fatal.
     fn delete_expired_files(&self) -> anyhow::Result<()> {
+        let _mutation_lock = self.lock_mutations().map_err(anyhow::Error::from)?;
         let deadline = SystemTime::now() - self.ttl;
         let dirname = self.p.display().to_string();
         for entry in fs::read_dir(&self.p).with_context(|| dirname.clone())? {
@@ -287,6 +315,7 @@ impl Directory {
     }
 
     fn delete_owned_files(&mut self) -> anyhow::Result<()> {
+        let _mutation_lock = self.lock_mutations().map_err(anyhow::Error::from)?;
         let mut errs = Vec::new();
         for p in self.owned_files.lock().drain() {
             if let Err(err) = fs::remove_file(&p) {
@@ -297,6 +326,10 @@ impl Directory {
             anyhow::bail!(errs.join(", "));
         }
         Ok(())
+    }
+
+    fn lock_mutations(&self) -> Result<DirectoryMutationLock, StoreError> {
+        DirectoryMutationLock::acquire(&self.p)
     }
 
     fn write_temp_file(&self, value: &[u8]) -> Result<PathBuf, StoreError> {
@@ -338,6 +371,7 @@ impl Bucket for Directory {
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
 
+        let _mutation_lock = self.lock_mutations()?;
         let temp_path = self.write_temp_file(&value)?;
 
         if revision == 0 {
@@ -387,12 +421,52 @@ impl Bucket for Directory {
         Ok(StoreOutcome::Created(revision))
     }
 
-    async fn replace(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+    async fn compare_and_replace(
+        &self,
+        key: &Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
         let full_path = self.p.join(key.url_safe().as_ref());
-        if !full_path.exists() {
-            return Err(StoreError::MissingKey(key.to_string()));
+        let str_path = full_path.display().to_string();
+        let _mutation_lock = self.lock_mutations()?;
+        let temp_path = self.write_temp_file(&value)?;
+
+        let current = match fs::read(&full_path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if let Err(remove_error) = fs::remove_file(&temp_path) {
+                    tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove unused FileStore temp file");
+                }
+                return Err(StoreError::MissingKey(key.to_string()));
+            }
+            Err(error) => {
+                if let Err(remove_error) = fs::remove_file(&temp_path) {
+                    tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove unused FileStore temp file");
+                }
+                return Err(to_fs_err(error));
+            }
+        };
+        if current.as_slice() != expected.as_ref() {
+            if let Err(remove_error) = fs::remove_file(&temp_path) {
+                tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove unused FileStore temp file");
+            }
+            return Err(StoreError::Retry);
         }
-        self.insert(key, value, 1).await
+
+        if let Err(error) = fs::rename(&temp_path, &full_path) {
+            if let Err(remove_error) = fs::remove_file(&temp_path) {
+                tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove FileStore temp file after replace error");
+            }
+            return Err(a_to_fs_err(anyhow::Error::new(error).context(format!(
+                "renaming {} to {}",
+                temp_path.display(),
+                str_path
+            ))));
+        }
+
+        self.owned_files.lock().insert(full_path);
+        Ok(StoreOutcome::Created(1))
     }
 
     /// Read a file from the directory
@@ -415,6 +489,7 @@ impl Bucket for Directory {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
+        let _mutation_lock = self.lock_mutations()?;
         if !full_path.exists() {
             return Err(StoreError::MissingKey(str_path));
         }
@@ -639,7 +714,57 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
-    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreOutcome};
+    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreError, StoreOutcome};
+
+    #[tokio::test]
+    async fn delete_wins_race_with_compare_and_replace() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let update_cancel = CancellationToken::new();
+        let delete_cancel = CancellationToken::new();
+        let update_store = FileStore::new(update_cancel.clone(), temp_dir.path());
+        let delete_store = FileStore::new(delete_cancel.clone(), temp_dir.path());
+        let update_bucket = Arc::new(
+            update_store
+                .get_or_create_bucket("v1/tests", None)
+                .await
+                .unwrap(),
+        );
+        let delete_bucket = Arc::new(
+            delete_store
+                .get_or_create_bucket("v1/tests", None)
+                .await
+                .unwrap(),
+        );
+        let key = Key::new("model".to_string());
+        update_bucket.insert(&key, "old".into(), 0).await.unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let task_bucket = update_bucket.clone();
+        let task_key = key.clone();
+        let task_barrier = barrier.clone();
+        let update = tokio::spawn(async move {
+            task_barrier.wait().await;
+            task_bucket
+                .compare_and_replace(&task_key, "old".into(), "new".into())
+                .await
+        });
+        let task_bucket = delete_bucket.clone();
+        let task_key = key.clone();
+        let task_barrier = barrier.clone();
+        let delete = tokio::spawn(async move {
+            task_barrier.wait().await;
+            task_bucket.delete(&task_key).await
+        });
+
+        barrier.wait().await;
+        let update_result = update.await.unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_))));
+        assert_eq!(update_bucket.get(&key).await.unwrap(), None);
+
+        update_cancel.cancel();
+        delete_cancel.cancel();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_bucket_open_shares_ownership_registry() {
