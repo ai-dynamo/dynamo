@@ -105,7 +105,8 @@ class PrefillPointCandidate(_PointCandidate):
                 raise ValueError("partition.high_count must be less than batch_size")
             if self.partition.axis in ("kv", "both") and self.total_kv_read_tokens == 0:
                 raise ValueError(
-                    'partition axis "kv" requires total_kv_read_tokens > 0'
+                    f'partition axis "{self.partition.axis}" requires '
+                    "total_kv_read_tokens > 0"
                 )
         return self
 

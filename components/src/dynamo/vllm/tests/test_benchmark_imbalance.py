@@ -14,8 +14,10 @@ import pytest
 from dynamo.vllm.benchmark_imbalance import (
     build_manifest,
     classify,
+    idx_work,
     mla_work,
     plan_cell,
+    reference_rows,
     segments_for,
     work_columns,
 )
@@ -120,16 +122,70 @@ def test_a_cell_with_no_room_to_redistribute_plans_nothing():
 # --------------------------------------------------------------- manifest
 
 
-def test_manifest_emits_the_uniform_batch_for_every_cell():
+def test_indexer_column_carries_rows_below_the_budget():
+    """``idx_work`` is not gated on ``topk`` -- the scoring pass runs for a
+    request at or below the budget too -- so the column must not be. Gating it
+    charged zero to exactly the rows a mixed batch is full of, and left a batch
+    entirely below the budget looking like it did no indexer work at all."""
+    s_bar, p_bar, b = 512, 0, 4
+    rows = [(1024, 0), (256, 0), (256, 0), (512, 0)]
+    assert all(s + p <= TOPK for s, p in rows)
+    assert sum(s for s, _ in rows) == b * s_bar
+    x_idx, _, _ = work_columns(rows, s_bar, p_bar, TOPK)
+    expected = sum(idx_work(s, p, TOPK) for s, p in rows) - b * idx_work(
+        s_bar, p_bar, TOPK
+    )
+    assert x_idx == pytest.approx(expected)
+    # Convex in s at fixed totals, so a spread costs strictly more than equal.
+    assert x_idx > 0
+
+
+def test_manifest_emits_the_reference_batch_for_every_cell():
     """This manifest REPLACES the generated grid rather than adding to it, so
     a cell dropped here is a coordinate the switch-off run would have measured
     and this one silently would not. It holds even for cells around which no
-    spread can be built."""
+    spread can be built.
+
+    The coordinate is the pair of totals, not the pair of averages: a cell whose
+    totals do not divide evenly is still measured, by a batch that carries the
+    remainder rather than one that truncates it away."""
     cells = [(1, 4096, 1024), (2, 128, 64), (8, 32768, 8192)]
     manifest, _ = build_manifest(cells, TOPK, repeats=1, kv_block=64)
-    emitted = {_cell_of(p) for p in manifest["prefill"] if _uniform(p)}
-    for b, total_new, total_kv in cells:
-        assert (b, total_new // b, total_kv // b) in emitted
+    emitted = {
+        (p["batch_size"], p["total_prefill_tokens"], p["total_kv_read_tokens"])
+        for p in manifest["prefill"]
+    }
+    for cell in cells:
+        assert cell in emitted
+
+
+def test_reference_batch_conserves_both_totals_in_whole_blocks():
+    """The floor-divided batch was wrong twice over: it measured a coordinate up
+    to ``b - 1`` tokens off the one the sweep chose -- enough to fall off the
+    CUDA-graph capture size the point was picked for -- and it left every row's
+    prefix at ``total_kv // b``, which the loader rejects when that is not a
+    whole block, aborting the run instead of measuring the cell."""
+    kv_block = 64
+    for b, total_new, total_kv in [(2, 128, 64), (3, 3072, 256), (8, 32769, 8192)]:
+        rows = reference_rows(b, total_new, total_kv, kv_block)
+        assert rows is not None
+        assert len(rows) == b
+        assert sum(s for s, _ in rows) == total_new
+        assert sum(p for _, p in rows) == total_kv
+        assert all(p % kv_block == 0 for _, p in rows)
+        # Still the equal batch to within the remainder it has to carry.
+        assert max(s for s, _ in rows) - min(s for s, _ in rows) <= 1
+        assert max(p for _, p in rows) - min(p for _, p in rows) <= kv_block
+
+
+def test_reference_batch_reports_a_cell_it_cannot_express():
+    """A KV total that is not a whole number of blocks cannot be split into rows
+    that are. Emitting it anyway is what aborts the run, so the cell is reported
+    and skipped instead."""
+    assert reference_rows(2, 128, 100, 64) is None
+    manifest, notes = build_manifest([(2, 128, 100)], TOPK, repeats=1, kv_block=64)
+    assert manifest["prefill"] == []
+    assert any("not expressible" in note for note in notes)
 
 
 def test_manifest_is_valid_against_the_schema():
