@@ -7,6 +7,8 @@ package runtime
 
 import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 
+// A new gate must not change PodSpec rendering for a previously released runtime.
+// Its minimum runtime version must be the release introducing the gate or newer.
 var (
 	// CanaryHealthChecks gates the canary health-check rendering defaults
 	// introduced for Dynamo runtime 1.5.0.
