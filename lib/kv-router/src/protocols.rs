@@ -287,7 +287,8 @@ pub trait WorkerConfigLike {
     ///
     /// `None` means this worker/rank does not support router hints. Backends
     /// that support hints but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`.
+    /// `source_control_endpoint: None`. If router hints grow into a broader
+    /// multi-backend contract, move this method into a dedicated extension trait.
     fn router_hint_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,

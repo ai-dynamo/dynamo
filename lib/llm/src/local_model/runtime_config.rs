@@ -383,8 +383,7 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
         Some(RouterHintWorkerMetadata {
             worker_type,
-            source_control_endpoint: self
-                .router_hint_endpoint_for_dp_rank(dp_rank),
+            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
         })
     }
 

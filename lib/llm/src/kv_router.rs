@@ -927,9 +927,12 @@ where
         let retain_router_hint_chain =
             should_prepare_router_hint && self.indexer.supports_router_hint_chain_retention();
         if should_prepare_router_hint && !retain_router_hint_chain {
-            tracing::warn!(
-                "router_hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without router hints"
-            );
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "router_hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without router hints"
+                );
+            });
         }
 
         let TieredLookupResult {
