@@ -355,14 +355,31 @@ class SimResult:
     BACKLOG_GROWTH_TOLERANCE = 0.05
 
     @property
+    def measured_items_per_s(self) -> float:
+        """Throughput actually observed at the loop's exit, whole run."""
+        times = self.loop_item_times
+        if len(times) < 2:
+            return 0.0
+        span_s = (times[-1] - times[0]) / 1e9
+        return len(times) / span_s if span_s > 0 else 0.0
+
+    @property
     def backlog_growing(self) -> bool:
         if self.backlog_aborted:
             return True
         if self.timed_out and self.backlog_max < 1000:
             # Ran the clock out with the loop keeping up: not saturated.
             return False
-        capacity = self.loop_capacity_per_s
-        return self.backlog_growth_per_s > self.BACKLOG_GROWTH_TOLERANCE * capacity
+        # Relative to what this architecture MEASURABLY does, not to
+        # loop_capacity_per_s -- that is derived from `Costs`, i.e. from the
+        # BASELINE cost model, and is the same 11,718/s for every
+        # architecture. Judging a 30,000/s architecture against a threshold
+        # sized for a 9,500/s one makes ordinary drift look like saturation,
+        # which stops the benchmark's ladder early and reports an
+        # engine-limited run as a loop-limited one. Bug found by the
+        # offloaded-postproc experiment.
+        reference = self.measured_items_per_s or self.loop_capacity_per_s
+        return self.backlog_growth_per_s > self.BACKLOG_GROWTH_TOLERANCE * reference
 
     @property
     def overloaded(self) -> bool:
