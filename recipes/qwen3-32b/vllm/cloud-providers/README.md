@@ -47,7 +47,7 @@ Kustomize command is required to consume this recipe.
 
 For recipe contributors, the source of truth is
 [`.kustomize-matrix.yaml`](.kustomize-matrix.yaml), `kustomize/base/`, the
-recipe-local Components and `_rdma` overlay, plus the referenced shared
+recipe-local Components, plus the referenced shared
 Components under `recipes/kustomize/components/`. The public overlay
 `kustomization.yaml` files and `deploy-*.yaml` files are generated, committed
 for review, and must not be hand-edited. Regenerate them with:

@@ -47,12 +47,11 @@ and easy to review:
         │   └── kustomization.yaml
         ├── gcp-roce/
         │   └── kustomization.yaml
-        └── _shared-overlay/
 ```
 
 For a matrix-backed recipe, the source of truth is
 `.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, local Components,
-intermediate `_` overlays, and any referenced Components under
+and any referenced Components under
 `recipes/kustomize/components/`. The generated files are public overlay
 `kustomization.yaml` files, `deploy-<name>.yaml` manifests, and the central
 `recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` schema. Commit
@@ -64,7 +63,6 @@ The render convention is:
 - `kustomize/overlays/<name>/` renders to `deploy-<name>.yaml`.
 - `kustomize/overlays/generic/` renders to `deploy-generic.yaml`. Use it when a
   generic deployable variant exists.
-- `kustomize/overlays/_<name>/` is intermediate and is not rendered.
 - `kustomize/components/` is for shared Kustomize building blocks and is not rendered.
 - Bases that patch Dynamo CRDs include the central
   `recipes/kustomize/components/dynamo-openapi/` Component. Its generated
@@ -85,7 +83,7 @@ human-readable `name` and a list of Kustomize `components`; output names
 interpolate only the value names, never their paths:
 
 ```yaml
-source: kustomize/overlays/_rdma
+source: kustomize/base
 nameTemplate: "${variant}"
 matrix:
   variant:

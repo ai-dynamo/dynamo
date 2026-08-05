@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
   `<deployment>/kustomize/`: `base/` is shared input and never renders directly;
   `components/` holds building blocks used only by that recipe; public overlays
   under `overlays/<name>/` render to `deploy-<name>.yaml`; an `overlays/generic/`
-  variant renders when it exists; and `overlays/_<name>/` is intermediate. Shared
+  variant renders when it exists. Shared
   Components that can be selected by multiple recipes live separately under
   `recipes/kustomize/components/`; that directory has no base or overlays and
   never renders by itself. Prefer resource-shaped Kustomize merge patches over
@@ -18,8 +18,8 @@ SPDX-License-Identifier: Apache-2.0
   base with backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
-  `components` list. The matrix, recipe-local base and Components, intermediate
-  overlays, and shared Components are source. Public overlay `kustomization.yaml`
+  `components` list. The matrix, recipe-local base and Components, and shared
+  Components are source. Public overlay `kustomization.yaml`
   files, `deploy-*.yaml` files, and the central schema are generated. Edit source,
   then run `scripts/kustomize-matrix.py unfold <matrix.yaml>` followed by
   `scripts/kustomize-matrix.py render <matrix.yaml>`; do not hand-edit generated

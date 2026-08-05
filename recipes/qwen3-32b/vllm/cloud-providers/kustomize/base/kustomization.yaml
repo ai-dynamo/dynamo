@@ -6,5 +6,6 @@ sortOptions:
   order: fifo
 components:
   - ../../../../../kustomize/components/dynamo-openapi
+  - ../../../../../kustomize/components/disagg-workers/rdma-defaults
 resources:
   - deploy.yaml
