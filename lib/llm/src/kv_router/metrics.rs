@@ -63,7 +63,7 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
-use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -953,7 +953,7 @@ impl RouterRequestMetrics {
                 let non_max_overlap_selections_total = metrics
                     .create_intcountervec(
                         &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
-                        "Total admitted scheduler selections with less KV cache overlap than another eligible worker",
+                        "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
                         &[labels::WORKER_TYPE],
                         extra_labels,
                     )
@@ -961,16 +961,14 @@ impl RouterRequestMetrics {
                 let overlap_blocks_lost = metrics
                     .create_histogramvec(
                         &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
-                        "Difference in effective KV cache overlap between the highest-overlap eligible worker and selected worker",
+                        "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
                         &[labels::WORKER_TYPE],
                         extra_labels,
                         Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
                     )
                     .expect("failed to create router_overlap_blocks_lost");
-                for worker_type in [WORKER_TYPE_PREFILL, WORKER_TYPE_DECODE] {
-                    non_max_overlap_selections_total.with_label_values(&[worker_type]);
-                    overlap_blocks_lost.with_label_values(&[worker_type]);
-                }
+                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
