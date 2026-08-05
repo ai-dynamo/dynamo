@@ -1096,7 +1096,7 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Handle prompt_logprobs
             prompt_logprobs_value = output_options.get("prompt_logprobs")
-            if prompt_logprobs_value:
+            if prompt_logprobs_value is not None:
                 if hasattr(sampling_params, "prompt_logprobs"):
                     setattr(
                         sampling_params, "prompt_logprobs", int(prompt_logprobs_value)

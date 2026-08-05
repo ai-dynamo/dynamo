@@ -56,6 +56,7 @@ class MockSamplingParams:
     best_of: int = 1
     ignore_eos: bool = False
     guided_decoding: object | None = None
+    prompt_logprobs: int | None = None
     max_tokens: int | None = None
     min_tokens: int | None = None
     stop_token_ids: list[int] | None = None
@@ -753,8 +754,8 @@ class TestDisaggRequestId:
         assert params.request_type == "context_and_generation"
 
 
-class TestHealthCheckPriority:
-    """Verify generate_locally forwards the correct priority to generate_async.
+class TestGenerateLocally:
+    """Verify generate_locally forwards request options to generate_async.
 
     Health check requests (built by TrtllmHealthCheckPayload) must reach
     the TRT-LLM engine at priority=1.0.  Regular inference requests
@@ -844,6 +845,28 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    async def test_zero_prompt_logprobs_is_forwarded(self):
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["sampling_params"].prompt_logprobs == 0
 
     @pytest.mark.asyncio
     async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
