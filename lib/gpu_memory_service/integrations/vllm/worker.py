@@ -28,7 +28,7 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
     is_scratch,
 )
-from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import (
     GMS_TAGS,
     get_socket_path,
@@ -71,6 +71,18 @@ patch_memory_snapshot()
 apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
+
+
+def kv_reuse_enabled() -> bool:
+    """Opt in to committing the KV layout so it survives this engine (default off).
+
+    Two consequences an operator should know about, both inherent rather than
+    incidental: the KV pages are held by the GMS server after this engine dies (that is
+    the feature), and sleep therefore no longer returns KV memory to the device for this
+    tag -- the same property that makes same-engine sleep/wake reuse work.
+    """
+    return os.getenv("DYN_GMS_PERSIST_KV", "0") not in ("0", "", "false", "False")
+
 
 # MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
 # Pause/resume serving lifecycle is implemented in modelexpress.lifecycle, which
@@ -435,14 +447,68 @@ class GMSWorker(Worker):
             # registration.
             was_scratch = is_scratch(kv_cache_manager)
             assert kv_cache_manager.is_unmapped, "GMS kv_cache is not unmapped"
-            kv_cache_manager.connect(RequestedLockType.RW)
+            # "Adopt if there is something to adopt, otherwise build one." A standby
+            # taking over is granted RW_DATA and reattaches the prior engine's pages;
+            # the first engine finds nothing, is granted RW, and allocates. Same code
+            # either way -- the granted mode tells us which happened.
+            kv_cache_manager.connect(
+                RequestedLockType.RW_DATA_OR_RW
+                if kv_reuse_enabled()
+                else RequestedLockType.RW
+            )
+            adopted = kv_cache_manager.granted_lock_type == GrantedLockType.RW_DATA
             if was_scratch:
                 # Move scratch bookkeeping from _scratch_mappings into _mappings
                 # as preserved-VA records and flip subsequent allocations on
                 # this mempool to server-backed create_mapping.
                 kv_cache_manager.prepare_scratch_for_reallocation()
-            kv_cache_manager.reallocate_all_handles(tag="kv_cache")
-            kv_cache_manager.remap_all_vas()
+            if adopted:
+                # KV reuse (shadow failover): a prior engine committed its KV layout, so
+                # the server -- which owns the physical memory, not the process that was
+                # writing it -- kept the pages when that engine died. Reattach the SAME
+                # bytes by name instead of allocating a fresh, empty pool. remap maps
+                # RW-writable, so this engine keeps serving.
+                logger.info(
+                    "[GMS] KV reuse: adopting %d committed kv_cache allocations "
+                    "from a prior engine (skipping fresh reallocation)",
+                    len(kv_cache_manager.list_handles(tag="kv_cache")),
+                )
+                try:
+                    kv_cache_manager.remap_all_vas()
+                except StaleMemoryLayoutError as exc:
+                    # The inherited layout does not fit this engine -- e.g. a standby
+                    # that profiled a different num_gpu_blocks. Release it wholesale,
+                    # which frees the pages and widens us back to RW, then build our own.
+                    # Without the release the stale pool would be orphaned and the new
+                    # one stacked on top of it.
+                    logger.warning(
+                        "[GMS] KV reuse: inherited layout is incompatible (%s); "
+                        "releasing it and allocating a fresh pool",
+                        exc,
+                    )
+                    logger.info(
+                        "[GMS] KV reuse: released %d allocations",
+                        kv_cache_manager.release_layout(),
+                    )
+                    adopted = False
+                    kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+                    kv_cache_manager.remap_all_vas()
+            else:
+                kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+                kv_cache_manager.remap_all_vas()
+            # Seal the shape. This is the atomic boundary for KV durability: from here
+            # the pages outlive this engine, so a standby can adopt them. Dying before
+            # this point leaves a half-built pool that the server discards, which is what
+            # makes a crash mid-allocation safe. Sealing keeps our mappings and lets us
+            # go on writing -- only the geometry is frozen. Skipped when we adopted a
+            # layout that is already sealed.
+            if kv_reuse_enabled() and not adopted:
+                logger.info(
+                    "[GMS] KV layout committed (hash %s...): %d allocations now "
+                    "outlive this engine",
+                    kv_cache_manager.commit_layout()[:16],
+                    len(kv_cache_manager.mappings),
+                )
             self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()
