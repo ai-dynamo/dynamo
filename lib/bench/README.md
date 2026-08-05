@@ -21,6 +21,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | Entrypoint | Feature |
 |---|---|
 | `claude_trace_export` | `claude-trace-export` |
+| `request_trace_to_mooncake` | `request-trace-to-mooncake` |
 | `request_trace_to_satf` | `satf` |
 | `multiturn_bench` | `multiturn` |
 | `offline_replay_bench` | `offline-replay` |

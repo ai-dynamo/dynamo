@@ -132,12 +132,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 {% if context.sglang.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
-# SGLang runtime dependency stack.
+# SGLang runtime dependency stack. google-crc32c is imported eagerly by the MX
+# sglang loader (>=0.5.0) and is not in the SGLang base image, so install it
+# alongside; the import check below fails the build on any future --no-deps gap.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
     export PIP_CACHE_DIR=/root/.cache/pip; \
     pip install --break-system-packages --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+        "modelexpress==${MODELEXPRESS_VERSION}"; \
+    pip install --break-system-packages "google-crc32c>=1.5.0"; \
+    python3 -c "import modelexpress.engines.sglang"
 {% endif %}
 {% endif %}
 {% endif %}
@@ -161,6 +165,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+
+{% if device != "xpu" and target not in ("dev", "local-dev") %}
+# Add generic UCX aliases beside NIXL's private libraries so native consumers
+# use the same implementation without breaking UCX's $ORIGIN-based core and
+# module lookup. The wheel's auditwheel dependency directory is deliberately
+# placed first for every process; it contains only hash-mangled dependencies
+# plus the two generic UCX aliases. No existing wheel file or ELF metadata is
+# modified.
+RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
+    --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+{% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests

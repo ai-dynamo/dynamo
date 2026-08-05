@@ -52,11 +52,6 @@ logger = logging.getLogger(__name__)
 pytest_plugins = ("tests.utils.otel_plugin",)
 
 
-def _is_cuda13() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    return v.startswith("13")
-
-
 def _disable_responses_reasoning(
     payload: ResponsesPayload | ResponsesStreamPayload,
 ) -> ResponsesPayload | ResponsesStreamPayload:
@@ -204,10 +199,6 @@ sglang_configs = {
             # "ready" at ~176s on a warm-cache RTX 6000 Ada.
             pytest.mark.timeout(470),  # 3x ~155s (sglang gpu_1 log)
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
@@ -245,10 +236,6 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(470),  # 3x ~156s (sglang gpu_1 log)
             pytest.mark.post_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
@@ -272,10 +259,6 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(470),  # 3x ~151s (sglang gpu_1 log)
             pytest.mark.post_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,

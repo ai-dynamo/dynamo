@@ -45,9 +45,25 @@ jobs:
         with:
           gh_token: ${{ github.token }}
 
+  # Structural docs rules the Fern CLI does not cover: SPDX headers, frontmatter, body H1,
+  # link scope, dangling nav paths, and internal references. Read-only, so it reports through
+  # inline annotations and the job summary rather than a pull request comment.
+  docs-lint:
+    name: Docs Lint
+    needs: changed-files
+    if: needs.changed-files.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+    - name: Lint docs structure
+      run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
+
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, fern-check, fern-broken-links, docs-lint, operator, snapshot, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, fern-check, fern-broken-links, docs-lint, operator, snapshot, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -83,11 +99,8 @@ jobs:
       working-directory: docs/fern
       run: fern check
 
-  # Structural docs rules the Fern CLI does not cover: SPDX headers, frontmatter, body H1,
-  # link scope, dangling nav paths, and internal references. Read-only, so it reports through
-  # inline annotations and the job summary rather than a pull request comment.
-  docs-lint:
-    name: Docs Lint
+  docs-website-composition:
+    name: Docs Website Composition Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
     runs-on: ubuntu-latest
@@ -95,9 +108,32 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-    - name: Lint docs structure
-      run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
+      with:
+        fetch-depth: 0
+    # The sync and release-version composition (rsync scopes, nav path
+    # transforms, the shared-Reference machinery) only executes on main pushes
+    # and tag cuts, so fern check pre-merge validates the source tree rather
+    # than the tree that actually publishes. This replays both jobs against
+    # docs-website and runs fern check on the composed result.
+    - name: Fetch docs-website
+      run: git fetch --no-tags --depth=1 origin docs-website:refs/remotes/origin/docs-website
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - name: Install Fern CLI
+      run: npm install -g fern-api
+    - name: Install yq
+      run: |
+        # Runner-owned bin dir: no sudo, and $GITHUB_PATH puts it ahead of
+        # any preinstalled yq for the steps that follow.
+        mkdir -p "$RUNNER_TEMP/bin"
+        wget -qO "$RUNNER_TEMP/bin/yq" https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
+        chmod +x "$RUNNER_TEMP/bin/yq"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+    - name: Replay the docs-website composition
+      env:
+        DOCS_WEBSITE_REF: origin/docs-website
+      run: bash docs/fern/scripts/simulate_docs_website.sh
 
   fern-broken-links:
     name: Fern Broken Links Check
@@ -207,11 +243,28 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run canonical replay feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: |
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib canonical_digest_tests
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib pressure_readmission
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib fresh_prefill_tracks_cache_owned_prefix_pages
+        cargo test --locked -p dynamo-bench --features replay-bench \
+          --bench offline_replay_bench -- \
+          testdata/mooncake_trace_tiny.jsonl \
+          --iterations 2 \
+          --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl"
+    - name: Run Python bindings AIC feature tests
+      if: matrix.dir == 'lib/bindings/python'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --features aic-forward-pass -- --nocapture
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: |
         cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload replay_forces_g1_to_g2 -- --nocapture
+        cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload aggregated_canonical_evidence -- --nocapture
         cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
@@ -226,11 +279,15 @@ jobs:
 
         compile_bench multiturn --bench multiturn_bench
         compile_bench satf --bin request_trace_to_satf
+        compile_bench request-trace-to-mooncake --bin request_trace_to_mooncake
         compile_bench offline-replay --bench offline_replay_bench
         compile_bench mooncake --bench mooncake_bench
         compile_bench active-sequences --bench active_sequences_bench
         compile_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         compile_bench dc-ckf-relay --bench dc_ckf_relay_bench
+
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features request-trace-to-mooncake --test request_trace_to_mooncake
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -298,6 +355,7 @@ jobs:
 
         lint_bench multiturn --bench multiturn_bench
         lint_bench satf --bin request_trace_to_satf
+        lint_bench request-trace-to-mooncake --bin request_trace_to_mooncake
         lint_bench offline-replay --bench offline_replay_bench
         lint_bench mooncake --bench mooncake_bench
         lint_bench active-sequences --bench active_sequences_bench
