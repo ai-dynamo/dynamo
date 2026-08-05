@@ -242,12 +242,21 @@ jobs:
             echo "Nightly publish; release-pin gate does not apply." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Backward compat: branches cut before the manifest existed
-          # (e.g. release/1.3.0) do not have it at this commit.
+          # Backward compat, bounded. Branches cut before the manifest existed
+          # (e.g. release/1.3.0) legitimately lack it. Anything from the first
+          # covered release onward must have it: an unbounded skip would let a
+          # commit that deletes or renames either file publish ungated.
+          MANIFEST_FLOOR=1.4.0
           if [ ! -f .github/scripts/release_manifest/check_release_pins.py ] \
              || [ ! -f .github/release-manifest.yaml ]; then
-            echo "No release manifest at this commit; skipping gate." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
+            OLDEST=$(printf '%s\n%s\n' "${VERSION}" "${MANIFEST_FLOOR}" | sort -V | head -1)
+            if [ "${OLDEST}" = "${VERSION}" ] && [ "${VERSION}" != "${MANIFEST_FLOOR}" ]; then
+              echo "Release ${VERSION} predates the manifest (floor ${MANIFEST_FLOOR}); skipping gate." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "::error::Release ${VERSION} is at or past the manifest floor ${MANIFEST_FLOOR} but .github/release-manifest.yaml or check_release_pins.py is missing at this commit. Refusing to publish ungated."
+            exit 1
           fi
           # Mainline scope only (X.Y.0), same as release-branch-guard.yml.
           # A patch publish (e.g. 1.4.1) runs from a release branch whose
