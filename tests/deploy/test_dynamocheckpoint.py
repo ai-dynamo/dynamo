@@ -101,7 +101,7 @@ class CheckpointBackendConfig:
 CHECKPOINT_BACKENDS = {
     "vllm": CheckpointBackendConfig(
         name="vllm",
-        manifest=("examples", "backends", "vllm", "deploy", "v1beta1", "agg.yaml"),
+        manifest=("examples", "backends", "vllm", "deploy", "agg.yaml"),
         decode_component="VllmDecodeWorker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -117,14 +117,7 @@ CHECKPOINT_BACKENDS = {
     ),
     "sglang": CheckpointBackendConfig(
         name="sglang",
-        manifest=(
-            "examples",
-            "backends",
-            "sglang",
-            "deploy",
-            "v1beta1",
-            "agg.yaml",
-        ),
+        manifest=("examples", "backends", "sglang", "deploy", "agg.yaml"),
         decode_component="decode",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -144,14 +137,7 @@ CHECKPOINT_BACKENDS = {
     ),
     "trtllm": CheckpointBackendConfig(
         name="trtllm",
-        manifest=(
-            "examples",
-            "backends",
-            "trtllm",
-            "deploy",
-            "v1beta1",
-            "agg.yaml",
-        ),
+        manifest=("examples", "backends", "trtllm", "deploy", "agg.yaml"),
         decode_component="TRTLLMWorker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -234,6 +220,11 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
+def _checkpoint_manifest_path(backend: CheckpointBackendConfig) -> Path:
+    """Absolute path to the example manifest this backend deploys from."""
+    return Path(_get_workspace_dir()).joinpath(*backend.manifest)
+
+
 def _new_checkpoint_spec(
     backend: CheckpointBackendConfig,
     name: str,
@@ -244,7 +235,7 @@ def _new_checkpoint_spec(
     model_cache_pvc: str | None = None,
     model_cache_mount: str | None = None,
 ) -> DeploymentSpec:
-    spec_path = Path(_get_workspace_dir()).joinpath(*backend.manifest)
+    spec_path = _checkpoint_manifest_path(backend)
     deployment_spec = DeploymentSpec(str(spec_path))
     deployment_spec.name = name
     deployment_spec.namespace = namespace
