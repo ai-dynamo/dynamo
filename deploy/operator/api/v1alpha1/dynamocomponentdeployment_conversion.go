@@ -278,11 +278,19 @@ func ConvertToDynamoComponentDeploymentSpec(src *v1beta1.DynamoComponentDeployme
 }
 
 func marshalDCDHubSpec(src *v1beta1.DynamoComponentDeploymentSpec) ([]byte, error) {
-	return marshalPreservedSpec(*src.DeepCopy(), func(*v1beta1.DynamoComponentDeploymentSpec, *[]preservedRawJSON) {})
+	return marshalPreservedSpec(*src.DeepCopy(), func(spec *v1beta1.DynamoComponentDeploymentSpec, records *[]preservedRawJSON) {
+		if spec.EPPConfig != nil {
+			preserveEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
+		}
+	})
 }
 
 func restoreDCDHubSpec(raw string) (v1beta1.DynamoComponentDeploymentSpec, bool) {
-	return restorePreservedSpec(raw, func(*v1beta1.DynamoComponentDeploymentSpec, []preservedRawJSON) {})
+	return restorePreservedSpec(raw, func(spec *v1beta1.DynamoComponentDeploymentSpec, records []preservedRawJSON) {
+		if spec.EPPConfig != nil {
+			restoreEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
+		}
+	})
 }
 
 func marshalDCDSpokeSpec(src *DynamoComponentDeploymentSpec, emptyServiceName bool) ([]byte, error) {
@@ -292,6 +300,9 @@ func marshalDCDSpokeSpec(src *DynamoComponentDeploymentSpec, emptyServiceName bo
 				Path: preservedDCDEmptyServiceNamePath,
 				Nil:  true,
 			})
+		}
+		if spec.EPPConfig != nil {
+			preserveEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
 		}
 	})
 }
@@ -303,6 +314,9 @@ func restoreDCDSpokeSpec(raw string) (DynamoComponentDeploymentSpec, bool, bool)
 			if record.Path == preservedDCDEmptyServiceNamePath && record.Nil {
 				emptyServiceName = true
 			}
+		}
+		if spec.EPPConfig != nil {
+			restoreEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
 		}
 	})
 	return spec, emptyServiceName, ok

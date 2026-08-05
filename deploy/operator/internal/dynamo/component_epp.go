@@ -6,7 +6,10 @@
 package dynamo
 
 import (
+	"fmt"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -102,14 +105,35 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		},
 	}...)
 
-	// The Dynamo EPP is a native binary configured entirely through
-	// environment variables (DYN_NAMESPACE_PREFIX, DYN_COMPONENT_NAME, ...)
-	// and serves ext_proc/health on fixed ports. It takes no CLI flags and
-	// reads no config file, so leave Command/Args empty and let the image
-	// ENTRYPOINT run. Users can still override args via
-	// extraPodSpec.mainContainer.args (mergo.WithOverride).
 	container.Command = []string{}
-	container.Args = []string{}
+
+	// Presence of eppConfig keeps the legacy Go EPP launch contract so existing
+	// DGDs survive operator upgrades unchanged until migration clears it.
+	if epp.IsLegacyGoEPP(context.EPPConfig) {
+		poolName := epp.GetPoolName(context.ParentGraphDeploymentName)
+		poolNamespace := epp.GetPoolNamespace(context.ParentGraphDeploymentNamespace)
+		configFilePath := epp.GetConfigFilePath()
+
+		container.Args = []string{
+			"--pool-name", poolName,
+			"--pool-namespace", poolNamespace,
+			"--pool-group", epp.InferencePoolGroup,
+			"-v", "4",
+			"--zap-encoder", "json",
+			"--grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
+			"--grpc-health-port", "9003",
+			"--config-file", configFilePath,
+		}
+
+		_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
+		container.VolumeMounts = append(container.VolumeMounts, volumeMount)
+	} else {
+		// Native Rust EPP: configured through DYN_* env vars, serves
+		// ext_proc/health on fixed ports, takes no CLI flags, and reads no
+		// config file. Leave Args empty and let the image ENTRYPOINT run.
+		// Users can still override args via extraPodSpec.mainContainer.args.
+		container.Args = []string{}
+	}
 
 	// Mount HuggingFace cache directory for model config downloads
 	hfCacheMount := corev1.VolumeMount{
@@ -129,6 +153,11 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 
 	// EPP needs longer grace period for graceful shutdown
 	podSpec.TerminationGracePeriodSeconds = ptr.To(int64(130))
+
+	if epp.IsLegacyGoEPP(context.EPPConfig) {
+		volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
+		podSpec.Volumes = append(podSpec.Volumes, volume)
+	}
 
 	// Add emptyDir volume for HuggingFace cache (needed for downloading model config files)
 	hfCacheVolume := corev1.Volume{

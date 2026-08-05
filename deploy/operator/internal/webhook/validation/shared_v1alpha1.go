@@ -70,6 +70,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 			fmt.Sprintf("cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers", consts.FrontendSidecarContainerName),
 		))
 	}
+	if spec.EPPConfig != nil {
+		allErrs = append(allErrs, v.validateEPPConfigV1alpha1(spec.EPPConfig, fldPath.Child("eppConfig"))...)
+	}
 	if spec.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
@@ -88,6 +91,24 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		}
 	}
 
+	return allErrs
+}
+
+// validateEPPConfigV1alpha1 validates deprecated Go-EPP config. config and fldPath must not be nil.
+func (v *sharedValidation) validateEPPConfigV1alpha1(
+	config *nvidiacomv1alpha1.EPPConfig,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if config.ConfigMapRef == nil && config.Config == nil {
+		allErrs = append(allErrs, field.Required(fldPath, "either configMapRef or config must be specified"))
+	}
+	if config.ConfigMapRef != nil && config.Config != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath, "configMapRef and config", "are mutually exclusive"))
+	}
+	if config.ConfigMapRef != nil && config.ConfigMapRef.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("configMapRef", "name"), "is required"))
+	}
 	return allErrs
 }
 

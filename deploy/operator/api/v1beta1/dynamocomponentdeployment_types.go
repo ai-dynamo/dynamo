@@ -174,6 +174,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
+	// eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
+	// components. Only meaningful when `type` is `epp`.
+	//
+	// Deprecated: omit this field for the native Rust EPP. Presence of
+	// `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config
+	// mount) so existing DGDs keep running across operator upgrades until
+	// migration is started by clearing this field.
+	// +optional
+	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
+
 	// frontendSidecar optionally designates a container in
 	// `podTemplate.spec.containers` as the frontend sidecar. The value must
 	// match the `name` of a container in that list; the operator merges its

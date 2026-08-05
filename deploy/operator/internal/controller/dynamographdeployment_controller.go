@@ -2675,7 +2675,7 @@ func generateAdapterName(dgdName, componentName string) string {
 func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	componentName, _, hasEPP := dgd.GetEPPComponent()
+	componentName, eppService, hasEPP := dgd.GetEPPComponent()
 	if !hasEPP {
 		logger.V(1).Info("No EPP service defined, skipping EPP resource reconciliation")
 		return nil
@@ -2683,11 +2683,29 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 
 	logger.Info("Reconciling EPP resources", "componentName", componentName)
 
-	// 1. Reconcile InferencePool
+	// Legacy Go EPP: reconcile the ConfigMap when eppConfig is set and not a
+	// user-managed ConfigMapRef. Native Rust EPP needs no ConfigMap.
+	if epp.IsLegacyGoEPP(eppService.EPPConfig) && eppService.EPPConfig.ConfigMapRef == nil {
+		configMap, err := epp.GenerateConfigMap(ctx, dgd, componentName, eppService.EPPConfig)
+		if err != nil {
+			logger.Error(err, "Failed to generate EPP ConfigMap")
+			return fmt.Errorf("failed to generate EPP ConfigMap: %w", err)
+		}
+
+		if configMap != nil {
+			_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+				return configMap, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "Failed to sync EPP ConfigMap")
+				return fmt.Errorf("failed to sync EPP ConfigMap: %w", err)
+			}
+		}
+	}
+
+	// Reconcile InferencePool.
 	// Note: EPP Service is created automatically by the standard component reconciliation
 	// via GenerateComponentService() in graph.go (see ComponentTypeEPP case).
-	// The Dynamo EPP is configured via environment variables and needs no
-	// ConfigMap, so no EPP config ConfigMap is generated.
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
 	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName)
 	if err != nil {
@@ -2703,7 +2721,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
 	}
 
-	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule).
+	// Reconcile service mesh resources (e.g., Istio DestinationRule).
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.

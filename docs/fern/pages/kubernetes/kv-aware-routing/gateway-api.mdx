@@ -52,10 +52,22 @@ Add one component with `type: epp` to `qwen-gateway.yaml`. The Dynamo EPP runs t
 KV-aware router natively and is configured through `DYN_*` environment variables. Disaggregated
 versus aggregated routing is determined automatically from the worker types registered through
 Dynamo discovery.
-> [!IMPORTANT]
-> **Deprecation:** Dynamo no longer provides the Go-based EPP. The former
-> `deploy/inference-gateway/epp/` Go EPP tree has been removed. Dynamo EPP is now written in Rust and remains a part of the FrontEnd image.
 
+<Warning>
+**Go EPP deprecation.** Dynamo no longer ships a Go-based EPP image. New EPP components omit
+`eppConfig` and use the native Rust EPP (bundled in the FrontEnd image). Existing DGDs that still
+set `eppConfig` keep the legacy Go EPP Pod contract across operator upgrades until you migrate
+explicitly.
+
+Supported migration:
+
+1. Create a new DGD (or EPP component) that omits `eppConfig` and uses the Rust EPP image.
+2. Verify the new EPP is Ready and that the InferencePool / Gateway route serves traffic.
+3. Scale down or delete the old Go-EPP DGD.
+
+Clearing `eppConfig` on an existing DGD and switching the image is the in-place signal that
+migration has started; do that only when you are ready to roll the EPP Pod.
+</Warning>
 
 ```yaml
 spec:

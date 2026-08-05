@@ -24,6 +24,13 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
   <span className="enum-values"><span className="enum-label">Value:</span> <Badge intent="note" minimal>epp</Badge></span>
 </ParamField>
 
+<ParamField path="spec.components[].eppConfig" type="object">
+  Deprecated Go-EPP configuration. Omit for the native Rust EPP. When present, the operator keeps
+  the legacy Go EPP Pod contract (CLI flags and config mount) so existing DGDs survive operator
+  upgrades until you migrate by clearing this field and updating the image. See
+  [Route Requests with Gateway API](../../kubernetes/kv-aware-routing/gateway-api.mdx).
+</ParamField>
+
 <ParamField path="spec.components[].replicas" type="integer" default="1">
   Number of EPP pods. Increase this value when endpoint-picker request volume requires more EPP capacity.
 </ParamField>
