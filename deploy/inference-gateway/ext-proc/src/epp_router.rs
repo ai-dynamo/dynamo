@@ -83,7 +83,7 @@ impl EppRouter {
     /// Assemble a custom EPP image around a prebuilt selection service.
     pub async fn from_selection_service(
         cfg: EppStandaloneConfig,
-        service: Arc<SelectionService>,
+        service: SelectionService,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::from_service(&cfg, service).await?);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;

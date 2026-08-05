@@ -150,8 +150,9 @@ impl Selector {
     /// Wrap a prebuilt selection service for use by a custom EPP image.
     pub(crate) async fn from_service(
         cfg: &EppStandaloneConfig,
-        service: Arc<SelectionService>,
+        service: SelectionService,
     ) -> Result<Self> {
+        let service = Arc::new(service);
         let queueing_enabled = service
             .queueing_enabled(&cfg.model_name)
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
@@ -565,7 +566,7 @@ models:
             .build()
             .await
             .expect("custom selection service should build");
-        let selector = Selector::from_service(&test_config(), Arc::new(service))
+        let selector = Selector::from_service(&test_config(), service)
             .await
             .expect("selector should accept a prebuilt service");
         selector
@@ -843,13 +844,11 @@ models:
     async fn prebuilt_service_rejects_missing_queue_capacity() {
         let policy_file = model_policy_file();
         let router_config = router_config_with_policy(&policy_file);
-        let service = Arc::new(
-            SelectionServiceBuilder::new(router_config)
-                .indexer_threads(1)
-                .build()
-                .await
-                .expect("selection service should build"),
-        );
+        let service = SelectionServiceBuilder::new(router_config)
+            .indexer_threads(1)
+            .build()
+            .await
+            .expect("selection service should build");
         let mut cfg = test_config();
         cfg.model_name = "queueing-model".to_string();
         cfg.max_num_batched_tokens = None;
@@ -868,13 +867,11 @@ models:
 
     #[tokio::test]
     async fn prebuilt_service_rejects_peer_discovery_without_replica_sync() {
-        let service = Arc::new(
-            SelectionServiceBuilder::new(KvRouterConfig::default())
-                .indexer_threads(1)
-                .build()
-                .await
-                .expect("selection service should build"),
-        );
+        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
+            .indexer_threads(1)
+            .build()
+            .await
+            .expect("selection service should build");
         let mut cfg = test_config();
         cfg.peer_service = Some("does-not-exist".to_string());
 

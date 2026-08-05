@@ -113,7 +113,8 @@ pub trait WorkerPicker: Send {
         WorkerInputs::NONE
     }
 
-    /// Return one row index from the host-owned eligible candidate table.
+    /// Return one row index from the host-owned eligible candidate table. Row order is
+    /// unspecified; inspect candidate data instead of relying on a stable position.
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -336,13 +337,14 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     let pinned = eligibility.pinned_worker().is_some();
     let mut error = None;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
-        let preferred_taint_multiplier = if pinned {
-            None
-        } else {
-            request
-                .routing_constraints
-                .preferred_taint_multiplier(config.taints())
-        };
+        let preferred_taint_multiplier =
+            if pinned || !(*worker_inputs).contains(WorkerInputs::ROUTING) {
+                None
+            } else {
+                request
+                    .routing_constraints
+                    .preferred_taint_multiplier(config.taints())
+            };
         let candidate = input.row(worker, preferred_taint_multiplier, *worker_inputs);
         let mut cost = 0.0;
         for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
