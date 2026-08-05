@@ -1420,11 +1420,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
             }
-        if new_dp_size < 2:
+        if new_dp_size < 1:
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
+            }
+        # vLLM's config validation rejects EPLB, which elastic EP requires, unless
+        # tensor_parallel_size * data_parallel_size > 1. Mirror it so a scale request
+        # cannot drive a live engine into a topology its own startup would refuse.
+        tp_size = self.engine_client.vllm_config.parallel_config.tensor_parallel_size
+        if tp_size * new_dp_size <= 1:
             return {
                 "status": "error",
                 "message": (
-                    "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled"
+                    "tensor_parallel_size * new_data_parallel_size must be > 1 when "
+                    f"elastic EP/ePLB is enabled, but got tensor_parallel_size={tp_size}, "
+                    f"new_data_parallel_size={new_dp_size}"
                 ),
             }
 
