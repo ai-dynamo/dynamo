@@ -818,7 +818,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | ConfigMapRef references a user-provided ConfigMap containing EPP configuration.<br />The ConfigMap should contain EndpointPickerConfig YAML.<br />Mutually exclusive with Config. |  | Optional: \{\} <br /> |
-| `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br />Optional: \{\} <br /> |
+| `config` _EndpointPickerConfig_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### EndpointInfo
@@ -2444,7 +2444,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | configMapRef references a user-provided ConfigMap containing EPP<br />configuration. Mutually exclusive with `config`. |  | Optional: \{\} <br /> |
-| `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
+| `config` _EndpointPickerConfig_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec

@@ -20,7 +20,7 @@ This guide walks through deploying **Meta-Llama-3.1-8B-Instruct** with **Eagle3*
 
 ### Step 1: Set Up Your Docker Environment
 
-First, initialize a Docker container using the vLLM backend. See the [vLLM Quickstart Guide](../../knowledge-base/modular-components/backends/vllm/overview.md#vllm-quick-start) for details.
+First, initialize a Docker container using the vLLM backend. See the [vLLM Quickstart Guide](../../knowledge-base/modular-components/backends/vllm/overview.md#quick-start) for details.
 
 ```bash
 # Launch infrastructure services

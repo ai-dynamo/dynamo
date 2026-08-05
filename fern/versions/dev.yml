@@ -60,6 +60,12 @@ navigation:
     layout:
       - page: Welcome
         path: ../index.mdx
+      - link: Join Slack
+        href: http://ai-dynamo.org/slack
+        target: _blank
+      - link: Community Calendar
+        href: https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20
+        target: _blank
   # ==================== Kubernetes Guide ====================
   - tab: kubernetes-guide
     layout:
@@ -85,7 +91,7 @@ navigation:
             path: ../pages-dev/kubernetes/installation/install-dynamo.md
           - page: Multinode Orchestration
             path: ../pages-dev/kubernetes/installation/multinode-orchestration.md
-          - page: Gateway API Routing
+          - page: Gateway API Inference Extension
             path: ../pages-dev/kubernetes/installation/gateway-api-routing.mdx
           - section: RDMA Setup
             contents:
@@ -105,8 +111,6 @@ navigation:
                 path: ../pages-dev/kubernetes/installation/model-storage/azure-lustre-csi-driver.mdx
               - page: EFS
                 path: ../pages-dev/kubernetes/installation/model-storage/efs.mdx
-          - page: Observability
-            path: ../pages-dev/kubernetes/installation/observability.md
           - section: Managed Kubernetes
             contents:
               - section: EKS
@@ -156,16 +160,13 @@ navigation:
         contents:
           - page: Overview
             path: ../pages-dev/kubernetes/kv-aware-routing/overview.md
-          - page: Dynamo Frontend
+          - page: Using the Dynamo Frontend
             path: ../pages-dev/kubernetes/kv-aware-routing/dynamo-frontend.md
-          - page: Gateway API
+          - page: Using GAIE with Dynamo
             path: ../pages-dev/kubernetes/kv-aware-routing/gateway-api.mdx
-          - page: Vanilla vLLM On-ramp
+          - page: Using GAIE with vanilla vLLM
             path: ../pages-dev/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx
             slug: vanilla-vllm-onramp
-          - page: Standalone Router
-            slug: standalone-router
-            path: ../pages-dev/kubernetes/kv-aware-routing/standalone-router.md
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
         collapsed: true
@@ -185,7 +186,7 @@ navigation:
         icon: shield-halved
         collapsed: true
         contents:
-          - page: Introduction
+          - page: Overview
             path: ../pages-dev/kubernetes/fault-tolerance/introduction.md
           - page: Request Migration
             path: ../pages-dev/kubernetes/fault-tolerance/request-migration.md
@@ -193,6 +194,8 @@ navigation:
             path: ../pages-dev/kubernetes/fault-tolerance/request-rejection.md
           - page: Graceful Shutdown
             path: ../pages-dev/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: Shadow Engine Failover
+            path: ../pages-dev/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
       - section: Auto Deployment
         icon: wand-magic-sparkles
         collapsed: true
@@ -212,12 +215,13 @@ navigation:
         contents:
           - page: Observability
             path: ../pages-dev/kubernetes/operations/observability.mdx
-          - page: Benchmarking with AIPerf
-            path: ../pages-dev/kubernetes/operations/benchmarking-with-aiperf.mdx
-          - page: Performance Tuning
-            path: ../pages-dev/kubernetes/operations/performance-tuning.md
-          - page: LoRA Adapters
-            path: ../pages-dev/kubernetes/operations/lora-adapters.md
+          - section: Cold Start Optimizations
+            collapsed: true
+            contents:
+              - page: Dynamo Snapshot
+                path: ../pages-dev/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
+              - page: Model Express
+                path: ../pages-dev/developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md
           - section: Simulation with DynoSim
             slug: dynosim
             contents:
@@ -238,6 +242,12 @@ navigation:
               - page: DynoSim Planner Replay
                 slug: planner-simulation-benchmarking
                 path: ../pages-dev/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+          - page: Benchmarking with AIPerf
+            path: ../pages-dev/kubernetes/operations/benchmarking-with-aiperf.mdx
+          - page: Performance Tuning
+            path: ../pages-dev/kubernetes/operations/performance-tuning.md
+          - page: LoRA Adapters
+            path: ../pages-dev/kubernetes/operations/lora-adapters.md
   # ==================== CLI Guide ====================
   - tab: cli-guide
     layout:
@@ -260,8 +270,6 @@ navigation:
             path: ../pages-dev/cli/installation/install-dynamo.mdx
           - page: Minikube Setup
             path: ../pages-dev/cli/installation/minikube-setup.mdx
-          - page: Observability
-            path: ../pages-dev/cli/installation/observability.mdx
       - section: Model Deployment
         icon: microchip
         collapsed: true
@@ -299,10 +307,6 @@ navigation:
         contents:
           - page: Observability
             path: ../pages-dev/cli/operations/observability.mdx
-          - page: Benchmarking with AIPerf
-            path: ../pages-dev/cli/operations/benchmarking-with-aiperf.mdx
-          - page: LoRA Adapters
-            path: ../pages-dev/cli/operations/lora-adapters.md
           - section: Simulation with DynoSim
             slug: dynosim
             contents:
@@ -319,6 +323,10 @@ navigation:
               - page: DynoSim Sweeps
                 slug: simulation-sweeps
                 path: ../pages-dev/cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx
+          - page: Benchmarking with AIPerf
+            path: ../pages-dev/cli/operations/benchmarking-with-aiperf.mdx
+          - page: LoRA Adapters
+            path: ../pages-dev/cli/operations/lora-adapters.md
   - tab: use-cases
     layout:
       # ==================== Features ====================
@@ -343,6 +351,15 @@ navigation:
             path: ../pages-dev/use-cases/agents/agent-simulation.mdx
           - page: ThunderAgent Program Scheduler
             path: ../pages-dev/use-cases/agents/thunderagent-program-scheduler.md
+      - section: Reinforcement Learning
+        collapsed: true
+        icon: brain
+        slug: reinforcement-learning
+        contents:
+          - page: Overview
+            path: ../pages-dev/use-cases/reinforcement-learning/overview.md
+          - page: RL Implementation Guide
+            path: ../pages-dev/use-cases/reinforcement-learning/implementation-guide.md
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film
@@ -385,19 +402,12 @@ navigation:
               - page: Text-to-Text (LLM Diffusion)
                 slug: text-to-text
                 path: ../pages-dev/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
-      - section: Reinforcement Learning
-        collapsed: true
-        icon: brain
-        slug: reinforcement-learning
-        contents:
-          - page: Overview
-            path: ../pages-dev/use-cases/reinforcement-learning/overview.md
       - section: Tool Calling & Reasoning
         collapsed: true
         icon: screwdriver-wrench
         slug: parsing
         contents:
-          - page: Introduction
+          - page: Overview
             path: ../pages-dev/use-cases/tool-calling-and-reasoning/overview.mdx
           - page: Chat Processors
             path: ../pages-dev/use-cases/tool-calling-and-reasoning/chat-processors.mdx
@@ -620,7 +630,7 @@ navigation:
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/router-guide.md
                   - page: Routing Concepts
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/routing-concepts.md
-                  - page: Worker Filtering
+                  - page: Router Filtering
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
                   - page: Configuration and Tuning
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
@@ -906,10 +916,16 @@ navigation:
     layout:
       - page: Compatibility
         path: ../pages-dev/reference/general/compatibility.mdx
+        slug: compatibility
       - page: Examples
         path: ../pages-dev/reference/general/examples.md
+        slug: examples
       - page: Release Artifacts
         path: ../pages-dev/reference/general/release-artifacts.mdx
+        slug: release-artifacts
+      - page: Nightly Release Info
+        path: ../pages-dev/reference/general/nightly-release-info.md
+        slug: nightly-release-info
       - section: Releases
         slug: releases
         path: ../pages-dev/reference/general/releases/release-history.mdx
@@ -933,8 +949,10 @@ navigation:
             path: ../pages-dev/reference/general/releases/deprecations.mdx
       - page: Model Early Access Builds
         path: ../pages-dev/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
       - page: Glossary
         path: ../pages-dev/reference/general/glossary.md
+        slug: glossary
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)

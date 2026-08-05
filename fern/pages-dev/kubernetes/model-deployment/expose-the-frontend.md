@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Expose the Frontend
 subtitle: Route external traffic to a DynamoGraphDeployment's Frontend with a Kubernetes Ingress, a LoadBalancer Service, or the Inference Gateway.
-# TODO: either add or drop this page
 ---
 
 The [DGD Guide](deploy-with-dgd.md) reaches the Frontend with `kubectl port-forward`, which is fine for a smoke test but not for production traffic. This page shows how to give the Frontend a stable external address. Whatever the API version, the operator creates a `ClusterIP` Service named `<name>-frontend` (where `<name>` is `metadata.name`) on port 8000 for the Frontend component — the options below route external traffic to that Service. Choose one of three paths depending on what your cluster runs.

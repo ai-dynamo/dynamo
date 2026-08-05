@@ -115,7 +115,7 @@ Planner 支持基于吞吐量和基于负载的策略。请参阅 [Planner 设�
 - Request migration/cancellation 控制正在处理中的行为。
 - Load shedding 防止过载下的级联崩溃。
 
-请参阅 [Fault Tolerance](/dynamo/dev/kubernetes/fault-tolerance/introduction)。
+请参阅 [Fault Tolerance](/dynamo/dev/kubernetes/fault-tolerance/overview)。
 
 ## Kubernetes 原生实现（CRD + Grove）
 
@@ -186,7 +186,7 @@ NIXL 通过优化跨异构内存的 worker 间传输行为，降低分布式服�
 - [Discovery Plane](/dynamo/dev/knowledge-base/concepts/communication-planes/discovery-plane)
 - [Event Plane](/dynamo/dev/knowledge-base/concepts/communication-planes/event-plane)
 - [Request Plane](/dynamo/dev/knowledge-base/concepts/communication-planes/request-plane)
-- [Fault Tolerance](/dynamo/dev/kubernetes/fault-tolerance/introduction)
+- [Fault Tolerance](/dynamo/dev/kubernetes/fault-tolerance/overview)
 - [Grove](/dynamo/dev/knowledge-base/kubernetes/multinode/grove)
 
 ## 致谢
