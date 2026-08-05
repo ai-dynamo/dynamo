@@ -63,11 +63,7 @@ from dynamo.frontend.utils import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    # gpu_0: CPU-only in the sglang image -- proven by the arm64 CPU test
-    # lane, which already runs `sglang and gpu_0` and imports these same
-    # packages. GPU markers mean GPUs REQUIRED; a gpu_1 mark here routes
-    # the file through the VRAM-scheduled stage at ~24s/test of pure
-    # scheduling+import overhead against an idle GPU.
+    # gpu_0: CPU-only test
     pytest.mark.gpu_0,
     # Download tokenizer once per module scope
     pytest.mark.model("Qwen/Qwen3-0.6B"),
