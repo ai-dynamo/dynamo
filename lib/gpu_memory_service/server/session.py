@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,6 +29,8 @@ from gpu_memory_service.common.protocol.messages import (
 )
 
 from .fsm import GMSFSM, Connection, ServerState, StateEvent
+
+logger = logging.getLogger(__name__)
 
 
 class OperationNotAllowed(Exception):
@@ -289,7 +292,23 @@ class GMSSessionManager:
         what it just froze.
         """
         self._locking.transition(StateEvent.LAYOUT_COMMIT, conn)
-        conn.mode = GrantedLockType.RW_DATA
+        self._regrant(conn, GrantedLockType.RW_DATA)
+
+    def _regrant(self, conn: Connection, mode: GrantedLockType) -> None:
+        """The only place a live session's grant changes.
+
+        Logged because a client's capability changing underneath it is exactly what you
+        want in the log when staring at an unexplained permission error.
+        """
+        if conn.mode is mode:
+            return
+        logger.info(
+            "session %s regranted %s -> %s",
+            conn.session_id,
+            conn.mode.name,
+            mode.name,
+        )
+        conn.mode = mode
 
     def check_operation(self, msg_type: type, conn: Connection) -> None:
         allowed = _ALLOWED_BY_MODE.get(conn.mode, frozenset())

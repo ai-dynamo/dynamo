@@ -490,11 +490,13 @@ class GMSWorker(Worker):
             # go on writing -- only the geometry is frozen. Skipped when we adopted a
             # layout that is already sealed.
             if kv_reuse_enabled() and not adopted:
+                commit = kv_cache_manager.commit_layout()
                 logger.info(
                     "[GMS] KV layout committed (hash %s...): %d allocations now "
-                    "outlive this engine",
-                    kv_cache_manager.commit_layout()[:16],
+                    "outlive this engine; session narrowed to %s",
+                    commit.memory_layout_hash[:16],
                     len(kv_cache_manager.mappings),
+                    commit.granted_lock_type.name,
                 )
             self.model_runner.post_kv_cache_wake_up()
             if was_scratch:

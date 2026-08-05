@@ -1107,7 +1107,11 @@ def _build_sealed_layout(socket_path, size=4096, tag="kv_cache"):
     assert writer.granted_lock_type == GrantedLockType.RW
     va = writer.create_mapping(size=size, tag=tag)
     allocation_id = writer.mappings[va].allocation_id
-    writer.commit_layout()
+    commit = writer.commit_layout()
+    # The server is the authority on the new grant, and the caller is handed it back
+    # rather than having to know that committing narrows them.
+    assert commit.granted_lock_type == GrantedLockType.RW_DATA
+    assert commit.memory_layout_hash
     assert writer.granted_lock_type == GrantedLockType.RW_DATA
     return writer, allocation_id
 

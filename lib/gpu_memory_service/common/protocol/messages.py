@@ -41,6 +41,10 @@ class CommitLayoutRequest(msgspec.Struct, tag="commit_layout_request"):
 class CommitLayoutResponse(msgspec.Struct, tag="commit_layout_response"):
     success: bool
     memory_layout_hash: str = ""
+    # What the caller holds now. Committing a layout narrows the session to RW_DATA,
+    # and like HandshakeResponse the server is the authority on that rather than the
+    # client assuming it.
+    granted_lock_type: Optional[GrantedLockType] = None
 
 
 class GetLockStateRequest(msgspec.Struct, tag="get_lock_state_request"):

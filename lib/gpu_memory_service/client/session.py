@@ -137,22 +137,27 @@ class _GMSClientSession:
         logger.info("Committed weights and released RW connection")
         return True
 
-    def commit_layout(self) -> str:
-        """Seal the shape and keep writing. Returns the layout hash.
+    def commit_layout(self) -> CommitLayoutResponse:
+        """Seal the shape and keep writing.
 
         Deliberately unlike :meth:`commit`: the connection stays open and the caller's
         mappings are untouched, because the point is to go on writing bytes into a pool
-        whose geometry is now fixed. The server narrows this session to RW_DATA.
+        whose geometry is now fixed. Committing narrows this session, and the new grant
+        is read back from the response rather than assumed, the same way the handshake
+        does it.
         """
         response = self._transport.request(CommitLayoutRequest(), CommitLayoutResponse)
         if not response.success:
             raise RuntimeError("GMS commit_layout returned failure")
-        self._granted_lock_type = GrantedLockType.RW_DATA
+        if response.granted_lock_type is None:
+            raise RuntimeError("CommitLayoutResponse omitted granted_lock_type")
+        self._granted_lock_type = response.granted_lock_type
         logger.info(
-            "Committed layout shape (hash %s...); session narrowed to RW_DATA",
+            "Committed layout shape (hash %s...); session narrowed to %s",
             response.memory_layout_hash[:16],
+            self._granted_lock_type.name,
         )
-        return response.memory_layout_hash
+        return response
 
     def allocate_info(self, size: int, tag: str = "default") -> AllocateResponse:
         return self._transport.request(

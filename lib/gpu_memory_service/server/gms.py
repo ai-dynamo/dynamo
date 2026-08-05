@@ -305,7 +305,9 @@ class GMS:
             )
             return (
                 CommitLayoutResponse(
-                    success=True, memory_layout_hash=self._memory_layout_hash
+                    success=True,
+                    memory_layout_hash=self._memory_layout_hash,
+                    granted_lock_type=conn.mode,
                 ),
                 -1,
                 False,

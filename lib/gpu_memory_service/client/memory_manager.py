@@ -140,6 +140,19 @@ class LocalMapping:
         )
 
 
+@dataclass(frozen=True)
+class LayoutCommit:
+    """What :meth:`GMSClientMemoryManager.commit_layout` did to this session.
+
+    Returned rather than logged-and-discarded because committing a layout narrows the
+    caller's grant, and a call that changes what you may do should hand you back what
+    you now hold.
+    """
+
+    memory_layout_hash: str
+    granted_lock_type: GrantedLockType
+
+
 class GMSClientMemoryManager:
     """Unified memory manager for GPU Memory Service.
 
@@ -344,7 +357,7 @@ class GMSClientMemoryManager:
         self._granted_lock_type = None
         return True
 
-    def commit_layout(self) -> str:
+    def commit_layout(self) -> "LayoutCommit":
         """Seal the allocation set: the shape is final, the pages outlive this session.
 
         The counterpart to :meth:`commit`, and deliberately narrower. ``commit`` publishes
@@ -358,15 +371,23 @@ class GMSClientMemoryManager:
 
         The server narrows this session to RW_DATA, so allocate/free/metadata-put now
         raise. Reconnect with RW to build a different layout.
+
+        Returns what just happened to this session: the layout's identity, and the
+        grant the caller now holds.
         """
         self._require_rw()
         # Publish barrier, matching commit(): make this process's GPU writes visible
         # before the layout is advertised as reattachable.
         self._vmm.synchronize()
-        layout_hash = self._client.commit_layout()
-        self._granted_lock_type = GrantedLockType.RW_DATA
-        self._last_memory_layout_hash = layout_hash
-        return layout_hash
+        response = self._client.commit_layout()
+        # The server decides what we hold now; take it from the session rather than
+        # assuming, so the two sides cannot drift.
+        self._granted_lock_type = self._client.lock_type
+        self._last_memory_layout_hash = response.memory_layout_hash
+        return LayoutCommit(
+            memory_layout_hash=response.memory_layout_hash,
+            granted_lock_type=self._granted_lock_type,
+        )
 
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()
