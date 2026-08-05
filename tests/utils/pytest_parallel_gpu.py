@@ -281,11 +281,6 @@ _WATCHDOG_TIMEOUT_MULTIPLIER = 4
 _WATCHDOG_GRACE_S = 120
 
 
-def _watchdog_deadline(test_timeout: float) -> float:
-    """Wall-clock budget for one child pytest before the watchdog kills it."""
-    return test_timeout * _WATCHDOG_TIMEOUT_MULTIPLIER + _WATCHDOG_GRACE_S
-
-
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
     """Read all lines from a pipe into `captured`. Runs in a thread.
 
@@ -787,7 +782,9 @@ def run_parallel(
             if run_info.watchdog_reason or run_info.proc.poll() is not None:
                 continue
             elapsed = now - run_info.start_time
-            deadline = _watchdog_deadline(run_info.test.timeout)
+            deadline = (
+                run_info.test.timeout * _WATCHDOG_TIMEOUT_MULTIPLIER + _WATCHDOG_GRACE_S
+            )
             if elapsed <= deadline:
                 continue
             limit_note = (

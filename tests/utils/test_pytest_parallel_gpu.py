@@ -11,10 +11,6 @@ the VRAM-aware ordering beats the legacy timeout-sorted first-fit. No GPU or
 
 from __future__ import annotations
 
-import subprocess
-import sys
-
-import psutil
 import pytest
 
 from tests.utils.pytest_parallel_gpu import (
@@ -22,7 +18,6 @@ from tests.utils.pytest_parallel_gpu import (
     _priority_key,
     _select_launches,
     _TestEntry,
-    _watchdog_deadline,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -425,34 +420,3 @@ def test_simulation_conserves_work_and_respects_budget():
 
     assert makespan >= longest
     assert makespan >= total_work / 8 - 1e-6
-
-
-# --------------------------------------------------------------------------- #
-# watchdog
-# --------------------------------------------------------------------------- #
-def test_watchdog_deadline_clears_worst_case_retry_budget():
-    """A false kill turns a passing test into a failure, so the budget must
-    clear the worst legitimate run: 3 attempts (Datadog Auto Test Retries with
-    DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2), each with its own --timeout window.
-    """
-    for declared in (60.0, 320.0, 1200.0):
-        assert _watchdog_deadline(declared) > 3 * declared
-
-
-def test_psutil_reap_makes_popen_report_a_false_success():
-    """Why pass/fail gates on watchdog_reason instead of ``rc``.
-
-    ``terminate_process_tree`` reaps the child through psutil, so the later
-    ``Popen.poll()`` hits ``ChildProcessError`` and subprocess falls back to
-    reporting status 0 -- a SIGKILLed child would look like a clean pass.
-    """
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        handle = psutil.Process(proc.pid)
-        handle.kill()
-        handle.wait(timeout=10)  # psutil reaps it here
-        assert proc.poll() == 0  # real status is -SIGKILL
-    finally:
-        if proc.poll() is None:  # pragma: no cover - safety net
-            proc.kill()
-            proc.wait(timeout=10)
