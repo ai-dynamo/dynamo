@@ -2370,9 +2370,13 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
 /// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
 /// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
 /// for correct disambiguation when `n > 1`.
+///
+/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
+/// backend may reuse the same tool call id across choices, and keying on the id alone
+/// would silently drop every choice after the first.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<String>,
+    dispatched_ids: &mut HashSet<(u32, String)>,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -2393,7 +2397,8 @@ fn streaming_tool_dispatch_events(
             if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
                 // Skip already-dispatched tool calls (dedup guard, matches
                 // the stopped/done flags in Anthropic/Responses converters).
-                if !dispatched_ids.insert(id.clone()) {
+                // Scoped per choice so repeated ids across choices still dispatch.
+                if !dispatched_ids.insert((choice.index, id.clone())) {
                     continue;
                 }
                 let payload = ToolCallDispatchPayload {
@@ -2647,7 +2652,7 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
@@ -6431,7 +6436,7 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<String>,
+        dispatched_ids: &mut HashSet<(u32, String)>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
         streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
@@ -6759,6 +6764,91 @@ mod tests {
         let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
         assert_eq!(json1["choice_index"], 1);
         assert_eq!(json1["tool_call"]["id"], "call_b");
+    }
+
+    #[test]
+    fn test_tool_dispatch_n_greater_than_1_same_id_across_choices() {
+        // Regression test for #12676: with n > 1, backends may reuse the same tool call id
+        // across choices. Dedup keyed on the id alone silently dropped every choice after
+        // the first, so the client never saw choice 1's dispatch. The key is
+        // (choice_index, id), so both choices must dispatch.
+        let choice_0 = make_choice_with_tool_call(
+            0,
+            Some("call_1"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        );
+        let choice_1 = make_choice_with_tool_call(
+            1,
+            Some("call_1"), // same id as choice 0
+            Some("get_weather"),
+            Some(r#"{"city":"London"}"#),
+        );
+
+        let response = make_stream_response(vec![choice_0, choice_1]);
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(
+            events.len(),
+            2,
+            "both choices must dispatch even when they share a tool call id"
+        );
+
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["choice_index"], 0);
+        assert_eq!(json0["tool_call"]["id"], "call_1");
+        assert_eq!(
+            json0["tool_call"]["function"]["arguments"],
+            r#"{"city":"Paris"}"#
+        );
+
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["choice_index"], 1);
+        assert_eq!(json1["tool_call"]["id"], "call_1");
+        assert_eq!(
+            json1["tool_call"]["function"]["arguments"],
+            r#"{"city":"London"}"#
+        );
+    }
+
+    #[test]
+    fn test_tool_dispatch_dedups_repeated_id_within_one_choice() {
+        // The per-choice scoping must not weaken dedup *within* a choice: the same id
+        // repeated in one choice is still a duplicate and dispatches exactly once.
+        let first = ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_1".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+            }),
+        };
+        let repeat = first.clone();
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: Some(vec![first, repeat]),
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+
+        let response = make_stream_response(vec![choice]);
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        assert_eq!(
+            events.len(),
+            1,
+            "a repeated id within the same choice must dispatch only once"
+        );
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["choice_index"], 0);
+        assert_eq!(json["tool_call"]["id"], "call_1");
     }
 
     #[test]
