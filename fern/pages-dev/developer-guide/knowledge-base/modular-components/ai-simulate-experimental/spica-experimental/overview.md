@@ -35,8 +35,7 @@ Spica's source lives in `aisimulate/src/aisimulate/spica` and is published by th
 distribution in the Dynamo repository. Installing that distribution provides the canonical
 `aisimulate.spica` Python package and its CPU Vizier and JAX dependencies. Runnable configuration
 files and tools live in `examples/aisimulate/spica`. Spica uses AI Configurator's lower-layer
-forward-pass provider and, when available, memory provider, then evaluates candidates with
-Dynamo Replay.
+forward-pass and memory providers, then evaluates candidates with Dynamo Replay.
 
 ## Spica and Replay Optimize
 
@@ -61,16 +60,11 @@ Spica source, documentation, and examples were migrated from
 
 ## Current Limitations
 
-The `dynamo-planner` image currently keeps AI Configurator 0.9 for compatibility with the existing
-Profiler. That release does not provide `aiconfigurator.sdk.memory`:
-
-- Spica emits a warning and skips the pre-search KV-capacity shape filter when the memory estimator
-  is unavailable. Trace workloads and synthetic workloads with fixed `concurrency` remain usable;
-  Replay and the GPU-budget checks still evaluate their candidates.
-- `kv_load_ratio` needs the compatible AI Configurator memory estimator to convert a relative load
-  into candidate-specific concurrency. Spica fails fast before starting the search for this
-  workload mode in the current default `dynamo-planner` image instead of evaluating an unverified
-  load or returning an empty candidate set after the sweep.
+KV-capacity filtering and `kv_load_ratio` require an AI Configurator performance database for the
+target `(hardware_sku, backend)`. Branch enumeration drops targets without one and backend or
+deployment-mode combinations without a KV-feasible shape within the capacity budget. It raises
+`NoViableParallelConfig` if no viable branch remains. Spica does not use the naive memory-estimation
+fallback.
 
 Treat workloads and search modes not covered by image smoke tests as unsupported experimental paths.
 See [Traffic](traffic.md#kv_load_ratio-candidate-relative-concurrency) for the KV-load contract.
