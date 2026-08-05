@@ -70,14 +70,9 @@ func ExecuteRestore(
 	// Rewrite libdir in criu.conf to the injected bundle path — the dump-time path
 	// (/usr/local/lib/snapshot/criu-plugins) only exists on the agent, not in the
 	// placeholder namespace. Write the override to the work dir (runtime state).
-	if criuOpts.ConfigFile != nil && settings.WorkDir != "" {
-		if data, err := os.ReadFile(criuOpts.GetConfigFile()); err == nil {
-			conf := overrideLibDir(string(data), filepath.Join(nsmountinjector.SnapshotBinDir, "criu-plugins"))
-			overridePath := filepath.Join(settings.WorkDir, "criu-restore.conf")
-			if err := os.WriteFile(overridePath, []byte(conf), 0644); err == nil {
-				criuOpts.ConfigFile = proto.String(overridePath)
-			}
-		}
+	if err := rewriteCRIULibDir(criuOpts, settings.WorkDir, log); err != nil {
+		cleanup()
+		return 0, nil, err
 	}
 
 	c := criulib.MakeCriu()
@@ -198,6 +193,28 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 
 // overrideLibDir rewrites or appends the libdir line in a criu.conf so that
 // CRIU loads plugins from the injected bundle rather than the dump-time path.
+func rewriteCRIULibDir(criuOpts *criurpc.CriuOpts, workDir string, log logr.Logger) error {
+	if criuOpts.ConfigFile == nil {
+		return nil
+	}
+	if workDir == "" {
+		log.Info("criu WorkDir unset; skipping libdir override — criu will use dump-time plugin path")
+		return nil
+	}
+	data, err := os.ReadFile(criuOpts.GetConfigFile())
+	if err != nil {
+		log.Error(err, "failed to read criu config file; skipping libdir override", "path", criuOpts.GetConfigFile())
+		return nil
+	}
+	overridePath := filepath.Join(workDir, "criu-restore.conf")
+	conf := overrideLibDir(string(data), filepath.Join(nsmountinjector.SnapshotBinDir, "criu-plugins"))
+	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
+		return fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
+	}
+	criuOpts.ConfigFile = proto.String(overridePath)
+	return nil
+}
+
 func overrideLibDir(conf, libDir string) string {
 	lines := strings.Split(conf, "\n")
 	replaced := false

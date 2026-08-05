@@ -172,8 +172,6 @@ config:
       - "*.pyc"
 
   restore:
-    # Path to the nsrestore binary in the placeholder image
-    nsRestorePath: /usr/local/bin/nsrestore
     # Maximum seconds to allow a restore attempt before snapshot-agent marks it failed
     restoreTimeoutSeconds: 7200
 

@@ -27,7 +27,6 @@ data:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
     restore:
-      nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
 
     criu:

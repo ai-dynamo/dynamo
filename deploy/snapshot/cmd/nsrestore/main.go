@@ -25,7 +25,11 @@ import (
 // reachable through an exec.Cmd we control. Both inherit this environment.
 // nsrestore itself is a static binary, so LD_LIBRARY_PATH does not affect it.
 func useInjectedBundle() error {
-	if err := os.Setenv("LD_LIBRARY_PATH", filepath.Join(nsmountinjector.SnapshotBinDir, "lib")); err != nil {
+	libDir := filepath.Join(nsmountinjector.SnapshotBinDir, "lib")
+	if existing := os.Getenv("LD_LIBRARY_PATH"); existing != "" {
+		libDir += ":" + existing
+	}
+	if err := os.Setenv("LD_LIBRARY_PATH", libDir); err != nil {
 		return err
 	}
 	if err := os.Setenv("PATH", nsmountinjector.SnapshotBinDir+":"+os.Getenv("PATH")); err != nil {
