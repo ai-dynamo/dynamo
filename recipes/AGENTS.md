@@ -19,14 +19,19 @@ SPDX-License-Identifier: Apache-2.0
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
   `components` list. The matrix, recipe-local base and Components, and shared
-  Components are source. Public overlay `kustomization.yaml`
-  files, `deploy-*.yaml` files, and the central schema are generated. Edit source,
-  then run `scripts/kustomize-matrix.py unfold <matrix.yaml>` followed by
-  `scripts/kustomize-matrix.py render <matrix.yaml>`; do not hand-edit generated
-  files. `scripts/kustomize-matrix.py check` validates every matrix and detects
-  artifacts left by moved matrices; use `unfold --clean` and `render --clean` to
-  remove those explicitly.
-  To compose additional Components without a checked-in overlay, use
+  Components are source. Kustomize is both the authoring model and recipe
+  documentation: the base and Components explain settings, public overlay
+  `kustomization.yaml` files document a concrete variant, and `deploy-*.yaml`
+  files are the fully materialized result. Users may apply a checked-in manifest
+  with `kubectl apply -f`, a checked-in public overlay with `kubectl apply -k`,
+  or an overlay they compose themselves. Only contributors edit source and run
+  `scripts/kustomize-matrix.py unfold <matrix.yaml>` followed by
+  `scripts/kustomize-matrix.py render <matrix.yaml>` to update committed
+  generated artifacts and the central schema; do not hand-edit them.
+  `scripts/kustomize-matrix.py check` validates every matrix and detects artifacts
+  left by moved matrices; use `unfold --clean` and `render --clean` to remove
+  those explicitly. To compose additional Components without a checked-in overlay,
+  use
   `scripts/kustomize-matrix.py compose <target> [<component-path>...] [<build-options>...]`.
   The target must be first, Components follow it, and Kustomize build options come
   last.
