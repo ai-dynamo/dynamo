@@ -1620,6 +1620,8 @@ mod core_behavior {
                 num_computed_tokens: 9,
                 num_preemptions: 1,
                 offload_dependency: None,
+                cached_prefix_tokens: None,
+                cached_tokens_signaled: false,
             },
         );
 
@@ -3147,6 +3149,8 @@ mod offload {
                 num_computed_tokens,
                 num_preemptions: 0,
                 offload_dependency: None,
+                cached_prefix_tokens: None,
+                cached_tokens_signaled: false,
             },
         );
     }
@@ -4464,4 +4468,80 @@ mod offload {
         assert!(core.destination_is_held(handoff_id));
         assert_eq!(core.destination_block_count(handoff_id), 2);
     }
+}
+
+#[test]
+fn test_first_signal_carries_admission_cache_truth() {
+    let args = MockEngineArgs::builder()
+        .engine_type(EngineType::Vllm)
+        .block_size(4)
+        .num_gpu_blocks(16)
+        .max_num_batched_tokens(Some(16))
+        .max_num_seqs(Some(3))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    // 9 tokens = two full blocks (cacheable) + one partial.
+    let tokens: Vec<u32> = (0..9).collect();
+
+    fn drive_to_completion(core: &mut VllmCore, uuid: Uuid) -> Vec<OutputSignal> {
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut signals = Vec::new();
+        for step in 0..100 {
+            let pass = core.execute_pass(&mut collector, step as f64);
+            signals.extend(
+                pass.output_signals
+                    .iter()
+                    .filter(|signal| signal.uuid == uuid)
+                    .cloned(),
+            );
+            if signals.iter().any(|signal| signal.completed) {
+                return signals;
+            }
+        }
+        panic!("request {uuid} never completed");
+    }
+
+    let cold = Uuid::from_u128(90);
+    core.receive(DirectRequest {
+        tokens: tokens.clone(),
+        max_output_tokens: 3,
+        uuid: Some(cold),
+        ..Default::default()
+    });
+    let cold_signals = drive_to_completion(&mut core, cold);
+    assert_eq!(
+        cold_signals[0].cached_tokens,
+        Some(0),
+        "cold request must report zero admission cache hits"
+    );
+    assert!(
+        cold_signals[1..]
+            .iter()
+            .all(|signal| signal.cached_tokens.is_none()),
+        "cache truth must ride the first signal only"
+    );
+
+    let warm = Uuid::from_u128(91);
+    core.receive(DirectRequest {
+        tokens: tokens.clone(),
+        max_output_tokens: 3,
+        uuid: Some(warm),
+        ..Default::default()
+    });
+    let warm_signals = drive_to_completion(&mut core, warm);
+    assert_eq!(
+        warm_signals[0].cached_tokens,
+        Some(8),
+        "repeat of the same prompt must report its two full blocks as admission cache hits"
+    );
+    assert!(
+        warm_signals[1..]
+            .iter()
+            .all(|signal| signal.cached_tokens.is_none()),
+        "cache truth must ride the first signal only"
+    );
 }
