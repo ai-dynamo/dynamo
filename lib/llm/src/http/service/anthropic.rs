@@ -447,6 +447,9 @@ async fn anthropic_messages(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let mut engine_stream = engine_stream;
+        // Clone for the inner cancellation watch; the original `ctx` is handed
+        // to `monitor_for_disconnects` below.
+        let cancel_ctx = ctx.clone();
 
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
@@ -456,24 +459,48 @@ async fn anthropic_messages(
             }
 
             let mut saw_error = false;
+            let mut cancelled = false;
 
-            while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
-                    &annotated_chunk,
-                    &mut response_collector,
-                    &mut http_queue_guard,
-                );
+            // Keep a single cancellation future alive across chunks — recreating
+            // it per token churns the underlying Notify (see disconnect.rs).
+            let stopped = cancel_ctx.stopped();
+            tokio::pin!(stopped);
 
-                let Some(stream_resp) = annotated_chunk.data else {
-                    if annotated_chunk.event.as_deref() == Some("error") {
-                        saw_error = true;
+            loop {
+                tokio::select! {
+                    // Prefer draining a ready backend chunk before honoring a
+                    // cancel so no already-generated token is dropped.
+                    biased;
+                    maybe_chunk = engine_stream.next() => {
+                        let Some(annotated_chunk) = maybe_chunk else {
+                            break; // backend stream ended normally
+                        };
+                        process_response_and_observe_metrics(
+                            &annotated_chunk,
+                            &mut response_collector,
+                            &mut http_queue_guard,
+                        );
+
+                        let Some(stream_resp) = annotated_chunk.data else {
+                            if annotated_chunk.event.as_deref() == Some("error") {
+                                saw_error = true;
+                            }
+                            continue;
+                        };
+
+                        converter.append_chunk_events(&stream_resp, &mut events);
+                        for event in events.drain(..) {
+                            yield event.map_err(axum::Error::new);
+                        }
                     }
-                    continue;
-                };
-
-                converter.append_chunk_events(&stream_resp, &mut events);
-                for event in events.drain(..) {
-                    yield event.map_err(axum::Error::new);
+                    _ = &mut stopped => {
+                        // Client disconnected (or the request was otherwise
+                        // cancelled). Best-effort flush the terminal usage +
+                        // message_stop below so a still-writable proxy records
+                        // the final token counts for the tokens produced so far.
+                        cancelled = true;
+                        break;
+                    }
                 }
             }
 
@@ -484,6 +511,14 @@ async fn anthropic_messages(
             }
             for event in events.drain(..) {
                 yield event.map_err(axum::Error::new);
+            }
+
+            if cancelled {
+                // Park so the outer `monitor_for_disconnects` (whose select is
+                // biased toward the stream) forwards the finalizer events above,
+                // then observes the stop itself and records the request as
+                // cancelled rather than completed.
+                std::future::pending::<()>().await;
             }
         };
 

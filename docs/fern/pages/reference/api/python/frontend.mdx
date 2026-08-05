@@ -20,7 +20,7 @@ from dynamo.frontend.vllm_processor import EngineFactory
 EngineFactory(config: FrontendConfig, flags: Namespace)
 ```
 
-[`components/src/dynamo/frontend/vllm_processor.py#L887`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L887)
+[`components/src/dynamo/frontend/vllm_processor.py#L889`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L889)
 
 **Public methods**
 
@@ -32,7 +32,7 @@ __init__(config: FrontendConfig, flags: Namespace)
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L888)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L890)
 
 <h4 id="api-dynamo-frontend-vllm-processor-enginefactory-chat-engine-factory">chat_engine_factory</h4>
 
@@ -42,7 +42,7 @@ chat_engine_factory(instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard, 
 
 Called by Rust when a model is discovered.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L907)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L909)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-frontendarggroup" title="FrontendArgGroup (class)">
@@ -52,7 +52,7 @@ Frontend configuration parameters.
 from dynamo.frontend.frontend_args import FrontendArgGroup
 ```
 
-[`components/src/dynamo/frontend/frontend_args.py#L171`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L171)
+[`components/src/dynamo/frontend/frontend_args.py#L175`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L175)
 
 **Public methods**
 
@@ -64,7 +64,7 @@ add_arguments(parser) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L174)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L178)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-frontendconfig" title="FrontendConfig (class)">
@@ -86,7 +86,7 @@ validate() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L93)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L97)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-preprocesserror" title="PreprocessError (class)">
@@ -551,7 +551,7 @@ graceful_shutdown(runtime: DistributedRuntime) -> None
 The DistributedRuntime instance to shut down.
 </ParamField>
 
-[`components/src/dynamo/frontend/main.py#L475`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L475)
+[`components/src/dynamo/frontend/main.py#L482`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L482)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-handle-engine-error" title="handle_engine_error (function)">
@@ -598,7 +598,7 @@ from dynamo.frontend.main import main
 main() -> None
 ```
 
-[`components/src/dynamo/frontend/main.py#L484`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L484)
+[`components/src/dynamo/frontend/main.py#L491`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L491)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-make-backend-error" title="make_backend_error (function)">

@@ -11225,8 +11225,7 @@ spec:
                               DGD/DCD services apply this to service pods. Auto-created checkpoints
                               apply checkpoint job clients before creating the DynamoCheckpoint; manual
                               DynamoCheckpoint users must provide an already-prepared pod template.
-                              In each rendered pod, only matching container names are wired; absent
-                              names are ignored.
+                              Every name must match a user-declared container in the enclosing pod spec.
                             items:
                               maxLength: 63
                               minLength: 1
@@ -12596,8 +12595,8 @@ spec:
                                 description: |-
                                   extraClientContainers lists additional user-declared containers that should
                                   be wired as GMS clients in service pods. Checkpoint Job clients are declared
-                                  under checkpoint.job.gmsClientContainers. In each rendered pod, only
-                                  matching container names are wired; absent names are ignored.
+                                  under checkpoint.job.gmsClientContainers. Every name must match a container
+                                  in the enclosing component's podTemplate.spec.containers.
                                 items:
                                   maxLength: 63
                                   minLength: 1

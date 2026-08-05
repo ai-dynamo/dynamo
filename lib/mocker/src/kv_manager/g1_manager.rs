@@ -59,15 +59,6 @@ enum DecodeBlockReservationBackend {
     Native(NativeDecodeBlockReservation),
 }
 
-impl DecodeBlockReservation {
-    pub(crate) fn len(&self) -> usize {
-        match &self.inner {
-            DecodeBlockReservationBackend::Kvbm(reservation) => reservation.len(),
-            DecodeBlockReservationBackend::Native(reservation) => reservation.len(),
-        }
-    }
-}
-
 pub(crate) struct DestinationReservation {
     inner: DestinationReservationBackend,
 }
