@@ -77,9 +77,6 @@ api_docs:
 examples:
   - 'recipes/**'
   - 'examples/**'
-  - 'scripts/generate_kustomize_openapi.py'
-  - 'scripts/kustomize-matrix.py'
-  - 'scripts/kustomize_matrix.py'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
@@ -163,6 +160,9 @@ core:
   - '*.py'
   - '*.rs'
   - 'tests/report_pytest_markers.py'
+  - 'scripts/generate_kustomize_openapi.py'
+  - 'scripts/kustomize-matrix.py'
+  - 'scripts/kustomize_matrix.py'
   # Negation patterns MUST come after positive patterns — micromatch processes
   # patterns left-to-right, so negations only filter matches accumulated by
   # preceding patterns. Placing them first has no effect.

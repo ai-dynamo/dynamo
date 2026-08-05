@@ -29,9 +29,13 @@ list:
 - transport-specific environment variables such as `UCX_NET_DEVICES` or
   `DYN_KVBM_NIXL_BACKEND_LIBFABRIC`
 
-This avoids replacing the full `args` list in each overlay. The rendered
-`deploy-*.yaml` files are checked in for GitHub review and direct `kubectl
-apply`.
+This avoids replacing the full `args` list in each overlay.
+
+## Applying and maintaining variants
+
+Cluster users select a checked-in `deploy-*.yaml` manifest below and apply it
+directly. Those manifests are the stable, reviewable deployment interface; no
+Kustomize command is required to consume this recipe.
 
 | Rendered manifest | Provider fabric | Overlay |
 |-------------------|-----------------|---------|
@@ -41,8 +45,12 @@ apply`.
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
 
-The variants are declared in [`.kustomize-matrix.yaml`](.kustomize-matrix.yaml).
-Regenerate the checked-in overlays and manifests with:
+For recipe contributors, the source of truth is
+[`.kustomize-matrix.yaml`](.kustomize-matrix.yaml), `kustomize/base/`, the
+recipe-local Components and `_rdma` overlay, plus the referenced shared
+Components under `recipes/kustomize/components/`. The public overlay
+`kustomization.yaml` files and `deploy-*.yaml` files are generated, committed
+for review, and must not be hand-edited. Regenerate them with:
 
 ```bash
 scripts/kustomize-matrix.py unfold .kustomize-matrix.yaml
