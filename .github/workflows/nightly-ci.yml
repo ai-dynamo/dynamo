@@ -610,7 +610,7 @@ jobs:
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
-      profiles: '["agg"]'
+      profiles: '["agg", "agg_router_kv_approx"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}

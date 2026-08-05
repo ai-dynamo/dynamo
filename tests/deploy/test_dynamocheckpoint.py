@@ -117,7 +117,13 @@ CHECKPOINT_BACKENDS = {
     ),
     "sglang": CheckpointBackendConfig(
         name="sglang",
-        manifest=("examples", "backends", "sglang", "deploy", "agg.yaml"),
+        manifest=(
+            "examples",
+            "backends",
+            "sglang",
+            "deploy",
+            "agg.yaml",
+        ),
         decode_component="decode",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -137,7 +143,13 @@ CHECKPOINT_BACKENDS = {
     ),
     "trtllm": CheckpointBackendConfig(
         name="trtllm",
-        manifest=("examples", "backends", "trtllm", "deploy", "agg.yaml"),
+        manifest=(
+            "examples",
+            "backends",
+            "trtllm",
+            "deploy",
+            "agg.yaml",
+        ),
         decode_component="TRTLLMWorker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
