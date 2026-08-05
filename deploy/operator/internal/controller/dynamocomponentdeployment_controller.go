@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"maps"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -128,6 +130,15 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	logs = logs.WithValues("dynamoComponentDeployment", dynamoComponentDeployment.Name, "namespace", dynamoComponentDeployment.Namespace)
 
+	// Finalize deleting resources before validating their now-immutable live configuration.
+	if !dynamoComponentDeployment.GetDeletionTimestamp().IsZero() {
+		_, err = commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
+		if err != nil {
+			logs.Error(err, "Failed to handle finalizer")
+		}
+		return ctrl.Result{}, err
+	}
+
 	// Setup defer to handle errors and update status
 	defer func() {
 		if err == nil {
@@ -148,6 +159,12 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
 		}
 	}()
+
+	if err = stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
+		dynamoComponentDeployment.Spec.Experimental,
+	)...); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
 	if err != nil {

@@ -452,6 +452,157 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 checkpoint with inter-pod GMS is rejected on create without job",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+			},
+		},
+		{
+			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on create without job",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+			},
+		},
+		{
+			name: "v1beta1 checkpoint with inter-pod GMS is rejected on update without job",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+			},
+		},
+		{
+			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on update without job",
+			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+			}),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+			},
+		},
+		{
+			name: "v1beta1 checkpoint with failover is rejected on create",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+				dcd.Spec.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{}
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+			},
+		},
+		{
+			name: "v1beta1 checkpoint with inter-pod GMS and failover reports both errors",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+				dcd.Spec.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
+					Mode:       nvidiacomv1beta1.GMSModeInterPod,
+					NumShadows: 1,
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+			},
+		},
+		{
+			name: "v1alpha1 checkpoint with enabled failover is rejected on create",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+			},
+		},
+		{
+			name:          "v1beta1 checkpoint with failover is rejected on update",
+			oldDeployment: betaDCDForAdmission(nil),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+				dcd.Spec.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{}
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+			},
+		},
+		{
+			name:          "v1alpha1 checkpoint with enabled failover is rejected on update",
+			oldDeployment: alphaDCDForAdmission(nil),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+			},
+		},
+		{
+			name: "v1alpha1 disabled failover remains accepted with checkpoint",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+				Failover:   &nvidiacomv1alpha1.FailoverSpec{},
+			}),
+		},
+		{
 			name: "empty dynamo namespace is accepted",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				DynamoNamespace: k8sptr.To(""),
@@ -733,7 +884,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint.job.gmsClientContainers: Forbidden: is only supported with gpuMemoryService.mode=IntraPod",
-				"spec.experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
 			},
 		},
 		{
