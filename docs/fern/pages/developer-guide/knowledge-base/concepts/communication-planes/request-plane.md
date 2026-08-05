@@ -49,14 +49,6 @@ legacy destination does not advertise a codec, the client uses JSON. The setting
 process does not control its outbound requests. Each request and its responses use the same selected
 codec.
 
-Codec selection happens independently on every hop. For example, a mixed-version SGLang deployment
-can use different codecs across one request path:
-
-| Hop | Selected Codec | Reason |
-| --- | --- | --- |
-| Dynamo 1.4 frontend → Dynamo 1.4 encode worker | MessagePack | The encode endpoint advertises the default `msgpack` preference. |
-| Dynamo 1.4 encode worker → Dynamo 1.2 backend worker | JSON | The legacy backend endpoint has no codec metadata, so the client falls back to JSON. |
-
 ## Configuration
 
 ### Environment Variable
