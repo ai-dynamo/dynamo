@@ -585,10 +585,15 @@ where
     }
 
     fn has_router_hint_capable_workers(&self) -> bool {
+        // Router-hint capability is worker-level metadata. Check one
+        // representative DP rank here so the coarse request-path gate does not
+        // scale with data_parallel_size. Follow-up: cache this from the runtime
+        // config watch if the per-worker scan shows up in large-fleet routing
+        // benchmarks.
         self.workers_with_configs.borrow().values().any(|config| {
-            let start = config.data_parallel_start_rank();
-            let end = start.saturating_add(config.data_parallel_size());
-            (start..end).any(|dp_rank| config.router_hint_metadata_for_dp_rank(dp_rank).is_some())
+            config
+                .router_hint_metadata_for_dp_rank(config.data_parallel_start_rank())
+                .is_some()
         })
     }
 
