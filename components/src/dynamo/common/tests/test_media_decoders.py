@@ -22,11 +22,19 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @pytest.fixture
 def sandboxed(monkeypatch):
-    """Stub out the lock and import-cache rewrite for unit runs."""
+    """Stub out the lock, cache rewrite, and fresh-interpreter probe."""
     monkeypatch.setattr(
         media_decoders, "_cross_process_lock", lambda: contextlib.nullcontext()
     )
     monkeypatch.setattr(media_decoders.importlib, "invalidate_caches", lambda: None)
+    # Route the fresh-interpreter probe through _module_available so one stub
+    # controls both, and the probe never spawns a real python (which would
+    # also collide with the subprocess.run recorders below).
+    monkeypatch.setattr(
+        media_decoders,
+        "_modules_missing_fresh",
+        lambda mods: [m for m in mods if not media_decoders._module_available(m)],
+    )
     return monkeypatch
 
 
@@ -273,6 +281,21 @@ def test_pending_subset_installs_only_still_missing(sandboxed):
     assert media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd
 
 
+def test_modules_missing_fresh_real_probe():
+    """Unmocked: the fresh-interpreter probe distinguishes real modules.
+
+    The probe exists because pip may install into a user-site directory
+    created after the parent interpreter started; only a fresh interpreter
+    (like the worker launched later) is guaranteed to see it. Exercise the
+    real subprocess path here since every other test stubs it out.
+    """
+    missing = media_decoders._modules_missing_fresh(
+        ["json", "definitely_not_a_module_xyz"]
+    )
+    assert missing == ["definitely_not_a_module_xyz"]
+    assert media_decoders._modules_missing_fresh([]) == []
+
+
 def test_redact_masks_url_credentials():
     line = "pip install --index-url https://user:secret@pypi.corp/simple pkg"
     masked = media_decoders._redact(line)
@@ -328,6 +351,18 @@ def test_cli_packages_override_reaches_pip(sandboxed):
     (cmd,) = calls
     assert "av==18.0.0" in cmd
     assert "--no-deps" not in cmd
+
+
+def test_cli_pip_args_equals_form_single_flag(sandboxed):
+    """--pip-args=--no-index must parse: a spaceless leading-dash value as a
+    separate token is an argparse usage error, so the docs teach the = form.
+    Found on a real image: the separate-token form exited 2, not 1."""
+    present: set[str] = set()
+    _set_available(sandboxed, present)
+    calls = _record_pip_and_mark(sandboxed, present, "decord")
+    assert media_decoders.main(["sglang", "--pip-args=--no-index"]) == 0
+    (cmd,) = calls
+    assert "--no-index" in cmd
 
 
 def test_cli_pip_args_reach_pip(sandboxed):
