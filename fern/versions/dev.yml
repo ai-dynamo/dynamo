@@ -379,6 +379,9 @@ navigation:
           - page: Video Decode GPU Requirements
             slug: video-decode-gpu-requirements
             path: ../pages-dev/use-cases/multimodal-serving/video-decode-gpu-requirements.md
+          - page: Additional Media Decoders
+            slug: additional-media-decoders
+            path: ../pages-dev/use-cases/multimodal-serving/additional-media-decoders.md
       - section: Diffusion
         collapsed: true
         icon: wand-magic-sparkles
