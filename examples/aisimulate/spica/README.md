@@ -47,8 +47,8 @@ python examples/aisimulate/spica/tools/run_sweep.py \
 To use another replay implementation, pass its `RunnerFactory` to
 `aisimulate.spica.run_smart_search`.
 
-The GLM-5-FP8 configuration demonstrates a disaggregated Pareto search over
-`kv_load_ratio`.
+The GLM-5-FP8 Pareto-front configuration captures the setup from a previous experiment and
+demonstrates a disaggregated search over `kv_load_ratio`.
 
 Update `workload.trace_path` before running a trace-backed configuration.
 

@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Spica Overview
+title: Spica Search Flow
 subtitle: Backend-neutral search, adapter materialization, and replay execution
 ---
 
@@ -82,6 +82,8 @@ Spica preserves the existing barrier-round behavior:
 
 - Vizier ask/tell stays in the main process.
 - Suggestions are projected onto backend-supported parallel configurations.
+- Backends without an AI Configurator performance database or a KV-feasible shape are removed; the
+  search fails if no deployment branch remains.
 - Exact repeated suggestions use the run-local result cache.
 - Candidate build failures, replay failures, GPU-budget violations, and timeouts are reported as
   infeasible trials.

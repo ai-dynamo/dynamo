@@ -54,6 +54,11 @@ Backends that have no performance database, no legal parallel configuration, or 
 the selected runner are removed before sampling. The transitional Dynamo runner supports vLLM and
 SGLang aggregated and disaggregated replay, and TensorRT-LLM aggregated replay.
 
+KV feasibility and `kv_load_ratio` use
+`aiconfigurator_core.sdk.memory.estimate_kv_cache`. A target without a matching performance database
+is removed; Spica does not use the naive memory-estimation fallback. If no viable deployment branch
+remains, Spica raises `NoViableParallelConfig` before sampling.
+
 ## Engine Fields
 
 Each searched engine list must be a non-empty subset of its allowed choices. A one-item list pins

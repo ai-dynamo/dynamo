@@ -22,6 +22,9 @@ Use the `dynamo-planner` image when a sweep needs those adapters or the transiti
 The image builds and installs AI Simulate and Dynamo from the same source revision; it does not
 publish AI Simulate as a standalone wheel.
 
+Spica uses AI Configurator's lower-layer forward-pass and memory providers, then evaluates each
+candidate with the injected replay runner.
+
 ## Documentation
 
 - [Overview](search-flow.md) describes ownership boundaries and the sweep flow.
@@ -100,6 +103,17 @@ runner.
 
 Planner performance queries use the `aiconfigurator-core` Python wheel directly and do not use a
 `dynamo._core` engine-performance binding.
+
+## Current Limitations
+
+KV-capacity filtering and `kv_load_ratio` require an AI Configurator performance database for the
+target `(hardware_sku, backend)`. Branch enumeration removes targets without one and backend or
+deployment-mode combinations without a KV-feasible shape within the capacity budget. It raises
+`NoViableParallelConfig` if no viable branch remains. Spica does not use the naive memory-estimation
+fallback.
+
+Treat workloads and search modes not covered by image smoke tests as unsupported experimental paths.
+See [Traffic](traffic.md#kv_load_ratio-candidate-relative-concurrency) for the KV-load contract.
 
 ## Compatibility
 

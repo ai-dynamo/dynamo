@@ -6,14 +6,14 @@ subtitle: Weighted arbitration across router policy classes
 ---
 
 The router uses a Deficit Round Robin (DRR) variant that is work-conserving
-across dispatchable physical policy-class heads. DRR determines which class
-can dispatch next; the configured FCFS or WSPT policy determines request
-order within that class.
+across dispatchable physical policy classes. DRR determines which class can
+dispatch next; the configured FCFS or WSPT policy determines request order
+within that class's shared and exact-worker lanes.
 
 This separation provides:
 
 - Weighted service across policy classes with different request sizes.
-- Independent within-class ordering and strict-priority tiers.
+- Independent within-class ordering, exact-worker lanes, and strict-priority tiers.
 - Progress for requests whose token cost is much larger than their class quantum.
 - Bounded arbitration work that does not loop once per token or DRR round.
 
@@ -40,7 +40,9 @@ amounts of credit.
 
 The scheduler maintains the following state for each physical class:
 
-- A pending heap ordered by strict priority and the class's FCFS or WSPT policy.
+- A shared pending heap for requests that can use any eligible worker.
+- One pending heap per exact-worker target, ordered by the same strict priority
+  and FCFS or WSPT policy.
 - A deficit containing earned but unspent credit.
 - A quantum controlling how quickly the deficit grows.
 
@@ -50,13 +52,15 @@ the configured class order from becoming a permanent preference.
 
 ## Selecting the Next Request
 
-For each class in cursor order, the scheduler examines only the class head:
+For each class in cursor order, the scheduler selects a class candidate by
+comparing the dispatchable shared-heap head with the dispatchable head of each
+exact-worker lane. It then applies DRR to that candidate:
 
 1. If the class is empty, reset its deficit to zero.
-2. If its head cannot currently dispatch, retain its deficit but add no credit.
-3. If existing deficit covers the head cost, dispatch it without adding another quantum.
-4. Otherwise, add one quantum and dispatch if the head is now affordable.
-5. If the head remains unaffordable, continue to the next class.
+2. If none of its lane heads can currently dispatch, retain its deficit but add no credit.
+3. If existing deficit covers the selected candidate's cost, dispatch it without adding another quantum.
+4. Otherwise, add one quantum and dispatch if the candidate is now affordable.
+5. If the candidate remains unaffordable, continue to the next class.
 
 Quantum is granted per ring round, not per request. A class that retained
 enough credit can dispatch multiple requests from the same weighted allocation:
@@ -128,16 +132,18 @@ unbounded burst while preserving work they had already earned.
 
 ## Dispatchability and Head-of-Line Behavior
 
-A class head is dispatchable when its eligible workers are not all above the
-class busy threshold. If no eligible endpoint remains, the head proceeds to
-worker selection so the router can return the appropriate error instead of
-parking it indefinitely. Eligibility continues to enforce exact pins, worker
-allow-lists, DP-rank bounds, taints, and overload filtering.
+A shared head is dispatchable when its eligible workers are not all above the
+class busy threshold. An exact-worker lane head is checked against its target
+worker. If no eligible endpoint remains, the candidate proceeds to worker
+selection so the router can return the appropriate error instead of parking it
+indefinitely. Eligibility continues to enforce exact pins, worker allow-lists,
+DP-rank bounds, taints, and overload filtering.
 
-Only the class head participates in arbitration. A constrained or pinned head
-can therefore block later requests in the same class even if those later
-requests could use another worker. This is intentional current behavior;
-FCFS/WSPT ordering is not bypassed to search deeper in a class heap.
+Head-of-line blocking is lane-local. The shared heap does not search past a
+blocked shared head, and an exact-worker lane does not search past its own
+blocked head. A blocked exact-worker lane does not prevent another exact-worker
+lane, or a dispatchable shared head, from competing for the class. FCFS/WSPT
+ordering is not bypassed within any individual lane.
 
 New arrivals also join an existing backlog in their resolved class instead of
 bypassing queued work. Queue limits, ordering, and DRR charging apply equally
@@ -151,19 +157,31 @@ One arbitration call performs:
 2. One linear calculation for bulk virtual rounds when required.
 3. At most one final ring scan.
 
-For `C` configured classes, arbitration is therefore `O(C)` regardless of the
-request cost or quantum. The queue actor calls arbitration repeatedly while
-work remains dispatchable, but each individual selection is bounded and
-continuation draining remains local to the actor.
+For `C` configured classes and `L` exact-worker lane heads that must be
+inspected or rechecked, arbitration is `O(C + L log L)` in the worst case,
+regardless of request cost or quantum. Candidate exact-worker heads are tree
+indexed, so ordinary selections do not need to rescan every ready lane; a
+worker-state recheck can visit the affected blocked lanes and pay the tree
+update factor. The queue actor calls arbitration repeatedly while work remains
+dispatchable, but each individual selection is bounded and continuation
+draining remains local to the actor.
 
-With only the synthetic no-YAML `default` class, the ring contains one class
-and DRR reduces to ordinary single-queue dispatch.
+With only the synthetic no-YAML `default` class, the ring contains one class.
+DRR reduces to single-class arbitration, but exact-worker requests still use
+their separate lanes.
 
 ## Configuration
 
 Set each physical class's `quantum` in the router policy YAML:
 
 ```yaml
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 3072
+    bucket: uncached
+
 policy_classes:
   - name: cached
     policy_family: standard

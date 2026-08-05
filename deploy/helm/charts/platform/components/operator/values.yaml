@@ -96,6 +96,20 @@ controllerManager:
   serviceAccount:
     annotations: {}
 
+planner:
+  powerAwareness:
+    # -- Grant the Planner's ServiceAccount pods/list in the DGD namespace.
+    # Required for power-annotation settlement checks during startup when
+    # enable_power_awareness=true. Leaving this false avoids granting an
+    # unnecessary namespace-level permission to power-disabled Planners.
+    # Note: this is an installation-wide capability flag; per-instance
+    # power awareness is still controlled by enable_power_awareness in the
+    # Planner config. In clusters where multiple Planner instances share
+    # the standard ServiceAccount, enabling this flag grants pods/list to
+    # all of them. A separate ServiceAccount per Planner is needed for
+    # truly per-instance least privilege.
+    enabled: false
+
 dynamo:
   components:
     serviceAccount:

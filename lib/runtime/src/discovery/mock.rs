@@ -3,11 +3,15 @@
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, validate_event_source_reregistration,
+    DiscoverySpec, DiscoveryStream, diff_discovery_instances, endpoint_instances,
+    validate_event_source_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 use tokio_util::sync::CancellationToken;
 
 /// Shared in-memory registry for mock discovery
@@ -184,14 +188,23 @@ impl Discovery for MockDiscovery {
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.into_instance(self.instance_id);
+        let instance_id = instance.id();
         let mut instances = self.registry.instances.lock().unwrap();
-        if matches!(&instance, DiscoveryInstance::EventSource { .. })
-            && let Some(existing) = instances
-                .iter()
-                .find(|existing| existing.id() == instance.id())
+        if let Some(existing) = instances
+            .iter_mut()
+            .find(|existing| existing.id() == instance_id)
         {
-            validate_event_source_reregistration(existing, &instance)?;
-            return Ok(existing.clone());
+            match &instance {
+                DiscoveryInstance::Endpoint(_) => {
+                    *existing = instance.clone();
+                    return Ok(instance);
+                }
+                DiscoveryInstance::EventSource { .. } => {
+                    validate_event_source_reregistration(existing, &instance)?;
+                    return Ok(existing.clone());
+                }
+                DiscoveryInstance::Model { .. } | DiscoveryInstance::EventChannel { .. } => {}
+            }
         }
         instances.push(instance.clone());
 
@@ -224,38 +237,35 @@ impl Discovery for MockDiscovery {
         query: DiscoveryQuery,
         _cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
-        use std::collections::HashSet;
-
         let registry = self.registry.clone();
 
         let stream = async_stream::stream! {
-            let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
+            let mut known_ids = HashSet::<DiscoveryInstanceId>::new();
+            let mut known_endpoints = HashMap::new();
 
             loop {
-                let current: Vec<_> = {
+                let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = {
                     let instances = registry.instances.lock().unwrap();
                     instances
                         .iter()
                         .filter(|instance| matches_query(instance, &query))
-                        .cloned()
+                        .map(|instance| (instance.id(), instance.clone()))
                         .collect()
                 };
 
-                let current_ids: HashSet<DiscoveryInstanceId> = current.iter().map(|i| i.id()).collect();
+                let (upserted, removed) =
+                    diff_discovery_instances(&known_ids, &known_endpoints, &current);
 
-                // Emit Added events for new instances
-                for instance in current {
-                    let id = instance.id();
-                    if known_instances.insert(id) {
-                        yield Ok(DiscoveryEvent::Added(instance));
-                    }
+                for instance in upserted {
+                    yield Ok(DiscoveryEvent::Added(instance));
                 }
 
-                // Emit Removed events for instances that are gone
-                for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
-                    known_instances.remove(&id);
+                for id in removed {
                     yield Ok(DiscoveryEvent::Removed(id));
                 }
+
+                known_endpoints = endpoint_instances(&current);
+                known_ids = current.into_keys().collect();
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
@@ -268,7 +278,45 @@ impl Discovery for MockDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::TransportType;
     use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn watch_emits_same_id_endpoint_update() {
+        let client = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        let query = DiscoveryQuery::Endpoint {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            endpoint: "endpoint".to_string(),
+        };
+        let spec = |transport: &str| DiscoverySpec::Endpoint {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            endpoint: "endpoint".to_string(),
+            transport: TransportType::Tcp(transport.to_string()),
+            device_type: None,
+        };
+        let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+
+        let original = client.register(spec("127.0.0.1:8000")).await.unwrap();
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("mock watch should emit the initial instance")
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, DiscoveryEvent::Added(original));
+
+        let updated = client.register(spec("127.0.0.1:9000")).await.unwrap();
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("mock watch should emit the updated instance")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(event, DiscoveryEvent::Added(updated.clone()));
+        assert_eq!(client.list(query).await.unwrap(), vec![updated]);
+    }
 
     fn model_spec(
         namespace: &str,

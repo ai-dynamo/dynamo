@@ -143,6 +143,12 @@ shape of the frontier without treating those near-duplicates as different deploy
 For this workload, 50-55 rounds is the practical quality/runtime point. The final 27 rounds
 after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolume.
 
+## Reproduction Status
+
+The packaged dependencies support this configuration's KV-capacity and candidate-concurrency
+calculations. Reproducing the historical frontier still depends on AI Configurator performance
+database coverage for B200/SGLang/GLM-5-FP8 and on Replay behavior in the runtime snapshot.
+
 ## Reproduce
 
 ```bash
@@ -150,6 +156,6 @@ python examples/aisimulate/spica/tools/run_sweep.py \
   --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
-The AIConfigurator performance model needs the `aic-forward-pass` binding. Dynamo must include the
-attention-DP KV-capacity fix so replay sees engine capacity as per-rank capacity multiplied by
-attention DP and replicas.
+The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo's attention-DP
+KV-capacity calculation multiplies per-rank capacity by attention DP and replicas before passing
+engine capacity to Replay.
