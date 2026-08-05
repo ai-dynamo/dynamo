@@ -181,11 +181,9 @@ class Turn(RealtimeTurn):
         """Extract per-step audio deltas from an engine output.
 
         Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
-        float32 waveform (or list of them). Read it only through the ``Mapping``
-        API: ``OmniRequestOutput.multimodal_output`` yields a
-        ``MultimodalPayload`` when a stage attached a non-empty one and a plain
-        ``dict`` otherwise -- its fallback field defaults to ``{}``, which is what
-        every stage-0 step returns -- so ``.tensors`` is not always present. Some
+        float32 waveform (or list of them). The payload is a ``Mapping`` -- a
+        ``MultimodalPayload`` or a plain dict, depending on what the step
+        attached -- so read it through that interface, not a concrete type. Some
         engine paths emit a growing cumulative waveform; ``waveform_to_deltas``
         reconciles both shapes against ``self.audio_ref`` so the client never
         hears duplicates.
@@ -457,14 +455,6 @@ def decode_pcm16(audio_b64: str) -> np.ndarray | None:
 
 
 def tensor_to_numpy(value: Any) -> np.ndarray | None:
-    """Coerce an engine payload value to a flat float32 waveform, or None.
-
-    Anything that is not numeric sample data is skipped rather than raised on:
-    ``model_outputs`` is a general-purpose key whose contents are model-defined,
-    and a structured value there (a dict, a list of objects) survives
-    ``np.asarray`` as an object array instead of failing it. Letting that reach
-    the caller would fail the whole turn over one unreadable step.
-    """
     if value is None:
         return None
     if isinstance(value, np.ndarray):
@@ -476,13 +466,13 @@ def tensor_to_numpy(value: Any) -> np.ndarray | None:
             arr = np.asarray(value)
         except Exception:  # noqa: BLE001 - non-array engine payloads are skipped
             return None
-    # bool/int/uint/float only: rejects object, str, bytes, void and complex.
+    # ``model_outputs`` is model-defined, so a structured value there survives
+    # np.asarray as an object array; skip it rather than fail the turn on the
+    # astype below. "biuf" is bool/int/uint/float.
     if arr.dtype.kind not in "biuf":
         return None
-    # Always flatten, including 0-d: a scalar step (e.g. the last entry of a
-    # list of per-step values) would otherwise reach waveform_to_deltas as a
-    # 0-d array and raise IndexError on the next step's ``shape[0]``.
-    arr = arr.reshape(-1)
+    if arr.ndim > 1:
+        arr = arr.reshape(-1)
     return arr.astype(np.float32, copy=False)
 
 

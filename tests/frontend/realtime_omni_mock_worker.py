@@ -49,12 +49,9 @@ class _MockAsyncOmni:
     ``OmniRequestOutput`` exposes (``stage_id``, ``outputs[].text``, and
     ``multimodal_output``).
 
-    ``multimodal_output`` is a property whose type depends on the step: a
-    ``MultimodalPayload`` when a stage attached a non-empty one, and the plain
-    ``dict`` fallback field otherwise. Stage-0 attaches nothing, so its frame
-    must carry ``{}`` rather than an empty payload -- a mock that hands back a
-    payload on every step tests only what the handler already assumes and cannot
-    catch a consumer that reaches past the ``Mapping`` API.
+    ``multimodal_output`` is a plain ``dict`` when the step attached no payload
+    and a ``MultimodalPayload`` when it did; the frames below use both so the
+    handler is exercised against either.
     """
 
     default_sampling_params_list: list = []

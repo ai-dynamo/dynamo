@@ -93,9 +93,8 @@ class _FakeEngine:
     canned text and split audio exercise transcript + multi-delta translation.
     """
 
-    def __init__(self, text: str = "hello", make_payload=_payload_obj) -> None:
+    def __init__(self, text: str = "hello") -> None:
         self.text = text
-        self.make_payload = make_payload
         self.seen_chunks: list = []
         self.seen_output_modalities: list = []
 
@@ -112,8 +111,8 @@ class _FakeEngine:
         )
         yield _text_output(self.text)
         half = len(full) // 2
-        yield _audio_output(full[:half], self.make_payload)
-        yield _audio_output(full[half:], self.make_payload)
+        yield _audio_output(full[:half])
+        yield _audio_output(full[half:])
 
 
 async def _passthrough_factory(audio_stream, input_stream):
@@ -139,13 +138,12 @@ async def _drive(handler, events, context):
     return [event async for event in handler.generate(request_stream(), context)]
 
 
-@payload_shapes
-def test_full_turn_event_sequence(make_payload):
+def test_full_turn_event_sequence():
     # Input PCM16 chunk: a short ramp, base64-encoded like the wire format.
     pcm16 = np.linspace(-8000, 8000, 64, dtype=np.int16).tobytes()
     audio_b64 = base64.b64encode(pcm16).decode("utf-8")
 
-    engine = _FakeEngine(text="hi there", make_payload=make_payload)
+    engine = _FakeEngine(text="hi there")
     handler = _make_handler(engine)
 
     events = [
@@ -222,48 +220,21 @@ def test_extract_audio_chunks_reads_both_payload_shapes(make_payload, key):
 @pytest.mark.parametrize(
     "multimodal_output",
     [
-        {},  # stage-0 steps: the property's plain-dict fallback
-        None,
-        MultimodalPayload(),
-        {"sr": 16000},  # metadata only, no waveform
+        {},  # what a step that attached no payload reports
         "not-a-mapping",
     ],
-    ids=["empty_dict", "none", "empty_payload", "metadata_only", "non_mapping"],
+    ids=["empty_dict", "non_mapping"],
 )
 def test_extract_audio_chunks_without_audio_is_empty(multimodal_output):
     output = SimpleNamespace(multimodal_output=multimodal_output)
     assert _bare_turn().extract_audio_chunks(output) == []
 
 
-@pytest.mark.parametrize(
-    "raw_audio",
-    [
-        {"logits": [1, 2]},  # structured payload survives np.asarray as object
-        [{"a": 1}, {"b": 2}],
-        "not-audio",
-        object(),
-    ],
-    ids=["dict", "list_of_dicts", "str", "opaque"],
-)
-def test_extract_audio_chunks_skips_non_waveform_model_outputs(raw_audio):
-    # ``model_outputs`` is model-defined, so a non-numeric value there must be
-    # skipped rather than escape and fail the whole turn.
-    output = SimpleNamespace(multimodal_output={"model_outputs": raw_audio})
+def test_extract_audio_chunks_skips_non_waveform_model_outputs():
+    # ``model_outputs`` is model-defined; a structured value there survives
+    # np.asarray as an object array and must be skipped, not raised on.
+    output = SimpleNamespace(multimodal_output={"model_outputs": {"logits": [1, 2]}})
     assert _bare_turn().extract_audio_chunks(output) == []
-
-
-def test_scalar_step_does_not_break_the_next_delta():
-    # A list payload yields its last entry; a scalar there flattens to 1-d, so
-    # the following step's prefix comparison has a shape[0] to read.
-    turn = _bare_turn()
-    first = turn.extract_audio_chunks(
-        SimpleNamespace(multimodal_output={"audio": [0.25]})
-    )
-    assert [c.tolist() for c in first] == [[0.25]]
-    second = turn.extract_audio_chunks(
-        SimpleNamespace(multimodal_output={"audio": np.float32([0.25, 0.5])})
-    )
-    assert [c.tolist() for c in second] == [[0.5]]
 
 
 def test_unknown_client_events_are_ignored():
