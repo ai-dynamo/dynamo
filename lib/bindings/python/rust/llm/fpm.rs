@@ -1039,14 +1039,16 @@ mod tests {
             serde_json::json!(["blue", "gpu"])
         );
 
-        assert!(!update_worker_model_card_taints(
-            &cards,
-            &ModelTaintsUpdate {
-                id: card_id(99, None),
-                taints: vec!["unknown".to_string()],
-            },
-        )
-        .unwrap());
+        assert!(
+            !update_worker_model_card_taints(
+                &cards,
+                &ModelTaintsUpdate {
+                    id: card_id(99, None),
+                    taints: vec!["unknown".to_string()],
+                },
+            )
+            .unwrap()
+        );
         assert_eq!(cards.len(), 1);
     }
 }
