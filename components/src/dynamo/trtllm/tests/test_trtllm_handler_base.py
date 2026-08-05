@@ -20,6 +20,7 @@ if not torch.cuda.is_available():
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.llmapi import DisaggregatedParams
+from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
@@ -776,13 +777,14 @@ class TestGenerateLocally:
         handler.default_sampling_params = MockSamplingParams()
         return handler
 
-    def _make_mock_generation_result(self):
+    def _make_mock_generation_result(self, prompt_logprobs=None):
         """Mock GenerationResult that yields a single finished token."""
         output = MagicMock()
         output.token_ids = [42]
         output.finish_reason = "stop"
         output.stop_reason = None
         output.request_perf_metrics = None
+        output.prompt_logprobs = prompt_logprobs
 
         res = MagicMock()
         res.outputs = [output]
@@ -847,9 +849,16 @@ class TestGenerateLocally:
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
 
     @pytest.mark.asyncio
-    async def test_zero_prompt_logprobs_is_forwarded(self):
+    async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):
         handler = self._make_handler()
-        generation_result = self._make_mock_generation_result()
+        prompt_logprob = MagicMock(
+            logprob=-0.25,
+            rank=1,
+            decoded_token="two",
+        )
+        generation_result = self._make_mock_generation_result(
+            prompt_logprobs=[None, {2: prompt_logprob}]
+        )
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
 
         request = {
@@ -867,6 +876,21 @@ class TestGenerateLocally:
 
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["sampling_params"].prompt_logprobs == 0
+        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
+            None,
+            {
+                "2": {
+                    "logprob": -0.25,
+                    "rank": 1,
+                    "decoded_token": "two",
+                }
+            },
+        ]
+
+    def test_trtllm_sampling_params_accepts_zero_prompt_logprobs(self):
+        sampling_params = SamplingParams(prompt_logprobs=0)
+
+        assert sampling_params.prompt_logprobs == 0
 
     @pytest.mark.asyncio
     async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
