@@ -45,12 +45,12 @@
  * cause arbitrary host paths to be mounted into (or unmounted from) a foreign
  * namespace.
  *
- * These values mirror the Go constants in internal/injection/paths.go:
+ * These values mirror the Go constants in internal/nsmountinjector/injector.go:
  *   agentBinDir    = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
  *   SnapshotBinDir = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
  * Keep them in sync when either changes. */
-#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = injection.agentBinDir */
-#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = injection.SnapshotBinDir */
+#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = nsmountinjector.agentBinDir */
+#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = nsmountinjector.SnapshotBinDir */
 
 /* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
 static int

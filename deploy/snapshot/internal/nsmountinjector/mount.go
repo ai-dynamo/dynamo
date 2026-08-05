@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package nsbindmount wraps the ns-bind-mount C helper binary, which performs
-// cross-namespace bind mounts using open_tree(2)/move_mount(2) after entering
-// the target process's mount namespace via setns(CLONE_NEWNS). The C helper is
-// necessary because Go's multithreaded runtime cannot call setns(CLONE_NEWNS)
-// directly.
-package nsbindmount
+package nsmountinjector
 
 import (
 	"context"
@@ -31,6 +26,10 @@ const (
 	// ExtraFiles, so it lands at fd 3. If ExtraFiles ever gains additional
 	// entries before nsFd, this constant must be updated to match.
 	nsFdChildNum = 3
+
+	// unmountTimeout bounds a single ns-bind-mount cleanup invocation so a hung
+	// umount cannot block the caller indefinitely.
+	unmountTimeout = 10 * time.Second
 )
 
 // MountOptions configures a single namespace-aware mount operation.
@@ -49,36 +48,34 @@ type MountHandle interface {
 	TargetPath() string
 }
 
-// Mounter mounts src at dst inside the mount namespace identified by pid.
-// The returned MountHandle must be Unmount-ed by the caller.
-type Mounter interface {
+// mounter mounts src at dst inside the mount namespace identified by pid.
+// It exists so tests can substitute the ns-bind-mount subprocess; production
+// callers get an execMounter via New and never name this type.
+type mounter interface {
 	Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error)
 }
 
-// ExecMounter implements Mounter by invoking the ns-bind-mount C helper as a
-// subprocess.
-type ExecMounter struct {
+// execMounter implements mounter by invoking the ns-bind-mount C helper as a
+// subprocess. The helper performs cross-namespace bind mounts using
+// open_tree(2)/move_mount(2) after entering the target process's mount
+// namespace via setns(CLONE_NEWNS); it is a separate binary because Go's
+// multithreaded runtime cannot call setns(CLONE_NEWNS) directly.
+type execMounter struct {
 	binaryPath string
 	log        logr.Logger
 }
 
-// New returns an ExecMounter using the default ns-bind-mount binary path.
-// Returns an error if the binary is not found on the host so callers fail
-// at startup rather than at the first mount operation.
-func New(log logr.Logger) (*ExecMounter, error) {
-	return NewWithBinary(defaultBinaryPath, log)
-}
-
-// NewWithBinary returns an ExecMounter using a custom binary path (e.g. for tests).
-// Returns an error if the binary does not exist at path.
-func NewWithBinary(path string, log logr.Logger) (*ExecMounter, error) {
+// newExecMounter returns an execMounter for the ns-bind-mount binary at path.
+// It errors if the binary is absent so callers fail at startup rather than at
+// the first mount operation.
+func newExecMounter(path string, log logr.Logger) (*execMounter, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("%s binary not found at %s: %w", binaryName, path, err)
 	}
-	return &ExecMounter{binaryPath: path, log: log}, nil
+	return &execMounter{binaryPath: path, log: log}, nil
 }
 
-// mountHandle is the concrete MountHandle returned by ExecMounter.Mount.
+// mountHandle is the concrete MountHandle returned by execMounter.Mount.
 // It holds an open /proc/<pid>/ns/mnt fd captured at mount time so that
 // Unmount can re-enter the correct namespace even after the target process
 // has exited and its PID been recycled by the kernel.
@@ -96,10 +93,10 @@ func (h *mountHandle) TargetPath() string { return h.dst }
 func (h *mountHandle) Unmount(_ context.Context) error {
 	h.once.Do(func() {
 		defer h.nsFd.Close()
-		// Use a fresh context with a hard timeout so a hung umount does not block
-		// indefinitely. Parent context is intentionally not forwarded: cleanup must
-		// complete even if the caller's context is already cancelled.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Fresh context with a hard timeout. The parent context is intentionally
+		// not forwarded: cleanup must complete even if the caller's context is
+		// already cancelled.
+		ctx, cancel := context.WithTimeout(context.Background(), unmountTimeout)
 		defer cancel()
 		// Pass the ns fd via ExtraFiles; it lands at fd nsFdChildNum in the child.
 		cmd := exec.CommandContext(ctx, h.binaryPath, "umount-fd", strconv.Itoa(nsFdChildNum), h.dst)
@@ -121,7 +118,7 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 // After a successful mount it opens /proc/<pid>/ns/mnt and holds the fd in
 // the returned handle so Unmount can re-enter the namespace without relying
 // on the PID still being alive.
-func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
+func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
 	pidStr := strconv.Itoa(pid)
 	args := []string{pidStr, src, dst}
 	if opts.ReadOnly {
@@ -137,8 +134,7 @@ func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 	if err != nil {
 		// Mount succeeded but we cannot hold the namespace reference — unmount
 		// synchronously so the caller never receives an un-unmountable handle.
-		// Use a short timeout; if cleanup hangs we still return the original error.
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), unmountTimeout)
 		defer cleanupCancel()
 		if out, umErr := exec.CommandContext(cleanupCtx, m.binaryPath, "umount", pidStr, dst).CombinedOutput(); umErr != nil {
 			m.log.Error(umErr, "cleanup unmount failed after ns fd open error", "dst", dst, "output", strings.TrimSpace(string(out)))

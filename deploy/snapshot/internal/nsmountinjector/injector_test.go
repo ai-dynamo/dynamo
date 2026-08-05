@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package injection
+package nsmountinjector
 
 import (
 	"context"
@@ -11,10 +11,9 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsbindmount"
 )
 
-// fakeMountHandle implements nsbindmount.MountHandle for tests.
+// fakeMountHandle implements MountHandle for tests.
 type fakeMountHandle struct {
 	dst        string
 	unmountLog *[]string
@@ -31,7 +30,7 @@ func (h *fakeMountHandle) Unmount(_ context.Context) error {
 type mountCall struct {
 	pid      int
 	src, dst string
-	opts     nsbindmount.MountOptions
+	opts     MountOptions
 }
 
 // mockMounter lets tests control per-call Mount results and record call order.
@@ -42,7 +41,7 @@ type mockMounter struct {
 	unmountLog []string
 }
 
-func (m *mockMounter) Mount(_ context.Context, pid int, src, dst string, opts nsbindmount.MountOptions) (nsbindmount.MountHandle, error) {
+func (m *mockMounter) Mount(_ context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
 	i := len(m.calls)
 	m.calls = append(m.calls, mountCall{pid: pid, src: src, dst: dst, opts: opts})
 	if i < len(m.results) && m.results[i] != nil {
@@ -55,9 +54,9 @@ const testPID = 42
 
 func newInjector(t *testing.T, m *mockMounter) *NSMountInjector {
 	t.Helper()
-	inj, err := New(Config{}, m, logr.Discard())
+	inj, err := newWithMounter(Config{}, m, logr.Discard())
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("newWithMounter: %v", err)
 	}
 	return inj
 }
@@ -70,7 +69,7 @@ func TestInject_MountsAgentBundle(t *testing.T) {
 	}
 
 	want := []mountCall{
-		{pid: testPID, src: agentBinDir, dst: SnapshotBinDir, opts: nsbindmount.MountOptions{ReadOnly: true}},
+		{pid: testPID, src: agentBinDir, dst: SnapshotBinDir, opts: MountOptions{ReadOnly: true}},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d mount calls, want %d", len(m.calls), len(want))

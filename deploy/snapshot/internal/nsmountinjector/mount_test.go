@@ -3,7 +3,7 @@
 
 //go:build linux
 
-package nsbindmount
+package nsmountinjector
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 )
 
 // writeFakeBinary writes a shell script at a temp path and returns the path.
-// The script is passed to sh -c, so $@ refers to the arguments passed by ExecMounter.
+// The script is passed to sh -c, so $@ refers to the arguments passed by execMounter.
 func writeFakeBinary(t *testing.T, script string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "ns-bind-mount")
@@ -29,11 +29,11 @@ func writeFakeBinary(t *testing.T, script string) string {
 	return p
 }
 
-func newMounterForTest(t *testing.T, bin string) *ExecMounter {
+func newMounterForTest(t *testing.T, bin string) *execMounter {
 	t.Helper()
-	m, err := NewWithBinary(bin, logr.Discard())
+	m, err := newExecMounter(bin, logr.Discard())
 	if err != nil {
-		t.Fatalf("NewWithBinary: %v", err)
+		t.Fatalf("newExecMounter: %v", err)
 	}
 	return m
 }
