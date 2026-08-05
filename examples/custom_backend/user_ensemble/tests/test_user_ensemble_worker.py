@@ -237,6 +237,19 @@ async def test_rejects_multiple_choices():
         await _collect(engine, request)
 
 
+async def test_accepts_null_choice_count_as_single_choice():
+    engine = _engine()
+    engine._encoder = _FakeEncoder([object()])
+    engine._adapter = _FakeAdapter()
+    engine._decoder = _FakeDecoder()
+    request = _request()
+    request["sampling_options"]["n"] = None
+
+    chunks = await _collect(engine, request)
+
+    assert chunks[-1]["finish_reason"] == "stop"
+
+
 async def test_abort_and_cleanup_delegate_and_cleanup_is_idempotent():
     encoder = _FakeEncoder([object()])
     decoder = _FakeDecoder()

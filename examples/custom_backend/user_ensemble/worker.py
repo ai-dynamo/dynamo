@@ -347,7 +347,9 @@ class UserEnsembleEngine(LLMEngine):
         self, request: GenerateRequest, prompt_tokens: int
     ) -> SamplingParams:
         sampling_options = request.get("sampling_options") or {}
-        n = sampling_options.get("n", 1)
+        n = sampling_options.get("n")
+        if n is None:
+            n = 1
         if n != 1:
             raise InvalidArgument(
                 f"UserEnsembleEngine supports exactly one choice; got n={n}"
