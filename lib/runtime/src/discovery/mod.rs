@@ -704,8 +704,7 @@ impl DiscoverySpec {
 
 /// Registered instances in the discovery plane
 /// Represents objects that have been successfully registered with an instance ID
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryInstance {
     /// Registered endpoint instance - wraps the component::Instance directly
     Endpoint(crate::component::Instance),
@@ -718,7 +717,6 @@ pub enum DiscoveryInstance {
         /// This allows lib/runtime to remain independent of lib/llm types
         card_json: serde_json::Value,
         /// Optional suffix appended after instance_id in the key path (e.g., for LoRA adapters)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model_suffix: Option<String>,
     },
     /// Registered event channel instance for event plane pub/sub
@@ -739,10 +737,10 @@ pub enum DiscoveryInstance {
     },
 }
 
-// Deserialize through a wire-only representation so v1.2 EventChannel records can be normalized
-// from their sibling `namespace` and `component` fields. Serialization remains canonical through
-// DiscoveryInstance's derived Serialize implementation.
-#[derive(Deserialize)]
+// Serialize and deserialize through a wire-only representation so current and v1.2 readers can
+// consume the same EventChannel record. `scope` is authoritative for current readers; the sibling
+// `namespace` and `component` fields are its legacy projection.
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum DiscoveryInstanceWire {
     Endpoint(crate::component::Instance),
@@ -752,7 +750,7 @@ enum DiscoveryInstanceWire {
         endpoint: String,
         instance_id: u64,
         card_json: serde_json::Value,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model_suffix: Option<String>,
     },
     EventChannel {
@@ -772,6 +770,76 @@ enum DiscoveryInstanceWire {
         publisher_id: u64,
         metadata: serde_json::Value,
     },
+}
+
+fn legacy_event_scope(scope: &EventScope) -> (&str, &str) {
+    match scope {
+        EventScope::Namespace { name } => (name, ""),
+        EventScope::Component {
+            namespace,
+            component,
+        } => (namespace, component),
+        EventScope::Endpoint { endpoint } => (&endpoint.namespace, &endpoint.component),
+    }
+}
+
+impl From<&DiscoveryInstance> for DiscoveryInstanceWire {
+    fn from(instance: &DiscoveryInstance) -> Self {
+        match instance {
+            DiscoveryInstance::Endpoint(instance) => Self::Endpoint(instance.clone()),
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                card_json,
+                model_suffix,
+            } => Self::Model {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint.clone(),
+                instance_id: *instance_id,
+                card_json: card_json.clone(),
+                model_suffix: model_suffix.clone(),
+            },
+            DiscoveryInstance::EventChannel {
+                scope,
+                topic,
+                instance_id,
+                transport,
+            } => {
+                let (namespace, component) = legacy_event_scope(scope);
+                Self::EventChannel {
+                    scope: Some(scope.clone()),
+                    namespace: Some(namespace.to_string()),
+                    component: Some(component.to_string()),
+                    topic: topic.clone(),
+                    instance_id: *instance_id,
+                    transport: transport.clone(),
+                }
+            }
+            DiscoveryInstance::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                metadata,
+            } => Self::EventSource {
+                scope: scope.clone(),
+                topic: topic.clone(),
+                publisher_id: *publisher_id,
+                metadata: metadata.clone(),
+            },
+        }
+    }
+}
+
+impl Serialize for DiscoveryInstance {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        DiscoveryInstanceWire::from(self).serialize(serializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for DiscoveryInstance {
@@ -807,7 +875,21 @@ impl<'de> Deserialize<'de> for DiscoveryInstance {
                 transport,
             } => {
                 let scope = match (scope, namespace, component) {
-                    (Some(scope), _, _) => scope,
+                    (Some(scope), None, None) => scope,
+                    (Some(scope), Some(namespace), Some(component)) => {
+                        let (expected_namespace, expected_component) = legacy_event_scope(&scope);
+                        if namespace != expected_namespace || component != expected_component {
+                            return Err(serde::de::Error::custom(
+                                "event channel `scope` conflicts with legacy `namespace`/`component`",
+                            ));
+                        }
+                        scope
+                    }
+                    (Some(_), _, _) => {
+                        return Err(serde::de::Error::custom(
+                            "event channel legacy scope must contain both `namespace` and `component`",
+                        ));
+                    }
                     (None, Some(namespace), Some(component)) if component.is_empty() => {
                         EventScope::Namespace { name: namespace }
                     }
@@ -1453,5 +1535,33 @@ mod tests {
             }
             _ => panic!("expected endpoint discovery metadata"),
         }
+    }
+
+    #[test]
+    fn conflicting_current_and_legacy_event_scopes_are_rejected() {
+        let metadata = serde_json::json!({
+            "type": "EventChannel",
+            "scope": {
+                "kind": "endpoint",
+                "endpoint": {
+                    "namespace": "dynamo",
+                    "component": "backend",
+                    "name": "generate"
+                }
+            },
+            "namespace": "other",
+            "component": "backend",
+            "topic": "kv-events",
+            "instance_id": 42,
+            "transport": {
+                "kind": "Nats",
+                "config": {
+                    "subject_prefix": "namespace.dynamo.component.backend.endpoint.generate"
+                }
+            }
+        });
+
+        let error = serde_json::from_value::<DiscoveryInstance>(metadata).unwrap_err();
+        assert!(error.to_string().contains("conflicts with legacy"));
     }
 }

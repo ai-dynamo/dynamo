@@ -124,10 +124,43 @@ mod tests {
     use super::*;
     use crate::discovery::{
         DiscoveryInstance, DiscoveryQuery, EventChannelQuery, EventScope, EventSourceQuery,
-        MAX_JSON_SAFE_PUBLISHER_ID,
+        EventTransport, MAX_JSON_SAFE_PUBLISHER_ID,
     };
     use crate::protocols::EndpointId;
     use kube::Resource;
+
+    #[derive(serde::Deserialize)]
+    struct V1_2DiscoveryMetadata {
+        endpoints: std::collections::HashMap<String, serde_json::Value>,
+        model_cards: std::collections::HashMap<String, serde_json::Value>,
+        event_channels: std::collections::HashMap<String, V1_2EventChannel>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type")]
+    enum V1_2EventChannel {
+        EventChannel {
+            namespace: String,
+            component: String,
+            topic: String,
+            instance_id: u64,
+            transport: EventTransport,
+        },
+    }
+
+    impl V1_2EventChannel {
+        fn into_parts(self) -> (String, String, String, u64, EventTransport) {
+            match self {
+                Self::EventChannel {
+                    namespace,
+                    component,
+                    topic,
+                    instance_id,
+                    transport,
+                } => (namespace, component, topic, instance_id, transport),
+            }
+        }
+    }
 
     #[test]
     fn test_crd_metadata() {
@@ -201,11 +234,68 @@ mod tests {
         ));
 
         let serialized = serde_json::to_value(metadata).unwrap();
-        for channel in serialized["event_channels"].as_object().unwrap().values() {
-            assert!(channel.get("scope").is_some());
-            assert!(channel.get("namespace").is_none());
-            assert!(channel.get("component").is_none());
-        }
+        let component_channel = &serialized["event_channels"]["dynamo/backend/kv-events/2a"];
+        assert!(component_channel.get("scope").is_some());
+        assert_eq!(component_channel["namespace"], "dynamo");
+        assert_eq!(component_channel["component"], "backend");
+
+        let namespace_channel = &serialized["event_channels"]["dynamo//kv_metrics/2a"];
+        assert!(namespace_channel.get("scope").is_some());
+        assert_eq!(namespace_channel["namespace"], "dynamo");
+        assert_eq!(namespace_channel["component"], "");
+    }
+
+    #[test]
+    fn current_event_channels_serialize_for_v1_2_frontends() {
+        let cr: DynamoWorkerMetadata =
+            serde_json::from_str(include_str!("fixtures/v1_2_dwm.json")).unwrap();
+        let mut metadata: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
+        let endpoint = EndpointId {
+            namespace: "dynamo".to_string(),
+            component: "backend".to_string(),
+            name: "generate".to_string(),
+        };
+        let subject_prefix = "namespace.dynamo.component.backend.endpoint.generate";
+        metadata
+            .register_event_channel(DiscoveryInstance::EventChannel {
+                scope: EventScope::Endpoint {
+                    endpoint: endpoint.clone(),
+                },
+                topic: "endpoint-kv-events".to_string(),
+                instance_id: 43,
+                transport: EventTransport::nats(subject_prefix),
+            })
+            .unwrap();
+
+        let cr = build_cr("current-worker", "current-worker", "pod-uid", &metadata).unwrap();
+        let legacy: V1_2DiscoveryMetadata = serde_json::from_value(cr.spec.data.clone()).unwrap();
+        assert_eq!(legacy.endpoints.len(), 1);
+        assert_eq!(legacy.model_cards.len(), 1);
+        assert_eq!(legacy.event_channels.len(), 3);
+
+        let endpoint_channel = legacy
+            .event_channels
+            .into_values()
+            .map(V1_2EventChannel::into_parts)
+            .find(|(_, _, topic, _, _)| topic == "endpoint-kv-events")
+            .unwrap();
+        assert_eq!(endpoint_channel.0, "dynamo");
+        assert_eq!(endpoint_channel.1, "backend");
+        assert_eq!(endpoint_channel.3, 43);
+        assert_eq!(endpoint_channel.4, EventTransport::nats(subject_prefix));
+
+        let current: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
+        assert_eq!(
+            current.filter(&DiscoveryQuery::EventChannels(
+                EventChannelQuery::endpoint_topic(endpoint.clone(), "endpoint-kv-events")
+            )),
+            vec![DiscoveryInstance::EventChannel {
+                scope: EventScope::Endpoint { endpoint },
+                topic: "endpoint-kv-events".to_string(),
+                instance_id: 43,
+                transport: EventTransport::nats(subject_prefix),
+            }]
+        );
     }
 
     #[test]
