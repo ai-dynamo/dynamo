@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import kustomize_matrix
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
 
@@ -78,6 +80,23 @@ def test_compose_requires_target_first():
 
     assert result.returncode == 2
     assert "the following arguments are required: target" in result.stderr
+
+
+def test_scan_yaml_uses_name_selectors_for_list_comments():
+    document = kustomize_matrix.scan_yaml(
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata:\n"
+        "  name: app\n"
+        "items:\n"
+        "  # Applies to UCX only\n"
+        "  - name: UCX_NET_DEVICES\n"
+        "    value: mlx5_0:1\n"
+    )[0]
+
+    path = ("items", "name=UCX_NET_DEVICES")
+    assert document.comments[0].path == path
+    assert path in document.targets
 
 
 def test_unfold_expands_matrix_and_check_detects_stale_overlay(tmp_path):
@@ -159,10 +178,19 @@ def test_render_uses_leaf_component_and_preserves_source_comments(tmp_path):
         "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
         "kind: Component\n"
         "patches:\n"
-        "  - path: patch.yaml\n",
+        "  - target:\n"
+        "      version: v1\n"
+        "      kind: ConfigMap\n"
+        "    path: patch.yaml\n",
     )
     (parent / "patch.yaml").write_text(
-        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\ndata:\n  parent: value\n",
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata:\n"
+        "  name: component\n"
+        "data:\n"
+        "  # Parent comment\n"
+        "  parent: value\n",
         encoding="utf-8",
     )
     leaf = recipe / "components/leaf"
@@ -201,6 +229,7 @@ def test_render_uses_leaf_component_and_preserves_source_comments(tmp_path):
         in rendered
     )
     assert "# Base comment\n  source: base" in rendered
+    assert "# Parent comment\n  parent: value" in rendered
     assert "  leaf: value" in rendered
     assert "  parent: value" in rendered
 

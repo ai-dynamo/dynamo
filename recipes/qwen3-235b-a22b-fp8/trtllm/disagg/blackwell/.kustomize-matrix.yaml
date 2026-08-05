@@ -14,4 +14,4 @@ matrix:
         - ../../../../kustomize/components/disagg-workers/gke-roce
     - name: nscale-ib
       components:
-        - kustomize/components/nscale-ib
+        - ../../../../kustomize/components/disagg-workers/nscale-ib
