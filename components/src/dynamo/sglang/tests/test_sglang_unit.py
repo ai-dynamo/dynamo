@@ -97,13 +97,14 @@ def _cpu_engine_when_no_accelerator(monkeypatch):
     _sgl_common.get_device.cache_clear()
 
 
-def test_configured_engine_route_cannot_replace_built_in_route():
+@pytest.mark.parametrize(
+    "reserved_path", ["control/start_profile", "update/model_taints"]
+)
+def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     handler = object.__new__(DecodeWorkerHandler)
     handler.engine = SimpleNamespace(custom_method=lambda: None)
     handler.config = SimpleNamespace(
-        dynamo_args=SimpleNamespace(
-            engine_routes=["control/start_profile=custom_method"]
-        )
+        dynamo_args=SimpleNamespace(engine_routes=[f"{reserved_path}=custom_method"])
     )
 
     registered_routes = []
@@ -115,8 +116,8 @@ def test_configured_engine_route_cannot_replace_built_in_route():
     with pytest.raises(
         ValueError,
         match=(
-            "Configured SGLang engine route /engine/control/start_profile "
-            "collides with a built-in route"
+            rf"Configured SGLang engine route /engine/{reserved_path} "
+            r"collides with a built-in route"
         ),
     ):
         handler.register_engine_routes(Runtime())
