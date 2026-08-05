@@ -677,6 +677,18 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         path would leave hardware decode unreachable in a stock deployment.
         """
         if modality_name != "VIDEO" or not self._nvdec_video_enabled():
+            # NVDEC off (CPU image, DYN_DISABLE_NVDEC, or a gated model type)
+            # means these URLs go straight to SGLang's software path -- the
+            # deployments MOST likely to lack a decoder entirely. Without this
+            # preflight they are exactly the ones that still get the deep
+            # "No module named 'decord'" with the payload repr embedded. No
+            # bytes were fetched here, so the codec cannot be named.
+            if (
+                modality_name == "VIDEO"
+                and urls
+                and not _software_video_decoder_imports()
+            ):
+                raise video_decoder_missing("sglang", "decord2", "decord", None)
             return list(urls)
         encode_inputs: list[Any] = []
         for url in urls:

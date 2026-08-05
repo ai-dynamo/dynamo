@@ -32,8 +32,16 @@ pytestmark = [
 
 
 @pytest.fixture
-def cache_handler() -> MultimodalEncodeWorkerHandler:
-    """Create a lightweight handler instance for cache-path unit tests."""
+def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
+    """Create a lightweight handler instance for cache-path unit tests.
+
+    Default test-world assumption: a software video decoder exists, so the
+    URL/bytes flow under test is reachable -- the codec-compliant test image
+    ships none, and without this stub the handler's decoder preflight fires
+    before the cache logic these tests exercise. Tests about decoder ABSENCE
+    override the stub explicitly.
+    """
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
     class _DummyEncoder:
         def __init__(self) -> None:
@@ -321,6 +329,44 @@ def nvdec_handler(cache_handler) -> MultimodalEncodeWorkerHandler:
     cache_handler.num_video_frames = 32
     cache_handler._url_policy = SimpleNamespace()
     return cache_handler
+
+
+@pytest.mark.asyncio
+async def test_disabled_nvdec_without_software_decoder_is_actionable(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC off (env/CPU/gated model) + no software decoder: the URLs would
+    go straight to SGLang and die deep with the payload-blob error, so
+    _build_encode_inputs must raise the actionable error up front.
+
+    This is the deployment class MOST likely to lack a decoder entirely --
+    reviewers caught that the preflight originally lived only on the
+    NVDEC-enabled path and never ran here.
+    """
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: False
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+
+    assert "install_media_decoders sglang" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_disabled_nvdec_with_software_decoder_passes_urls(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC off but a software decoder exists: URLs pass through unchanged
+    (SGLang fetches and decodes them itself, as before)."""
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
+
+    out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+    assert out == ["https://x/clip.mp4"]
 
 
 def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
