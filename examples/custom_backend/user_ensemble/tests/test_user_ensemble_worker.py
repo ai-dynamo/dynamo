@@ -14,6 +14,7 @@ pytest.importorskip(
     "dynamo._core.backend",
     reason="dynamo._core.backend not built — run maturin develop first",
 )
+pytest.importorskip("vllm", reason="vLLM is required by the ensemble worker")
 
 from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
 from examples.custom_backend.user_ensemble.worker import (  # noqa: E402
