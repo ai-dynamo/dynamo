@@ -24,6 +24,13 @@ import (
 const (
 	binaryName        = "ns-bind-mount"
 	defaultBinaryPath = "/usr/local/sbin/" + binaryName
+
+	// nsFdChildNum is the fd number that the ns/mnt file descriptor will have
+	// inside the child process. Go's exec package maps ExtraFiles[i] to fd
+	// (3+i) — after stdin(0), stdout(1), stderr(2). nsFd is the only entry in
+	// ExtraFiles, so it lands at fd 3. If ExtraFiles ever gains additional
+	// entries before nsFd, this constant must be updated to match.
+	nsFdChildNum = 3
 )
 
 // MountOptions configures a single namespace-aware mount operation.
@@ -94,9 +101,8 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 		// complete even if the caller's context is already cancelled.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		// Pass the ns fd as fd 3 in the child via ExtraFiles; Go maps
-		// ExtraFiles[0] → fd 3 (after stdin/stdout/stderr).
-		cmd := exec.CommandContext(ctx, h.binaryPath, "umount-fd", "3", h.dst)
+		// Pass the ns fd via ExtraFiles; it lands at fd nsFdChildNum in the child.
+		cmd := exec.CommandContext(ctx, h.binaryPath, "umount-fd", strconv.Itoa(nsFdChildNum), h.dst)
 		cmd.ExtraFiles = []*os.File{h.nsFd}
 		out, err := cmd.CombinedOutput()
 		if err != nil {

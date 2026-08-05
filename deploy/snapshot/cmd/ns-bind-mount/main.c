@@ -40,6 +40,35 @@
 #define OPEN_TREE_CLONE 1
 #define MOVE_MOUNT_F_EMPTY_PATH 0x00000004
 
+/* Paths the caller is allowed to pass as src and dst.  Both the Go layer and
+ * this binary enforce these prefixes so that a bug in the controller cannot
+ * cause arbitrary host paths to be mounted into (or unmounted from) a foreign
+ * namespace.
+ *
+ * These values mirror the Go constants in internal/injection/paths.go:
+ *   agentBinDir    = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
+ *   SnapshotBinDir = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
+ * Keep them in sync when either changes. */
+#define ALLOWED_SRC_PREFIX "/snapshot-binaries"      /* = injection.agentBinDir */
+#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries"  /* = injection.SnapshotBinDir */
+
+/* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
+static int
+check_path_prefix(const char* path, const char* allowed_prefix, const char* label)
+{
+  if (path[0] != '/') {
+    fprintf(stderr, "%s must be an absolute path: %s\n", label, path);
+    return -1;
+  }
+  size_t plen = strlen(allowed_prefix);
+  if (strncmp(path, allowed_prefix, plen) != 0 ||
+      (path[plen] != '\0' && path[plen] != '/')) {
+    fprintf(stderr, "%s must start with %s: %s\n", label, allowed_prefix, path);
+    return -1;
+  }
+  return 0;
+}
+
 static int
 sys_open_tree(int dfd, const char* path, unsigned flags)
 {
@@ -97,6 +126,9 @@ do_umount(int argc, char* argv[])
     return 1;
   const char* dst = argv[3];
 
+  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+    return 1;
+
   if (enter_mnt_ns(pid) < 0)
     return 1;
 
@@ -134,6 +166,9 @@ do_umount_fd(int argc, char* argv[])
   }
   int ns_fd = (int)fd_val;
   const char* dst = argv[3];
+
+  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+    return 1;
 
   if (setns(ns_fd, CLONE_NEWNS) < 0) {
     fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
@@ -175,6 +210,11 @@ main(int argc, char* argv[])
   const char* dst = argv[3];
   int readonly = (argc >= 5 && strcmp(argv[4], "ro") == 0);
 
+  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
+    return 1;
+  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+    return 1;
+
   /* Clone the source mount tree before entering the target namespace. */
   int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
   if (tree_fd < 0) {
@@ -190,10 +230,26 @@ main(int argc, char* argv[])
 
   /* Create the target directory inside the new namespace.
    * Track whether we created it so we only remove it on failure if we own it. */
-  int created_dst = (mkdir(dst, 0755) == 0);
+  int created_dst = (mkdir(dst, 0700) == 0);
   if (!created_dst && errno != EEXIST) {
     fprintf(stderr, "mkdir %s: %s\n", dst, strerror(errno));
+    close(tree_fd);
     return 1;
+  }
+  if (!created_dst) {
+    /* dst already existed — verify it is a plain directory, not a symlink,
+     * so a process inside the namespace cannot redirect the mount. */
+    struct stat st;
+    if (lstat(dst, &st) < 0) {
+      fprintf(stderr, "lstat %s: %s\n", dst, strerror(errno));
+      close(tree_fd);
+      return 1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+      fprintf(stderr, "dst %s exists but is not a plain directory\n", dst);
+      close(tree_fd);
+      return 1;
+    }
   }
 
   /* Move the cloned mount into the target namespace at dst. */
