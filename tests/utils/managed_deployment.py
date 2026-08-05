@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
 
+import aiohttp
+import httpx
 import kr8s
 import requests
 import yaml
@@ -37,23 +39,14 @@ def _get_workspace_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# The vCluster port-forward (127.0.0.1:8443) can briefly drop mid-test; its
-# watchdog takes a few seconds to restart it. Retry K8s API calls so that window
-# doesn't fail a post-Ready call on a healthy deployment.
-def _api_connection_errors() -> tuple[type[BaseException], ...]:
-    # aiohttp.ClientConnectorError (kubernetes_asyncio) and the builtin connection
-    # errors are OSError subclasses; httpx.TransportError (kr8s) is not.
-    errs: list[type[BaseException]] = [OSError]
-    try:
-        import httpx
-
-        errs.append(httpx.TransportError)
-    except Exception:
-        pass
-    return tuple(errs)
-
-
-_API_CONNECTION_ERRORS = _api_connection_errors()
+# Connection-level errors from the K8s API clients (kr8s -> httpx,
+# kubernetes_asyncio -> aiohttp) when the vCluster port-forward (127.0.0.1:8443)
+# briefly drops mid-test before its watchdog restarts it.
+_API_CONNECTION_ERRORS = (
+    ConnectionError,
+    aiohttp.ClientConnectionError,
+    httpx.TransportError,
+)
 
 
 def _retry_api_call(
@@ -65,24 +58,14 @@ def _retry_api_call(
     delay: float = 2.0,
 ):
     """Retry ``fn`` on a port-forward connection blip; other errors propagate."""
-    last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
             return fn()
         except _API_CONNECTION_ERRORS as e:
-            last_exc = e
-            logger.warning(
-                "K8s API call (%s) failed on attempt %d/%d "
-                "(vCluster port-forward blip?): %s",
-                what,
-                attempt,
-                attempts,
-                e,
-            )
-            if attempt < attempts:
-                time.sleep(delay)
-    assert last_exc is not None  # loop ran at least once
-    raise last_exc
+            if attempt == attempts:
+                raise
+            logger.debug("%s failed (port-forward blip?), retrying: %s", what, e)
+            time.sleep(delay)
 
 
 # Supported DynamoGraphDeployment CRD schemas. v1alpha1 uses ``spec.services``
