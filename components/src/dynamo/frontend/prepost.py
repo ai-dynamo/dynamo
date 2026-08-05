@@ -75,9 +75,11 @@ def _should_build_tool_call_guidance(
         return False
     if structural_tag_scope == "always":
         return True
-    return request.parallel_tool_calls is False or any(
-        _tool_is_strict(tool) for tool in request.tools
+    explicit_single_call = (
+        "parallel_tool_calls" in request.model_fields_set
+        and request.parallel_tool_calls is False
     )
+    return explicit_single_call or any(_tool_is_strict(tool) for tool in request.tools)
 
 
 def _request_for_vllm_structural_tag(
@@ -108,7 +110,6 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
-    starts_in_reasoning: bool = False,
 ) -> dict[str, Any] | None:
     """Build tool-call guidance through vLLM's configured tool parser."""
     if not _should_build_tool_call_guidance(
@@ -123,10 +124,7 @@ def build_tool_call_guided_decoding(
             request,
             structural_tag_schema=structural_tag_schema,
         )
-        structural_tag = tool_parser.get_structural_tag(
-            request_for_tag,
-            reasoning=starts_in_reasoning,
-        )
+        structural_tag = tool_parser.get_structural_tag(request_for_tag)
         if structural_tag is not None:
             tag_value = (
                 structural_tag.model_dump()

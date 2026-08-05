@@ -38,11 +38,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
-from .prepost import (
-    StreamingPostProcessor,
-    build_tool_call_guided_decoding,
-    preprocess_chat_request,
-)
+from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     extract_mm_urls,
@@ -183,70 +179,6 @@ def _build_reasoning_parser_metadata(
         chat_template_kwargs=chat_template_kwargs,
     )
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
-
-
-def _build_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Translate assistant structured-output fields to Dynamo guidance."""
-    guided_json = request.get("guided_json")
-    if guided_json is None:
-        response_format = request.get("response_format")
-        if isinstance(response_format, dict):
-            response_format_type = response_format.get("type")
-            if response_format_type == "json_object":
-                guided_json = {"type": "object"}
-            elif response_format_type == "json_schema":
-                json_schema = response_format.get("json_schema")
-                if isinstance(json_schema, dict):
-                    guided_json = json_schema.get("schema")
-
-    guided_decoding = {
-        key: value
-        for key, value in (
-            ("json", guided_json),
-            ("regex", request.get("guided_regex")),
-            ("grammar", request.get("guided_grammar")),
-            ("choice", request.get("guided_choice") or None),
-        )
-        if value is not None
-    }
-    if not guided_decoding:
-        return None
-
-    whitespace_pattern = request.get("guided_whitespace_pattern")
-    if whitespace_pattern is not None:
-        guided_decoding["whitespace_pattern"] = whitespace_pattern
-    return guided_decoding
-
-
-def _is_forced_tool_choice(tool_choice: Any) -> bool:
-    return tool_choice == "required" or (
-        tool_choice is not None and not isinstance(tool_choice, str)
-    )
-
-
-def _resolve_guided_decoding(
-    request: dict[str, Any],
-    tool_guided_decoding: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    assistant_guided_decoding = _build_guided_decoding(request)
-    if tool_guided_decoding is None:
-        return assistant_guided_decoding
-
-    if _is_forced_tool_choice(request.get("tool_choice", "auto")):
-        has_explicit_guidance = (
-            request.get("guided_json") is not None
-            or request.get("guided_regex") is not None
-            or request.get("guided_grammar") is not None
-            or bool(request.get("guided_choice"))
-        )
-        if has_explicit_guidance:
-            raise ValueError(
-                "guided decoding cannot be used in the same request as "
-                'tool_choice="required" or a named tool_choice.'
-            )
-        return tool_guided_decoding
-
-    return assistant_guided_decoding or tool_guided_decoding
 
 
 def _inject_routing_metadata(
@@ -562,7 +494,7 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
-        tool_guided_decoding = pre.guided_decoding
+        guided_decoding = pre.guided_decoding
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -651,18 +583,6 @@ class VllmProcessor:
             request_for_sampling,
             tokens,
         )
-        if reasoning_ended is False and _is_forced_tool_choice(
-            request_for_sampling.tool_choice
-        ):
-            tool_guided_decoding = build_tool_call_guided_decoding(
-                request_for_sampling,
-                tool_parser,
-                structural_tag_mode=self.structural_tag_mode,
-                structural_tag_scope=self.structural_tag_scope,
-                structural_tag_schema=self.structural_tag_schema,
-                starts_in_reasoning=True,
-            )
-        guided_decoding = _resolve_guided_decoding(request, tool_guided_decoding)
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
