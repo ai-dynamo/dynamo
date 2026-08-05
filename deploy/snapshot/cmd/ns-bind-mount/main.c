@@ -52,7 +52,7 @@
 #ifndef MOUNT_ATTR_RDONLY
 #define MOUNT_ATTR_RDONLY 0x00000001
 #define MOUNT_ATTR_NOSUID 0x00000002
-#define MOUNT_ATTR_NODEV  0x00000004
+#define MOUNT_ATTR_NODEV 0x00000004
 struct mount_attr {
   uint64_t attr_set;
   uint64_t attr_clr;
@@ -93,11 +93,12 @@ check_path_prefix(const char* path, const char* allowed_prefix, const char* labe
 static int
 has_dotdot_component(const char* path)
 {
-  for (const char* p = path; *p; ) {
+  for (const char* p = path; *p;) {
     const char* seg = p;
     while (*p && *p != '/') p++;
     size_t len = (size_t)(p - seg);
-    if (len == 2 && seg[0] == '.' && seg[1] == '.') return 1;
+    if (len == 2 && seg[0] == '.' && seg[1] == '.')
+      return 1;
     while (*p == '/') p++;
   }
   return 0;
