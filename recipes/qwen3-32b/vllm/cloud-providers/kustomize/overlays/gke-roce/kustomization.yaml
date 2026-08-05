@@ -11,4 +11,6 @@ sortOptions:
 resources:
   - "../_rdma"
 components:
-  - "../../components/gke-roce"
+  - "../../../../../../kustomize/components/disagg-workers/gke-roce"
+  - "../../../../../../kustomize/components/vllm-disagg/nixl-default"
+  - "../../components/gke-image-pull-secret"

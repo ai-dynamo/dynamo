@@ -8,19 +8,11 @@ spec:
   services:
     Frontend:
       extraPodSpec:
-        imagePullSecrets:
+        imagePullSecrets: &imagePullSecrets
           - name: nvcr-pull-secret
     PrefillWorker:
       extraPodSpec:
-        imagePullSecrets:
-          - name: nvcr-pull-secret
-        mainContainer:
-          env: &vllmEnvironment
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        imagePullSecrets: *imagePullSecrets
     DecodeWorker:
       extraPodSpec:
-        imagePullSecrets:
-          - name: nvcr-pull-secret
-        mainContainer:
-          env: *vllmEnvironment
+        imagePullSecrets: *imagePullSecrets
