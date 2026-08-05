@@ -6,12 +6,16 @@ from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Dict
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.sglang.backend_args import DynamoSGLangConfig
-from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    DecodeWorkerHandler,
+    FrontendDecodedVideo,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -87,6 +91,7 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = enable_frontend_decoding
     handler._image_loader = None
+    handler._video_loader = None
     handler._mm_hashes_supported = False
 
     @asynccontextmanager
@@ -105,6 +110,17 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
 async def _empty_stream() -> AsyncGenerator[Dict[str, Any], None]:
     if False:  # pragma: no cover — never yields
         yield {}
+
+
+@pytest.mark.parametrize(("frame_indices", "frame_count"), [([120], 1), ([0, 0], 2)])
+def test_frontend_decoded_video_falls_back_to_duration_fps(frame_indices, frame_count):
+    frames = np.zeros((frame_count, 4, 4, 3), dtype=np.uint8)
+    video = FrontendDecodedVideo(
+        frames,
+        {"fps": 24.0, "duration": 10.0, "frames_indices": frame_indices},
+    )
+
+    assert video.avg_fps == frame_count / 10.0
 
 
 @pytest.mark.asyncio
@@ -174,6 +190,48 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
         [{"Decoded": decoded_metadata}]
     )
     assert captured["image_data"] == [pil_stub]
+
+
+@pytest.mark.asyncio
+async def test_aggregated_fd_on_loads_decoded_video_frames():
+    handler = _new_decode_handler(enable_frontend_decoding=True)
+    frames = np.zeros((4, 4, 4, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 24.0,
+        "duration": 10.0,
+        "frames_indices": [0, 80, 160, 239],
+        "total_num_frames": 240,
+    }
+    video_loader = SimpleNamespace(
+        load_video_batch=AsyncMock(return_value=[(frames, metadata)])
+    )
+    handler._image_loader = SimpleNamespace(load_image_batch=AsyncMock())
+    handler._video_loader = video_loader
+
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_stream()
+
+    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
+    decoded_metadata = {"shape": [2, 4, 4, 3], "dtype": "uint8"}
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"video_url": [{"Decoded": decoded_metadata}]},
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    video_loader.load_video_batch.assert_awaited_once_with(
+        [{"Decoded": decoded_metadata}]
+    )
+    assert len(captured["video_data"]) == 1
+    video = captured["video_data"][0]
+    assert isinstance(video, np.ndarray)
+    assert video.avg_fps == pytest.approx(72 / 239)
+    np.testing.assert_array_equal(video.get_frames_at([0, 1]), frames[[0, 1]])
 
 
 @pytest.mark.asyncio

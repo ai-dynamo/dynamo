@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated multimodal (image/video + LLM) serving.
-# Pass --frontend-decoding to route the image through the Rust frontend's
-# NIXL RDMA pipeline (decoded pixels → SGLang worker as PIL Images) instead
+# Pass --frontend-decoding to route media through the Rust frontend's
+# NIXL RDMA pipeline instead
 # of letting SGLang fetch+decode internally.
 # GPUs: 1
 
@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --chat-template <name>   Specify SGLang chat template (default: $CHAT_TEMPLATE)"
             echo "  --page-size <n>          SGLang KV-cache page size (default: $PAGE_SIZE; must be 1 for Mamba)"
             echo "  --enable-otel            Enable OpenTelemetry tracing"
-            echo "  --frontend-decoding      Decode images in the Rust frontend and"
+            echo "  --frontend-decoding      Decode images/videos in the Rust frontend and"
             echo "                           ship pixels via NIXL RDMA (bypasses"
             echo "                           SGLang's internal HTTP fetch + base64 decode)"
             echo "  -h, --help               Show this help message"
@@ -127,7 +127,7 @@ fi
 # run worker with a vision model (SGLang auto-detects chat template from HF tokenizer).
 # Without --frontend-decoding, the SGLang engine handles image/video loading and
 # vision encoding internally. With it, the worker consumes Decoded items via
-# ImageLoader and hands PIL Images to sgl.Engine.async_generate(image_data=[...]).
+# the corresponding media loaders before calling sgl.Engine.async_generate.
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
