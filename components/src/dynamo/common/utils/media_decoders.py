@@ -55,7 +55,7 @@ therefore not extended by an install here -- backend decode is.
 For air-gapped or allowlisted-network hosts, point pip at a local wheelhouse:
 
     python -m dynamo.common.utils.media_decoders vllm \\
-        --pip-args "--no-index --find-links /wheels"
+        --pip-args="--no-index --find-links /wheels"
 """
 
 from __future__ import annotations
@@ -143,6 +143,41 @@ def _module_available(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except (ImportError, ValueError):
         return False
+
+
+def _modules_missing_fresh(modules: Sequence[str]) -> list[str]:
+    """Return the subset of `modules` a FRESH interpreter cannot import.
+
+    Post-install verification must not ask this process: running as a
+    non-root user, pip defaults to a user-site install, and a user-site
+    directory created after this interpreter started is never added to its
+    ``sys.path`` (``site.py`` only does that at startup, and
+    ``importlib.invalidate_caches()`` cannot add path entries). Verified on
+    all three runtime images: the same-process check reported the install
+    missing while a fresh process imported it fine. What matters
+    operationally is the worker process launched after this command --
+    which is exactly a fresh interpreter.
+    """
+    if not modules:
+        return []
+    probe = (
+        "import importlib.util, sys\n"
+        "missing = [m for m in sys.argv[1:]"
+        " if importlib.util.find_spec(m) is None]\n"
+        "print(' '.join(missing))\n"
+    )
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", probe, *modules],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - cannot verify => report missing
+        logger.warning("fresh-interpreter verification failed to run: %s", exc)
+        return list(modules)
+    return out.stdout.split()
 
 
 def _redact(text: str) -> str:
@@ -274,7 +309,7 @@ def install_media_decoders(
         _pip_install(specs, pip_args, with_deps=with_deps, timeout_s=timeout_s)
 
     importlib.invalidate_caches()
-    still_missing = [m for m in verify_modules if not _module_available(m)]
+    still_missing = _modules_missing_fresh(verify_modules)
     if still_missing:
         raise RuntimeError(
             "media decoder module(s) still not importable after install: "
@@ -316,7 +351,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="ARGS",
         help=(
             "extra arguments appended to `pip install`, shell-quoted as one "
-            "string (e.g. --pip-args '--no-index --find-links /wheels' for "
+            'string. Use the = form -- --pip-args="--no-index --find-links '
+            '/wheels" -- so a value starting with a dash is not mistaken '
+            "for an option (for air-gapped hosts)"
             "air-gapped hosts)"
         ),
     )
@@ -355,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(
             "media decoder install failed: %s. For offline/air-gapped hosts, "
             "point pip at a local wheelhouse, e.g. "
-            "--pip-args '--no-index --find-links /wheels'.",
+            "--pip-args='--no-index --find-links /wheels'.",
             exc,
         )
         return 1

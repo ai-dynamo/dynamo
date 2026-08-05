@@ -90,11 +90,11 @@ args:
 
 ## Air-gapped and allowlisted networks
 
-The install needs a package index or a local wheelhouse. Point pip at one with `--pip-args`:
+The install needs a package index or a local wheelhouse. Point pip at one with `--pip-args` (use the `=` form, so a value starting with a dash is not mistaken for an option):
 
 ```bash
 python -m dynamo.common.utils.media_decoders vllm \
-  --pip-args "--no-index --find-links /opt/wheels"
+  --pip-args="--no-index --find-links /opt/wheels"
 ```
 
 The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables it), so a stalled index fails the run rather than hanging it.
