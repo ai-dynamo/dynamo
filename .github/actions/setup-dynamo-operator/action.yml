@@ -123,9 +123,10 @@ runs:
           BRANCH_SANITIZED="${BRANCH//\//-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+          BRANCH_PRE_NORMALIZATION="${BRANCH_SANITIZED}"
           BRANCH_SANITIZED="$(printf '%s' "${BRANCH_SANITIZED}" | sed -E 's/[^A-Za-z0-9_.-]+/-/g; s/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9]+$//')"
-          if [[ -z "${BRANCH_SANITIZED}" || ${#BRANCH_SANITIZED} -gt 10 ]]; then
-            # Keep truncated cleanup keys valid and distinct across similarly named branches.
+          if [[ "${BRANCH_SANITIZED}" != "${BRANCH_PRE_NORMALIZATION}" || -z "${BRANCH_SANITIZED}" || ${#BRANCH_SANITIZED} -gt 10 ]]; then
+            # Keep normalized or truncated keys valid and distinct across branch names.
             BRANCH_HASH="$(printf '%s' "${BRANCH}" | sha256sum | cut -c1-6)"
             BRANCH_PREFIX="$(printf '%s' "${BRANCH_SANITIZED:0:10}" | sed -E 's/[^[:alnum:]]+$//')"
             if [[ -n "${BRANCH_PREFIX}" ]]; then
