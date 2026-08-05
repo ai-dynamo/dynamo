@@ -17,12 +17,12 @@ use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
-    reconcile_discovery_snapshot,
+    ModelCardInstanceId, reconcile_discovery_snapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -221,16 +221,18 @@ impl Discovery for KubeDiscoveryClient {
         Ok(instance)
     }
 
-    async fn update_model_taints_internal(&self, instance: DiscoveryInstance) -> Result<()> {
-        if !matches!(&instance, DiscoveryInstance::Model { .. }) {
-            anyhow::bail!("update_model_taints_internal requires a model discovery instance")
-        }
-
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
         // Hold the local metadata lock through server-side apply so concurrent
-        // registrations cannot overwrite the update with a stale snapshot.
+        // registrations and removals cannot race the authoritative read or write.
         let mut metadata = self.metadata.write().await;
         let original_state = metadata.clone();
-        metadata.replace_model_card(instance)?;
+        if !metadata.update_model_taints(&id, taints)? {
+            return Ok(());
+        }
 
         let cr_name = self.pod_info.target.cr_name();
         let cr = build_cr(

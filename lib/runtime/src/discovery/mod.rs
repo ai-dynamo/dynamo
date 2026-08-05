@@ -1491,30 +1491,15 @@ pub trait Discovery: Send + Sync {
         if id.model_suffix.is_some() {
             anyhow::bail!("model taint updates are supported only for base model cards")
         }
-        let query = DiscoveryQuery::EndpointModels {
-            namespace: id.namespace.clone(),
-            component: id.component.clone(),
-            endpoint: id.endpoint.clone(),
-        };
-        let candidate_id = DiscoveryInstanceId::Model(id);
-        let existing = self
-            .list(query)
-            .await?
-            .into_iter()
-            .find(|instance| instance.id() == candidate_id)
-            .with_context(|| {
-                format!("model discovery record {candidate_id:?} is not registered")
-            })?;
-
-        let candidate = model_with_updated_taints(&existing, taints)?;
-        if candidate == existing {
-            return Ok(());
-        }
-        self.update_model_taints_internal(candidate).await
+        self.update_model_taints_internal(id, taints).await
     }
 
-    /// Backend-specific persistence after the shared taint-only mutation.
-    async fn update_model_taints_internal(&self, _instance: DiscoveryInstance) -> Result<()> {
+    /// Backend-specific authoritative read, taint-only mutation, and persistence.
+    async fn update_model_taints_internal(
+        &self,
+        _id: ModelCardInstanceId,
+        _taints: HashSet<String>,
+    ) -> Result<()> {
         anyhow::bail!("model taint updates are not supported by this discovery backend")
     }
 

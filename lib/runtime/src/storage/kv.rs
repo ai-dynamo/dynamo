@@ -28,8 +28,6 @@ pub use etcd::EtcdStore;
 mod file;
 pub use file::FileStore;
 
-const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(1000);
-
 /// String we use as the Key in a key-value storage operation. Simple String wrapper
 /// that can encode / decode a string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -312,6 +310,29 @@ impl Manager {
         })
     }
 
+    async fn forward_watch_event(
+        tx: &tokio::sync::mpsc::Sender<WatchEvent>,
+        event: WatchEvent,
+        cancel_token: &CancellationToken,
+        bucket_name: &str,
+    ) -> bool {
+        tokio::select! {
+            _ = cancel_token.cancelled() => false,
+            result = tx.send(event) => {
+                if let Err(error) = result {
+                    tracing::error!(
+                        bucket_name,
+                        %error,
+                        "KeyValueStoreManager.watch receiver closed"
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
     /// Returns a receiver that will receive all the existing keys, and
     /// then block and receive new keys as they are created.
     /// Starts a task that runs forever, watches the store.
@@ -325,9 +346,7 @@ impl Manager {
         tokio::sync::mpsc::Receiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
-        // Use a larger channel capacity to reduce the likelihood that a slow consumer
-        // during the initial KV-store replay phase triggers send timeouts. Events may
-        // still be dropped if the consumer cannot keep up within `WATCH_SEND_TIMEOUT`.
+        // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
@@ -339,14 +358,9 @@ impl Manager {
 
             // Send all the existing keys
             for (key, bytes) in bucket.entries().await? {
-                if let Err(err) = tx
-                    .send_timeout(
-                        WatchEvent::Put(KeyValue::new(key, bytes)),
-                        WATCH_SEND_TIMEOUT,
-                    )
-                    .await
-                {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
+                let event = WatchEvent::Put(KeyValue::new(key, bytes));
+                if !Self::forward_watch_event(&tx, event, &cancel_token, &bucket_name).await {
+                    return Ok(());
                 }
             }
 
@@ -359,26 +373,8 @@ impl Manager {
                         None => break,
                     }
                 };
-                match event {
-                    WatchEvent::Resync(_) => {
-                        // Resync is an authoritative snapshot; do not drop it on a
-                        // timeout like incremental events. If the receiver closes,
-                        // the watch has no consumer and can stop.
-                        tokio::select! {
-                            _ = cancel_token.cancelled() => break,
-                            result = tx.send(event) => {
-                                if let Err(err) = result {
-                                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding resync to channel");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    event => {
-                        if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
-                            tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
-                        }
-                    }
+                if !Self::forward_watch_event(&tx, event, &cancel_token, &bucket_name).await {
+                    break;
                 }
             }
 
@@ -431,8 +427,17 @@ pub trait Bucket: Send + Sync {
     /// The Key should be the name of the item, not including the bucket name.
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError>;
 
-    /// Replace an existing item without creating a missing key.
-    async fn replace(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError>;
+    /// Replace an existing item only if its current value matches `expected`.
+    ///
+    /// Implementations must perform the comparison and replacement atomically.
+    /// A missing key returns [`StoreError::MissingKey`] and must never be created;
+    /// a value changed by another writer returns [`StoreError::Retry`].
+    async fn compare_and_replace(
+        &self,
+        key: &Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError>;
 
     /// Delete an item from the bucket
     /// The Key should be the name of the item, not including the bucket name.
@@ -545,6 +550,43 @@ mod tests {
 
     fn init() {
         crate::logging::init();
+    }
+
+    #[tokio::test]
+    async fn saturated_watch_channel_delivers_final_taint_state() {
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let first = WatchEvent::Put(KeyValue::new(
+            Key::new("v1/mdc/ns/worker/generate/1".to_string()),
+            br#"{"runtime_config":{"taints":["slow"]}}"#[..].into(),
+        ));
+        assert!(Manager::forward_watch_event(&tx, first.clone(), &cancel_token, BUCKET_NAME).await);
+
+        let final_event = WatchEvent::Put(KeyValue::new(
+            Key::new("v1/mdc/ns/worker/generate/1".to_string()),
+            br#"{"runtime_config":{"taints":["fast"]}}"#[..].into(),
+        ));
+        let final_event_for_send = final_event.clone();
+        let tx_clone = tx.clone();
+        let cancel_clone = cancel_token.clone();
+        let send_task = tokio::spawn(async move {
+            Manager::forward_watch_event(
+                &tx_clone,
+                final_event_for_send,
+                &cancel_clone,
+                BUCKET_NAME,
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !send_task.is_finished(),
+            "send must wait for channel capacity"
+        );
+        assert_eq!(rx.recv().await, Some(first));
+        assert!(send_task.await.unwrap());
+        assert_eq!(rx.recv().await, Some(final_event));
     }
 
     #[tokio::test]
