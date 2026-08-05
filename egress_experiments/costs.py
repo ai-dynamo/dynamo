@@ -101,8 +101,22 @@ def pad_to(start_ns: int, target_microseconds: float) -> None:
     is only the difference between the real work (a couple of microseconds of
     dict building) and the measured cost. Attribution stays honest: if the real
     work ever grows past the target, this is a no-op rather than a rewind.
+
+    The ledger is charged the stage's FULL duration, not just the padding.
+    Charging only the padding under-reports any architecture that does more
+    real Python inside a padded stage -- and the effect is backwards: the
+    baseline's ``ResponseSender.send`` does a cross-thread
+    ``call_soon_threadsafe`` inside its padded range, so when that overruns
+    10.72 us it is charged nothing, and an architecture that REMOVES that work
+    looks like it added cost. Found by the batched-loop experiment.
     """
-    spin(target_microseconds - (_perf() - start_ns) / 1000.0)
+    elapsed_us = (_perf() - start_ns) / 1000.0
+    remaining = target_microseconds - elapsed_us
+    if remaining > 0:
+        spin(remaining)
+        _cell()[0] += elapsed_us  # the real work spin() did not see
+    else:
+        _cell()[0] += elapsed_us  # overran the model; charge what it cost
 
 
 @dataclass(frozen=True)

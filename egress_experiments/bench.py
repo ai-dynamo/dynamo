@@ -75,6 +75,10 @@ MAX_TOKENS = 1_000_000
 #: Ignore the first second: the batch is still filling and the ladder step
 #: before this one may still be draining.
 WARMUP_S = 1.0
+#: Length of the scored slice. Every architecture is measured over the same
+#: duration at the same point in the run, so a design that merely drains its
+#: deque more slowly cannot score differently for that reason alone.
+MEASURE_S = 6.0
 #: Hard bound on every run. Saturating runs end sooner, on MAX_BACKLOG; this is
 #: what stops a NON-saturating one from running forever, since closed-loop
 #: requests never finish and a loop that is keeping up never builds a backlog.
@@ -131,16 +135,29 @@ def _config(architecture: str, batch: int, costs: Costs) -> SimConfig:
 
 
 def _measure(result: SimResult, warmup_s: float) -> tuple[float, float, int]:
-    """items/s over the post-warmup window, from LOOP-EXIT timestamps."""
+    """items/s over a FIXED post-warmup slice, from LOOP-EXIT timestamps.
+
+    Fixed rather than "everything after the warmup", because the run's total
+    length is architecture-dependent and that made the comparison unfair.
+    ``max_backlog`` cancels ingress, not the loop: the meter keeps ticking
+    while the ready deque drains, and a design whose deque holds whole-batch
+    callbacks drains far more slowly. Measured windows of 13.0 s and 18.3 s
+    for two architectures on the same config -- different lengths covering
+    different phases of the run, with different contenders active.
+
+    A fixed slice gives every architecture the same duration at the same point
+    in the run. Found by the batched-loop experiment.
+    """
     times = result.loop_item_times
     if len(times) < 100:
         return 0.0, 0.0, len(times)
     start = times[0] + int(warmup_s * 1e9)
-    windowed = [t for t in times if t >= start]
+    end = start + int(MEASURE_S * 1e9)
+    windowed = [t for t in times if start <= t <= end]
     if len(windowed) < 100:
-        # Run was shorter than the warmup; fall back to the whole thing rather
-        # than reporting a number from a handful of samples.
-        windowed = times
+        # Run was shorter than warmup+MEASURE_S; fall back to everything after
+        # the warmup rather than scoring off a handful of samples.
+        windowed = [t for t in times if t >= start] or times
     span_s = (windowed[-1] - windowed[0]) / 1e9
     if span_s <= 0:
         return 0.0, 0.0, len(windowed)
