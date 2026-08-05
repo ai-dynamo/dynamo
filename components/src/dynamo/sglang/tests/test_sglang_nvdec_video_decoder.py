@@ -28,7 +28,12 @@ from dynamo.sglang.request_handlers.multimodal.nvdec_video_decoder import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,  # sglang tests run on GPU-enabled workers
+    # gpu_0: CPU-only in the sglang image -- proven by the arm64 CPU test
+    # lane, which already runs `sglang and gpu_0` and imports these same
+    # packages. GPU markers mean GPUs REQUIRED; a gpu_1 mark here routes
+    # the file through the VRAM-scheduled stage at ~24s/test of pure
+    # scheduling+import overhead against an idle GPU.
+    pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
@@ -93,6 +98,9 @@ def test_get_frames_as_tensor_returns_nhwc_uint8_cpu(decoder) -> None:
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="pinned host memory requires CUDA"
 )
+# The one test here that touches CUDA. It stays consistent with the file's
+# gpu_0 mark because gpu_0 means "no GPU required": on the CPU-only lane it
+# skips itself, and on the GPU job's gpu_0 stage it runs and guards pinning.
 def test_frames_are_pinned_on_cuda(decoder) -> None:
     """Pinned memory is the performance contract of this return type.
 
