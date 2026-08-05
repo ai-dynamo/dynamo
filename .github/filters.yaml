@@ -40,6 +40,9 @@ docs:
 examples:
   - 'recipes/**'
   - 'examples/**'
+  - 'scripts/generate_kustomize_openapi.py'
+  - 'scripts/kustomize-matrix.py'
+  - 'scripts/kustomize_matrix.py'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
