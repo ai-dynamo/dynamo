@@ -27,8 +27,9 @@ review:
 
 ```text
 <deployment>/
+├── .kustomize-matrix.yaml
 ├── deploy-generic.yaml
-├── deploy-aws-efa.yaml
+├── deploy-aws-efa-p8d16.yaml
 ├── deploy-gcp-roce.yaml
 ├── perf.yaml
 └── kustomize/
@@ -40,12 +41,10 @@ review:
     └── overlays/
         ├── generic/
         │   └── kustomization.yaml
-        ├── aws-efa/
-        │   ├── kustomization.yaml
-        │   └── patch-dgd.yaml
+        ├── aws-efa-p8d16/
+        │   └── kustomization.yaml
         ├── gcp-roce/
-        │   ├── kustomization.yaml
-        │   └── patch-dgd.yaml
+        │   └── kustomization.yaml
         └── _shared-overlay/
 ```
 
@@ -69,20 +68,58 @@ Prefer resource-shaped Kustomize merge patches over JSON patches where possible.
 For other Custom Resource Definition (CRD) list fields, include the complete
 intended list in the merge patch unless the schema supplies an OpenAPI merge key.
 
-Edit the Kustomize source, not the generated manifests. The renderer delegates to
-`kustomize build` and falls back to `kubectl kustomize` when `kustomize` is not on
-`PATH`. Kustomize drops comments while rendering Kubernetes objects, so the renderer
-re-inserts non-SPDX comments from the base and overlay YAML before matching rendered
-fields. It does not copy comments inside literal block scalars because those already
-render in place. The renderer also refreshes the central OpenAPI schema from the
-operator CRDs. Render from the repo root:
+Edit the Kustomize source, not the generated manifests. A recipe matrix is an explicit
+`.kustomize-matrix.yaml` beside the recipe. It names the Kustomize `source`, a
+`nameTemplate`, and matrix dimensions. Every dimension value has a human-readable
+`name` and a list of Kustomize `components`; output names interpolate only the value
+names, never their paths:
 
-```bash
-python3 scripts/render_recipe_kustomize.py
+```yaml
+source: kustomize/overlays/_rdma
+nameTemplate: "${variant}"
+matrix:
+  variant:
+    - name: aws-efa-p8d16
+      components:
+        - ../../../kustomize/components/aws/components/efa/components/p8d16
 ```
 
-The pre-commit hook runs the same renderer. If you remove or rename an overlay,
-also remove the stale `deploy-<name>.yaml` file that is no longer generated.
+Generate the checked-in Level-2 overlays, then the flattened Level-3 manifests:
+
+```bash
+scripts/kustomize-matrix.py unfold <matrix.yaml>
+scripts/kustomize-matrix.py render <matrix.yaml>
+```
+
+For a dependent Component tree, select only the leaf in the matrix. Kustomize
+rejects a Component that includes an ancestor directory as a load cycle, so keep
+each parent implementation in a sibling `_component/` directory. The leaf includes
+that sibling, rather than its containing directory.
+
+`render` runs `kustomize build` and falls back to `kubectl kustomize` when
+`kustomize` is not on `PATH`. Kustomize drops comments while rendering Kubernetes
+objects, so it re-inserts non-SPDX comments from the source YAML before matching
+rendered fields. It does not copy comments inside literal block scalars because those
+already render in place. It also refreshes the central OpenAPI schema from the
+operator CRDs. `scripts/kustomize-matrix.py check` validates all generated overlays,
+manifests, and the schema; the pre-commit hook runs the same command.
+It also reports artifacts left by a moved matrix. Normal generation leaves those
+artifacts in place; after reviewing them, clean them explicitly:
+
+```bash
+scripts/kustomize-matrix.py unfold --clean <matrix.yaml>
+scripts/kustomize-matrix.py render --clean <matrix.yaml>
+```
+
+For an ad-hoc, uncommitted composition, use `compose`. The target is first,
+Components follow it, and Kustomize build options come last:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  <target-kustomization> \
+  /absolute/path/to/recipes/kustomize/components/aws/components/efa/components/p8d16 \
+  --enable-helm
+```
 
 ## Validation
 

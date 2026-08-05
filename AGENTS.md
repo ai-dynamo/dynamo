@@ -15,8 +15,19 @@ SPDX-License-Identifier: Apache-2.0
   Component; its schema is generated from every operator CRD. The central
   `recipes/kustomize/components/disagg-workers/` Components require one DGD per
   base with backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
-  Edit the Kustomize source, then run `python3 scripts/render_recipe_kustomize.py`;
-  do not hand-edit generated `deploy-*.yaml` files or the central generated schema.
+  A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
+  `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
+  `components` list. Edit matrix and Component sources, then run
+  `scripts/kustomize-matrix.py unfold <matrix.yaml>` followed by
+  `scripts/kustomize-matrix.py render <matrix.yaml>`; do not hand-edit generated
+  overlay `kustomization.yaml` files, `deploy-*.yaml` files, or the central
+  generated schema. `scripts/kustomize-matrix.py check` validates every matrix and
+  detects artifacts left by moved matrices; use `unfold --clean` and `render --clean`
+  to remove those explicitly.
+  To compose additional Components without a checked-in overlay, use
+  `scripts/kustomize-matrix.py compose <target> [<component-path>...] [<build-options>...]`.
+  The target must be first, Components follow it, and Kustomize build options come
+  last.
 - Use Conventional Commit PR titles: `type(scope): summary`. Accepted types:
   `feat`, `fix`, `docs`, `test`, `ci`, `refactor`, `perf`, `chore`, `revert`,
   `style`, and `build`.

@@ -3,7 +3,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-235b-a22b-disagg
+  name: disagg-workers
 spec:
   services:
     PrefillWorker:
@@ -18,7 +18,7 @@ spec:
       resources:
         limits:
           custom:
-            vpc.amazonaws.com/efa: "16"
+            vpc.amazonaws.com/efa: "8"
         requests:
           custom:
-            vpc.amazonaws.com/efa: "16"
+            vpc.amazonaws.com/efa: "8"

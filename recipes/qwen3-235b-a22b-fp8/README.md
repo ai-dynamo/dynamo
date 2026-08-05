@@ -44,7 +44,7 @@ kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 # OR: kubectl apply -f trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}   # H100/H200
 
 # For Blackwell disaggregated, choose the provider-specific manifest matching your cluster interconnect:
-# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-aws-efa.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-aws-efa-p8d16.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/blackwell/deploy-nscale-ib.yaml -n ${NAMESPACE}
 ```
@@ -52,7 +52,8 @@ kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 ## Cloud Provider Overlays
 
 The Blackwell disaggregated recipe keeps the shared deployment in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`.
-Provider-specific deltas live in Kustomize merge patches under `trtllm/disagg/blackwell/kustomize/overlays/`.
+Provider-specific deltas live in Kustomize Components and are selected by
+`trtllm/disagg/blackwell/.kustomize-matrix.yaml`.
 Overlay directories starting with `_` are intermediate and are not rendered. Shared Kustomize building blocks belong under
 `recipes/kustomize/components/`; the disaggregated provider Components use the
 backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
@@ -63,14 +64,15 @@ overlay YAML before matching rendered fields. Comments inside literal block scal
 | Rendered manifest | Provider fabric | Patch source |
 |-------------------|-----------------|--------------|
 | `trtllm/disagg/blackwell/deploy-generic.yaml` | Provider-neutral baseline | `trtllm/disagg/blackwell/kustomize/overlays/generic/` |
-| `trtllm/disagg/blackwell/deploy-aws-efa.yaml` | AWS EFA | `trtllm/disagg/blackwell/kustomize/overlays/aws-efa/patch-dgd.yaml` |
-| `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `trtllm/disagg/blackwell/kustomize/overlays/gcp-roce/patch-dgd.yaml` |
-| `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `trtllm/disagg/blackwell/kustomize/overlays/nscale-ib/patch-dgd.yaml` |
+| `trtllm/disagg/blackwell/deploy-aws-efa-p8d16.yaml` | AWS EFA, 8 EFA prefill and 16 decode | `recipes/kustomize/components/aws/components/efa/components/p8d16/` |
+| `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `recipes/kustomize/components/disagg-workers/gke-roce/` |
+| `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `trtllm/disagg/blackwell/kustomize/components/nscale-ib/` |
 
 After editing the base or overlays, render the apply-able manifests from the repo root:
 
 ```bash
-python3 scripts/render_recipe_kustomize.py
+scripts/kustomize-matrix.py unfold trtllm/disagg/blackwell/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render trtllm/disagg/blackwell/.kustomize-matrix.yaml
 ```
 
 ## Test the Deployment
