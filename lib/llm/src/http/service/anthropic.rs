@@ -360,6 +360,15 @@ async fn anthropic_messages(
         ),
     );
 
+    // Same backstop as the chat handler, so the two aggregation entry points
+    // cannot drift. See `wants_reasoning_as_content_when_empty`.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Create inflight_guard early to ensure all errors are counted
