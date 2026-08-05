@@ -128,7 +128,7 @@
       "from_image": "vllm/vllm-openai-xpu",
       "from_tag": "v0.26.0",
       "platform": "linux/amd64"
-    },    
+    },
     {
       "baseline_digest": "sha256:36d6146dfb19084f7098852991b0da67565cba1e5a9bb5980b1c1a7edae3bf1b",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
