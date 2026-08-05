@@ -13,6 +13,20 @@ from dynamo.trtllm.constants import DisaggregationMode, Modality
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
 
 
+def _configure_trtllm_snapshot_capture_env() -> None:
+    """Disable TRT-LLM's NCCL registered window before engine creation."""
+    env_name = "TLLM_NCCL_SYMMETRIC_ZERO_COPY"
+    configured = os.environ.get(env_name)
+    if configured and configured != "0":
+        logging.getLogger(__name__).warning(
+            "Overriding %s=%r with '0' for snapshot mode because "
+            "cuda-checkpoint cannot capture NCCL registered windows",
+            env_name,
+            configured,
+        )
+    os.environ[env_name] = "0"
+
+
 def _should_prefetch_model_for_snapshot(config: Any) -> bool:
     if os.path.exists(config.model):
         return False
