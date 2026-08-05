@@ -1,18 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from tests.utils.constants import DefaultPort
+from tests.utils.inference_endpoint import InferenceEndpoint
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import BasePayload, check_health_generate, check_models_api
+
+# Re-exported for backwards compatibility: these moved to the
+# deployment-agnostic verification module so tests/deploy can raise and catch
+# the same errors without importing the local-process stack. The class names
+# are load-bearing -- tests select them by name in
+# @pytest.mark.flaky(only_rerun=[...]).
+from tests.utils.verification import (  # noqa: F401
+    EngineLogError,
+    EngineResponseError,
+    ResponseValidationError,
+    check_response,
+    validate_expected_logs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,31 +32,6 @@ logger = logging.getLogger(__name__)
 FRONTEND_PORT = (
     DefaultPort.FRONTEND.value
 )  # Do NOT use this in tests! Use allocate_port() instead.
-
-
-class EngineResponseError(Exception):
-    """Custom exception for engine response errors"""
-
-    pass
-
-
-class ResponseValidationError(EngineResponseError):
-    """Validation/assertion failure during process_response.
-
-    Subset of EngineResponseError raised only when payload.process_response
-    asserts on response content (the case the in-process retry was designed
-    for). Status (non-200) and handler errors continue to raise the parent
-    EngineResponseError so they surface immediately and aren't masked by
-    payload.max_attempts.
-    """
-
-    pass
-
-
-class EngineLogError(Exception):
-    """Custom exception for engine log validation errors"""
-
-    pass
 
 
 @dataclass
@@ -84,6 +71,12 @@ class EngineConfig:
 class EngineProcess(ManagedProcess):
     """Base class for LLM engine processes (vLLM, TRT-LLM, etc.)"""
 
+    # Frontend port this engine was launched on, recorded by from_config so the
+    # process can hand out a deployment-agnostic InferenceEndpoint. ManagedProcess
+    # is a dataclass and this is not a constructor argument, so it is declared
+    # here as a class attribute like the other private ManagedProcess state.
+    _frontend_port: Optional[int] = None
+
     @staticmethod
     def worker_health_check_urls(env: Dict[str, str], count: int) -> List[str]:
         """Build /health URLs for the worker system ports a launch script binds.
@@ -111,88 +104,35 @@ class EngineProcess(ManagedProcess):
             urls.append(f"http://localhost:{val}/health")
         return urls
 
+    def endpoint(self, model: Optional[str] = None) -> InferenceEndpoint:
+        """The frontend address, as the deployment-agnostic handle.
+
+        A test that only sends payloads and asserts on responses should take
+        this and nothing else from the process.
+        """
+        if self._frontend_port is None:
+            raise RuntimeError(
+                "EngineProcess has no frontend port: build it with from_config() "
+                "so the launch configuration's frontend_port is recorded"
+            )
+        return InferenceEndpoint.from_port(self._frontend_port, model=model)
+
     def check_response(
         self,
         payload: BasePayload,
         response: requests.Response,
     ) -> None:
+        """Validate a response, using this process's log for ``expected_log``.
+
+        Thin wrapper over the deployment-agnostic
+        :func:`tests.utils.verification.check_response`; the process is passed
+        as the log source because it is the only part that needs a handle.
         """
-        Check if the response is valid and contains expected content.
-
-        Args:
-            payload: The original payload (should have expected_response attribute)
-            response: The response object
-            response_handler: Function to extract content from response
-
-        Raises:
-            EngineResponseError: If the response is invalid or missing expected content
-        """
-
-        if response.status_code != 200:
-            logger.error(
-                "Response returned non-200 status code: %d", response.status_code
-            )
-
-            error_msg = f"Response returned non-200 status code: {response.status_code}"
-            try:
-                error_data = response.json()
-                if "error" in error_data:
-                    error_msg += f"\nError details: {error_data['error']}"
-                logger.error(
-                    "Response error details: %s", json.dumps(error_data, indent=2)
-                )
-            except Exception:
-                logger.error("Response text: %s", response.text[:500])
-
-            raise EngineResponseError(error_msg)
-
-        try:
-            content = payload.process_response(response)
-
-            logger.info(
-                "Extracted content: \n%s",
-                content[:200] + "..."
-                if isinstance(content, str) and len(content) > 200
-                else content,
-            )
-        except AssertionError as e:
-            raise ResponseValidationError(str(e))
-        except Exception as e:
-            raise EngineResponseError(f"Failed to handle response: {e}")
-
-        # Optionally validate expected log patterns after response handling
-        if payload.expected_log:
-            time.sleep(
-                0.5
-            )  # The kv event sometimes needs extra time to arrive and be reflected in the log.
-            self.validate_expected_logs(payload.expected_log)
+        check_response(payload, response, log_source=self)
 
     def validate_expected_logs(self, patterns: Any) -> None:
-        """Validate that all regex patterns are present in the current logs.
-
-        Reads the full log via ManagedProcess.read_logs and searches for each
-        provided regex pattern. Raises EngineLogError if any are missing.
-        """
-        import re  # local import to keep module load minimal
-
-        content = self.read_logs() or ""
-        if not content:
-            raise EngineLogError(
-                f"Log file not available or empty at path: {self.log_path}"
-            )
-
-        compiled = [re.compile(p) for p in patterns]
-        missing = []
-        for pattern, rx in zip(patterns, compiled):
-            if not rx.search(content):
-                missing.append(pattern)
-
-        if missing:
-            sample = content[-1000:] if len(content) > 1000 else content
-            raise EngineLogError(
-                f"Missing expected log patterns: {missing}\n\nLog sample:\n{sample}"
-            )
-        logger.info(f"SUCCESS: All expected log patterns: {patterns} found")
+        """Assert every regex in ``patterns`` appears in this process's log."""
+        validate_expected_logs(patterns, self)
 
     @classmethod
     def from_config(
@@ -256,7 +196,7 @@ class EngineProcess(ManagedProcess):
 
         health_urls = worker_checks + frontend_checks
 
-        return cls(
+        instance = cls(
             command=command,
             env=env,
             timeout=config.timeout,
@@ -273,6 +213,8 @@ class EngineProcess(ManagedProcess):
             stragglers=config.stragglers,
             log_dir=request.node.name,
         )
+        instance._frontend_port = config.frontend_port
+        return instance
 
     @classmethod
     def _build_script_command(cls, config: EngineConfig) -> List[str]:
