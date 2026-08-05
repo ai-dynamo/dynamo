@@ -2,18 +2,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TCP TLS
-subtitle: Encrypt all TCP connections between frontend and workers
+subtitle: Encrypt the TCP request and response streams between frontend and workers
 ---
 
-Dynamo supports opt-in TLS encryption on all TCP transports between frontends
-and workers. When enabled, both the **request plane** (frontend → worker
-inference requests) and the **response stream** (worker → frontend inference
-output) are encrypted using [rustls](https://github.com/rustls/rustls) with the
-`ring` cryptographic provider. When no TLS configuration is provided, all
-transports operate in plaintext exactly as before.
+Dynamo supports opt-in TLS encryption on the TCP request and response streams
+between frontends and workers. When enabled, both the **request plane**
+(frontend → worker inference requests) and the **response stream** (worker →
+frontend inference output) are encrypted using
+[rustls](https://github.com/rustls/rustls) with the `ring` cryptographic
+provider. When no TLS configuration is provided, these streams operate in
+plaintext exactly as before.
 
 The same `DYN_TCP_TLS_*` environment variables apply to both transports — a
-single set of certificates encrypts all TCP traffic between Dynamo components.
+single set of certificates encrypts the frontend↔worker TCP request and
+response streams. This does **not** cover the KV event plane, which is carried
+over ZMQ or NATS Core depending on setup and is a separate transport; those
+paths are not encrypted by this configuration.
 
 ## Environment variables
 
@@ -139,8 +143,7 @@ server and client depending on the stream direction.
 
 ## Encrypted paths
 
-When TLS is configured, all TCP communication between frontend and worker is
-encrypted:
+When TLS is configured, the following frontend↔worker streams are encrypted:
 
 | Path | Direction | Data | Transport |
 |---|---|---|---|
@@ -152,8 +155,9 @@ encrypted:
 
 - Client TLS connectors are built once and cached via `OnceCell` on the first
   outbound connection; the request-plane and response-stream servers build their
-  TLS acceptor eagerly at startup. Either way, certificate rotation requires a
-  process restart.
+  TLS acceptor eagerly at startup. Because the config is cached, certificate
+  rotation currently requires a process restart — hot-reloading certificates
+  from disk via a rustls certificate resolver is a possible future enhancement.
 - The TLS handshake is spawned per-connection on both the request plane and
   response stream servers so the accept loop is never blocked.
 - Invalid TLS configuration on the request plane (e.g. bad cert path) prevents
