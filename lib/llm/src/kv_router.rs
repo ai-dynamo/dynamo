@@ -585,10 +585,11 @@ where
     }
 
     fn has_router_hint_capable_workers(&self) -> bool {
-        self.workers_with_configs
-            .borrow()
-            .values()
-            .any(|config| config.supports_router_hints())
+        self.workers_with_configs.borrow().values().any(|config| {
+            let start = config.data_parallel_start_rank();
+            let end = start.saturating_add(config.data_parallel_size());
+            (start..end).any(|dp_rank| config.router_hint_metadata_for_dp_rank(dp_rank).is_some())
+        })
     }
 
     fn router_hint_for_selection(
@@ -602,10 +603,7 @@ where
         let (block_hashes, source_control_endpoint) = {
             let configs = self.workers_with_configs.borrow();
             let target_config = configs.get(&target.worker_id)?;
-            if !target_config.supports_router_hints() {
-                return None;
-            }
-            let target_worker_type = target_config.router_hint_worker_type()?;
+            let target_metadata = target_config.router_hint_metadata_for_dp_rank(target.dp_rank)?;
 
             let prefix_blocks_to_beat =
                 usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
@@ -613,16 +611,19 @@ where
                 candidates.best_source(prefix_blocks_to_beat, |worker| {
                     worker != target
                         && configs.get(&worker.worker_id).is_some_and(|config| {
-                            config.supports_router_hints()
-                                && config.router_hint_worker_type() == Some(target_worker_type)
-                                && config
-                                    .router_hint_source_control_endpoint_for_dp_rank(worker.dp_rank)
-                                    .is_some_and(|endpoint| !endpoint.is_empty())
+                            config
+                                .router_hint_metadata_for_dp_rank(worker.dp_rank)
+                                .is_some_and(|source_metadata| {
+                                    source_metadata.worker_type == target_metadata.worker_type
+                                        && source_metadata.source_control_endpoint.is_some()
+                                })
                         })
                 })?;
-            let source_control_endpoint = configs.get(&source.worker_id).and_then(|config| {
-                config.router_hint_source_control_endpoint_for_dp_rank(source.dp_rank)
-            })?;
+            let source_control_endpoint = configs
+                .get(&source.worker_id)?
+                .router_hint_metadata_for_dp_rank(source.dp_rank)?
+                .source_control_endpoint?
+                .to_string();
             (block_hashes, source_control_endpoint)
         };
 

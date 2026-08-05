@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::{
-    protocols::KvTransferEnforcement,
+    protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
     router_hint::{
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
@@ -325,6 +325,29 @@ impl Default for ModelRuntimeConfig {
     }
 }
 
+impl ModelRuntimeConfig {
+    fn router_hints_enabled(&self) -> bool {
+        match self.runtime_data.get(ROUTER_HINT_RUNTIME_CAPABILITY_KEY) {
+            Some(serde_json::Value::Bool(true)) => true,
+            // Python ModelRuntimeConfig.set_engine_specific currently stores
+            // engine-specific values as strings.
+            Some(serde_json::Value::String(value)) => is_truthy(value),
+            _ => false,
+        }
+    }
+
+    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+        let dp_rank = dp_rank.to_string();
+        let endpoint = self
+            .runtime_data
+            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .as_object()?
+            .get(&dp_rank)?
+            .as_str()?;
+        (!endpoint.is_empty()).then_some(endpoint)
+    }
+}
+
 impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
@@ -342,47 +365,27 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn supports_router_hints(&self) -> bool {
-        match self.runtime_data.get(ROUTER_HINT_RUNTIME_CAPABILITY_KEY) {
-            Some(serde_json::Value::Bool(true)) => true,
-            // Python ModelRuntimeConfig.set_engine_specific currently stores
-            // engine-specific values as strings.
-            Some(serde_json::Value::String(value)) => is_truthy(value),
-            _ => false,
+    fn router_hint_metadata_for_dp_rank(
+        &self,
+        dp_rank: u32,
+    ) -> Option<RouterHintWorkerMetadata<'_>> {
+        if !self.router_hints_enabled() {
+            return None;
         }
-    }
 
-    fn router_hint_worker_type(&self) -> Option<&str> {
         let worker_type = self
             .runtime_data
             .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
             .as_str()?;
-        (!worker_type.is_empty()).then_some(worker_type)
-    }
+        if worker_type.is_empty() {
+            return None;
+        }
 
-    fn router_hint_source_control_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<String> {
-        let dp_rank = dp_rank.to_string();
-        let endpoint = match self
-            .runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
-        {
-            serde_json::Value::Object(endpoints) => endpoints
-                .get(&dp_rank)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            serde_json::Value::String(encoded) => {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(encoded)
-                    .ok()
-                    .and_then(|endpoints| {
-                        endpoints
-                            .get(&dp_rank)
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    })
-            }
-            _ => None,
-        }?;
-        (!endpoint.is_empty()).then_some(endpoint)
+        Some(RouterHintWorkerMetadata {
+            worker_type,
+            source_control_endpoint: self
+                .router_hint_endpoint_for_dp_rank(dp_rank),
+        })
     }
 
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
@@ -858,49 +861,52 @@ mod tests {
         use dynamo_kv_router::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
-        assert!(!config.supports_router_hints());
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
 
         config
             .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, true)
             .unwrap();
-        assert!(config.supports_router_hints());
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
 
-        config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
-            .unwrap();
-        assert!(config.supports_router_hints());
-
-        config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
-            .unwrap();
-        assert!(!config.supports_router_hints());
-
-        assert!(config.router_hint_worker_type().is_none());
         config
             .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
             .unwrap();
-        assert_eq!(config.router_hint_worker_type(), Some("prefill"));
+        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        assert_eq!(info.worker_type, "prefill");
+        assert!(info.source_control_endpoint.is_none());
 
-        assert!(
-            config
-                .router_hint_source_control_endpoint_for_dp_rank(0)
-                .is_none()
-        );
         config
             .set_engine_specific(
                 ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
                 r#"{"0":"tcp://127.0.0.1:23280"}"#,
             )
             .unwrap();
+        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        assert_eq!(info.worker_type, "prefill");
+        assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
         assert_eq!(
-            config.router_hint_source_control_endpoint_for_dp_rank(0),
-            Some("tcp://127.0.0.1:23280".to_string())
-        );
-        assert!(
             config
-                .router_hint_source_control_endpoint_for_dp_rank(1)
-                .is_none()
+                .router_hint_metadata_for_dp_rank(1)
+                .unwrap()
+                .source_control_endpoint,
+            None
         );
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+            .unwrap();
+        assert_eq!(
+            config
+                .router_hint_metadata_for_dp_rank(0)
+                .unwrap()
+                .worker_type,
+            "prefill"
+        );
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
+            .unwrap();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]

@@ -262,6 +262,18 @@ fn compute_seq_hash_for_block_with(
     sequence_hashes
 }
 
+/// Router-hint metadata exposed by a worker config for one global DP rank.
+///
+/// This is borrowed from the underlying worker config so candidate filtering can
+/// check capability, role compatibility, and source endpoint presence without
+/// allocating. `source_control_endpoint` is optional because targets only need
+/// to consume hints, while sources must provide an endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouterHintWorkerMetadata<'a> {
+    pub worker_type: &'a str,
+    pub source_control_endpoint: Option<&'a str>,
+}
+
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
@@ -271,20 +283,15 @@ pub trait WorkerConfigLike {
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
 
-    /// Whether this worker can consume router_hint extra args attached by the KV router.
-    fn supports_router_hints(&self) -> bool {
-        false
-    }
-
-    /// Backend worker role used to keep router-hint source and target selection compatible.
-    fn router_hint_worker_type(&self) -> Option<&str> {
-        None
-    }
-
-    /// Advertised peer-control endpoint for a specific global DP rank.
-    /// Backends that advertise router-hint support are responsible for publishing
-    /// a usable endpoint for each managed DP rank.
-    fn router_hint_source_control_endpoint_for_dp_rank(&self, _dp_rank: DpRank) -> Option<String> {
+    /// Router-hint capability and source metadata for a specific global DP rank.
+    ///
+    /// `None` means this worker/rank does not support router hints. Backends
+    /// that support hints but cannot serve as a source may return `Some` with
+    /// `source_control_endpoint: None`.
+    fn router_hint_metadata_for_dp_rank(
+        &self,
+        _dp_rank: DpRank,
+    ) -> Option<RouterHintWorkerMetadata<'_>> {
         None
     }
 
@@ -1885,7 +1892,7 @@ mod tests {
             "Default kv_transfer_preferred_weight() should return None"
         );
         assert!(config.native_offloading_capacity_tokens().is_none());
-        assert!(!config.supports_router_hints());
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]
