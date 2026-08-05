@@ -19,6 +19,7 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from examples.custom_backend.user_ensemble.worker import (
     UserEnsembleEngine,
+    _served_model_name,
 )
 
 pytestmark = [
@@ -251,3 +252,18 @@ async def test_abort_and_cleanup_delegate_and_cleanup_is_idempotent():
     assert decoder.abort_ids == ["cancel-me"]
     assert decoder.shutdown_calls == 1
     assert encoder.shutdown_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("configured", "fallback", "expected"),
+    [
+        (None, "public/model-id", "public/model-id"),
+        ([], "public/model-id", "public/model-id"),
+        (["served", "alias"], "public/model-id", "served"),
+        ("served", "public/model-id", "served"),
+    ],
+)
+def test_served_model_name_preserves_public_cli_identity(
+    configured, fallback: str, expected: str
+):
+    assert _served_model_name(configured, fallback) == expected

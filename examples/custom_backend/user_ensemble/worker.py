@@ -121,11 +121,10 @@ def _load_encoder_backend(class_path: str) -> type[VisionEncoderBackend[Any, Any
     return cast(type[VisionEncoderBackend[Any, Any, Any]], backend_type)
 
 
-def _served_model_name(engine_args: AsyncEngineArgs) -> str:
-    configured = engine_args.served_model_name
+def _served_model_name(configured: str | list[str] | None, fallback: str) -> str:
     if isinstance(configured, list):
-        return configured[0] if configured else engine_args.model
-    return configured or engine_args.model
+        return configured[0] if configured else fallback
+    return configured or fallback
 
 
 class UserEnsembleEngine(LLMEngine):
@@ -177,9 +176,13 @@ class UserEnsembleEngine(LLMEngine):
         AsyncEngineArgs.add_cli_args(parser, async_args_only=False)
         args = parser.parse_args(argv)
 
+        requested_model = args.model
         engine_args = AsyncEngineArgs.from_cli_args(args)
         engine_args.enable_prompt_embeds = True
-        served_model_name = _served_model_name(engine_args)
+        served_model_name = _served_model_name(
+            args.served_model_name,
+            requested_model,
+        )
         backend_type = _load_encoder_backend(args.encoder_class)
         custom_template = (
             os.path.abspath(os.path.expanduser(args.custom_jinja_template))
@@ -192,7 +195,7 @@ class UserEnsembleEngine(LLMEngine):
             )
 
         engine = cls(
-            model_name=engine_args.model,
+            model_name=requested_model,
             served_model_name=served_model_name,
             engine_args=engine_args,
             encoder_backend_type=backend_type,
@@ -201,7 +204,7 @@ class UserEnsembleEngine(LLMEngine):
             namespace=args.namespace,
             component=args.component,
             endpoint=args.endpoint,
-            model_name=engine_args.model,
+            model_name=requested_model,
             served_model_name=served_model_name,
             endpoint_types=args.endpoint_types,
             discovery_backend=args.discovery_backend,

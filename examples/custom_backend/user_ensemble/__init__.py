@@ -2,7 +2,3 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """User-authored aggregated model chaining on Dynamo's generic worker."""
-
-from .worker import DummyClassifier, UserEnsembleEngine
-
-__all__ = ["DummyClassifier", "UserEnsembleEngine"]
