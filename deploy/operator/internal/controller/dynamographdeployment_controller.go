@@ -146,12 +146,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(statusErr, "unable to update status after compatibility failure")
 			return ctrl.Result{}, statusErr
 		}
-		return ctrl.Result{}, compatibilityErr
+		return ctrl.Result{}, nil
 	}
 
 	// Add the finalizer only after the live object passes compatibility preflight.
-	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
-	if err != nil {
+	if _, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r); err != nil {
 		logger.Error(err, "failed to handle the finalizer")
 		programResult := newWorkloadProgramResult(dynamoDeployment)
 		programResult.Fail(dynamoDeployment.Generation, "failed_to_handle_the_finalizer", err)
@@ -159,9 +158,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(statusErr, "unable to update status after finalizer failure")
 		}
 		return ctrl.Result{}, err
-	}
-	if deleted {
-		return ctrl.Result{}, nil
 	}
 
 	program := r.selectWorkloadProgram(dynamoDeployment)
@@ -227,7 +223,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			predicate.GenerationChangedPredicate{},
+			generationOrDeletionChangedPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(

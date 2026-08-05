@@ -1180,7 +1180,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS is rejected on create without job",
+			name: "v1beta1 checkpoint with inter-pod GMS is rejected on create",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaInterPodGMS(worker)
@@ -1191,7 +1191,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on create without job",
+			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on create",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.Resources = &nvidiacomv1alpha1.Resources{
@@ -1208,7 +1208,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS is rejected on update without job",
+			name: "v1beta1 checkpoint with inter-pod GMS is rejected on update",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
@@ -1222,7 +1222,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on update without job",
+			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on update",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.Resources = &nvidiacomv1alpha1.Resources{

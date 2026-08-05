@@ -139,6 +139,23 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
+	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
+		dynamoComponentDeployment.Spec.Experimental,
+	)...); compatibilityErr != nil {
+		if _, statusErr := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dynamoComponentDeployment.Generation,
+				Reason:             "InvalidCheckpointConfiguration",
+				Message:            compatibilityErr.Error(),
+			},
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Setup defer to handle errors and update status
 	defer func() {
 		if err == nil {
@@ -160,19 +177,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}()
 
-	if err = stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
-		dynamoComponentDeployment.Spec.Experimental,
-	)...); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
-	if err != nil {
+	if _, err = commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r); err != nil {
 		logs.Error(err, "Failed to handle finalizer")
 		return ctrl.Result{}, err
-	}
-	if deleted {
-		return ctrl.Result{}, nil
 	}
 
 	if len(dynamoComponentDeployment.Status.Conditions) == 0 {
@@ -890,7 +897,7 @@ func hasLegacyWorkerSelector(labels map[string]string, componentType string) boo
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(generationOrDeletionChangedPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment

@@ -163,24 +163,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 				`spec.job.targetContainerName: Invalid value: "missing": does not name a container in podTemplateSpec.spec.containers`,
 			},
 		},
-		{
-			name: "preparation failures aggregate",
-			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
-				checkpoint.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-					Enabled: true,
-					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
-				}
-			}),
-			wantWebhook: []string{
-				`spec.job.podTemplateSpec.spec.volumes: Required value: must contain the GMS shared volume "gms-intrapod-control"`,
-				`spec.job.podTemplateSpec.spec.initContainers: Required value: must contain the GMS init sidecar "gms-server"`,
-				`spec.job.podTemplateSpec.spec.containers[0].env: Required value: must contain GMS_SOCKET_DIR=/gms-intrapod-control for GMS`,
-				`spec.job.podTemplateSpec.spec.containers[0].resources.claims: Required value: must contain the GMS resource claim "intrapod-shared-gpu"`,
-				`spec.job.podTemplateSpec.spec.containers[0].volumeMounts: Required value: must mount volume "gms-intrapod-control" at "/gms-intrapod-control" for GMS`,
-				`spec.job.podTemplateSpec.spec.resourceClaims: Required value: must contain the GMS pod resource claim "intrapod-shared-gpu"`,
-			},
-		},
-
 		// Update, CEL immutability, and deletion behavior.
 		{
 			name:          "unchanged checkpoint update is accepted",

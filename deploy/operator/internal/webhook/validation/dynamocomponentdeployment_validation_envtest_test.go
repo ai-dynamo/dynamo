@@ -452,7 +452,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS is rejected on create without job",
+			name: "v1beta1 checkpoint with inter-pod GMS is rejected on create",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
@@ -462,7 +462,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on create without job",
+			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on create",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,
@@ -477,7 +477,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS is rejected on update without job",
+			name: "v1beta1 checkpoint with inter-pod GMS is rejected on update",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 			}),
@@ -490,7 +490,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on update without job",
+			name: "v1alpha1 checkpoint with inter-pod GMS is rejected on update",
 			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,

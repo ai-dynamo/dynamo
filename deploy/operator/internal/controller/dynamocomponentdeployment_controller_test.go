@@ -110,7 +110,7 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build an admission-bypassed live DCD")
 			dcd := &v1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
 				Spec: v1beta1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 						Experimental: tt.experimental,
@@ -122,9 +122,10 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 				WithObjects(dcd).
 				WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
 				Build()
+			recorder := record.NewFakeRecorder(10)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        kubeClient,
-				Recorder:      record.NewFakeRecorder(10),
+				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 			}
@@ -133,7 +134,7 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 			_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 				NamespacedName: client.ObjectKeyFromObject(dcd),
 			})
-			require.EqualError(t, err, tt.wantErr)
+			require.NoError(t, err)
 
 			t.Log("Verify failure status is written without finalizers or child resources")
 			var stored v1beta1.DynamoComponentDeployment
@@ -145,7 +146,15 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 			)
 			require.NotNil(t, available)
 			require.Equal(t, metav1.ConditionFalse, available.Status)
-			require.Contains(t, available.Message, tt.wantErr)
+			require.Equal(t, dcd.Generation, available.ObservedGeneration)
+			require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
+			require.Equal(t, tt.wantErr, available.Message)
+			require.Zero(t, stored.Status.ObservedGeneration)
+			select {
+			case unexpected := <-recorder.Events:
+				t.Fatalf("unexpected reconciliation event: %s", unexpected)
+			default:
+			}
 
 			var deployments appsv1.DeploymentList
 			require.NoError(t, kubeClient.List(context.Background(), &deployments, client.InNamespace(dcd.Namespace)))

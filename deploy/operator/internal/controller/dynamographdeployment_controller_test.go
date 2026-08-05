@@ -160,9 +160,10 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 				WithObjects(dgd).
 				WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
 				Build()
+			recorder := record.NewFakeRecorder(10)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        kubeClient,
-				Recorder:      record.NewFakeRecorder(10),
+				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{Gate: gates},
 			}
@@ -172,7 +173,7 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 			_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 				NamespacedName: client.ObjectKeyFromObject(dgd),
 			})
-			require.ErrorContains(t, err, tt.wantErr)
+			require.NoError(t, err)
 
 			t.Log("Verify failure status is authoritative without mutating the live DGD")
 			var stored v1beta1.DynamoGraphDeployment
@@ -183,8 +184,15 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 			ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
 			require.NotNil(t, ready)
 			require.Equal(t, metav1.ConditionFalse, ready.Status)
+			require.Equal(t, dgd.Generation, ready.ObservedGeneration)
 			require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 			require.Equal(t, tt.wantErr, ready.Message)
+			require.Zero(t, stored.Status.ObservedGeneration)
+			select {
+			case unexpected := <-recorder.Events:
+				t.Fatalf("unexpected reconciliation event: %s", unexpected)
+			default:
+			}
 
 			t.Log("Verify no component, checkpoint, claim, service, storage, or Grove resource was created")
 			var dcds v1beta1.DynamoComponentDeploymentList
