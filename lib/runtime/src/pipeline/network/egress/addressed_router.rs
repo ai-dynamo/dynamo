@@ -368,7 +368,9 @@ impl<T> AddressedRequest<T> {
         Self::with_instance(request, address, instance)
     }
 
-    pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
+    /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
+    /// impl can read the routed address + instance.
+    pub fn into_parts(self) -> (T, String, Option<Instance>) {
         (self.request, self.address, self.instance)
     }
 }
@@ -430,7 +432,7 @@ impl AddressedPushRouter {
     /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
     /// sugar, so we just do it inline here. Will consider only if we do want to call this from
     /// typed erased AsyncEngine impls.
-    pub async fn generate_bidirectional<T, U>(
+    pub async fn dispatch_bidirectional<T, U>(
         &self,
         instance: Instance,
         address: String,
@@ -762,6 +764,90 @@ where
             None,
         )
         .await
+    }
+}
+
+/// Transport seam beneath `PushRouter`: given an already-selected worker (typed
+/// request + resolved address), dispatch the final hop and return a typed stream.
+/// Selection, occupancy, fault detection, and migration stay in `PushRouter`
+/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
+/// (the request plane) is the default impl.
+///
+/// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
+/// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
+/// `ResourceExhausted` / `Cancelled`), or `wrap_with_fault_detection`'s
+/// report-down / overload / migration won't fire.
+///
+/// The removal watcher behind `on_instance_removed` / `on_instance_added` is
+/// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
+/// holding per-instance state must share it per endpoint (the default cleans up
+/// shared per-runtime state, so it is unaffected).
+#[async_trait::async_trait]
+pub trait StreamingDispatch<T, U>: Send + Sync
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    /// Unary final hop: typed request in, typed response stream out.
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error>;
+
+    /// Bidirectional final hop (streaming input).
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error>;
+
+    /// Discovery-driven cleanup when an instance leaves — the request plane
+    /// cancels its call-home streams; another transport frees per-instance state.
+    async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
+
+    /// Discovery-driven notification when an instance (re)appears — the request
+    /// plane clears its tombstone.
+    async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
+}
+
+#[async_trait::async_trait]
+impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        // Delegate to the existing `AsyncEngine` impl (still used directly by the
+        // KV recovery worker-query path); behavior unchanged.
+        <Self as AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error>>::generate(
+            self, request,
+        )
+        .await
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error> {
+        self.dispatch_bidirectional(instance, address, input).await
+    }
+
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        let n = self.cancel_instance_streams(id).await;
+        if n > 0 {
+            tracing::warn!(
+                namespace = %id.namespace,
+                component = %id.component,
+                endpoint = %id.endpoint,
+                instance_id = id.instance_id,
+                cancelled = n,
+                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+            );
+        }
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        self.clear_instance_tombstone(id).await;
     }
 }
 

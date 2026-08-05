@@ -16,6 +16,7 @@ use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
 use crate::replay::TraceCollector;
+use crate::replay::offline::evidence::record_pressure_readmission;
 
 use super::config::SglangConfig;
 use super::decode::{
@@ -666,6 +667,7 @@ impl SglangCore {
 
         admissions.append(&mut admit.admissions);
         for admission in &admissions {
+            record_pressure_readmission(admission.uuid, now_ms);
             if let Some(collector) = collector.as_deref_mut() {
                 collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
             }
