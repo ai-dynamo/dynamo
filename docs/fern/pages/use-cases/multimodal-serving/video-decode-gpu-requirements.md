@@ -6,8 +6,14 @@ title: Video Decode GPU Requirements
 
 Dynamo decodes H.264 and H.265 (HEVC) video input on the GPU using NVDEC, NVIDIA's
 dedicated hardware video decoder, through
-[PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/). Other formats (VP8, VP9)
-continue to use the software decode path.
+[PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/).
+
+Other formats — VP8, VP9 and AV1 — have **no video-input decoder** in the shipped images.
+The in-tree VP8/VP9 FFmpeg serves the video *output* (generation) path; it is not wired to
+video input, and the Rust `media-ffmpeg` decoder is not built into these images. Video
+input decodes through Python carriers (OpenCV, PyAV, decord) that the images deliberately
+omit, so a VP8/VP9/AV1 clip fails with an unsupported-codec error unless one of those
+packages is installed alongside.
 
 This page covers which GPUs provide NVDEC, what the container must expose, and how
 Dynamo behaves when hardware decode is unavailable.
@@ -122,13 +128,19 @@ between the two.
 ## Behavior when NVDEC is unavailable
 
 Hardware decode is additive and never blocks a request on its own: routing falls through
-to the software decode path.
+to the software decode path where one exists.
 
 > [!IMPORTANT]
-> Dynamo's runtime images ship a VP8/VP9-only in-tree FFmpeg, so the software path cannot
-> decode H.264 or H.265. If NVDEC is unavailable in one of these images, those formats
-> have no decoder and the request fails with an unsupported-codec error. Grant the
-> container the `video` driver capability so NVDEC can be used.
+> In the shipped images there is no software decode path for video input, for any format.
+> The Python carriers that decode video input (OpenCV, PyAV, decord) are deliberately not
+> installed, and the in-tree VP8/VP9 FFmpeg serves the video *output* path rather than
+> input. So if NVDEC is unavailable, H.264 and H.265 fail with an unsupported-codec error
+> — and VP8, VP9 and AV1 fail the same way whether NVDEC is available or not, since NVDEC
+> does not decode them either.
+>
+> Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
+> For the other formats, install a decode carrier alongside, or transcode the input to
+> H.264/H.265 before sending it.
 
 ## Hardware encode (NVENC)
 
@@ -146,7 +158,7 @@ NVDEC as above needs no additional change. Encode performance does not depend on
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DYN_DISABLE_NVDEC` | unset | Set to `1` to force the software decode path. |
+| `DYN_DISABLE_NVDEC` | unset | Set to `1` to skip hardware decode. In a shipped image that leaves video input with no decoder at all, so it is a debugging switch rather than a fallback. Read as a boolean: `1`/`true`/`yes` disable, anything else does not. |
 | `DYN_NVDEC_GPU_ID` | `0` | GPU ordinal used for decode. |
 | `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Frames sampled uniformly from each clip. |
 
