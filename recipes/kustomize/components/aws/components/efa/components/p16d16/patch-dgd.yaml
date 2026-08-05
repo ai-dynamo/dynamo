@@ -3,16 +3,10 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: q32b-1p1d-cloud-provider
+  name: disagg-workers
 spec:
   services:
     PrefillWorker:
-      extraPodSpec:
-        mainContainer:
-          env: &efaEnvironment
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
       resources:
         limits:
           custom:
@@ -21,10 +15,6 @@ spec:
           custom:
             vpc.amazonaws.com/efa: "16"
     DecodeWorker:
-      extraPodSpec:
-        mainContainer:
-          env: *efaEnvironment
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
       resources:
         limits:
           custom:

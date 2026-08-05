@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  services:
+    PrefillWorker:
+      extraPodSpec:
+        mainContainer:
+          env: &efaEnvironment
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+    DecodeWorker:
+      extraPodSpec:
+        mainContainer:
+          env: *efaEnvironment
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64

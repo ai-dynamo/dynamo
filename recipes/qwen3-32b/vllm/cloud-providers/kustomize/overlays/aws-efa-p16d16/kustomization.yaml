@@ -11,4 +11,5 @@ sortOptions:
 resources:
   - "../_rdma"
 components:
-  - "../../components/gke-roce"
+  - "../../../../../../kustomize/components/aws/components/efa/components/p16d16"
+  - "../../components/vllm-efa"

@@ -15,8 +15,9 @@ fabric: RDMA resources, annotations, host mounts, image selection, and runtime
 environment.
 
 Shared provider Components apply to the backend-neutral `PrefillWorker` and
-`DecodeWorker` service keys. Model-specific resource counts, images, mounts,
-and command configuration remain in the local recipe overlays.
+`DecodeWorker` service keys. Model-specific images, mounts, and command
+configuration remain in local Components. The EFA leaf Component includes its
+AWS and libfabric parents and names the per-worker EFA request explicitly.
 
 The vLLM command line reads provider-specific values from environment variables
 so overlays can patch individual values without replacing the shared argument
@@ -35,7 +36,15 @@ apply`.
 | Rendered manifest | Provider fabric | Overlay |
 |-------------------|-----------------|---------|
 | `deploy-aks-ib.yaml` | Azure AKS InfiniBand | `kustomize/overlays/aks-ib/` |
-| `deploy-aws-efa.yaml` | AWS EFA + libfabric | `kustomize/overlays/aws-efa/` |
+| `deploy-aws-efa-p16d16.yaml` | AWS EFA + libfabric, 16 EFA per worker | `kustomize/overlays/aws-efa-p16d16/` |
 | `deploy-gke-roce.yaml` | GKE RoCE | `kustomize/overlays/gke-roce/` |
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
+
+The variants are declared in [`.kustomize-matrix.yaml`](.kustomize-matrix.yaml).
+Regenerate the checked-in overlays and manifests with:
+
+```bash
+scripts/kustomize-matrix.py unfold .kustomize-matrix.yaml
+scripts/kustomize-matrix.py render .kustomize-matrix.yaml
+```

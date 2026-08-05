@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+source: kustomize/overlays/_rdma
+nameTemplate: "${variant}"
+matrix:
+  variant:
+    - name: aks-ib
+      components:
+        - kustomize/components/aks-ib
+    - name: aws-efa-p16d16
+      components:
+        - ../../../kustomize/components/aws/components/efa/components/p16d16
+        - kustomize/components/vllm-efa
+    - name: gke-roce
+      components:
+        - kustomize/components/gke-roce
+    - name: nebius-ib
+      components:
+        - kustomize/components/nebius-ib
+    - name: nscale-ib
+      components:
+        - kustomize/components/nscale-ib
