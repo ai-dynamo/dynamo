@@ -98,6 +98,29 @@ def _engine(classifier=None):
     return engine
 
 
+def test_encoder_queue_delay_is_configured_on_engine():
+    engine = UserEnsembleEngine(
+        model_name="test-model",
+        served_model_name="test-model",
+        engine_args=MagicMock(),
+        encoder_backend_type=MagicMock(),
+        custom_encoder_max_queue_delay_us=1_000,
+    )
+
+    assert engine._custom_encoder_max_queue_delay_us == 1_000
+
+
+def test_encoder_queue_delay_rejects_negative_values():
+    with pytest.raises(ValueError, match="non-negative"):
+        UserEnsembleEngine(
+            model_name="test-model",
+            served_model_name="test-model",
+            engine_args=MagicMock(),
+            encoder_backend_type=MagicMock(),
+            custom_encoder_max_queue_delay_us=-1,
+        )
+
+
 def _context(request_id: str = "request-1") -> MagicMock:
     context = MagicMock()
     context.id.return_value = request_id

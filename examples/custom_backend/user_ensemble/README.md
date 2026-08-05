@@ -37,6 +37,12 @@ From the repository root:
 ./examples/custom_backend/user_ensemble/launch.sh
 ```
 
+For cross-request encoder coalescing, pass the existing Dynamo batcher policy
+through the user worker, for example
+`--custom-encoder-max-queue-delay-us 1000`. The default is zero (dispatch
+immediately); batch cost, item caps, and preprocess concurrency remain encoder
+backend policy.
+
 Then issue a non-streaming request:
 
 ```bash
