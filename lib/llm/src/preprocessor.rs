@@ -2378,8 +2378,22 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Validate prompt token count against model's context length
+        // Stamp ISL on the enclosing `http-request` span as soon as it is known,
+        // before any check that can reject the request. Requests that fail during
+        // preprocessing never reach a worker, so no metrics annotation ever comes
+        // back to carry this — without it their log line and OTel span report no
+        // input size at all, which is what makes context-length rejections
+        // indistinguishable from every other preprocessing failure.
+        //
+        // `ResponseMetricCollector::drop` runs later and leaves the field alone
+        // unless it observed a response, so this value survives on the error path
+        // and is overwritten with the identical count on the success path. The
+        // field is declared by `make_inference_request_span`; when this runs
+        // outside that span (non-HTTP entry points) `record` is a no-op.
         if let Some(count) = token_count {
+            tracing::Span::current().record("input_tokens", count as u32);
+
+            // Validate prompt token count against model's context length
             Self::validate_token_count(count, self.context_length)?;
         }
 
@@ -4364,6 +4378,33 @@ mod tests {
 
         assert!(matches!(mapped.error_type(), ErrorType::InvalidArgument));
         assert_eq!(mapped.message(), "template configuration failed");
+    }
+
+    #[test]
+    fn validate_token_count_rejects_a_prompt_that_fills_the_context() {
+        // The bound is `>=`, not `>`: context_length is the combined input+output
+        // budget, so a prompt that exactly fills it leaves no room to generate.
+        assert!(OpenAIPreprocessor::validate_token_count(65_535, 65_536).is_ok());
+
+        let error = OpenAIPreprocessor::validate_token_count(65_536, 65_536)
+            .expect_err("a prompt filling the whole context must be rejected");
+        let error = error
+            .downcast_ref::<DynamoError>()
+            .expect("context-length rejection should map to a DynamoError");
+
+        // InvalidArgument is what makes this a 400 rather than a 500 at the
+        // HTTP boundary, and the message carries both counts so the rejection
+        // is diagnosable from the response body alone.
+        assert!(matches!(error.error_type(), ErrorType::InvalidArgument));
+        assert!(
+            error.message().contains("65536") && error.message().contains("maximum context length"),
+            "message should report the limit and the offending count: {}",
+            error.message()
+        );
+
+        // context_length == 0 means the model card had no max_position_embeddings,
+        // so there is no budget to check against and validation is skipped.
+        assert!(OpenAIPreprocessor::validate_token_count(1_000_000, 0).is_ok());
     }
 
     fn url_entry(u: &str) -> MultimodalData {
