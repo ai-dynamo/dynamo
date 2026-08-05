@@ -205,9 +205,11 @@ async def test_classifier_failure_cancels_and_aborts_decoder():
     engine._adapter = _FakeAdapter()
     engine._decoder = decoder
 
-    with pytest.raises(Exception, match="classifier failed"):
+    with pytest.raises(Exception) as exc_info:
         await _collect(engine, _request())
 
+    nested_errors = getattr(exc_info.value, "exceptions", ())
+    assert any("classifier failed" in str(error) for error in nested_errors)
     assert decoder.abort_ids == ["request-1"]
 
 
