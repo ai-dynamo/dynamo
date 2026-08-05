@@ -310,6 +310,50 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
 }
 
+func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
+	t.Log("Build an already-admitted DGD with an unresolved GMS client")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: "registry.example/runtime:1.1.0",
+				}}}},
+				Experimental: &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+						Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
+						ExtraClientContainers: []string{"missing-client"},
+					},
+				},
+			}},
+		},
+	}
+	reconciler := createTestDGDReconcilerWithStatus(dgd)
+	program := reconciler.newComponentProgram()
+
+	t.Log("Reconcile the legacy object through the composition-first component program")
+	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "gpuMemoryService.extraClientContainers")
+	require.ErrorContains(t, err, "missing-client")
+
+	t.Log("Verify the program reports a bounded failure before creating any DCD")
+	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
+	assert.Contains(t, ready.Message, "gpuMemoryService.extraClientContainers")
+	assert.Contains(t, ready.Message, "missing-client")
+	dcds := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	require.NoError(t, reconciler.Client.List(context.Background(), dcds, client.InNamespace(dgd.Namespace)))
+	assert.Empty(t, dcds.Items)
+}
+
 func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	t.Log("Inject an unsupported-path metadata failure before shared reconciliation")
 	reconcileErr := errors.New("reconcile failed")
