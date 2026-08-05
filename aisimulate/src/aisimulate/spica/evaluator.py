@@ -14,9 +14,9 @@ a single dynamo replay entrypoint that emits the same flat ``trace_report`` dict
 ``planner_config`` selects the case on either entrypoint: ``None`` -> a static
 fixed-fleet replay (the mocker's event-driven ``run()`` loop, no scaling); a dict ->
 planner-in-the-loop, where the Rust bridge owns the same loop and calls back into the
-Python planner adapter once per ``PlannerTick``. Static returns the bare ``trace_report``
-dict; planner-in-the-loop returns a ``ReplayPlannerReport`` whose ``.trace_report`` is the
-identical flat dict (:func:`_unwrap` normalizes both). By construction
+Python planner adapter once per ``PlannerTick``. Offline replay returns a unified
+``ReplayReport`` for both cases; :func:`_unwrap` preserves Spica's flat scoring
+metrics and carries the planner tick count when planner details are present. By construction
 ``plan.is_static == (plan.planner_config is None)``.
 
 The closed-loop in-flight cap is ``replay_concurrency`` for a trace and ``concurrency``
@@ -51,16 +51,10 @@ def _build_kv_router_config(payload: dict | None):
 
 
 def _unwrap(report) -> dict[str, float]:
-    """Normalize a replay result to the flat ``trace_report`` dict: a static replay
-    returns that dict directly; planner-in-the-loop returns a ``ReplayPlannerReport``
-    whose ``.trace_report`` carries the identical shape. Preserve the planner tick
-    count so callers and e2e coverage can distinguish bridge initialization from an
-    actual planner callback."""
-    if not hasattr(report, "trace_report"):
-        return report
-    trace_report = dict(report.trace_report)
-    if hasattr(report, "total_ticks"):
-        trace_report["planner_total_ticks"] = float(report.total_ticks)
+    """Normalize ``ReplayReport`` at Spica's flat scoring boundary."""
+    trace_report = dict(report.summary)
+    if report.planner is not None:
+        trace_report["planner_total_ticks"] = float(report.planner.total_ticks)
     return trace_report
 
 
@@ -169,6 +163,8 @@ class ReplayEvaluator:
             replay_concurrency=wl.effective_in_flight_cap(),  # None -> arrival timestamps
             planner_config=None if plan.is_static else plan.planner_config,
             benchmark_granularity=self.benchmark_granularity,
+            capture_per_request=False,
+            capture_planner_details=False,
             **self._goodput_sla_kwargs(),
         )
         if plan.deployment_mode == "agg":
@@ -209,6 +205,8 @@ class ReplayEvaluator:
             ),
             planner_config=None if plan.is_static else plan.planner_config,
             benchmark_granularity=self.benchmark_granularity,
+            capture_per_request=False,
+            capture_planner_details=False,
             **self._goodput_sla_kwargs(),
             **self._synthetic_kwargs(concurrency_override),
         )

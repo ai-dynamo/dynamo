@@ -35,7 +35,10 @@ use crate::{
         KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
+    local_model::runtime_config::{
+        DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        topology_taint,
+    },
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::ModelDeploymentCard,
     types::{
@@ -600,6 +603,15 @@ impl ModelManager {
             .collect()
     }
 
+    /// List Generate models with an engine that advertises `capability`.
+    pub fn list_generate_models_for_capability(&self, capability: &str) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_generate_engine_for_capability(capability))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -696,6 +708,17 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine()
+    }
+    /// Get a Generate engine for `model` from a worker advertising `capability`.
+    pub fn get_generate_engine_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability(capability)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -945,11 +968,12 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_generate_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
+        let mut card = Self::aggregated_local_card();
+        card.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            serde_json::Value::Bool(true),
         );
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.generate_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())

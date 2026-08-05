@@ -13,7 +13,7 @@ use crate::services::common::replica_sync::{
 };
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig};
+use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerSelectorFactory};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -29,6 +29,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
+    worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
 }
 
 impl SelectionServiceBuilder {
@@ -40,6 +41,7 @@ impl SelectionServiceBuilder {
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
+            worker_selector_factory: None,
         }
     }
 
@@ -61,6 +63,15 @@ impl SelectionServiceBuilder {
 
     pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
         self.selection_cache = config;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn worker_selector_factory(
+        mut self,
+        factory: SelectionWorkerSelectorFactory,
+    ) -> Self {
+        self.worker_selector_factory = Some(factory);
         self
     }
 
@@ -89,6 +100,7 @@ impl SelectionServiceBuilder {
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
+            self.worker_selector_factory,
             self.selection_cache,
             tracking_hash,
         ));
