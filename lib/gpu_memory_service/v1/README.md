@@ -21,9 +21,13 @@ Dynamo Snapshot captures only after whole-engine GMS sleep. Restore preserves:
 - CUDA virtual-address reservations.
 
 Model construction, model loading, and non-Parameter storage copy-out do not
-run again after restore. The rank-local GMS sidecar survives separately and
-retains committed weight allocations. Default-allocator copies are ordinary
-process-owned Snapshot state.
+run again after restore. Default-allocator copies are ordinary process-owned
+Snapshot state.
+
+Committed weight allocations can be saved as raw shards before Snapshot
+capture and loaded under the same allocation IDs in a fresh rank-local V1
+server. The restored process then imports those allocations at its preserved
+virtual addresses.
 
 KV TensorImpls, mapping records, allocation IDs, sizes, and VA reservations also
 survive. KV physical backing and contents do not. Wake creates fresh backing
@@ -83,11 +87,34 @@ new readers. A same-socket commit changes RW to RO atomically. Disconnecting an
 uncommitted writer clears its complete allocation epoch before another writer
 is admitted. Reader disconnect only releases that reader.
 
-The server retains CUDA handles rather than persistent export FDs. Each export
+The server retains allocation IDs, aligned sizes, and CUDA handles rather than
+persistent export FDs. Each export
 creates a transient FD, transfers it with `SCM_RIGHTS`, and closes the server
 copy. Client import consumes and closes the received copy. The wire protocol is
 a small typed `msgspec.Struct` MessagePack protocol; there is no JSON
 compatibility path.
+
+## Cold weight storage
+
+The checkpoint saver with `--use-v1` connects RO to the rank-local `weights`
+socket, enumerates the committed allocation IDs and aligned sizes, temporarily
+imports them, and writes raw shard bytes through
+`snapshot.disk.write_device_shards`. Its manifest contains only a version and,
+for each allocation, its exact ID, aligned size, shard path, and shard offset.
+
+Without `--sharded-ssd-roots`, shard paths remain relative to the device
+artifact directory. With sharded roots, files are distributed across the
+per-device roots using the existing V0 directory convention and the manifest
+records their absolute paths.
+
+On restore, the checkpoint loader with `--use-v1` connects RW to a fresh
+`weights` socket, recreates the exact IDs and sizes, and builds generic
+`FileTransferSource` and `GMSTransferTarget` records. Backend selection goes
+through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
+`sharded-ssd` use the same implementations and configuration as V0. The loader
+synchronizes, releases its temporary mappings, commits the same socket RW to
+RO, closes its lease, and exits. The server retains the committed backing while
+the restored worker acquires a new RO lease and remaps its preserved VAs.
 
 ## Weight construction
 
@@ -123,28 +150,33 @@ sequenceDiagram
     participant W as vLLM worker
     participant WM as weights manager
     participant KM as KV manager
-    participant WS as weights server
+    participant L as V1 weight loader
+    participant WS as fresh weights server
     participant KS as KV server
 
     W->>WM: unmap_all_vas, disconnect RO
-    Note over WS: committed weight backing remains
     W->>KM: unmap_all_vas, disconnect RW
     Note over KS: clear KV epoch
     Note over W: Dynamo Snapshot captures sleeping engine
 
+    L->>WS: connect RW, allocate saved IDs
+    L->>WS: load with configured backend
+    L->>WS: commit RW to RO and exit
     W->>KM: connect RW
     W->>KM: reallocate_all_handles, remap_all_vas
     Note over KS: fresh KV backing at preserved VAs
-    W->>WM: connect RO against saved server identity/GPU
-    W->>WM: remap_all_vas
+    W->>WM: connect RO to configured socket
+    W->>WM: verify GPU and remap exact IDs
 ```
 
 Suspend order is weights then KV so the exclusive KV lease remains held until
 local weight memory is asleep. Resume order is KV then weights.
 
-Server nonce and physical GPU identity are saved on first connection. Every
-wake must match them. V1 does not reconstruct models, retain KV contents, scan
-raw mappings, validate model-specific layouts, or implement SGLang integration.
+Every connection verifies the physical GPU identity. The container-local device
+ordinal selects both the rank-local socket and the `device-<ordinal>` artifact
+directory; a predecessor server identity is not persisted. V1 does not
+reconstruct models, retain KV contents, scan raw mappings, validate
+model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
@@ -160,6 +192,22 @@ start one rank-local child directly:
 ```text
 gpu-memory-service --use-v1 --device 0
 ```
+
+Save or load that rank's weight artifact under
+`<checkpoint-dir>/device-0`:
+
+```text
+python -m gpu_memory_service.cli.snapshot.saver --use-v1 \
+  --checkpoint-dir /checkpoints/run/versions/1 --device 0
+python -m gpu_memory_service.cli.snapshot.loader --use-v1 \
+  --checkpoint-dir /checkpoints/run/versions/1 --device 0 \
+  --transfer-backend nixl-gds
+```
+
+The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
+and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
+Start one server and loader per rank/device with the restored worker's
+`GMS_SOCKET_DIR`. Only the `weights` socket is used by artifact transfer.
 
 Select the worker while retaining vLLM's normal load format:
 

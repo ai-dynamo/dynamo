@@ -42,7 +42,12 @@ class _GMSClientSession:
         lock_type: RequestedLockType,
         expected_identity: tuple[str, str] | None = None,
         connect_timeout: float | None = 30.0,
+        admission_timeout: float | None = None,
     ):
+        if connect_timeout is not None and connect_timeout <= 0:
+            raise ValueError("connect_timeout must be positive")
+        if admission_timeout is not None and admission_timeout <= 0:
+            raise ValueError("admission_timeout must be positive")
         self._lock = threading.RLock()
         self._socket: socket.socket | None = None
         deadline = (
@@ -71,7 +76,16 @@ class _GMSClientSession:
                         else min(_STARTUP_CONNECT_RETRY_INTERVAL, remaining)
                     )
             send_message(self._socket, HandshakeRequest(lock_type, expected_identity))
-            response, received_fd = receive_message(self._socket)
+            if admission_timeout is not None:
+                self._socket.settimeout(admission_timeout)
+            try:
+                response, received_fd = receive_message(self._socket)
+            except TimeoutError as cause:
+                raise ConnectionError(
+                    "Timed out waiting for GMS lock admission"
+                ) from cause
+            finally:
+                self._socket.settimeout(None)
             handshake = self._decode(
                 "handshake",
                 response,
@@ -170,9 +184,9 @@ class _GMSClientSession:
             if isinstance(response, ErrorResponse):
                 if response.out_of_memory:
                     raise MemoryError(response.message)
-                raise RuntimeError(response.message)
+                raise RuntimeError(response.message)  # noqa: TRY004
             if not isinstance(response, response_type):
-                raise RuntimeError(
+                raise RuntimeError(  # noqa: TRY004
                     f"GMS {operation} returned {type(response).__name__}, "
                     f"expected {response_type.__name__}"
                 )
