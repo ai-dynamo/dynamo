@@ -205,29 +205,6 @@ fn cache_hit_for_worker(
     }
 }
 
-fn target_cached_prefix_blocks(
-    overlap: &dynamo_kv_router::scheduling::OverlapSignals,
-    target: WorkerWithDpRank,
-) -> u32 {
-    let device = overlap
-        .tier_overlap_blocks
-        .device
-        .get(&target)
-        .copied()
-        .unwrap_or(0);
-    let lower_tier = overlap
-        .tier_overlap_blocks
-        .host_pinned
-        .get(&target)
-        .copied()
-        .unwrap_or(0);
-    usize_to_u32_saturating(device.saturating_add(lower_tier))
-}
-
-fn usize_to_u32_saturating(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
-
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -941,12 +918,14 @@ where
         });
         let seq_hash_elapsed = start.elapsed();
 
+        let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
         let has_router_hint_capable_workers = self.has_router_hint_capable_workers();
+        let should_prepare_router_hint = is_admitted_routing && has_router_hint_capable_workers;
         let retain_router_hint_chain =
-            has_router_hint_capable_workers && self.indexer.supports_router_hint_chain_retention();
-        if has_router_hint_capable_workers && !retain_router_hint_chain {
+            should_prepare_router_hint && self.indexer.supports_router_hint_chain_retention();
+        if should_prepare_router_hint && !retain_router_hint_chain {
             tracing::warn!(
                 "router_hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without router hints"
             );
@@ -1056,17 +1035,18 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&response.overlap, response.best_worker);
-        let router_hint = self.router_hint_for_selection(
-            response.best_worker,
-            target_cached_prefix_blocks,
-            response.router_hint_candidates.as_ref(),
-        );
+        let router_hint = if is_admitted_routing {
+            self.router_hint_for_selection(
+                response.best_worker,
+                response.target_cached_prefix_blocks,
+                response.router_hint_candidates.as_ref(),
+            )
+        } else {
+            None
+        };
 
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
-        let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
 
         // Keep existing routing metrics scoped to requests admitted into the scheduler by this call.
         if is_admitted_routing && let Some(m) = metrics::RoutingOverheadMetrics::get() {

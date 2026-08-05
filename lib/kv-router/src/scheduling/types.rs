@@ -107,7 +107,7 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    pub overlap: OverlapSignals,
+    pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
 }
