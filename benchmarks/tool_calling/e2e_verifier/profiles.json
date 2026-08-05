@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "contract_version": 1,
+  "default_profile": "qualification",
+  "profiles": {
+    "manual": {"extends": "qualification"},
+    "pr": {"extends": "qualification"},
+    "nightly": {"extends": "qualification"},
+    "qualification": {
+      "custom": {
+        "target_minutes": 7,
+        "timeout_seconds": 420,
+        "request_timeout_seconds": 90,
+        "case_profile": "auto",
+        "modes": ["nonstream", "stream"],
+        "iterations": 1,
+        "concurrency": 8,
+        "temperature": 0,
+        "max_tokens": 4096
+      },
+      "bfcl": {
+        "target_minutes": 10,
+        "timeout_seconds": 600,
+        "parallelism": 10,
+        "image": "nvcr.io/nvidia/eval-factory/bfcl:26.03@sha256:fc6b5f22698b75b759dc29715663d3006b7180847330e06b15ee080346462c03",
+        "native_calling": true,
+        "categories": {
+          "simple_python": 30,
+          "multiple": 20,
+          "parallel": 20,
+          "parallel_multiple": 20,
+          "irrelevance": 20,
+          "live_simple": 20,
+          "live_multiple": 10,
+          "live_parallel": 10,
+          "live_parallel_multiple": 10,
+          "multi_turn_base": 10,
+          "multi_turn_miss_func": 10,
+          "multi_turn_miss_param": 10,
+          "multi_turn_long_context": 10
+        }
+      },
+      "tau2": {
+        "target_minutes": 12,
+        "timeout_seconds": 720,
+        "max_concurrency": 3,
+        "seed": 300,
+        "trials": 1,
+        "image": "nvcr.io/nvidia/eval-factory/tau2-bench:26.03@sha256:07b2fdf895a4b83e34630b1e2221339bec1b63282746cb1f3a1571f4a713ff9b",
+        "tasks": {
+          "airline": ["0", "7", "10"],
+          "retail": ["0", "20", "45"],
+          "telecom": [
+            "[mobile_data_issue]user_abroad_roaming_enabled_off[PERSONA:None]",
+            "[mobile_data_issue]data_saver_mode_on[PERSONA:Easy]",
+            "[mobile_data_issue]bad_network_preference[PERSONA:Hard]"
+          ]
+        }
+      }
+    }
+  }
+}
