@@ -150,6 +150,53 @@ _JUNIT_DIR = os.path.join(tempfile.gettempdir(), "gpu_parallel_junit")
 _JUNIT_COMBINED = os.path.join(_JUNIT_DIR, "combined.xml")
 
 
+def _junit_path(test_name: str) -> str:
+    """Where a child is told to write its --junitxml, keyed on the node id."""
+    safe_name = test_name.replace("/", "_").replace("::", "__")
+    return os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+
+
+def _write_watchdog_junit(test: _TestEntry, duration: float, reason: str) -> None:
+    """Write the JUnit entry a watchdog-killed child never got to write.
+
+    SIGKILL means pytest never reaches its own --junitxml write, so without this
+    the test is absent from the aggregated report entirely -- a silent hole in
+    Datadog test visibility and CI test reports rather than a visible failure.
+    """
+    import xml.etree.ElementTree as ET
+
+    classname, _, name = test.name.rpartition("::")
+    suite = ET.Element(
+        "testsuite",
+        {
+            "name": "gpu-parallel-watchdog",
+            "tests": "1",
+            "errors": "0",
+            "failures": "1",
+            "time": f"{duration:.3f}",
+        },
+    )
+    case = ET.SubElement(
+        suite,
+        "testcase",
+        {
+            "classname": classname or test.name,
+            "name": name or test.name,
+            "time": f"{duration:.3f}",
+        },
+    )
+    ET.SubElement(
+        case, "failure", {"message": reason, "type": "WatchdogTimeout"}
+    ).text = reason
+    try:
+        os.makedirs(_JUNIT_DIR, exist_ok=True)
+        ET.ElementTree(suite).write(
+            _junit_path(test.name), encoding="unicode", xml_declaration=True
+        )
+    except OSError as exc:
+        _print(f"[watchdog] could not write a JUnit entry for {test.name}: {exc}")
+
+
 def _parse_junit_skipped(junit_path: str) -> str | None:
     """Check JUnit XML for a skipped test. Returns skip reason or None."""
     import xml.etree.ElementTree as ET
@@ -742,7 +789,7 @@ def run_parallel(
         parent_cov_file = env.get("COVERAGE_FILE")
         if parent_cov_file:
             env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}"
-        junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+        junit_path = _junit_path(test.name)
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
         )
@@ -883,8 +930,7 @@ def run_parallel(
                 skipped = False
                 skip_reason: str | None = None
                 if passed:
-                    safe_name = test.name.replace("/", "_").replace("::", "__")
-                    junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+                    junit_path = _junit_path(test.name)
                     skip_reason = _parse_junit_skipped(junit_path)
                     if skip_reason is not None:
                         passed = False
@@ -907,6 +953,7 @@ def run_parallel(
                     # only whatever happened to flush.
                     if run_info.watchdog_reason is not None:
                         fail_reason = run_info.watchdog_reason
+                        _write_watchdog_junit(test, duration, fail_reason)
 
                 if skipped:
                     status = "SKIPPED"
