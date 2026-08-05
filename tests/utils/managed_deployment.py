@@ -37,19 +37,12 @@ def _get_workspace_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# --- Resilience for K8s API calls through the vCluster port-forward ----------
-#
-# Deploy tests reach the (v)cluster API over a local ``kubectl port-forward`` at
-# 127.0.0.1:8443. A watchdog restarts that forward when it drops, but the
-# restart takes a few seconds; a K8s API call that lands in that window fails
-# with a connection error. For post-Ready calls (e.g. get_pods()) that error
-# propagates and fails the whole test even though the deployment is healthy.
-# Retry connection-level errors so a transient tunnel blip does not fail the test.
+# The vCluster port-forward (127.0.0.1:8443) can briefly drop mid-test; its
+# watchdog takes a few seconds to restart it. Retry K8s API calls so that window
+# doesn't fail a post-Ready call on a healthy deployment.
 def _api_connection_errors() -> tuple[type[BaseException], ...]:
-    # ConnectionError/ConnectionRefusedError/TimeoutError and
-    # aiohttp.ClientConnectorError (kubernetes_asyncio) are all OSError subclasses;
-    # httpx.TransportError (kr8s) is not, so add it explicitly. Built defensively
-    # so a missing optional client library never breaks import.
+    # aiohttp.ClientConnectorError (kubernetes_asyncio) and the builtin connection
+    # errors are OSError subclasses; httpx.TransportError (kr8s) is not.
     errs: list[type[BaseException]] = [OSError]
     try:
         import httpx
@@ -71,11 +64,7 @@ def _retry_api_call(
     attempts: int = 5,
     delay: float = 2.0,
 ):
-    """Call ``fn`` and retry only on a vCluster port-forward connection blip.
-
-    Any non-connection exception propagates immediately so real failures are not
-    masked. Re-raises the last connection error if all attempts are exhausted.
-    """
+    """Retry ``fn`` on a port-forward connection blip; other errors propagate."""
     last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -1449,9 +1438,8 @@ class ManagedDeployment:
 
             pods: list[Pod] = []
 
-            # Materialize inside the retry so a dropped 127.0.0.1:8443 tunnel
-            # surfaces as a retryable connection error here rather than partway
-            # through the caller's iteration.
+            # Materialize inside the retry so a tunnel drop is retried here, not
+            # partway through the caller's iteration.
             fetched = _retry_api_call(
                 lambda ls=label_selector: list(
                     kr8s.get("pods", namespace=self.namespace, label_selector=ls)
@@ -1607,10 +1595,8 @@ class ManagedDeployment:
         the async cleanup may fail, which is expected and can be safely ignored.
         """
         try:
-            # Create port forward - this runs in a background thread
-            # Use 127.0.0.1 (localhost) instead of 0.0.0.0 to prevent port conflicts.
-            # Opening the forward talks to the K8s API over 127.0.0.1:8443, so retry
-            # if that tunnel is momentarily down rather than giving up (returning None).
+            # Runs in a background thread; 127.0.0.1 avoids port conflicts.
+            # Opening it talks to the K8s API, so retry if the tunnel is briefly down.
             def _open_port_forward():
                 pf = pod.portforward(
                     remote_port=remote_port,
