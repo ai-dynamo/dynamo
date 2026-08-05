@@ -160,7 +160,7 @@ test("keeps normal http/https/mailto/relative hrefs", () => {
     '<a href="/relative">r</a>' +
     '<a href="mailto:x@y.z">m</a>';
   const out = sanitizeHtml(html);
-  assert.ok(out.includes("https://github.com/x"));
+  assert.ok(out.includes('href="https://github.com/x"'));
   assert.ok(out.includes('href="/relative"'));
   assert.ok(out.includes("mailto:x@y.z"));
 });
