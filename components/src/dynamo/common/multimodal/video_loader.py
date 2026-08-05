@@ -21,9 +21,8 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import fetch_bytes
 from dynamo.common.http.url_validator import (
-    UrlValidationError,
     UrlValidationPolicy,
     validate_media_url,
 )
