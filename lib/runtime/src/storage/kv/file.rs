@@ -36,6 +36,8 @@ const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Files with this prefix are ignored by the watcher.
 const TEMP_FILE_PREFIX: &str = ".tmp_";
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 16;
+const MUTATION_LOCK_ATTEMPTS: usize = 100;
+const MUTATION_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Treat as a singleton
 #[derive(Clone)]
@@ -215,6 +217,21 @@ impl DirectoryMutationLock {
         }
         Ok(Self(file))
     }
+
+    fn try_acquire(path: &Path) -> Result<Option<Self>, StoreError> {
+        let file = File::open(path).map_err(to_fs_err)?;
+        // SAFETY: `file` owns a valid descriptor for the lifetime of this guard.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(Some(Self(file)));
+        }
+
+        let error = std::io::Error::last_os_error();
+        if error.kind() == ErrorKind::WouldBlock {
+            return Ok(None);
+        }
+        Err(to_fs_err(error))
+    }
 }
 
 impl Drop for DirectoryMutationLock {
@@ -272,7 +289,9 @@ impl Directory {
     /// Returns an error if we cannot open the directory. Errors inside the directory are logged
     /// but non-fatal.
     fn delete_expired_files(&self) -> anyhow::Result<()> {
-        let _mutation_lock = self.lock_mutations().map_err(anyhow::Error::from)?;
+        let _mutation_lock = self
+            .lock_mutations_blocking()
+            .map_err(anyhow::Error::from)?;
         let deadline = SystemTime::now() - self.ttl;
         let dirname = self.p.display().to_string();
         for entry in fs::read_dir(&self.p).with_context(|| dirname.clone())? {
@@ -315,7 +334,9 @@ impl Directory {
     }
 
     fn delete_owned_files(&mut self) -> anyhow::Result<()> {
-        let _mutation_lock = self.lock_mutations().map_err(anyhow::Error::from)?;
+        let _mutation_lock = self
+            .lock_mutations_blocking()
+            .map_err(anyhow::Error::from)?;
         let mut errs = Vec::new();
         for p in self.owned_files.lock().drain() {
             if let Err(err) = fs::remove_file(&p) {
@@ -328,8 +349,24 @@ impl Directory {
         Ok(())
     }
 
-    fn lock_mutations(&self) -> Result<DirectoryMutationLock, StoreError> {
+    fn lock_mutations_blocking(&self) -> Result<DirectoryMutationLock, StoreError> {
         DirectoryMutationLock::acquire(&self.p)
+    }
+
+    async fn lock_mutations(&self) -> Result<DirectoryMutationLock, StoreError> {
+        for attempt in 0..MUTATION_LOCK_ATTEMPTS {
+            if let Some(lock) = DirectoryMutationLock::try_acquire(&self.p)? {
+                return Ok(lock);
+            }
+            if attempt + 1 < MUTATION_LOCK_ATTEMPTS {
+                tokio::time::sleep(MUTATION_LOCK_RETRY_DELAY).await;
+            }
+        }
+
+        Err(StoreError::FilesystemError(format!(
+            "timed out acquiring FileStore mutation lock for {} after {MUTATION_LOCK_ATTEMPTS} attempts",
+            self.p.display()
+        )))
     }
 
     fn write_temp_file(&self, value: &[u8]) -> Result<PathBuf, StoreError> {
@@ -371,7 +408,7 @@ impl Bucket for Directory {
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
 
-        let _mutation_lock = self.lock_mutations()?;
+        let _mutation_lock = self.lock_mutations().await?;
         let temp_path = self.write_temp_file(&value)?;
 
         if revision == 0 {
@@ -429,7 +466,7 @@ impl Bucket for Directory {
     ) -> Result<StoreOutcome, StoreError> {
         let full_path = self.p.join(key.url_safe().as_ref());
         let str_path = full_path.display().to_string();
-        let _mutation_lock = self.lock_mutations()?;
+        let _mutation_lock = self.lock_mutations().await?;
         let temp_path = self.write_temp_file(&value)?;
 
         let current = match fs::read(&full_path) {
@@ -489,7 +526,7 @@ impl Bucket for Directory {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
-        let _mutation_lock = self.lock_mutations()?;
+        let _mutation_lock = self.lock_mutations().await?;
         if !full_path.exists() {
             return Err(StoreError::MissingKey(str_path));
         }
@@ -520,12 +557,20 @@ impl Bucket for Directory {
             .watch(&self.p, RecursiveMode::NonRecursive)
             .map_err(to_fs_err)?;
 
+        // Establish the filesystem watcher before reading the snapshot. Mutations that race
+        // with the snapshot are buffered by notify; event values are read when consumed, so
+        // replaying a buffered notification cannot regress an emitted snapshot value.
+        let initial_entries = self.entries().await?;
         let dir = self.p.clone();
         let root = self.root.clone();
 
         Ok(Box::pin(async_stream::stream! {
             // Keep watcher alive for the duration of the stream
             let _watcher = watcher;
+
+            for (key, value) in initial_entries {
+                yield WatchEvent::Put(KeyValue::new(key, value));
+            }
 
             while let Some(event_result) = rx.recv().await {
                 let event = match event_result {
@@ -595,6 +640,7 @@ impl Bucket for Directory {
     }
 
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        let _mutation_lock = self.lock_mutations().await?;
         let contents = fs::read_dir(&self.p)
             .with_context(|| self.p.display().to_string())
             .map_err(a_to_fs_err)?;
@@ -715,6 +761,30 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreError, StoreOutcome};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn contended_mutation_lock_does_not_block_runtime_worker() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), temp_dir.path());
+        let bucket = store.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let held_lock = bucket.lock_mutations_blocking().unwrap();
+
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held_lock);
+        });
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = bucket.lock_mutations() => {
+                panic!("contended mutation lock blocked the current-thread runtime");
+            }
+        }
+
+        release_thread.join().unwrap();
+        cancel_token.cancel();
+    }
 
     #[tokio::test]
     async fn delete_wins_race_with_compare_and_replace() {

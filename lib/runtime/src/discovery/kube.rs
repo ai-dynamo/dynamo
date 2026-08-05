@@ -23,6 +23,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -35,6 +36,30 @@ fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn update_model_taints_and_persist<F, Fut>(
+    metadata: &Arc<RwLock<DiscoveryMetadata>>,
+    id: ModelCardInstanceId,
+    taints: HashSet<String>,
+    persist: F,
+) -> Result<bool>
+where
+    F: FnOnce(DiscoveryMetadata) -> Fut,
+    Fut: Future<Output = Result<DiscoveryMetadata>>,
+{
+    // Serialize metadata mutations through persistence, but leave the shared state untouched
+    // until persistence succeeds. Dropping this future at any await point therefore cannot
+    // leave local metadata ahead of the authoritative Kubernetes object.
+    let mut metadata = metadata.write().await;
+    let mut candidate = metadata.clone();
+    if !candidate.update_model_taints(&id, taints)? {
+        return Ok(false);
+    }
+
+    let persisted = persist(candidate).await?;
+    *metadata = persisted;
+    Ok(true)
 }
 
 /// Kubernetes-based discovery client
@@ -226,24 +251,24 @@ impl Discovery for KubeDiscoveryClient {
         id: ModelCardInstanceId,
         taints: HashSet<String>,
     ) -> Result<()> {
-        // Hold the local metadata lock through server-side apply so concurrent
-        // registrations and removals cannot race the authoritative read or write.
-        let mut metadata = self.metadata.write().await;
-        let original_state = metadata.clone();
-        if !metadata.update_model_taints(&id, taints)? {
-            return Ok(());
-        }
-
+        let kube_client = self.kube_client.clone();
+        let pod_namespace = self.pod_info.pod_namespace.clone();
         let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &metadata,
-        )?;
-        if let Err(error) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            *metadata = original_state;
-            return Err(error);
+        let pod_name = self.pod_info.pod_name.clone();
+        let pod_uid = self.pod_info.pod_uid.clone();
+        let changed = update_model_taints_and_persist(
+            &self.metadata,
+            id,
+            taints,
+            move |candidate| async move {
+                let cr = build_cr(&cr_name, &pod_name, &pod_uid, &candidate)?;
+                apply_cr(&kube_client, &pod_namespace, &cr).await?;
+                Ok(candidate)
+            },
+        )
+        .await?;
+        if !changed {
+            return Ok(());
         }
 
         tracing::debug!("Persisted model taint update to DynamoWorkerMetadata CR");
@@ -484,10 +509,24 @@ impl Discovery for KubeDiscoveryClient {
                         }
 
                         for event in events {
+                            let (event_kind, instance_id) = match &event {
+                                DiscoveryEvent::Added(instance) => ("added", instance.id()),
+                                DiscoveryEvent::ModelTaintsUpdated(update) => (
+                                    "model_taints_updated",
+                                    DiscoveryInstanceId::Model(update.id.clone()),
+                                ),
+                                DiscoveryEvent::Removed(id) => ("removed", id.clone()),
+                            };
                             tracing::info!(
                                 stream_id = %stream_id,
-                                ?event,
+                                event_kind,
+                                ?instance_id,
                                 "Emitting discovery event"
+                            );
+                            tracing::debug!(
+                                stream_id = %stream_id,
+                                ?event,
+                                "Discovery event detail"
                             );
                             if event_tx.send(Ok(event)).is_err() {
                                 tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
@@ -531,6 +570,19 @@ mod tests {
             device_type: None,
             request_plane_codec: None,
         })
+    }
+
+    fn model_with_taint(taint: &str) -> DiscoveryInstance {
+        DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            card_json: serde_json::json!({
+                "runtime_config": {"taints": [taint]}
+            }),
+            model_suffix: None,
+        }
     }
 
     #[test]
@@ -593,18 +645,8 @@ mod tests {
     }
     #[test]
     fn changed_model_taints_emit_scoped_event() {
-        let model = |taint: &str| DiscoveryInstance::Model {
-            namespace: "ns".to_string(),
-            component: "worker".to_string(),
-            endpoint: "generate".to_string(),
-            instance_id: 7,
-            card_json: serde_json::json!({
-                "runtime_config": {"taints": [taint]}
-            }),
-            model_suffix: None,
-        };
-        let old = model("old");
-        let updated = model("updated");
+        let old = model_with_taint("old");
+        let updated = model_with_taint("updated");
         let known = HashMap::from([(old.id(), old)]);
         let current = HashMap::from([(updated.id(), updated.clone())]);
 
@@ -621,5 +663,44 @@ mod tests {
             })]
         );
         assert_eq!(reconciled.get(&updated.id()), Some(&updated));
+    }
+
+    #[tokio::test]
+    async fn cancelled_model_taint_persistence_does_not_commit_local_state() {
+        let model = model_with_taint("old");
+        let DiscoveryInstanceId::Model(id) = model.id() else {
+            unreachable!()
+        };
+        let mut initial = DiscoveryMetadata::new();
+        initial.register_model_card(model).unwrap();
+        let metadata = Arc::new(RwLock::new(initial));
+        let task_metadata = metadata.clone();
+        let (persist_started_tx, persist_started_rx) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            update_model_taints_and_persist(
+                &task_metadata,
+                id,
+                HashSet::from(["new".to_string()]),
+                move |_| async move {
+                    persist_started_tx.send(()).unwrap();
+                    std::future::pending::<Result<DiscoveryMetadata>>().await
+                },
+            )
+            .await
+        });
+
+        persist_started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let stored = metadata.read().await.get_all_model_cards().pop().unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["old"])
+        );
     }
 }
