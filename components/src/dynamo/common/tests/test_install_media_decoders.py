@@ -444,14 +444,37 @@ def test_cli_pip_args_reach_pip(sandboxed):
 _COMPONENTS_ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_no_production_code_invokes_the_installer():
+def test_no_entrypoint_references_the_installer():
     """The installer is operator-run only.
 
     Reviewers rejected implicit installation at worker startup (env-var gated
     hooks in entrypoints): an install that changes the container's codec
-    surface has to be a visible, deliberate step. This sweep keeps any
-    `__main__.py` from calling the installer and the retired env switch from
-    coming back anywhere under components/src.
+    surface has to be a visible, deliberate step. Entrypoints are where
+    startup happens, so no `__main__.py` may reference the installer at all.
+
+    Other production code MAY import its constants -- the actionable
+    unsupported-codec errors single-source their version bounds from
+    VALIDATED_SPECS -- so this sweep is scoped to entrypoints, and the two
+    sweeps below cover the rest: nothing may CALL the installer, and the
+    retired env switch must not come back anywhere.
+    """
+    offenders: list[str] = []
+    for path in sorted(_COMPONENTS_ROOT.rglob("__main__.py")):
+        text = path.read_text(encoding="utf-8")
+        if "install_media_decoders" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
+            offenders.append(str(path.relative_to(_COMPONENTS_ROOT)))
+    assert not offenders, (
+        f"{offenders} reference the media-decoder installer from an entrypoint; "
+        "it must stay an explicit operator command, never wired into startup"
+    )
+
+
+def test_no_production_code_calls_the_installer():
+    """Importing constants is fine; invoking the install is not.
+
+    `install_media_decoders(` (the call) and the retired
+    DYN_ENABLE_MEDIA_DECODERS switch must appear nowhere outside the
+    installer module and its test.
     """
     allowed = {
         Path("dynamo/common/utils/install_media_decoders.py"),  # the installer itself
@@ -463,11 +486,11 @@ def test_no_production_code_invokes_the_installer():
         if rel in allowed:
             continue
         text = path.read_text(encoding="utf-8")
-        if "install_media_decoders" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
+        if "install_media_decoders(" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
             offenders.append(str(rel))
     assert not offenders, (
-        f"{offenders} reference the media-decoder installer; it must stay an "
-        "explicit operator command, never wired into worker startup"
+        f"{offenders} invoke the media-decoder installer (or resurrect its env "
+        "switch); only an operator may run it"
     )
 
 
