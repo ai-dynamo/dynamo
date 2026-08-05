@@ -42,10 +42,112 @@ class PreprocessResult:
     chat_template_kwargs: dict[str, Any]
     engine_prompt: dict[str, Any]
     prompt_token_ids: list[int]
+    guided_decoding: dict[str, Any] | None = None
 
 
 _ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _is_named_tool_choice(tool_choice: Any) -> bool:
+    return tool_choice is not None and not isinstance(tool_choice, str)
+
+
+def _tool_is_strict(tool: Any) -> bool:
+    return tool.function.strict is True
+
+
+def _should_build_tool_call_guidance(
+    request: ChatCompletionRequest,
+    *,
+    structural_tag_mode: str,
+    structural_tag_scope: str,
+) -> bool:
+    tool_choice = request.tool_choice or "auto"
+    if structural_tag_mode != "on" or not request.tools:
+        return False
+
+    if tool_choice == "none":
+        return False
+    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        return True
+    if tool_choice != "auto":
+        return False
+    if structural_tag_scope == "always":
+        return True
+    return request.parallel_tool_calls is False or any(
+        _tool_is_strict(tool) for tool in request.tools
+    )
+
+
+def _request_for_vllm_structural_tag(
+    request: ChatCompletionRequest,
+    *,
+    structural_tag_schema: str,
+) -> ChatCompletionRequest:
+    strict_schema = structural_tag_schema == "strict"
+    tools = [
+        tool.model_copy(
+            update={
+                "function": tool.function.model_copy(
+                    update={
+                        "strict": strict_schema or tool.function.strict is True,
+                    }
+                )
+            }
+        )
+        for tool in request.tools or []
+    ]
+    return request.model_copy(update={"tools": tools})
+
+
+def build_tool_call_guided_decoding(
+    request: ChatCompletionRequest,
+    tool_parser: ToolParser | None,
+    *,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
+    starts_in_reasoning: bool = False,
+) -> dict[str, Any] | None:
+    """Build tool-call guidance through vLLM's configured tool parser."""
+    if not _should_build_tool_call_guidance(
+        request,
+        structural_tag_mode=structural_tag_mode,
+        structural_tag_scope=structural_tag_scope,
+    ):
+        return None
+
+    if tool_parser is not None:
+        request_for_tag = _request_for_vllm_structural_tag(
+            request,
+            structural_tag_schema=structural_tag_schema,
+        )
+        structural_tag = tool_parser.get_structural_tag(
+            request_for_tag,
+            reasoning=starts_in_reasoning,
+        )
+        if structural_tag is not None:
+            tag_value = (
+                structural_tag.model_dump()
+                if hasattr(structural_tag, "model_dump")
+                else structural_tag
+            )
+            return {"structural_tag": tag_value}
+
+    # Some vLLM parsers build a constraint in adjust_request() rather than
+    # implementing get_structural_tag(). MistralToolParser, for example,
+    # stores a parser-native Lark grammar on the validated request.
+    structured_outputs = request.structured_outputs
+    if structured_outputs is None:
+        return None
+    if structured_outputs.grammar is not None:
+        return {"grammar": structured_outputs.grammar}
+    if structured_outputs.json is not None:
+        return {"json": structured_outputs.json}
+    if structured_outputs.json_object:
+        return {"json": {"type": "object"}}
+    return None
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
@@ -215,6 +317,9 @@ async def preprocess_chat_request(
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -230,6 +335,14 @@ async def preprocess_chat_request(
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
+    )
+
+    guided_decoding = build_tool_call_guided_decoding(
+        request_for_sampling,
+        tool_parser,
+        structural_tag_mode=structural_tag_mode,
+        structural_tag_scope=structural_tag_scope,
+        structural_tag_schema=structural_tag_schema,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -250,6 +363,7 @@ async def preprocess_chat_request(
         chat_template_kwargs=chat_template_kwargs,
         engine_prompt=engine_prompt,
         prompt_token_ids=tokens,
+        guided_decoding=guided_decoding,
     )
 
 

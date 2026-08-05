@@ -38,7 +38,11 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    build_tool_call_guided_decoding,
+    preprocess_chat_request,
+)
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     extract_mm_urls,
@@ -86,6 +90,19 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
+
+
+def _runtime_config_structural_tag_options(
+    mdc: ModelDeploymentCard,
+) -> tuple[str, str, str]:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return "off", "auto", "auto"
+    return (
+        runtime_config.get("structural_tag_mode", "off"),
+        runtime_config.get("structural_tag_scope", "auto"),
+        runtime_config.get("structural_tag_schema", "auto"),
+    )
 
 
 def _mm_feature_modality(feature: Any) -> str:
@@ -168,6 +185,70 @@ def _build_reasoning_parser_metadata(
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
 
 
+def _build_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None:
+    """Translate assistant structured-output fields to Dynamo guidance."""
+    guided_json = request.get("guided_json")
+    if guided_json is None:
+        response_format = request.get("response_format")
+        if isinstance(response_format, dict):
+            response_format_type = response_format.get("type")
+            if response_format_type == "json_object":
+                guided_json = {"type": "object"}
+            elif response_format_type == "json_schema":
+                json_schema = response_format.get("json_schema")
+                if isinstance(json_schema, dict):
+                    guided_json = json_schema.get("schema")
+
+    guided_decoding = {
+        key: value
+        for key, value in (
+            ("json", guided_json),
+            ("regex", request.get("guided_regex")),
+            ("grammar", request.get("guided_grammar")),
+            ("choice", request.get("guided_choice") or None),
+        )
+        if value is not None
+    }
+    if not guided_decoding:
+        return None
+
+    whitespace_pattern = request.get("guided_whitespace_pattern")
+    if whitespace_pattern is not None:
+        guided_decoding["whitespace_pattern"] = whitespace_pattern
+    return guided_decoding
+
+
+def _is_forced_tool_choice(tool_choice: Any) -> bool:
+    return tool_choice == "required" or (
+        tool_choice is not None and not isinstance(tool_choice, str)
+    )
+
+
+def _resolve_guided_decoding(
+    request: dict[str, Any],
+    tool_guided_decoding: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    assistant_guided_decoding = _build_guided_decoding(request)
+    if tool_guided_decoding is None:
+        return assistant_guided_decoding
+
+    if _is_forced_tool_choice(request.get("tool_choice", "auto")):
+        has_explicit_guidance = (
+            request.get("guided_json") is not None
+            or request.get("guided_regex") is not None
+            or request.get("guided_grammar") is not None
+            or bool(request.get("guided_choice"))
+        )
+        if has_explicit_guidance:
+            raise ValueError(
+                "guided decoding cannot be used in the same request as "
+                'tool_choice="required" or a named tool_choice.'
+            )
+        return tool_guided_decoding
+
+    return assistant_guided_decoding or tool_guided_decoding
+
+
 def _inject_routing_metadata(
     dynamo_preproc: dict[str, Any],
     target: dict[str, Any],
@@ -248,6 +329,9 @@ class VllmProcessor:
         enable_auto_tool_choice: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         default_thinking_mode: str | None = None,
+        structural_tag_mode: str = "off",
+        structural_tag_scope: str = "auto",
+        structural_tag_schema: str = "auto",
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -260,6 +344,9 @@ class VllmProcessor:
         self.enable_auto_tool_choice = enable_auto_tool_choice
         self.default_chat_template_kwargs = default_chat_template_kwargs
         self.default_thinking_mode = default_thinking_mode
+        self.structural_tag_mode = structural_tag_mode
+        self.structural_tag_scope = structural_tag_scope
+        self.structural_tag_schema = structural_tag_schema
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -465,6 +552,9 @@ class VllmProcessor:
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
                 default_thinking_mode=self.default_thinking_mode,
+                structural_tag_mode=self.structural_tag_mode,
+                structural_tag_scope=self.structural_tag_scope,
+                structural_tag_schema=self.structural_tag_schema,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -472,6 +562,7 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
+        tool_guided_decoding = pre.guided_decoding
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -558,6 +649,18 @@ class VllmProcessor:
             request_for_sampling,
             tokens,
         )
+        if reasoning_ended is False and _is_forced_tool_choice(
+            request_for_sampling.tool_choice
+        ):
+            tool_guided_decoding = build_tool_call_guided_decoding(
+                request_for_sampling,
+                tool_parser,
+                structural_tag_mode=self.structural_tag_mode,
+                structural_tag_scope=self.structural_tag_scope,
+                structural_tag_schema=self.structural_tag_schema,
+                starts_in_reasoning=True,
+            )
+        guided_decoding = _resolve_guided_decoding(request, tool_guided_decoding)
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
@@ -592,6 +695,8 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if guided_decoding is not None:
+            dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_ended is not None:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
@@ -1034,6 +1139,11 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        (
+            structural_tag_mode,
+            structural_tag_scope,
+            structural_tag_schema,
+        ) = _runtime_config_structural_tag_options(mdc)
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -1050,6 +1160,9 @@ class EngineFactory:
                 self.flags, "default_chat_template_kwargs", None
             ),
             default_thinking_mode=default_thinking_mode,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

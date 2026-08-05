@@ -10,12 +10,15 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 import importlib.util
 import json
 from types import SimpleNamespace
+from typing import Any, ClassVar
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
+from vllm.sampling_params import StructuredOutputsParams
 
-from dynamo.frontend.prepost import _prepare_request
+from dynamo.frontend import prepost as prepost_module
+from dynamo.frontend.prepost import _prepare_request, build_tool_call_guided_decoding
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -945,6 +948,224 @@ class TestSchemaAwareToolParser:
         assert args["profile"] == {"name": "Alice", "age": 30}
 
 
+class _FakeStructuralTag:
+    def __init__(self, value):
+        self.value = value
+
+    def model_dump(self):
+        return self.value
+
+
+class _FakeStructuralTagParser:
+    structural_tag_model = None
+
+    def __init__(self):
+        self.requests = []
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        self.requests.append((request, reasoning))
+        strict = [tool.function.strict for tool in request.tools]
+        return _FakeStructuralTag({"format": {"strict": strict}})
+
+
+class _FakeGrammarToolParser:
+    def get_structural_tag(self, request, *, reasoning=False):
+        return None
+
+
+class _FakeAdjustRequestGrammarToolParser(_FakeGrammarToolParser):
+    def __init__(self, tokenizer, tools):
+        del tokenizer, tools
+
+    def adjust_request(self, request):
+        request.structured_outputs = StructuredOutputsParams(
+            grammar='root ::= "<tool_call>"'
+        )
+        return request
+
+
+class TestToolCallGuidedDecoding:
+    def _request(self, tokenizer, **overrides):
+        raw_request = {**TOOL_REQUEST, "tool_choice": "auto", **overrides}
+        request, _, _, _, _ = _prepare_request(
+            raw_request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return request
+
+    def test_mode_off_emits_no_guidance(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer),
+            parser,
+            structural_tag_mode="off",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
+        )
+
+        assert guided is None
+        assert parser.requests == []
+
+    def test_strict_schema_uses_copy_and_forwards_reasoning_state(self, tokenizer):
+        request = self._request(tokenizer)
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
+            starts_in_reasoning=True,
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
+        assert request.tools[0].function.strict is None
+        assert parser.requests[0][1] is True
+        assert parser.requests[0][0].messages is request.messages
+
+    def test_parser_adjust_request_generated_grammar_is_forwarded(self, tokenizer):
+        request, parser, _, _, _ = _prepare_request(
+            {**TOOL_REQUEST, "tool_choice": "required"},
+            tokenizer=tokenizer,
+            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
+            structural_tag_schema="strict",
+        )
+
+        assert guided == {"grammar": 'root ::= "<tool_call>"'}
+
+    def test_forced_tool_from_reasoning_is_forwarded_to_vllm(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice="required"),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
+            structural_tag_schema="strict",
+            starts_in_reasoning=True,
+        )
+
+        assert guided is not None
+        assert parser.requests[0][1] is True
+
+    def test_tool_choice_none_does_not_request_vllm_guidance(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice="none"),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
+        )
+
+        assert guided is None
+        assert parser.requests == []
+
+    @pytest.mark.parametrize(
+        "schema_mode, expects_unconstrained_schema",
+        [("auto", True), ("strict", False)],
+    )
+    def test_vllm_parser_receives_schema_mode(
+        self, tokenizer, schema_mode, expects_unconstrained_schema
+    ):
+        tools = [
+            TOOL_REQUEST["tools"][0],
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_temperature",
+                    "description": "Get the temperature for a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                    "strict": False,
+                },
+            },
+        ]
+        tools[0] = {
+            **tools[0],
+            "function": {**tools[0]["function"], "strict": True},
+        }
+        request = self._request(tokenizer, tools=tools)
+        parser = _FakeStructuralTagParser()
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema=schema_mode,
+        )
+
+        assert guided is not None
+        strict_values = guided["structural_tag"]["format"]["strict"]
+        assert strict_values == [True, not expects_unconstrained_schema]
+
+    @pytest.mark.parametrize(
+        "mode, tool_choice, scope, strict, parallel, expected",
+        [
+            ("off", "auto", "always", False, None, False),
+            ("off", "none", "always", False, None, False),
+            (
+                "on",
+                {"type": "function", "function": {"name": "get_weather"}},
+                "auto",
+                False,
+                None,
+                True,
+            ),
+            ("on", "none", "auto", False, None, False),
+            ("on", "required", "auto", False, None, True),
+            ("on", "auto", "always", False, None, True),
+            ("on", "auto", "auto", True, None, True),
+            ("on", "auto", "auto", False, False, True),
+            ("on", "auto", "auto", False, None, False),
+        ],
+    )
+    def test_runtime_policy_matrix(
+        self,
+        tokenizer,
+        mode,
+        tool_choice,
+        scope,
+        strict,
+        parallel,
+        expected,
+    ):
+        request = self._request(
+            tokenizer,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": strict,
+                    },
+                }
+            ],
+        )
+
+        assert (
+            prepost_module._should_build_tool_call_guidance(
+                request,
+                structural_tag_mode=mode,
+                structural_tag_scope=scope,
+            )
+            is expected
+        )
+
+
 # ---------------------------------------------------------------------------
 # _prepare_request: chat_template_kwargs forwarding
 # ---------------------------------------------------------------------------
@@ -1104,3 +1325,133 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+def test_runtime_config_structural_tag_options(vllm_processor_module):
+    mdc = SimpleNamespace(
+        runtime_config=lambda: {
+            "structural_tag_mode": "on",
+            "structural_tag_scope": "always",
+            "structural_tag_schema": "strict",
+        }
+    )
+
+    assert vllm_processor_module._runtime_config_structural_tag_options(mdc) == (
+        "on",
+        "always",
+        "strict",
+    )
+
+
+class TestGuidedDecodingTranslation:
+    SCHEMA: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+
+    def _build(self, vllm_processor_module, request):
+        return vllm_processor_module._build_guided_decoding({"model": MODEL, **request})
+
+    @pytest.mark.parametrize(
+        "request_extra, expected",
+        [
+            (
+                {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "city", "schema": SCHEMA},
+                    }
+                },
+                {"json": SCHEMA},
+            ),
+            (
+                {"response_format": {"type": "json_object"}},
+                {"json": {"type": "object"}},
+            ),
+            ({"guided_json": SCHEMA}, {"json": SCHEMA}),
+            ({"guided_regex": r"\d{3}-\d{4}"}, {"regex": r"\d{3}-\d{4}"}),
+            (
+                {"guided_grammar": 'root ::= "yes" | "no"'},
+                {"grammar": 'root ::= "yes" | "no"'},
+            ),
+            ({"guided_choice": ["yes", "no"]}, {"choice": ["yes", "no"]}),
+        ],
+    )
+    def test_constraint_is_translated(
+        self,
+        vllm_processor_module,
+        request_extra,
+        expected,
+    ):
+        assert self._build(vllm_processor_module, request_extra) == expected
+
+    @pytest.mark.parametrize(
+        "request_extra",
+        [
+            {},
+            {"response_format": {"type": "text"}},
+            {"guided_choice": []},
+            {"guided_whitespace_pattern": "[ \n]*"},
+        ],
+    )
+    def test_no_constraint_emits_nothing(
+        self,
+        vllm_processor_module,
+        request_extra,
+    ):
+        assert self._build(vllm_processor_module, request_extra) is None
+
+    def test_auto_response_format_wins_over_tool_guidance(
+        self,
+        vllm_processor_module,
+    ):
+        tool_guided = {"structural_tag": {"format": "tool"}}
+        request = {
+            "tool_choice": "auto",
+            "response_format": {"type": "json_object"},
+        }
+
+        assert vllm_processor_module._resolve_guided_decoding(
+            request,
+            tool_guided,
+        ) == {"json": {"type": "object"}}
+
+    def test_forced_tool_choice_wins_over_response_format(
+        self,
+        vllm_processor_module,
+    ):
+        tool_guided = {"structural_tag": {"format": "tool"}}
+        request = {
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+        }
+
+        assert (
+            vllm_processor_module._resolve_guided_decoding(request, tool_guided)
+            == tool_guided
+        )
+
+    def test_forced_tool_choice_rejects_explicit_guidance(
+        self,
+        vllm_processor_module,
+    ):
+        with pytest.raises(ValueError, match="guided decoding cannot be used"):
+            vllm_processor_module._resolve_guided_decoding(
+                {"tool_choice": "required", "guided_regex": "yes"},
+                {"structural_tag": {"format": "tool"}},
+            )
+
+    def test_forced_tool_choice_allows_empty_guided_choice(
+        self,
+        vllm_processor_module,
+    ):
+        tool_guided = {"structural_tag": {"format": "tool"}}
+
+        assert (
+            vllm_processor_module._resolve_guided_decoding(
+                {"tool_choice": "required", "guided_choice": []},
+                tool_guided,
+            )
+            == tool_guided
+        )
