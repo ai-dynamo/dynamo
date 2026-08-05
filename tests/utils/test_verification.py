@@ -136,6 +136,27 @@ def test_require_content_field_accepts_real_content():
     check_response(payload, _chat_response())
 
 
+def test_require_content_field_rejects_empty_content_even_at_length_zero():
+    """min_content_length=0 means "any real answer", not "empty counts"."""
+    payload = _chat_payload(min_content_length=0, require_content_field=True)
+    response = _FakeResponse(
+        {
+            "model": "m",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "thinking out loud",
+                    }
+                }
+            ],
+        }
+    )
+    with pytest.raises(ResponseValidationError, match="'content' is empty"):
+        check_response(payload, response)
+
+
 def test_expected_role_mismatch_is_reported():
     payload = _chat_payload(expected_role="assistant")
     response = _FakeResponse(

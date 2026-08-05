@@ -304,11 +304,14 @@ class ChatPayload(BasePayload):
                 assert (
                     "content" in message
                 ), f"Message missing 'content' field: {message}"
-                assert len(message["content"] or "") >= self.min_content_length, (
-                    f"message['content'] too short: "
-                    f"{len(message['content'] or '')} chars "
+                # Non-empty regardless of min_content_length: a caller that
+                # sets 0 means "any real answer", not "an empty string counts".
+                content_field = message["content"] or ""
+                assert content_field, f"Message 'content' is empty: {message}"
+                assert len(content_field) >= self.min_content_length, (
+                    f"message['content'] too short: {len(content_field)} chars "
                     f"(min: {self.min_content_length}). "
-                    f"Content: {str(message['content'])[:200]}"
+                    f"Content: {content_field[:200]}"
                 )
 
         if self.expected_num_choices is None:
