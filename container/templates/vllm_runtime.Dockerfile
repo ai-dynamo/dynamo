@@ -210,12 +210,16 @@ RUN uv pip uninstall triton && \
 
 {% if context.vllm.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
-# vLLM runtime dependency stack.
+# vLLM runtime dependency stack. google-crc32c is imported eagerly by the MX
+# vLLM plugin (>=0.5.0) and is not in the XPU base image, so install it
+# alongside; the plugin-load guard later in this stage fails the build on any
+# remaining --no-deps gap.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install {{ pip_target }} --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+        "modelexpress==${MODELEXPRESS_VERSION}"; \
+    uv pip install {{ pip_target }} "google-crc32c>=1.5.0"
 {% endif %}
 
 {% endif %}
@@ -384,6 +388,19 @@ RUN set -eux; \
 # at runtime or it cannot import; set it in the image and ensure the K8s
 # pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
+
+{% if target not in ("dev", "local-dev") and context.vllm.enable_modelexpress == "true" %}
+# Regression guard for the --no-deps ModelExpress install above: resolve and
+# invoke the vllm.general_plugins entry points exactly as vLLM does at every
+# startup, so a missing transitive dependency fails the build here instead of
+# at pod startup. Runs after every package/library install in this stage
+# (including the XPU apt step and the cuda codec purge above) so the check is
+# order-independent and sees the final image state.
+RUN python3 -c "from importlib.metadata import entry_points; \
+eps = [ep for ep in entry_points(group='vllm.general_plugins') if ep.name == 'modelexpress']; \
+assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
+[ep.load()() for ep in eps]"
 {% endif %}
 
 USER dynamo
