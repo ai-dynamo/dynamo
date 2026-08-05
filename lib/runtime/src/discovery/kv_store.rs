@@ -22,6 +22,44 @@ const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 const EVENT_SOURCES_BUCKET: &str = "v1/event_sources";
+const UPDATE_MODEL_TAINTS_MAX_ATTEMPTS: usize = 8;
+
+async fn update_model_taints_in_bucket(
+    bucket: &dyn kv::Bucket,
+    key: &kv::Key,
+    target_id: &DiscoveryInstanceId,
+    taints: &HashSet<String>,
+) -> Result<()> {
+    for _ in 0..UPDATE_MODEL_TAINTS_MAX_ATTEMPTS {
+        let existing_json = bucket
+            .get(key)
+            .await?
+            .ok_or_else(|| kv::StoreError::MissingKey(key.to_string()))?;
+        let existing: DiscoveryInstance = serde_json::from_slice(&existing_json)?;
+        if &existing.id() != target_id {
+            anyhow::bail!(
+                "model discovery record {target_id:?} contains mismatched identity {:?}",
+                existing.id()
+            )
+        }
+        let candidate = model_with_updated_taints(&existing, taints.clone())?;
+        if candidate == existing {
+            return Ok(());
+        }
+
+        let candidate_json = serde_json::to_vec(&candidate)?.into();
+        match bucket
+            .compare_and_replace(key, existing_json, candidate_json)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(kv::StoreError::Retry) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(kv::StoreError::Retry.into())
+}
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -508,33 +546,7 @@ impl Discovery for KVStoreDiscovery {
         let key = kv::Key::new(id.to_path());
         let target_id = DiscoveryInstanceId::Model(id);
 
-        loop {
-            let existing_json = bucket
-                .get(&key)
-                .await?
-                .ok_or_else(|| kv::StoreError::MissingKey(key.to_string()))?;
-            let existing: DiscoveryInstance = serde_json::from_slice(&existing_json)?;
-            if existing.id() != target_id {
-                anyhow::bail!(
-                    "model discovery record {target_id:?} contains mismatched identity {:?}",
-                    existing.id()
-                )
-            }
-            let candidate = model_with_updated_taints(&existing, taints.clone())?;
-            if candidate == existing {
-                return Ok(());
-            }
-
-            let candidate_json = serde_json::to_vec(&candidate)?.into();
-            match bucket
-                .compare_and_replace(&key, existing_json, candidate_json)
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(kv::StoreError::Retry) => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
+        update_model_taints_in_bucket(bucket.as_ref(), &key, &target_id, &taints).await
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
@@ -741,6 +753,7 @@ mod tests {
     };
     use crate::protocols::EndpointId;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn endpoint_instance(instance_id: u64) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
@@ -1202,6 +1215,84 @@ mod tests {
             }),
             model_suffix: None,
         }
+    }
+
+    struct AlwaysConflictingBucket {
+        value: bytes::Bytes,
+        compare_attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl kv::Bucket for AlwaysConflictingBucket {
+        async fn insert(
+            &self,
+            _key: &kv::Key,
+            _value: bytes::Bytes,
+            _revision: u64,
+        ) -> Result<kv::StoreOutcome, kv::StoreError> {
+            unreachable!("insert is not used by this test")
+        }
+
+        async fn get(&self, _key: &kv::Key) -> Result<Option<bytes::Bytes>, kv::StoreError> {
+            Ok(Some(self.value.clone()))
+        }
+
+        async fn compare_and_replace(
+            &self,
+            _key: &kv::Key,
+            _expected: bytes::Bytes,
+            _value: bytes::Bytes,
+        ) -> Result<kv::StoreOutcome, kv::StoreError> {
+            self.compare_attempts.fetch_add(1, Ordering::Relaxed);
+            Err(kv::StoreError::Retry)
+        }
+
+        async fn delete(&self, _key: &kv::Key) -> Result<(), kv::StoreError> {
+            unreachable!("delete is not used by this test")
+        }
+
+        async fn watch(
+            &self,
+        ) -> Result<Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + '_>>, kv::StoreError>
+        {
+            unreachable!("watch is not used by this test")
+        }
+
+        async fn entries(&self) -> Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            unreachable!("entries is not used by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_stops_after_bounded_conflicts() {
+        let existing = model_spec("first").into_instance(7);
+        let target_id = existing.id();
+        let DiscoveryInstanceId::Model(id) = &target_id else {
+            unreachable!()
+        };
+        let key = kv::Key::new(id.to_path());
+        let bucket = AlwaysConflictingBucket {
+            value: serde_json::to_vec(&existing).unwrap().into(),
+            compare_attempts: AtomicUsize::new(0),
+        };
+
+        let error = update_model_taints_in_bucket(
+            &bucket,
+            &key,
+            &target_id,
+            &HashSet::from(["second".to_string()]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<kv::StoreError>(),
+            Some(kv::StoreError::Retry)
+        ));
+        assert_eq!(
+            bucket.compare_attempts.load(Ordering::Relaxed),
+            UPDATE_MODEL_TAINTS_MAX_ATTEMPTS
+        );
     }
 
     #[tokio::test]

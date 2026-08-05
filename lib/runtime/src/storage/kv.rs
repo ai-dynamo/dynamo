@@ -354,17 +354,11 @@ impl Manager {
                 .0
                 .get_or_create_bucket(&bucket_name, bucket_ttl)
                 .await?;
+            // Bucket::watch atomically establishes its initial snapshot and incremental
+            // stream. A separate entries() read here could replay an older buffered update
+            // after a newer snapshot.
             let mut stream = bucket.watch().await?;
 
-            // Send all the existing keys
-            for (key, bytes) in bucket.entries().await? {
-                let event = WatchEvent::Put(KeyValue::new(key, bytes));
-                if !Self::forward_watch_event(&tx, event, &cancel_token, &bucket_name).await {
-                    return Ok(());
-                }
-            }
-
-            // Now block waiting for new entries
             loop {
                 let event = tokio::select! {
                     _ = cancel_token.cancelled() => break,
@@ -432,6 +426,8 @@ pub trait Bucket: Send + Sync {
     /// Implementations must perform the comparison and replacement atomically.
     /// A missing key returns [`StoreError::MissingKey`] and must never be created;
     /// a value changed by another writer returns [`StoreError::Retry`].
+    /// A successful [`StoreOutcome`] revision is backend-specific and must not be
+    /// compared across backends or treated as a globally monotonic version.
     async fn compare_and_replace(
         &self,
         key: &Key,
@@ -443,9 +439,12 @@ pub trait Bucket: Send + Sync {
     /// The Key should be the name of the item, not including the bucket name.
     async fn delete(&self, key: &Key) -> Result<(), StoreError>;
 
-    /// A stream of items inserted into the bucket.
-    /// Every time the stream is polled it will either return a newly created entry, or block until
-    /// such time.
+    /// An atomic initial snapshot followed by changes newer than that snapshot.
+    ///
+    /// Implementations must establish the snapshot and incremental watch without a gap and must
+    /// never emit an incremental value older than a value already emitted in the initial snapshot.
+    /// Existing entries may be emitted as individual WatchEvent::Put events or as one
+    /// WatchEvent::Resync.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
@@ -550,6 +549,48 @@ mod tests {
 
     fn init() {
         crate::logging::init();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_emits_initial_snapshot_once_before_updates() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "old".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone());
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::Put(first) = first else {
+            panic!("expected initial put");
+        };
+        assert_eq!(first.value(), b"old");
+
+        bucket.insert(&key, "new".into(), 2).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::Put(second) = second else {
+            panic!("expected updated put");
+        };
+        assert_eq!(
+            second.value(),
+            b"new",
+            "the initial value must not be replayed after the snapshot"
+        );
+
+        cancel_token.cancel();
+        watch_task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

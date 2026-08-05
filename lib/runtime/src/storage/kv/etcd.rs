@@ -132,7 +132,7 @@ impl Bucket for EtcdBucket {
         tracing::trace!("etcd watch: {prefix}");
         let watcher = self
             .client
-            .kv_watch_prefix(&prefix)
+            .kv_get_and_watch_prefix(&prefix)
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let (_, mut watch_stream) = watcher.dissolve();

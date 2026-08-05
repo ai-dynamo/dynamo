@@ -189,7 +189,7 @@ impl Bucket for NATSBucket {
     {
         let watch_stream = self
             .nats_store
-            .watch_all()
+            .watch_with_history(">")
             .await
             .map_err(|e| StoreError::NATSError(e.to_string()))?;
         // Map the `Entry` to `Entry.value` which is Bytes of the stored value.
@@ -287,8 +287,9 @@ impl NATSBucket {
     ) -> Result<StoreOutcome, StoreError> {
         match self.nats_store.entry(key).await {
             Ok(Some(entry)) => {
-                // Re-try against the current stream revision.
-                match self.nats_store.update(key, value, entry.revision).await {
+                // Re-try the update with new version number
+                let next_rev = entry.revision + 1;
+                match self.nats_store.update(key, value, next_rev).await {
                     Ok(correct_revision) => Ok(StoreOutcome::Created(correct_revision)),
                     Err(err) => Err(StoreError::NATSError(format!(
                         "Error during update of key {key} after resync: {err}"
@@ -335,12 +336,11 @@ mod compare_and_replace_tests {
             name: "compare-and-replace".to_string(),
         };
         let store = NATSStore::new(client, endpoint);
+        let bucket_name = format!("compare_and_replace_{}", uuid::Uuid::new_v4());
+        let jetstream_bucket_name = single_name("test", &Slug::slugify(&bucket_name));
         let bucket = Arc::new(
             store
-                .get_or_create_bucket(
-                    &format!("compare_and_replace_{}", uuid::Uuid::new_v4()),
-                    None,
-                )
+                .get_or_create_bucket(&bucket_name, None)
                 .await
                 .unwrap(),
         );
@@ -370,5 +370,13 @@ mod compare_and_replace_tests {
         delete.await.unwrap().unwrap();
         assert!(update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_))));
         assert_eq!(bucket.get(&key).await.unwrap(), None);
+
+        drop(bucket);
+        store
+            .client
+            .jetstream()
+            .delete_key_value(&jetstream_bucket_name)
+            .await
+            .unwrap();
     }
 }
