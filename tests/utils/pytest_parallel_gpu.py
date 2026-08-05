@@ -120,8 +120,6 @@ class _RunningTest:
     start_time: float
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
-    # Child's process-group id (== pid, since it's a session leader).
-    pgid: int | None = None
 
 
 def _print(msg: str = "") -> None:
@@ -463,17 +461,14 @@ def _reap_running(running: dict[int, _RunningTest], reason: str) -> None:
 
     _print(f"[cleanup] terminating {len(running)} running test(s) — {reason}")
     for w_id, run_info in list(running.items()):
-        # Snapshots descendants before killing, so it catches ManagedProcess
-        # workers that setsid into their own session (killpg alone misses them).
+        # Walks parent->child links, which setsid() does not sever, so it reaches
+        # ManagedProcess workers in their own session. A process-group kill cannot:
+        # ManagedProcess starts each worker with start_new_session=True, so the
+        # child pytest's group contains only the child itself.
         try:
             terminate_process_tree(run_info.proc.pid, immediate_kill=True, timeout=5)
         except (psutil.Error, OSError) as exc:  # keep reaping remaining tests
             _print(f"[cleanup] w{w_id} tree kill error: {exc}")
-        if run_info.pgid is not None:
-            try:
-                os.killpg(run_info.pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
         try:
             run_info.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -783,12 +778,11 @@ def run_parallel(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            # Own session/process group so the orchestrator can killpg the
-            # whole tree on exit, and a terminal Ctrl-C hits only us.
+            # Own session so a terminal Ctrl-C goes only to the orchestrator,
+            # which then reaps deliberately instead of racing every child.
             start_new_session=True,
         )
         run_info = _RunningTest(proc=proc, test=test, start_time=time.monotonic())
-        run_info.pgid = proc.pid  # session leader: pgid == pid
         w_id = test.w_id
         stream_prefix = f"[w{w_id}]" if stream else None
         t = threading.Thread(
