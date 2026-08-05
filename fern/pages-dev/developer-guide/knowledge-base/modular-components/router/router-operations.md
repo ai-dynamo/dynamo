@@ -59,7 +59,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8000 --router-replica-syn
 python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-sync
 ```
 
-With replica sync enabled, a new router still starts with zero active-block knowledge, but it converges through live request handling and active-sequence events from other replicas. Without it, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
+With replica sync enabled, a new router still starts with zero active-block knowledge, but its view improves through live request handling and active-sequence events from other replicas. The channel is fire-and-forget and its bounded outbound publisher queue drops the newest event when full, so replicas can temporarily disagree. Add, prefill-complete, and free lifecycle events are synchronized; output-block growth remains local. Stale synchronized entries are force-expired after `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds). Without replica sync, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
 
 Session-affinity synchronization starts automatically when
 `--router-session-affinity-ttl-secs` is set. That path is best effort: each replica
@@ -136,7 +136,7 @@ Backend KV event publishing is independent of the frontend's `--no-router-kv-eve
 
 - **vLLM**: Pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or `'{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'` to enable.
 - **SGLang**: Pass `--kv-events-config` with a JSON config to enable, or omit it to keep publishing disabled.
-- **TRT-LLM**: Pass `--publish-events-and-metrics` to enable, or omit it to keep publishing disabled.
+- **TRT-LLM**: Pass `--publish-kv-events` to enable, or omit it to keep publishing disabled. The legacy `--publish-events-and-metrics` alias is accepted but deprecated.
 
 The CLI arg `--router-ttl-secs` controls local cache prediction lifetime when the router operates without receiving events from workers. When workers are configured to publish KV events, the router relies on worker-side eviction events and this parameter is ignored.
 

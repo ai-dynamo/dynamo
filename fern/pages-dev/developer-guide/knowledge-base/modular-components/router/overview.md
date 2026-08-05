@@ -52,6 +52,7 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 
 **Limitations:**
 - Static endpoints are not supported with KV routing; use dynamic discovery so the router can track worker instances and KV cache state
+- With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware. Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup. Session affinity is supported with LoRA only in KV mode; LoRA plus random or round-robin affinity is rejected.
 
 For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode power-of-two`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
 

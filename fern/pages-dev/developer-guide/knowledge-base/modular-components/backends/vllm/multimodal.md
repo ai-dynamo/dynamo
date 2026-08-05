@@ -86,10 +86,10 @@ The default path keeps multimodal processing on the worker:
 1. The frontend computes an `mm_hash` for each image.
 2. A model-specific processor specification resolves the image placeholder and calculates its expanded token count.
 3. The frontend expands the placeholder in a routing-only token view and builds per-block multimodal metadata.
-4. The KV router selects the worker with the highest overlap.
+4. The KV router credits that overlap in its combined prefill-and-decode cost and selects the lowest-cost eligible worker.
 5. The frontend forwards `mm_hashes`, which the worker passes to vLLM as `multi_modal_uuids`.
 
-For `data:` URIs, the frontend hashes the decoded bytes. For HTTP URLs, it hashes the full URL by default. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
+By default, the frontend hashes the exact full URI: the complete `data:` URI string or the HTTP URL including its query string. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
 
 Launch the default path:
 

@@ -331,6 +331,13 @@ The `model` field is case-sensitive and must match `lora_name` exactly. For disa
 
 ## KV Cache-Aware LoRA Routing
 
+<Info>
+With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware.
+Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup.
+Session affinity with LoRA is supported only in KV mode; random and round-robin
+plus affinity are rejected.
+</Info>
+
 <AccordionGroup>
   <Accordion title="How LoRA-aware KV routing works">
     When KV-aware routing is enabled, the router accounts for LoRA adapter identity when computing block hashes:
