@@ -95,7 +95,8 @@ pub struct NonMaxOverlapSelection {
     pub selected_overlap_blocks: f64,
 }
 
-/// Callback invoked after an admitted non-max-overlap selection is delivered.
+/// Callback dispatched off the scheduler actor after an admitted non-max-overlap selection is
+/// delivered.
 pub type NonMaxOverlapSelectionObserver =
     Arc<dyn Fn(&str, NonMaxOverlapSelection) + Send + Sync + 'static>;
 

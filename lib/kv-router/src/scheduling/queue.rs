@@ -1132,10 +1132,8 @@ impl<
         }
 
         if request.respond(Ok(response)) {
-            if let Some(selection) = non_max_overlap_selection
-                && let Some(observer) = self.non_max_overlap_selection_observer.get()
-            {
-                observer(&request_id, selection);
+            if let Some(selection) = non_max_overlap_selection {
+                self.dispatch_non_max_overlap_selection(request_id, selection);
             }
             return true;
         }
@@ -1145,6 +1143,20 @@ impl<
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
         false
+    }
+
+    fn dispatch_non_max_overlap_selection(
+        &self,
+        request_id: String,
+        selection: NonMaxOverlapSelection,
+    ) {
+        let Some(observer) = self.non_max_overlap_selection_observer.get() else {
+            return;
+        };
+        let observer = Arc::clone(observer);
+        let _observer_task = tokio::task::spawn_blocking(move || {
+            observer(&request_id, selection);
+        });
     }
 
     fn prefill_load_hint_for(
@@ -1874,14 +1886,12 @@ mod tests {
         );
         let worker0 = WorkerWithDpRank::new(0, 0);
         let worker1 = WorkerWithDpRank::new(1, 0);
-        let observed = Arc::new(StdMutex::new(Vec::new()));
-        let observer_events = Arc::clone(&observed);
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(queue.set_non_max_overlap_selection_observer(Arc::new(
             move |request_id, event| {
-                observer_events
-                    .lock()
-                    .unwrap()
-                    .push((request_id.to_string(), event));
+                observer_tx
+                    .send((request_id.to_string(), event))
+                    .expect("observer receiver should remain open");
             }
         )));
         let (mut request, response_rx) = make_request("locality-response", 64);
@@ -1894,11 +1904,14 @@ mod tests {
         let response = response_rx.await.unwrap().unwrap();
 
         assert_eq!(response.best_worker, worker0);
-        let events = observed.lock().unwrap();
-        assert_eq!(events[0].1.overlap_blocks_lost(), 3.0);
+        let event = tokio::time::timeout(Duration::from_secs(1), observer_rx.recv())
+            .await
+            .expect("observer did not run")
+            .expect("observer channel closed");
+        assert_eq!(event.1.overlap_blocks_lost(), 3.0);
         assert_eq!(
-            events.as_slice(),
-            [(
+            event,
+            (
                 "locality-response".to_string(),
                 NonMaxOverlapSelection {
                     selected_worker: worker0,
@@ -1906,8 +1919,68 @@ mod tests {
                     highest_overlap_blocks: 4.0,
                     selected_overlap_blocks: 1.0,
                 },
-            )]
+            )
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduler_observer_does_not_block_actor() {
+        let (queue, _slots) = make_queue_with_custom_selector(
+            2,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        let observer_gate = Arc::new((StdMutex::new(false), Condvar::new()));
+        let callback_gate = Arc::clone(&observer_gate);
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (finished_tx, mut finished_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_non_max_overlap_selection_observer(Arc::new(
+            move |_request_id, _event| {
+                started_tx.send(()).unwrap();
+                let (released, wake) = &*callback_gate;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                finished_tx.send(()).unwrap();
+            }
+        )));
+
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (mut first, first_rx) = make_request("blocking-observer", 64);
+        first
+            .overlap
+            .effective_overlap_blocks
+            .extend([(worker0, 1.0), (worker1, 4.0)]);
+        let first_queue = Arc::clone(&queue);
+        let first_enqueue = tokio::spawn(async move {
+            first_queue.enqueue(first).await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+            .await
+            .expect("observer did not start")
+            .expect("observer start channel closed");
+
+        let (second, second_rx) = make_request("actor-remains-responsive", 64);
+        tokio::time::timeout(Duration::from_secs(1), queue.enqueue(second))
+            .await
+            .expect("observer blocked the scheduler actor");
+
+        let (released, wake) = &*observer_gate;
+        *released.lock().unwrap() = true;
+        wake.notify_one();
+
+        first_enqueue.await.unwrap();
+        first_rx.await.unwrap().unwrap();
+        second_rx.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), finished_rx.recv())
+            .await
+            .expect("observer did not finish")
+            .expect("observer finish channel closed");
     }
 
     #[tokio::test]
