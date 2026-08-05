@@ -642,6 +642,12 @@ func registerControllers(
 			return err
 		}
 	}
+
+	if runtimeConfig.Gate.Enabled(features.GMSSnapshot) {
+		if err := controller.SetupGMSPodReplacement(mgr, setupOptions); err != nil {
+			return err
+		}
+	}
 	if err := controller.SetupTopologyLabel(mgr, setupOptions); err != nil {
 		return err
 	}
