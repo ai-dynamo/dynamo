@@ -227,7 +227,7 @@ class TestDiffusionFormatterVideo:
 
         f = _make_diffusion_formatter()
         with patch(
-            "dynamo.vllm.omni.output_formatter.normalize_video_frames",
+            "dynamo.vllm.omni.output_formatter.to_canonical",
             side_effect=RuntimeError("boom"),
         ):
             chunk = await f._encode_video([MagicMock()], "req-1", fps=16)
@@ -528,12 +528,17 @@ class TestDiffusionFormatterVideoOutputFormat:
     def _patches(self):
         from unittest.mock import patch as _patch
 
+        import numpy as np
+
         return (
             _patch(
-                "dynamo.vllm.omni.output_formatter.normalize_video_frames",
-                return_value=[MagicMock()],
+                "dynamo.vllm.omni.output_formatter.to_canonical",
+                return_value=np.zeros((2, 4, 4, 3), dtype=np.uint8),
             ),
-            _patch("dynamo.vllm.omni.output_formatter.export_to_video"),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.encode_video",
+                return_value=b"bytes",
+            ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
                 return_value="http://x/v.mp4",
@@ -616,3 +621,62 @@ class TestDiffusionFormatterVideoOutputFormat:
         assert result is not None
         assert result["data"][0]["url"] == "http://x/v.mp4"
         mock_upload.assert_called_once()
+
+
+# ── DiffusionFormatter — to_canonical converter + encode adapter ────────────
+
+
+class TestVllmVideoToCanonical:
+    """to_canonical() maps stage_output.images to canonical frames losslessly."""
+
+    def test_roundtrip_is_bit_exact(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.video_convert import to_canonical
+
+        # Distinctive per-pixel values catch axis / channel-order bugs.
+        truth = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)
+        native = [truth[None]]  # list holding one (1, T, H, W, C) array
+
+        out = to_canonical(native)
+
+        assert out.dtype == np.uint8
+        assert np.array_equal(out, truth)
+
+    @pytest.mark.asyncio
+    async def test_encode_video_receives_canonical_and_forwards_container(self):
+        from unittest.mock import patch as _patch
+
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        f = DiffusionFormatter(model_name="test", media_fs=None, media_http_url=None)
+        stage = MagicMock()
+        stage.images = [MagicMock()]
+        canonical = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+
+        with _patch(
+            "dynamo.vllm.omni.output_formatter.to_canonical", return_value=canonical
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.encode_video", return_value=b"bytes"
+        ) as m_enc, _patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="http://x/v.mp4",
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ):
+            await f.format(
+                stage,
+                "r8",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="url",
+            )
+
+        args, kwargs = m_enc.call_args
+        assert args[0] is canonical
+        assert args[1] == 16
+        assert kwargs["container"] == "mp4"
