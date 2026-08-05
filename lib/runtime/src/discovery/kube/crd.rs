@@ -340,6 +340,7 @@ mod tests {
             vec![channel]
         );
 
+        let namespace_transport = EventTransport::nats("namespace.workers");
         let legacy_metadata = serde_json::json!({
             "endpoints": {},
             "model_cards": {},
@@ -351,6 +352,14 @@ mod tests {
                     "topic": "kv-events",
                     "instance_id": 42,
                     "transport": transport,
+                },
+                "workers//namespace-events/2b": {
+                    "type": "EventChannel",
+                    "namespace": "workers",
+                    "component": "",
+                    "topic": "namespace-events",
+                    "instance_id": 43,
+                    "transport": namespace_transport,
                 }
             }
         });
@@ -369,6 +378,19 @@ mod tests {
                 topic: "kv-events".to_string(),
                 instance_id: 42,
                 transport,
+            }]
+        );
+        assert_eq!(
+            upgraded.filter(&DiscoveryQuery::EventChannels(
+                EventChannelQuery::namespace_topic("workers", "namespace-events")
+            )),
+            vec![DiscoveryInstance::EventChannel {
+                scope: EventScope::Namespace {
+                    name: "workers".to_string(),
+                },
+                topic: "namespace-events".to_string(),
+                instance_id: 43,
+                transport: namespace_transport,
             }]
         );
     }
