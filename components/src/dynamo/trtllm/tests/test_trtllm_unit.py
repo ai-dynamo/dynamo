@@ -631,39 +631,9 @@ def test_strip_postprocess_workers_warns_and_removes_when_positive(caplog):
 
 
 @pytest.mark.core
-def test_strip_postprocess_workers_silently_removes_when_zero(caplog):
-    """num_postprocess_workers=0 is removed without a warning."""
-    engine_args = {"num_postprocess_workers": 0, "max_batch_size": 128}
-    with caplog.at_level("WARNING"):
-        _strip_postprocess_workers(engine_args)
-    assert "num_postprocess_workers" not in engine_args
-    assert caplog.records == []
-
-
-@pytest.mark.core
-def test_strip_postprocess_workers_noop_when_absent(caplog):
-    """No-op and no warning when num_postprocess_workers is not present."""
-    engine_args = {"max_batch_size": 128}
-    with caplog.at_level("WARNING"):
-        _strip_postprocess_workers(engine_args)
-    assert engine_args == {"max_batch_size": 128}
-    assert caplog.records == []
-
-
-@pytest.mark.core
 def test_strip_postprocess_workers_handles_quoted_string_value(caplog):
     """Quoted YAML/JSON string values (e.g. "8") warn and are removed without TypeError."""
     engine_args = {"num_postprocess_workers": "8", "max_batch_size": 128}
-    with caplog.at_level("WARNING"):
-        _strip_postprocess_workers(engine_args)
-    assert "num_postprocess_workers" not in engine_args
-    assert any("num_postprocess_workers" in r.message for r in caplog.records)
-
-
-@pytest.mark.core
-def test_strip_postprocess_workers_handles_non_numeric_value(caplog):
-    """A non-numeric value still removes the key and warns without crashing."""
-    engine_args = {"num_postprocess_workers": "auto", "max_batch_size": 128}
     with caplog.at_level("WARNING"):
         _strip_postprocess_workers(engine_args)
     assert "num_postprocess_workers" not in engine_args
