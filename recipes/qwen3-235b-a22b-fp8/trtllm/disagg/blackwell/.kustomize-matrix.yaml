@@ -8,7 +8,7 @@ matrix:
       components: []
     - name: aws-efa-p8d16
       components:
-        - ../../../../kustomize/components/aws/components/efa/components/p8d16
+        - ../../../../kustomize/components/aws-efa-p8d16
     - name: gcp-roce
       components:
         - ../../../../kustomize/components/disagg-workers/gke-roce

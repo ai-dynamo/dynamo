@@ -11,5 +11,5 @@ sortOptions:
 resources:
   - "../_rdma"
 components:
-  - "../../../../../../kustomize/components/aws/components/efa/components/p16d16"
+  - "../../../../../../kustomize/components/aws-efa-p16d16"
   - "../../components/vllm-efa"

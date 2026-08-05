@@ -81,7 +81,7 @@ matrix:
   variant:
     - name: aws-efa-p8d16
       components:
-        - ../../../kustomize/components/aws/components/efa/components/p8d16
+        - ../../../kustomize/components/aws-efa-p8d16
 ```
 
 Generate the checked-in Level-2 overlays, then the flattened Level-3 manifests:
@@ -91,10 +91,9 @@ scripts/kustomize-matrix.py unfold <matrix.yaml>
 scripts/kustomize-matrix.py render <matrix.yaml>
 ```
 
-For a dependent Component tree, select only the leaf in the matrix. Kustomize
-rejects a Component that includes an ancestor directory as a load cycle, so keep
-each parent implementation in a sibling `_component/` directory. The leaf includes
-that sibling, rather than its containing directory.
+For dependent Components, use flat, explicit names such as `aws-efa` and
+`aws-efa-p8d16`. A leaf Component may include its predecessor, while the matrix
+selects only the leaf.
 
 `render` runs `kustomize build` and falls back to `kubectl kustomize` when
 `kustomize` is not on `PATH`. Kustomize drops comments while rendering Kubernetes
@@ -117,7 +116,7 @@ Components follow it, and Kustomize build options come last:
 ```bash
 scripts/kustomize-matrix.py compose \
   <target-kustomization> \
-  /absolute/path/to/recipes/kustomize/components/aws/components/efa/components/p8d16 \
+  /absolute/path/to/recipes/kustomize/components/aws-efa-p8d16 \
   --enable-helm
 ```
 
