@@ -12,7 +12,10 @@ package nsmountinjector
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-logr/logr"
 )
@@ -48,13 +51,29 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-// Validate returns an error if any required Config field is empty.
+// hasAllowedPrefix reports whether path equals prefix or begins with prefix+"/".
+func hasAllowedPrefix(path, prefix string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	rest := path[len(prefix):]
+	return rest == "" || rest[0] == '/'
+}
+
+// Validate returns an error if any required Config field is empty or uses a
+// path outside the allowed prefixes enforced by the C helper.
 func (c Config) Validate() error {
 	if c.SourceDir == "" {
 		return errors.New("nsmountinjector.Config: SourceDir must not be empty")
 	}
 	if c.DestinationDir == "" {
 		return errors.New("nsmountinjector.Config: DestinationDir must not be empty")
+	}
+	if !hasAllowedPrefix(c.SourceDir, agentBinDir) {
+		return fmt.Errorf("nsmountinjector.Config: SourceDir must start with %s: %s", agentBinDir, c.SourceDir)
+	}
+	if !hasAllowedPrefix(c.DestinationDir, SnapshotBinDir) {
+		return fmt.Errorf("nsmountinjector.Config: DestinationDir must start with %s: %s", SnapshotBinDir, c.DestinationDir)
 	}
 	return nil
 }
@@ -63,8 +82,9 @@ func (c Config) Validate() error {
 // The caller must call Cleanup after nsrestore returns.
 type Handle interface {
 	// BinPath returns the in-namespace absolute path to the named binary.
-	// Example: handle.BinPath("nsrestore") → "/tmp/snapshot-binaries/nsrestore"
-	BinPath(name string) string
+	// name must be a single path element with no separators or dot-dot components.
+	// Example: handle.BinPath("nsrestore") → "/tmp/snapshot-binaries/nsrestore", nil
+	BinPath(name string) (string, error)
 
 	// Cleanup unmounts the injected directory from the target namespace.
 	// Idempotent — safe to call from a defer even if Inject partially failed.
@@ -125,8 +145,14 @@ type injectionHandle struct {
 	mount MountHandle
 }
 
-func (h *injectionHandle) BinPath(name string) string {
-	return filepath.Join(h.mount.TargetPath(), name)
+// BinPath returns the in-namespace absolute path to the named binary.
+// name must be a single path element: callers pass literals, and anything
+// else could redirect a privileged exec outside the injected bundle.
+func (h *injectionHandle) BinPath(name string) (string, error) {
+	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, os.PathSeparator) {
+		return "", fmt.Errorf("nsmountinjector: invalid binary name %q", name)
+	}
+	return filepath.Join(h.mount.TargetPath(), name), nil
 }
 
 func (h *injectionHandle) Cleanup(ctx context.Context) error {

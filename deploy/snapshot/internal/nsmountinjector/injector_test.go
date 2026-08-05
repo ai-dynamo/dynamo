@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
-
 )
 
 // fakeMountHandle implements MountHandle for tests.
@@ -86,7 +85,10 @@ func TestInject_BinPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	got := handle.BinPath("nsrestore")
+	got, err := handle.BinPath("nsrestore")
+	if err != nil {
+		t.Fatalf("BinPath: unexpected error: %v", err)
+	}
 	want := filepath.Join(SnapshotBinDir, "nsrestore")
 	if got != want {
 		t.Errorf("BinPath: got %q, want %q", got, want)
@@ -122,16 +124,36 @@ func TestInject_MountFails(t *testing.T) {
 	}
 }
 
+func TestBinPath_RejectsInvalidNames(t *testing.T) {
+	m := &mockMounter{}
+	handle, err := newInjector(t, m).Inject(context.Background(), testPID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	invalid := []string{"", ".", "..", "foo/bar", "../../etc/passwd"}
+	for _, name := range invalid {
+		_, err := handle.BinPath(name)
+		if err == nil {
+			t.Errorf("BinPath(%q): expected error, got nil", name)
+		}
+	}
+}
+
 func TestConfig_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     Config
 		wantErr bool
 	}{
-		{"valid", Config{SourceDir: "/src", DestinationDir: "/dst"}, false},
-		{"missing source", Config{DestinationDir: "/dst"}, true},
-		{"missing destination", Config{SourceDir: "/src"}, true},
+		{"valid", Config{SourceDir: "/snapshot-binaries", DestinationDir: "/tmp/snapshot-binaries"}, false},
+		{"valid subdir", Config{SourceDir: "/snapshot-binaries/sub", DestinationDir: "/tmp/snapshot-binaries"}, false},
+		{"missing source", Config{DestinationDir: "/tmp/snapshot-binaries"}, true},
+		{"missing destination", Config{SourceDir: "/snapshot-binaries"}, true},
 		{"both empty", Config{}, true},
+		{"bad source prefix", Config{SourceDir: "/other", DestinationDir: "/tmp/snapshot-binaries"}, true},
+		{"bad dest prefix", Config{SourceDir: "/snapshot-binaries", DestinationDir: "/other"}, true},
+		{"source prefix overlap", Config{SourceDir: "/snapshot-binaries-extra", DestinationDir: "/tmp/snapshot-binaries"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,11 +176,11 @@ func TestConfig_WithDefaults(t *testing.T) {
 }
 
 func TestConfig_WithDefaults_PreservesExplicitValues(t *testing.T) {
-	cfg := Config{SourceDir: "/custom/src", DestinationDir: "/custom/dst"}.WithDefaults()
-	if cfg.SourceDir != "/custom/src" {
+	cfg := Config{SourceDir: "/snapshot-binaries/custom", DestinationDir: "/tmp/snapshot-binaries/custom"}.WithDefaults()
+	if cfg.SourceDir != "/snapshot-binaries/custom" {
 		t.Errorf("SourceDir overwritten: got %q", cfg.SourceDir)
 	}
-	if cfg.DestinationDir != "/custom/dst" {
+	if cfg.DestinationDir != "/tmp/snapshot-binaries/custom" {
 		t.Errorf("DestinationDir overwritten: got %q", cfg.DestinationDir)
 	}
 }

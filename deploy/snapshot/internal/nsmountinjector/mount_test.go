@@ -57,6 +57,8 @@ func readLines(t *testing.T, path string) []string {
 func TestExecMounter_Mount_Args(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "args.log")
 	// Print each argument on its own line so we can parse them individually.
+	// The Go caller now uses "mount-fd <nsFdChildNum> <src> <dst>" so $@ logs
+	// those four tokens.
 	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
 
 	m := newMounterForTest(t, bin)
@@ -67,7 +69,7 @@ func TestExecMounter_Mount_Args(t *testing.T) {
 	}
 
 	got := readLines(t, logFile)
-	want := []string{fmt.Sprintf("%d", pid), "/src", "/dst"}
+	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src", "/dst"}
 	if len(got) != len(want) {
 		t.Fatalf("args: got %v want %v", got, want)
 	}
@@ -90,12 +92,12 @@ func TestExecMounter_Mount_ReadOnly(t *testing.T) {
 	}
 
 	got := readLines(t, logFile)
-	want := []string{fmt.Sprintf("%d", pid), "/src", "/dst", "ro"}
+	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src", "/dst", "ro"}
 	if len(got) != len(want) {
 		t.Fatalf("args: got %v want %v", got, want)
 	}
-	if got[3] != "ro" {
-		t.Errorf("expected 'ro' flag, got %q", got[3])
+	if got[4] != "ro" {
+		t.Errorf("expected 'ro' flag at index 4, got %q", got[4])
 	}
 }
 
@@ -103,7 +105,8 @@ func TestExecMounter_Mount_ErrorWrapped(t *testing.T) {
 	bin := writeFakeBinary(t, `echo "subprocess boom" >&2; exit 1`)
 	m := newMounterForTest(t, bin)
 
-	_, err := m.Mount(context.Background(), 1, "/src", "/dst", MountOptions{})
+	// Use current pid so the ns fd open succeeds; the helper itself then fails.
+	_, err := m.Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -116,8 +119,8 @@ func TestExecMounter_Mount_ErrorWrapped(t *testing.T) {
 }
 
 func TestExecMounter_Mount_NsFdOpenFailure(t *testing.T) {
-	// Script always exits 0 so the mount "succeeds".
-	// We use a dead PID so os.Open("/proc/<pid>/ns/mnt") fails.
+	// The ns fd is now opened BEFORE the helper runs. A dead PID (MaxInt32)
+	// causes os.Open("/proc/<pid>/ns/mnt") to fail before the binary is called.
 	bin := writeFakeBinary(t, `exit 0`)
 	m := newMounterForTest(t, bin)
 
@@ -155,7 +158,7 @@ func TestExecMounter_Unmount_Error(t *testing.T) {
 
 func TestExecMounter_Unmount_Idempotent(t *testing.T) {
 	callLog := filepath.Join(t.TempDir(), "calls.log")
-	// Record the first argument of each invocation (subcommand or pid for mount).
+	// Record the first argument of each invocation (subcommand name).
 	bin := writeFakeBinary(t, `printf '%s\n' "$1" >> `+callLog)
 
 	m := newMounterForTest(t, bin)

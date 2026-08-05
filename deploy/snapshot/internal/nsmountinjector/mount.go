@@ -76,13 +76,14 @@ func newExecMounter(path string, log logr.Logger) (*execMounter, error) {
 }
 
 // mountHandle is the concrete MountHandle returned by execMounter.Mount.
-// It holds an open /proc/<pid>/ns/mnt fd captured at mount time so that
-// Unmount can re-enter the correct namespace even after the target process
-// has exited and its PID been recycled by the kernel.
+// It holds an open /proc/<pid>/ns/mnt fd captured before the mount helper runs
+// so that Unmount can re-enter the correct namespace even after the target
+// process has exited and its PID been recycled by the kernel.
 type mountHandle struct {
 	binaryPath string
-	nsFd       *os.File // /proc/<pid>/ns/mnt opened at Mount time
+	nsFd       *os.File // /proc/<pid>/ns/mnt opened before Mount runs
 	dst        string
+	createdDst bool // true if the mount helper created dst; controls rmdir on cleanup
 	log        logr.Logger
 	once       sync.Once
 	unmountErr error
@@ -99,7 +100,11 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 		ctx, cancel := context.WithTimeout(context.Background(), unmountTimeout)
 		defer cancel()
 		// Pass the ns fd via ExtraFiles; it lands at fd nsFdChildNum in the child.
-		cmd := exec.CommandContext(ctx, h.binaryPath, "umount-fd", strconv.Itoa(nsFdChildNum), h.dst)
+		args := []string{"umount-fd", strconv.Itoa(nsFdChildNum), h.dst}
+		if h.createdDst {
+			args = append(args, "created")
+		}
+		cmd := exec.CommandContext(ctx, h.binaryPath, args...)
 		cmd.ExtraFiles = []*os.File{h.nsFd}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -113,39 +118,43 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 }
 
 // Mount bind-mounts src (in the current namespace) to dst inside the mount
-// namespace of pid. It uses open_tree(OPEN_TREE_CLONE) to capture the source
-// before the namespace switch so the mount is independent of the source tree.
-// After a successful mount it opens /proc/<pid>/ns/mnt and holds the fd in
-// the returned handle so Unmount can re-enter the namespace without relying
-// on the PID still being alive.
+// namespace of pid. It opens /proc/<pid>/ns/mnt *before* launching the helper
+// so the namespace is pinned against PID reuse, then passes the fd to the
+// mount-fd subcommand via ExtraFiles. The fd is retained in the returned handle
+// so Unmount can re-enter the namespace without relying on the PID.
 func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
-	pidStr := strconv.Itoa(pid)
-	args := []string{pidStr, src, dst}
+	// Pin the namespace fd before calling the helper so mount and cleanup
+	// provably act on the same namespace regardless of PID reuse.
+	nsFd, err := os.Open(fmt.Sprintf("/proc/%d/ns/mnt", pid))
+	if err != nil {
+		return nil, fmt.Errorf("open /proc/%d/ns/mnt: %w", pid, err)
+	}
+
+	args := []string{"mount-fd", strconv.Itoa(nsFdChildNum), src, dst}
 	if opts.ReadOnly {
 		args = append(args, "ro")
 	}
-	out, err := exec.CommandContext(ctx, m.binaryPath, args...).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("ns-bind-mount %s -> %s: %w\noutput: %s", src, dst, err, strings.TrimSpace(string(out)))
+
+	cmd := exec.CommandContext(ctx, m.binaryPath, args...)
+	cmd.ExtraFiles = []*os.File{nsFd}
+	var stdout strings.Builder
+	var stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		nsFd.Close()
+		return nil, fmt.Errorf("ns-bind-mount mount-fd %s -> %s: %w\noutput: %s", src, dst, err, strings.TrimSpace(stderr.String()))
 	}
 	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "pid", pid)
 
-	nsFd, err := os.Open(fmt.Sprintf("/proc/%d/ns/mnt", pid))
-	if err != nil {
-		// Mount succeeded but we cannot hold the namespace reference — unmount
-		// synchronously so the caller never receives an un-unmountable handle.
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), unmountTimeout)
-		defer cleanupCancel()
-		if out, umErr := exec.CommandContext(cleanupCtx, m.binaryPath, "umount", pidStr, dst).CombinedOutput(); umErr != nil {
-			m.log.Error(umErr, "cleanup unmount failed after ns fd open error", "dst", dst, "output", strings.TrimSpace(string(out)))
-		}
-		return nil, fmt.Errorf("open /proc/%d/ns/mnt: %w", pid, err)
-	}
+	createdDst := strings.Contains(stdout.String(), "created_dst=1")
 
 	return &mountHandle{
 		binaryPath: m.binaryPath,
 		nsFd:       nsFd,
 		dst:        dst,
+		createdDst: createdDst,
 		log:        m.log,
 	}, nil
 }
