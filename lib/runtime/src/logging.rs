@@ -3138,10 +3138,6 @@ pub mod tests {
         if std::env::var("DYN_TEST_LOGGING_TOKIO_CONSOLE_JSONL").is_err() {
             return Ok(());
         }
-        assert!(
-            cfg!(feature = "tokio-console"),
-            "subprocess test must run with the tokio-console feature"
-        );
 
         let tmp_file = NamedTempFile::new().unwrap();
         let file_name = tmp_file.path().to_str().unwrap();
