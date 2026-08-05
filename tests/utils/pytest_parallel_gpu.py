@@ -35,12 +35,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import psutil
+
 _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-import psutil  # noqa: E402
-
+# Below the sys.path insert above, which is what makes these resolvable.
 from tests.utils.managed_process import terminate_process_tree  # noqa: E402
 from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
