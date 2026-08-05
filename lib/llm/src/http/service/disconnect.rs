@@ -230,6 +230,12 @@ fn monitor_for_disconnects_with_timeout(
         tokio::pin!(stopped);
         loop {
             tokio::select! {
+                // Drain any ready SSE event before honoring a cancel or the
+                // inactivity timeout. This preserves already-buffered output on
+                // disconnect and lets a source stream that emits its own
+                // finalizer-on-cancel (e.g. the Anthropic converter) flush those
+                // terminal events before this monitor records the cancellation.
+                biased;
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {

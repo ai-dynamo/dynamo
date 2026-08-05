@@ -4,7 +4,7 @@
 """Input schema for a Spica smart-search run.
 
 These Pydantic models are the single source of truth for the search inputs. See
-``docs/fern/components/aisimulate/spica/overview.md`` for the experimental design:
+``docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-flow.md`` for the experimental design:
 
 - :class:`SearchSpace`        — the knobs to sweep + pinned context, per component
 - :class:`Workload`           — the traffic every candidate is evaluated against
@@ -407,7 +407,7 @@ SEARCH_CHOICES: dict[str, tuple] = {
 # exactly that composite's unrolled field names (no partial/merge). The legality of
 # the values (perfect-square fpm bucket, interval > 0, etc.) is validated downstream
 # by Dynamo's PlannerConfig; here we only gate the key set. See
-# docs/fern/components/aisimulate/spica/search-space.md.
+# docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-space.md.
 COMPOSITE_DICT_KEYS: dict[str, frozenset[str]] = {
     "planner_scaling_policy": frozenset(
         {
@@ -530,7 +530,7 @@ class SearchSpace(BaseModel):
 
     # planner: composite knobs — each entry is a preset id (str) OR a dict pinning
     # the unrolled fields directly (see COMPOSITE_DICT_KEYS and
-    # docs/fern/components/aisimulate/spica/search-space.md).
+    # docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-space.md).
     # "disabled" = planner not enabled (no autoscaling, static replica count).
     planner_scaling_policy: list[str | dict[str, Any]] = [
         "disabled",
@@ -603,7 +603,7 @@ class SearchSpace(BaseModel):
                         raise ValueError(
                             f"{field_name} dict is missing required keys {sorted(missing)}; "
                             "a dict entry must be self-contained "
-                            "(see docs/fern/components/aisimulate/spica/search-space.md)"
+                            "(see docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-space.md)"
                         )
                 elif v not in allowed:
                     raise ValueError(

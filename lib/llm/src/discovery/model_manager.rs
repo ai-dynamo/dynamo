@@ -35,7 +35,10 @@ use crate::{
         KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
+    local_model::runtime_config::{
+        DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        topology_taint,
+    },
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::ModelDeploymentCard,
     types::{
@@ -148,6 +151,9 @@ pub struct ModelManager {
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
+    /// Per-endpoint HiCache state and its one Mooncake event subscriber.
+    hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
+
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
     kv_source_memberships: DashMap<EndpointId, Weak<KvSourceMembershipCoordinator>>,
@@ -188,6 +194,7 @@ impl ModelManager {
             prefill_router_activators: DashMap::new(),
             encoder_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
             lora_enabled: crate::lora::lora_serving_enabled(),
@@ -596,6 +603,15 @@ impl ModelManager {
             .collect()
     }
 
+    /// List Generate models with an engine that advertises `capability`.
+    pub fn list_generate_models_for_capability(&self, capability: &str) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_generate_engine_for_capability(capability))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -692,6 +708,17 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine()
+    }
+    /// Get a Generate engine for `model` from a worker advertising `capability`.
+    pub fn get_generate_engine_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability(capability)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -941,11 +968,12 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_generate_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
+        let mut card = Self::aggregated_local_card();
+        card.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            serde_json::Value::Bool(true),
         );
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.generate_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
@@ -1050,6 +1078,45 @@ impl ModelManager {
         lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
     }
 
+    fn hicache_cache_for(
+        &self,
+        endpoint: &Endpoint,
+        runtime_configs: RuntimeConfigWatch,
+    ) -> HicacheSharedKvCache {
+        self.hicache_caches
+            .entry(endpoint.id())
+            .or_insert_with(|| {
+                let frontend_kv_events_endpoint = std::env::var("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+                    .ok()
+                    .filter(|endpoint| !endpoint.is_empty());
+                let cache = HicacheSharedKvCache::new_with_cancellation_and_endpoint(
+                    runtime_configs,
+                    endpoint.component().drt().child_token(),
+                    frontend_kv_events_endpoint,
+                );
+                cache.start_subscriber();
+                cache
+            })
+            .clone()
+    }
+
+    pub fn remove_hicache_caches(&self, namespace: &str, component: &str) {
+        let endpoint_ids = self
+            .hicache_caches
+            .iter()
+            .filter(|entry| {
+                entry.key().namespace == namespace && entry.key().component == component
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+
+        for endpoint_id in endpoint_ids {
+            if let Some((_, cache)) = self.hicache_caches.remove(&endpoint_id) {
+                cache.shutdown();
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
@@ -1127,9 +1194,9 @@ impl ModelManager {
                     worker_component = worker_component_name,
                     "Using HiCache shared KV cache"
                 );
-                Some(Box::new(HicacheSharedKvCache::new(
-                    workers_with_configs.clone(),
-                )))
+                Some(Box::new(
+                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                ))
             }
         };
 
@@ -2376,6 +2443,38 @@ mod tests {
 
         // Model should still exist (ns1 still there)
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn remove_hicache_caches_cancels_only_the_removed_component() {
+        let manager = ModelManager::new();
+        let (_tx, runtime_configs) =
+            tokio::sync::watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let retained = tokio_util::sync::CancellationToken::new();
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.worker.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs.clone(), cancelled.clone()),
+        );
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.other.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs, retained.clone()),
+        );
+
+        manager.remove_hicache_caches("ns", "worker");
+
+        assert!(cancelled.is_cancelled());
+        assert!(!retained.is_cancelled());
+        assert!(
+            !manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.worker.generate"))
+        );
+        assert!(
+            manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.other.generate"))
+        );
     }
 
     #[test]

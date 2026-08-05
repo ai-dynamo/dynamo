@@ -1,15 +1,20 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dynamo on Google GKE
 
 Supported manifests for the GKE deployment guide.
 
-**Full guide:** [docs/kubernetes/cloud-providers/gke/gke.md](../../../docs/fern/kubernetes/cloud-providers/gke/gke.mdx)
+**Full guide:** [docs/kubernetes/cloud-providers/gke/gke.md](../../../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx)
 
 ## Contents
 
 | Path | Description |
 |------|-------------|
-| `vllm/` | vLLM DGD manifests (v1alpha1 and `v1beta1/`) |
-| `sglang/` | SGLang DGD manifests (v1alpha1 and `v1beta1/`) |
+| `vllm/` | vLLM `v1beta1` DGD manifests |
+| `sglang/` | SGLang `v1beta1` DGD manifests |
 
 ## Working Directory
 
