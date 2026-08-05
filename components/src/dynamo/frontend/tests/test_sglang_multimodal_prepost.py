@@ -19,6 +19,7 @@ from dynamo.frontend.sglang_prepost import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.multimodal,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -96,3 +97,41 @@ def test_preprocess_feeds_normalized_chunks_to_template():
 
     assert 42 in result.prompt_token_ids
     assert [c["type"] for c in tok.seen] == ["text", "image"]
+
+
+def test_kimi_k3_custom_template_emits_one_media_pad_per_image():
+    """K3's custom tokenizer has no Jinja template and needs image_prompts."""
+
+    class Tokenizer:
+        chat_template = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.seen = messages[0]["content"]
+            self.image_prompts = kwargs.get("image_prompts")
+            return [42 if chunk["type"] == "image" else 1 for chunk in self.seen]
+
+    tok = Tokenizer()
+    request = {
+        "model": "moonshot-ai/Kimi-K3",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    _url_chunk("image"),
+                    _url_chunk("image"),
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+    }
+
+    result = preprocess_chat_request(
+        request,
+        tokenizer=tok,
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+    )
+
+    assert result.prompt_token_ids == [42, 42, 1]
+    assert [chunk["type"] for chunk in tok.seen] == ["image", "image", "text"]
+    assert tok.image_prompts == ["<|media_pad|>", "<|media_pad|>"]
