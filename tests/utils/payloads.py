@@ -145,6 +145,15 @@ class BasePayload:
         """Return the request body for one repeat_count iteration."""
         return self.body
 
+    def declares_log_assertions(self) -> bool:
+        """Whether this payload will assert against the server's log.
+
+        Read at COLLECTION time to classify a test as ``topology_dependent``,
+        so a payload that only populates ``expected_log`` later (per iteration)
+        must override this to say so -- the field alone is not yet truthful.
+        """
+        return bool(self.expected_log)
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")

@@ -926,6 +926,8 @@ def lora_chat_payload(
     )
 
 
+# LoraTestChatPayload POSTs the adapter to a worker system port
+@pytest.mark.topology_dependent
 @pytest.mark.sglang
 @pytest.mark.core
 @pytest.mark.e2e

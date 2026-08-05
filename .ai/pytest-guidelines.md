@@ -395,11 +395,13 @@ Timing comments let AI/automation understand requirements when shuffling test su
 - `deploy`, `planner` -- additional component markers (alongside `core` / `multimodal` /
   `router` / `kvbm` / `fault_tolerance`).
 - `k8s` -- requires Kubernetes.
-- `topology_dependent` -- the test asserts on **how** Dynamo is deployed (routing,
-  per-worker metrics, log patterns, fault injection, scaling, performance) rather
-  than only on the inference response, so it cannot run against an arbitrary
-  frontend URL. Derived automatically for `tests/serve` configs and applied
-  directory-wide for `tests/fault_tolerance`, `tests/router`, `tests/mm_router`.
+- `topology_dependent` -- the test depends on **how** Dynamo is deployed (routing,
+  per-worker metrics or `/health`, log patterns, fault injection, scaling,
+  performance) rather than only on the inference response, so it cannot run
+  against an arbitrary frontend URL. Derived for the parametrized `tests/serve`
+  config dicts and applied directory-wide for `tests/fault_tolerance`,
+  `tests/router`, `tests/mm_router`; a test that builds its `EngineConfig` inline
+  must add it by hand, and `run_serve_deployment` fails fast if it does not.
 
 ### Example
 

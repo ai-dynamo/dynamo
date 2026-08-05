@@ -6,6 +6,7 @@
 import pytest
 
 from tests.serve.common import (
+    _assert_topology_marker,
     _bind_payload_to_ports,
     marks_for_config,
     topology_dependent_reason,
@@ -162,3 +163,61 @@ def test_marks_preserve_config_declared_marks():
     config = _config([_chat()])
     config.marks = [pytest.mark.gpu_1]
     assert "gpu_1" in _mark_names(marks_for_config("cfg", config))
+
+
+def test_worker_health_gating_makes_a_config_topology_dependent():
+    """Probing a worker's /health is not reachable behind a frontend URL."""
+    config = _config([_chat()])
+    config.health_check_workers = True
+    assert "/health" in topology_dependent_reason(config)
+
+
+class _DeferredLogPayload(ChatPayload):
+    """Mirrors UuidPassthroughChatPayload: expected_log is filled per iteration."""
+
+    def declares_log_assertions(self) -> bool:
+        return True
+
+
+def test_log_assertions_declared_after_collection_still_count():
+    """expected_log is empty at collection but the payload says it will assert."""
+    payload = _DeferredLogPayload(body={}, expected_response=[], expected_log=[])
+    assert payload.expected_log == []
+    assert "logs" in topology_dependent_reason(_config([payload]))
+
+
+# --- the runtime guard -------------------------------------------------------
+
+
+class _Node:
+    def __init__(self, marked: bool) -> None:
+        self._marked = marked
+
+    def get_closest_marker(self, name):
+        return object() if (self._marked and name == "topology_dependent") else None
+
+
+class _Request:
+    def __init__(self, marked: bool) -> None:
+        self.node = _Node(marked)
+
+
+def test_guard_passes_for_a_deployment_agnostic_config():
+    _assert_topology_marker(_config([_chat()]), _Request(marked=False))
+
+
+def test_guard_passes_when_a_coupled_config_is_marked():
+    config = _config([_chat(expected_log=["x"])])
+    _assert_topology_marker(config, _Request(marked=True))
+
+
+def test_guard_names_the_reason_and_the_marker_when_unmarked():
+    config = _config([_chat(expected_log=["x"])], name="agg_router")
+    # pytest.fail raises an outcome, not a plain Exception.
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        _assert_topology_marker(config, _Request(marked=False))
+
+    message = str(excinfo.value)
+    assert "agg_router" in message, "names the offending config"
+    assert "asserts on server logs" in message, "names why it is coupled"
+    assert "topology_dependent" in message, "names the marker to add"

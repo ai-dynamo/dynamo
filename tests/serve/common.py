@@ -369,6 +369,10 @@ def run_serve_deployment(
     logger.info("Using model: %s", config.model)
     logger.info("Script: %s", config.script_name)
 
+    # Before anything is launched, so a misclassification costs seconds rather
+    # than a full engine startup.
+    _assert_topology_marker(config, request)
+
     prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
     config = prep.config
     merged_env = prep.merged_env
@@ -424,15 +428,20 @@ def topology_dependent_reason(config: EngineConfig) -> Optional[str]:
 
     * matches regexes against the server's own log file (``expected_log``);
     * scrapes ``/metrics`` on a worker system port rather than the frontend; or
-    * addresses extra system ports directly (control-plane APIs).
+    * addresses extra system ports directly (control-plane APIs),
+
+    or when the config gates readiness on per-worker ``/health`` endpoints.
 
     None of those are reachable through a single frontend URL, so they need a
-    deployment handle. Deriving this from the payloads keeps the marker
-    correct as configs change, instead of relying on each config author to
-    remember it.
+    deployment handle. Deriving this from the config keeps the marker correct
+    as configs change, instead of relying on each config author to remember it.
     """
+    if config.health_check_workers:
+        return "readiness probes per-worker /health on system ports"
     for payload in config.request_payloads or ():
-        if payload.expected_log:
+        # Not `payload.expected_log`: a payload may only populate that field
+        # per iteration, at run time (see UuidPassthroughChatPayload).
+        if payload.declares_log_assertions():
             return f"{type(payload).__name__} asserts on server logs"
         if payload.system_ports:
             return f"{type(payload).__name__} addresses worker system ports"
@@ -442,6 +451,29 @@ def topology_dependent_reason(config: EngineConfig) -> Optional[str]:
         ):
             return f"{type(payload).__name__} scrapes a worker /metrics port"
     return None
+
+
+def _assert_topology_marker(config: EngineConfig, request: Any) -> None:
+    """Fail fast when a config needs a deployment handle but is not marked.
+
+    ``params_with_model_mark`` derives the marker for the parametrized config
+    dicts, but a test that builds its ``EngineConfig`` inline never goes through
+    it. Checking here -- before anything is launched -- covers both shapes and
+    keeps the classification honest as configs change, instead of letting it
+    drift silently into a marker nothing verifies.
+    """
+    reason = topology_dependent_reason(config)
+    if reason is None:
+        return
+    if request.node.get_closest_marker("topology_dependent") is not None:
+        return
+    pytest.fail(
+        f"EngineConfig {config.name!r} is deployment-coupled ({reason}) but the "
+        "test is not marked @pytest.mark.topology_dependent. Either add the "
+        "marker, or make the config assert only on the inference response. See "
+        "tests/README.md 'Deployment-agnostic tests'.",
+        pytrace=False,
+    )
 
 
 def marks_for_config(config_name: str, cfg: EngineConfig) -> list:

@@ -160,18 +160,29 @@ Dynamo is deployed. Legitimate reasons:
 None of those are reachable through a single frontend URL. Everything else
 should not carry the marker.
 
-For `tests/serve`, the marker is derived automatically from the config's
-payloads by `topology_dependent_reason()` in `tests/serve/common.py` -- you do
-not add it by hand. `tests/fault_tolerance/`, `tests/router/` and
-`tests/mm_router/` apply it directory-wide from their `conftest.py`.
+For the parametrized `tests/serve` config dicts, the marker is derived from the
+config by `topology_dependent_reason()` in `tests/serve/common.py` -- you do not
+add it by hand. A test that builds its `EngineConfig` **inline in the test body**
+never goes through that derivation, so it must carry the marker itself.
+`tests/fault_tolerance/`, `tests/router/` and `tests/mm_router/` apply it
+directory-wide from their `conftest.py`.
 
-Two guardrails back the rule up:
+Three guardrails back the rule up:
 
+- `run_serve_deployment` fails the test, before launching anything, if a config
+  is deployment-coupled but the test is not marked. This is what catches the
+  inline-config case, and it names both the reason and the marker to add.
 - `run_payloads` raises if a payload sets `expected_log` and no `log_source` was
   supplied, naming `topology_dependent` in the message.
 - The in-container CI jobs run with `... and not k8s` appended centrally in
   `.github/actions/pytest{,-local}/action.yml`, so a cluster test can never be
   collected into a job that has no cluster.
+
+> [!NOTE]
+> A payload that only populates `expected_log` at run time (per iteration, like
+> `UuidPassthroughChatPayload`) must override `declares_log_assertions()` to
+> return `True`. The derivation runs at collection time, when the field is still
+> empty.
 
 #### Keep the shared layer importable without `ai-dynamo`
 
