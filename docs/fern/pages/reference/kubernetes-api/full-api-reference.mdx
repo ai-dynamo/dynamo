@@ -1501,7 +1501,7 @@ DeviceClassName is the DRA DeviceClass to request GPUs from.
 </ParamField>
 
 <ParamField path="extraClientContainers" type="string array">
-ExtraClientContainers lists additional user-declared containers that should be wired as GMS clients in pods rendered from the enclosing spec. DGD/DCD services apply this to service pods. Auto-created checkpoints apply checkpoint job clients before creating the DynamoCheckpoint; manual DynamoCheckpoint users must provide an already-prepared pod template. In each rendered pod, only matching container names are wired; absent names are ignored.
+ExtraClientContainers lists additional user-declared containers that should be wired as GMS clients in pods rendered from the enclosing spec. DGD/DCD services apply this to service pods. Auto-created checkpoints apply checkpoint job clients before creating the DynamoCheckpoint; manual DynamoCheckpoint users must provide an already-prepared pod template. Every name must match a user-declared container in the enclosing pod spec.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3654,7 +3654,7 @@ deviceClassName is the DRA `DeviceClass` to request GPUs from.
 </ParamField>
 
 <ParamField path="extraClientContainers" type="string array">
-extraClientContainers lists additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under checkpoint.job.gmsClientContainers. In each rendered pod, only matching container names are wired; absent names are ignored.
+extraClientContainers lists additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under checkpoint.job.gmsClientContainers. Every name must match a container in the enclosing component's podTemplate.spec.containers.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3818,7 +3818,7 @@ PVCName is the name of the PersistentVolumeClaim containing model weights. The P
 </ParamField>
 
 <ParamField path="pvcModelPath" type="string">
-PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a container-visible absolute path already under PVCMountPath. Such an absolute path is interpreted as container-visible; use the relative form without a leading slash to address the same path prefix within the PVC.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
