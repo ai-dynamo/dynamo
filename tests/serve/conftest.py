@@ -36,10 +36,17 @@ MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 MULTIMODAL_VIDEO_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/triangle_240p_10.mp4"
 )
-# The H.264/H.265 clips exercise the NVDEC hardware-decode path. They MUST be
-# fetched over http(s): the backends only route http(s) video through NVDEC
-# (file:// video isn't hardware-decoded, and the shipped images carry no software
-# H.264/H.265 decoder). Served by the image_server fixture.
+# The H.264/H.265 clips exercise the NVDEC hardware-decode path, served over http
+# by the image_server fixture.
+#
+# An earlier revision of this note claimed file:// video is not hardware-decoded.
+# That is wrong for vLLM and SGLang: both read local media through
+# read_local_media_bytes and then route it to NVDEC exactly as they do http(s)
+# (common/multimodal/video_loader.py, sglang encode_worker_handler.py), because
+# otherwise a local H.264 file would reach only the software decoder these images
+# do not ship. TensorRT-LLM is the exception -- it has its own
+# allowed_local_media_path handling and no NVDEC routing for local paths.
+# MULTIMODAL_VIDEO_H264_FILE_URI below covers the local path.
 _MEDIA_DIR = os.path.join(WORKSPACE_DIR, "lib/llm/tests/data/media")
 _HTTP_SERVED_VIDEOS = (
     "triangle_240p_10.mp4",
@@ -56,6 +63,17 @@ MULTIMODAL_VIDEO_H265_URL = (
 # than a local file. Prefer this over any third-party URL: a remote host is an
 # availability dependency the test does not control.
 MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/triangle_240p_10.mp4"
+# The same H.264 clip addressed as a local file. Reading it is gated by
+# DYN_MM_LOCAL_PATH, which must name a directory containing the clip --
+# MULTIMODAL_MEDIA_DIR below. Worth covering separately from http: the local
+# branch has its own read path (read_local_media_bytes rather than a fetch)
+# before it reaches the same NVDEC routing, so an http-only suite leaves the
+# whole local read, its policy gate, and its hand-off to the decoder untested.
+MULTIMODAL_VIDEO_H264_FILE_URI = (
+    f"file://{os.path.join(_MEDIA_DIR, 'triangle_240p_10_h264.mp4')}"
+)
+# Value for DYN_MM_LOCAL_PATH in tests that use the file:// URI above.
+MULTIMODAL_MEDIA_DIR = _MEDIA_DIR
 # What the clip depicts, for expected_response assertions. The subject is chosen
 # so the answer is unambiguous: a model that decoded the frames says "triangle",
 # and one that did not cannot say it by luck.

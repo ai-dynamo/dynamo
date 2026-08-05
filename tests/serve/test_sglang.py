@@ -17,7 +17,9 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.conftest import (
+    MULTIMODAL_MEDIA_DIR,
     MULTIMODAL_VIDEO_EXPECTED,
+    MULTIMODAL_VIDEO_H264_FILE_URI,
     MULTIMODAL_VIDEO_H264_URL,
     MULTIMODAL_VIDEO_H265_URL,
     MULTIMODAL_VIDEO_URL,
@@ -641,6 +643,11 @@ sglang_configs = {
             # worker refuses the URL before NVDEC sees it and falls back to the
             # URL path, which has no decoder in this image.
             "DYN_MM_ALLOW_INTERNAL": "1",
+            # Permits the file:// payload below. The local branch reads through
+            # read_local_media_bytes instead of fetching, then joins the same
+            # NVDEC routing, so without a file:// case that read, its policy
+            # gate, and its hand-off to the decoder are never exercised.
+            "DYN_MM_LOCAL_PATH": MULTIMODAL_MEDIA_DIR,
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -654,7 +661,14 @@ sglang_configs = {
                 temperature=0.0,
                 max_tokens=100,
             )
-            for url in (MULTIMODAL_VIDEO_H264_URL, MULTIMODAL_VIDEO_H265_URL)
+            # The same clip over http and as a local file. All three are the
+            # identical triangle footage, so a difference in the answer points at
+            # the transport rather than at the model or the encoding.
+            for url in (
+                MULTIMODAL_VIDEO_H264_URL,
+                MULTIMODAL_VIDEO_H265_URL,
+                MULTIMODAL_VIDEO_H264_FILE_URI,
+            )
         ],
     ),
     "video_e_pd_qwen": SGLangConfig(
