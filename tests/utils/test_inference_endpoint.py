@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.utils.inference_endpoint import (
+    DEFAULT_SETTLE_SECONDS,
     DeploymentEndpoints,
     InferenceEndpoint,
     NotServingError,
@@ -147,6 +148,26 @@ def test_wait_until_serving_returns_once_a_request_succeeds(monkeypatch):
     )
     assert len(calls) == 3
     assert calls[0] == "http://x:1/v1/chat/completions"
+
+
+def test_wait_until_serving_settles_before_returning(monkeypatch):
+    """The first 200 can land while the rest of the graph is still coming up."""
+    slept = []
+    monkeypatch.setattr(
+        "tests.utils.inference_endpoint.send_request",
+        lambda url, payload, **kwargs: _FakeResponse(200),
+    )
+    monkeypatch.setattr(
+        "tests.utils.inference_endpoint.time.sleep", lambda s: slept.append(s)
+    )
+
+    endpoint = InferenceEndpoint(base_url="http://x:1", model="m")
+    wait_until_serving(endpoint, timeout=30)
+    assert slept == [DEFAULT_SETTLE_SECONDS]
+
+    slept.clear()
+    wait_until_serving(endpoint, timeout=30, settle_seconds=0)
+    assert slept == [], "settle_seconds=0 opts out"
 
 
 def test_wait_until_serving_raises_with_the_last_failure(monkeypatch):

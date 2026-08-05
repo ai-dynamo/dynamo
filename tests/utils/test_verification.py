@@ -96,6 +96,46 @@ def test_expected_model_mismatch_is_reported():
         check_response(payload, _chat_response(model="served"))
 
 
+def test_require_content_field_rejects_a_refusal_that_is_long_enough():
+    """extract_content falls back to `refusal`, so length alone is not enough."""
+    payload = _chat_payload(min_content_length=10, require_content_field=True)
+    response = _FakeResponse(
+        {
+            "model": "m",
+            "choices": [
+                {"message": {"role": "assistant", "refusal": "I cannot help with that"}}
+            ],
+        }
+    )
+    with pytest.raises(ResponseValidationError, match="missing 'content'"):
+        check_response(payload, response)
+
+
+def test_require_content_field_measures_message_content_not_the_fallback():
+    payload = _chat_payload(min_content_length=100, require_content_field=True)
+    response = _FakeResponse(
+        {
+            "model": "m",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "short",
+                        "reasoning_content": "x" * 500,
+                    }
+                }
+            ],
+        }
+    )
+    with pytest.raises(ResponseValidationError, match="content"):
+        check_response(payload, response)
+
+
+def test_require_content_field_accepts_real_content():
+    payload = _chat_payload(min_content_length=10, require_content_field=True)
+    check_response(payload, _chat_response())
+
+
 def test_expected_role_mismatch_is_reported():
     payload = _chat_payload(expected_role="assistant")
     response = _FakeResponse(

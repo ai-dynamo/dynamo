@@ -88,9 +88,10 @@ def deployment_smoke_chat_payload(
     port-forwarded Kubernetes frontend, remote ingress) with
     ``payload.bind(endpoint)``.
 
-    Asserts response shape, an assistant role, a substantive answer, and that
-    the frontend echoed back the model that was requested -- there is no
-    keyword expectation because the answer is open-ended.
+    Asserts response shape, an assistant role, a substantive answer in
+    ``message["content"]`` specifically, and that the frontend echoed back the
+    model that was requested. There is no keyword expectation because the
+    answer is open-ended.
     """
     return ChatPayload(
         body={
@@ -106,6 +107,7 @@ def deployment_smoke_chat_payload(
         min_content_length=min_content_length,
         expected_model=model,
         expected_role="assistant",
+        require_content_field=True,
     )
 
 

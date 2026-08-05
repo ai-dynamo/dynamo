@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 # while the model is still loading.
 DEFAULT_READINESS_ENDPOINT = "/v1/chat/completions"
 
+# Pause after the first successful probe before declaring the deployment ready.
+# Carried over from wait_for_model_availability, which slept 5s at the same
+# point. The first request can succeed while the rest of the graph is still
+# settling (workers registering, the router filling its view), and the tests
+# that follow send a single non-retried request. Removing it is a separate,
+# measurable change rather than a side effect of this refactor.
+DEFAULT_SETTLE_SECONDS = 5.0
+
 
 class NotServingError(RuntimeError):
     """A deployment did not become able to serve inference in time."""
@@ -182,6 +190,7 @@ def wait_until_serving(
     timeout: float = 300.0,
     poll_interval: float = 5.0,
     request_timeout: float = 30.0,
+    settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     log: Optional[logging.Logger] = None,
 ) -> None:
     """Block until the deployment serves inference, or raise.
@@ -230,11 +239,14 @@ def wait_until_serving(
         )
         if not reason:
             log.info(
-                "Deployment at %s is serving %s (attempt %d)",
+                "Deployment at %s is serving %s (attempt %d); settling %.0fs",
                 endpoint.base_url,
                 model or endpoint.model,
                 attempt,
+                settle_seconds,
             )
+            if settle_seconds > 0:
+                time.sleep(settle_seconds)
             return
         log.debug(
             "Not serving yet at %s (attempt %d): %s",

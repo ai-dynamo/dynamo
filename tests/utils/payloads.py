@@ -232,6 +232,11 @@ class ChatPayload(BasePayload):
     expected_num_choices: Optional[int] = None
     # When set, assert the first choice's message carries this role.
     expected_role: Optional[str] = None
+    # When True, assert the answer came back in message["content"] specifically.
+    # extract_content() deliberately falls back to reasoning_content, refusal
+    # and tool-call arguments, so without this a refusal long enough to clear
+    # min_content_length would pass as a successful generation.
+    require_content_field: bool = False
 
     @staticmethod
     def extract_content(response):
@@ -286,11 +291,25 @@ class ChatPayload(BasePayload):
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
 
-        if self.expected_role is not None:
-            role = response.json()["choices"][0]["message"].get("role")
-            assert (
-                role == self.expected_role
-            ), f"Expected role '{self.expected_role}', got '{role}'"
+        if self.expected_role is not None or self.require_content_field:
+            message = response.json()["choices"][0]["message"]
+
+            if self.expected_role is not None:
+                role = message.get("role")
+                assert (
+                    role == self.expected_role
+                ), f"Expected role '{self.expected_role}', got '{role}'"
+
+            if self.require_content_field:
+                assert (
+                    "content" in message
+                ), f"Message missing 'content' field: {message}"
+                assert len(message["content"] or "") >= self.min_content_length, (
+                    f"message['content'] too short: "
+                    f"{len(message['content'] or '')} chars "
+                    f"(min: {self.min_content_length}). "
+                    f"Content: {str(message['content'])[:200]}"
+                )
 
         if self.expected_num_choices is None:
             return
