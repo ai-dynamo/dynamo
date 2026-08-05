@@ -61,7 +61,10 @@ class XpuVMM(VMMDevice):
         _sycl_vmm.ensure_initialized()
 
     def synchronize(self) -> None:
-        _sycl_vmm.synchronize()
+        # Device-wide barrier: drain ALL queues
+        import torch
+
+        torch.xpu.synchronize()
 
     # ----- discovery / sizing -----------------------------------------------
 
@@ -69,10 +72,12 @@ class XpuVMM(VMMDevice):
         return list(range(_sycl_vmm.device_count()))
 
     def device_memory_info(self, device: int) -> tuple[int, int]:
-        free_bytes, total_bytes = _sycl_vmm.device_memory_info(device)
-        # Workaround: NEO driver does not reflect VMM zePhysicalMemCreate
-        # allocations in free-memory queries. Subtract our internally tracked
-        # VMM usage so the allocator sees accurate free memory.
+        # zePhysicalMemCreate allocations not reflected in
+        # free-memory queries; subtract internally tracked VMM usage.
+        # TODO: remove vmm_used subtraction post gpu runtime updated.
+        import torch
+
+        free_bytes, total_bytes = torch.xpu.mem_get_info(device)
         vmm_used = _sycl_vmm.total_allocated_bytes()
         free_bytes = max(0, free_bytes - vmm_used)
         return (free_bytes, total_bytes)
@@ -94,11 +99,20 @@ class XpuVMM(VMMDevice):
         return _sycl_vmm.ipc_export_fd(handle)
 
     def import_shareable_handle_close_fd(self, fd: int, import_size: int = 0) -> int:
-        # import_fd closes the FD (matching CUDA contract).
-        # L0 interop path requires import_size for zePhysicalMemCreate.
-        return _sycl_vmm.ipc_import_fd(
-            fd, dev_idx=self._active_device, import_size=import_size
-        )
+        # L0 takes ownership of the FD on success (closes it internally).
+        # On failure the FD is NOT consumed — close it here to avoid leaks.
+        try:
+            return _sycl_vmm.ipc_import_fd(
+                fd, dev_idx=self._active_device, import_size=import_size
+            )
+        except BaseException:
+            import os
+
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     # ----- virtual address space + mapping ----------------------------------
 

@@ -38,7 +38,6 @@ def _try_load_from_build_dir():
 try:
     from gpu_memory_service.common.vmm._sycl_vmm._sycl_vmm import *  # noqa: F401,F403
     from gpu_memory_service.common.vmm._sycl_vmm._sycl_vmm import (  # noqa: F401
-        HAS_SYCL_FREE_MEMORY,
         HAS_SYCL_HOST_REGISTER,
         HAS_SYCL_IPC,
         ONEAPI_VERSION,

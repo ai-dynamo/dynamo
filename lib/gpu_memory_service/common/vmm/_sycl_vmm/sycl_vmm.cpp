@@ -32,7 +32,8 @@
 #include <sycl/ext/oneapi/virtual_mem/physical_mem.hpp>
 #include <sycl/ext/oneapi/virtual_mem/virtual_mem.hpp>
 #else
-#error "SYCL VMM headers not found. Requires oneAPI 2026.0+ (IPC needs ipc_memory.hpp)."
+#error \
+    "SYCL VMM headers not found. Requires a oneAPI DPC++ compiler with sycl::ext::oneapi::experimental virtual_mem support."
 #endif
 
 // --- IPC: L0 interop path ---
@@ -51,14 +52,6 @@
 #define SYCL_HAS_HOST_REGISTER 1
 #else
 #define SYCL_HAS_HOST_REGISTER 0
-#endif
-
-// --- Intel free_memory extension (compile-time guarded) ---
-#if __has_include(<sycl/ext/intel/info/device.hpp>)
-#include <sycl/ext/intel/info/device.hpp>
-#define SYCL_HAS_FREE_MEMORY 1
-#else
-#define SYCL_HAS_FREE_MEMORY 0
 #endif
 
 #include <cstdint>
@@ -83,8 +76,6 @@ namespace syclex = sycl::ext::oneapi::experimental;
 struct DeviceState {
   sycl::device device;
   sycl::context context;
-  // Default in-order queue for synchronize() and fallback memcpy.
-  sycl::queue default_queue;
   // Cached aspect flags — checked once at init, immutable after.
   bool has_vmm;
   bool has_ipc;
@@ -109,18 +100,6 @@ static std::unordered_map<int64_t, sycl::queue> g_stream_handles;
 // torch.xpu.mem_get_info). Track committed bytes internally until the driver
 // accounting is fixed.
 static std::atomic<size_t> g_total_allocated_bytes{0};
-
-// For L0 interop IPC:
-// - g_l0_phys_handles: tracks L0 physical_mem handles (both local and imported)
-// - g_next_imported_id: ID generator for imported IPC handles (negative to distinguish)
-struct L0ImportedMem {
-  ze_context_handle_t context;
-  ze_physical_mem_handle_t phys;
-  void* va;
-  size_t size;
-};
-static std::unordered_map<int64_t, L0ImportedMem> g_imported_l0;
-static int64_t g_next_imported_id = -1;  // negative IDs for imported handles
 
 // L0 native physical_mem handles — for IPC-capable allocations created via L0
 // directly (because SYCL physical_mem constructor cannot pass export flags).
@@ -190,16 +169,14 @@ ensure_initialized()
   if (all_gpu_devices.empty())
     throw std::runtime_error("_sycl_vmm: no GPU devices found");
 
-  // Filter to VMM-capable devices only. On systems with both Level-Zero and
-  // OpenCL backends, the same GPU appears twice — only the Level-Zero device
-  // supports VMM (virtual memory management).
+  // Filter to VMM-capable devices only
+  // Only the Level-Zero device supports VMM (virtual memory management).
   g_devices.clear();
   g_devices.reserve(all_gpu_devices.size());
   for (auto& dev : all_gpu_devices) {
     if (!dev.has(sycl::aspect::ext_oneapi_virtual_mem))
-      continue;  // skip OpenCL / non-VMM devices
+      continue;
     auto ctx = dev.get_platform().khr_get_default_context();
-    sycl::queue q{ctx, dev, sycl::property::queue::in_order{}};
     bool vmm = dev.has(sycl::aspect::ext_oneapi_virtual_mem);
     bool ipc = false;
     bool hreg = false;
@@ -207,12 +184,12 @@ ensure_initialized()
 #if SYCL_HAS_HOST_REGISTER
     hreg = dev.has(sycl::aspect::ext_oneapi_register_host_memory);
 #endif
-    g_devices.push_back(DeviceState{dev, ctx, std::move(q), vmm, ipc, hreg});
+    g_devices.push_back(DeviceState{dev, ctx, vmm, ipc, hreg});
   }
   if (g_devices.empty())
     throw std::runtime_error(
         "_sycl_vmm: no VMM-capable GPU devices found. "
-        "VMM requires the Level-Zero backend (not OpenCL).");
+        "VMM requires the Level-Zero backend for XPU.");
   g_initialized = true;
 }
 
@@ -222,23 +199,6 @@ device_count()
   if (!g_initialized)
     ensure_initialized();
   return static_cast<int>(g_devices.size());
-}
-
-static py::tuple
-device_memory_info(int dev_idx)
-{
-  auto& ds = dev_state(dev_idx);
-  uint64_t total = ds.device.get_info<sycl::info::device::global_mem_size>();
-  uint64_t free_bytes = total;  // default: report total as free
-#if SYCL_HAS_FREE_MEMORY
-  try {
-    free_bytes = ds.device.get_info<sycl::ext::intel::info::device::free_memory>();
-  }
-  catch (...) {
-    // Fallback to total if the extension query fails on this device/driver.
-  }
-#endif
-  return py::make_tuple(free_bytes, total);
 }
 
 static std::string
@@ -358,7 +318,6 @@ physical_mem_create(int dev_idx, size_t size, bool want_ipc)
   size = ((size + gran - 1) / gran) * gran;
 
   try {
-    // physical_mem(device, context, size) â standard constructor.
     if (want_ipc) {
       // L0 interop: create physical_mem via L0 directly with export flag.
       ze_context_handle_t l0_ctx = _get_l0_context(ds.context);
@@ -419,8 +378,8 @@ physical_mem_release(int64_t handle_id)
         ::close(l0_it->second.cached_export_fd);
       zePhysicalMemDestroy(l0_it->second.context, l0_it->second.phys);
     }
-    // Imported handles: do NOT call zePhysicalMemDestroy (NEO driver DMA-BUF
-    // refcount bug — destroying an imported copy corrupts the shared backing).
+    // Imported handles: do NOT call zePhysicalMemDestroy (GPU runtime driver DMA-BUF
+    // refcount sighting — destroying an imported copy corrupts the shared backing).
     g_l0_phys_handles.erase(l0_it);
     return;
   }
@@ -486,12 +445,6 @@ physical_mem_size(int64_t handle_id)
 // Uses zePhysicalMemGetProperties (export) and zePhysicalMemCreate (import)
 // with external memory FD extension. Validated by ipc_spike_vmm.
 
-static void
-_check_ipc_aspect(int /*dev_idx*/)
-{
-  // L0 interop IPC is always available on this path (compile-time selected).
-}
-
 // Export: extract POSIX FD from a L0 physical_mem via zePhysicalMemGetProperties.
 // The allocation must have been created with want_ipc=true (which uses L0 with export flag).
 static int
@@ -504,7 +457,7 @@ ipc_export_fd(int64_t handle_id)
 
   auto& lm = l0_it->second;
 
-  // NEO driver bug: zePhysicalMemGetProperties caches the export fd internally
+  // GPU runtime sighting: zePhysicalMemGetProperties caches the export fd internally
   // and returns the SAME (stale) number on repeat calls even after the fd was
   // closed. Workaround: call GetProperties only once, cache the fd, and return
   // dup() copies to callers.
@@ -576,34 +529,6 @@ ipc_import_fd(int fd, int dev_idx, size_t import_size = 0)
   return id;
 }
 
-static void
-ipc_put_handle(py::bytes)
-{ /* no-op */
-}
-
-static uintptr_t
-ipc_get_mapped_ptr(int64_t /*handle_id*/)
-{
-  // With positive-ID import (stored in g_l0_phys_handles), the caller uses
-  // physical_mem_map() to bind to a VA. This function is kept for API compat.
-  throw std::runtime_error(
-      "_sycl_vmm: ipc_get_mapped_ptr not applicable with L0 interop path. "
-      "Use physical_mem_map() on the imported handle instead.");
-}
-
-static void
-ipc_close_imported(int64_t handle_id)
-{
-  // Imported handles are now in g_l0_phys_handles; use physical_mem_release.
-  physical_mem_release(handle_id);
-}
-
-static bool
-ipc_is_pointer_based()
-{
-  return false;
-}
-
 
 // --- Host register ---------------------------------------------------------
 
@@ -615,8 +540,7 @@ host_register(uintptr_t ptr, size_t size)
   if (!ds.has_host_register)
     throw std::runtime_error(
         "_sycl_vmm: device does not support host memory registration "
-        "(aspect::ext_oneapi_register_host_memory). "
-        "Ensure oneAPI 2026.1+ is in use.");
+        "(aspect::ext_oneapi_register_host_memory not advertised by this device).");
   syclex::register_host_memory(reinterpret_cast<void*>(ptr), size, ds.context);
 }
 static void
@@ -720,13 +644,6 @@ get_pointer_type(uintptr_t ptr, int dev_idx)
   }
 }
 
-// --- Global synchronize ---------------------------------------------------
-
-static void
-synchronize()
-{
-  active_dev().default_queue.wait_and_throw();
-}
 
 // ============================================================================
 // pybind11 module definition
@@ -764,10 +681,8 @@ PYBIND11_MODULE(_sycl_vmm, m)
   // --- runtime / discovery ---
   m.def("ensure_initialized", &ensure_initialized, "Initialize SYCL runtime and cache GPU devices/contexts");
   m.def("device_count", &device_count, "Return number of GPU devices");
-  m.def("device_memory_info", &device_memory_info, "Return (free_bytes, total_bytes) for a device", py::arg("dev_idx"));
   m.def("device_uuid", &device_uuid, "Return GPU UUID string for a device (GPU-xxxx-... format)", py::arg("dev_idx"));
   m.def("set_device", &set_device, "Set the active device for subsequent operations", py::arg("dev_idx"));
-  m.def("synchronize", &synchronize, "Wait for all work on the active device's default queue");
 
   // --- VMM core ---
   m.def(
@@ -790,7 +705,7 @@ PYBIND11_MODULE(_sycl_vmm, m)
   m.def(
       "total_allocated_bytes", &total_allocated_bytes,
       "Return total bytes committed via physical_mem_create (internal tracking; "
-      "workaround for NEO driver not reflecting VMM in free-memory queries)");
+      "workaround for GPU runtime not reflecting VMM in free-memory queries)");
   m.def(
       "physical_mem_map", &physical_mem_map, "Map physical memory to a VA range", py::arg("handle_id"), py::arg("ptr"),
       py::arg("size"), py::arg("mode") = 2);
@@ -804,17 +719,6 @@ PYBIND11_MODULE(_sycl_vmm, m)
   m.def(
       "ipc_import_fd", &ipc_import_fd, "Import a physical_mem handle from a memfd FD; closes the FD", py::arg("fd"),
       py::arg("dev_idx"), py::arg("import_size") = 0);
-  m.def("ipc_put_handle", &ipc_put_handle, "Release an IPC handle's resources", py::arg("handle_bytes"));
-  m.def(
-      "ipc_get_mapped_ptr", &ipc_get_mapped_ptr,
-      "Get the device pointer for an imported IPC handle (2026.0 pointer-based API only)", py::arg("handle_id"));
-  m.def(
-      "ipc_close_imported", &ipc_close_imported,
-      "Close/release an imported IPC handle (pointer API: unmaps pointer; physical_mem API: releases handle)",
-      py::arg("handle_id"));
-  m.def(
-      "ipc_is_pointer_based", &ipc_is_pointer_based,
-      "Returns True if this build uses pointer-based IPC (2026.0), False for physical_mem-based (future)");
 
   // --- host register ---
   m.def("host_register", &host_register, "Pin host memory for DMA access", py::arg("ptr"), py::arg("size"));
@@ -863,7 +767,6 @@ PYBIND11_MODULE(_sycl_vmm, m)
 
   m.attr("HAS_SYCL_IPC") = py::bool_(SYCL_HAS_IPC != 0);
   m.attr("HAS_SYCL_HOST_REGISTER") = py::bool_(SYCL_HAS_HOST_REGISTER != 0);
-  m.attr("HAS_SYCL_FREE_MEMORY") = py::bool_(SYCL_HAS_FREE_MEMORY != 0);
 #ifdef __INTEL_LLVM_COMPILER
   m.attr("ONEAPI_VERSION") = py::int_(__INTEL_LLVM_COMPILER);
 #else

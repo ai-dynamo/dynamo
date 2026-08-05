@@ -81,7 +81,7 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
 def _ensure_callbacks_initialized() -> None:
     global _callbacks_initialized, _pluggable_alloc
 
-    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
+    from gpu_memory_service.client.torch.extensions import _allocator_ext as _alloc_ext
 
     if _callbacks_initialized:
         return
@@ -91,18 +91,20 @@ def _ensure_callbacks_initialized() -> None:
         from torch.cuda import CUDAPluggableAllocator
 
         _pluggable_alloc = CUDAPluggableAllocator(
-            cumem.__file__, "my_malloc", "my_free"
+            _alloc_ext.__file__, "my_malloc", "my_free"
         )
     elif device_type == VMMDeviceType.XPU:
         from torch.xpu import XPUPluggableAllocator
 
-        _pluggable_alloc = XPUPluggableAllocator(cumem.__file__, "my_malloc", "my_free")
+        _pluggable_alloc = XPUPluggableAllocator(
+            _alloc_ext.__file__, "my_malloc", "my_free"
+        )
     else:
         raise NotImplementedError(
             f"GMS torch mempool integration unsupported for device_type={device_type.value}"
         )
 
-    cumem.init_module(_gms_malloc, _gms_free)
+    _alloc_ext.init_module(_gms_malloc, _gms_free)
     _callbacks_initialized = True
 
 
