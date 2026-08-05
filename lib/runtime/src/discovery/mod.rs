@@ -7,6 +7,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::EndpointId;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
@@ -22,7 +23,7 @@ mod kube;
 pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
-use crate::component::{DeviceType, TransportType};
+use crate::component::{DeviceType, Instance, TransportType};
 pub use utils::watch_and_extract_field;
 
 /// Largest publisher ID exactly representable by float64-backed JSON metadata.
@@ -1096,10 +1097,52 @@ impl DiscoveryInstanceId {
 /// Events emitted by the discovery watch stream
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryEvent {
-    /// A new instance was added
+    /// A new instance was added.
+    ///
+    /// Endpoint watches also emit this event when the endpoint data changes without changing its
+    /// [`DiscoveryInstanceId`]. Consumers of endpoint watches must replace the previous value.
     Added(DiscoveryInstance),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
+}
+
+pub(crate) fn diff_discovery_instances(
+    known_ids: &HashSet<DiscoveryInstanceId>,
+    known_endpoints: &HashMap<DiscoveryInstanceId, Instance>,
+    current: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+) -> (Vec<DiscoveryInstance>, Vec<DiscoveryInstanceId>) {
+    let upserted = current
+        .iter()
+        .filter(|(id, instance)| {
+            if !known_ids.contains(*id) {
+                return true;
+            }
+            matches!(
+                instance,
+                DiscoveryInstance::Endpoint(endpoint)
+                    if known_endpoints.get(*id) != Some(endpoint)
+            )
+        })
+        .map(|(_, instance)| instance.clone())
+        .collect();
+    let removed = known_ids
+        .iter()
+        .filter(|id| !current.contains_key(*id))
+        .cloned()
+        .collect();
+    (upserted, removed)
+}
+
+pub(crate) fn endpoint_instances(
+    instances: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+) -> HashMap<DiscoveryInstanceId, Instance> {
+    instances
+        .iter()
+        .filter_map(|(id, instance)| match instance {
+            DiscoveryInstance::Endpoint(endpoint) => Some((id.clone(), endpoint.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Stream type for discovery events

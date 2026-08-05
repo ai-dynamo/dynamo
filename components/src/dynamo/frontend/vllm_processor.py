@@ -516,12 +516,14 @@ class VllmProcessor:
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:
-            sampling_params.logprobs = top_logprobs or 1
+            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
         elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
             sampling_params.logprobs = logprobs
         elif top_logprobs not in (None, 0):
             sampling_params.logprobs = top_logprobs
-        if sampling_params.logprobs is not None and sampling_params.logprobs > 0:
+        # TODO: Support logprobs in the distributed vLLM chat processor by
+        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
+        if sampling_params.logprobs is not None:
             logger.warning(
                 "Logprobs requested but not supported in distributed inference mode"
             )

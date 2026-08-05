@@ -169,13 +169,17 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
             .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
-fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
+fn supports_generate_capability(card: &ModelDeploymentCard, capability: &str) -> bool {
     matches!(
-        card.runtime_config
-            .runtime_data
-            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        card.runtime_config.runtime_data.get(capability),
         Some(serde_json::Value::Bool(true))
     )
+}
+
+fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[&str]) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| supports_generate_capability(card, capability))
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -258,9 +262,9 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
-    /// Whether the frontend configured the vLLM-compatible Generate API.
-    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
-    generate_engine_enabled: bool,
+    /// Worker capabilities accepted by the frontend's engine-native Generate routes.
+    /// Keep raw pipelines out of default-off and backend-mismatched paths.
+    generate_engine_capabilities: Vec<&'static str>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -384,7 +388,7 @@ impl ModelWatcher {
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
-            generate_engine_enabled: false,
+            generate_engine_capabilities: Vec::new(),
         }
     }
 
@@ -400,8 +404,15 @@ impl ModelWatcher {
         self.tokenizer_backend = tokenizer_backend;
     }
 
+    pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
+        self.generate_engine_capabilities = capabilities;
+    }
+    /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
-        self.generate_engine_enabled = enabled;
+        self.generate_engine_capabilities = enabled
+            .then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .into_iter()
+            .collect();
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
@@ -1042,7 +1053,6 @@ impl ModelWatcher {
                 card.name() == model_name && namespace_filter.matches(&endpoint_id.namespace)
             })
             .collect::<Vec<_>>();
-
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
@@ -1103,6 +1113,7 @@ impl ModelWatcher {
                 && eid.component == *worker_component
                 && worker_set_key(eid, other_card.model_type, other_card.worker_type) == ws_key
         });
+
         let endpoint_has_instances =
             has_live_endpoint_card(&all_cards, worker_namespace, worker_component);
 
@@ -1600,7 +1611,7 @@ impl ModelWatcher {
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
-                self.generate_engine_enabled && supports_vllm_generate(card);
+                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2195,6 +2206,7 @@ fn seed_lora_state_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
 
     fn test_endpoint_id(name: &str) -> EndpointId {
@@ -2218,20 +2230,23 @@ mod tests {
     }
 
     #[test]
-    fn vllm_generate_requires_explicit_worker_capability() {
+    fn generate_requires_enabled_matching_worker_capability() {
+        const OTHER_GENERATE_CAPABILITY: &str = "other_generate";
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.model_type = ModelType::Chat | ModelType::Completions;
-        assert!(!supports_vllm_generate(&card));
-
         card.runtime_config
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
             .unwrap();
-        assert!(supports_vllm_generate(&card));
 
-        card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
-            .unwrap();
-        assert!(!supports_vllm_generate(&card));
+        assert!(supports_enabled_engine_generate(
+            &card,
+            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+        ));
+        assert!(!supports_enabled_engine_generate(&card, &[]));
+        assert!(!supports_enabled_engine_generate(
+            &card,
+            &[OTHER_GENERATE_CAPABILITY]
+        ));
     }
 
     #[test]
