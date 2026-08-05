@@ -62,8 +62,8 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-import importlib.util
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -137,33 +137,35 @@ _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {
 }
 
 
-def _module_available(module: str) -> bool:
-    """Return True if `module` can be imported in this interpreter."""
-    try:
-        return importlib.util.find_spec(module) is not None
-    except (ImportError, ValueError):
-        return False
-
-
 def _modules_missing_fresh(modules: Sequence[str]) -> list[str]:
-    """Return the subset of `modules` a FRESH interpreter cannot import.
+    """Return the subset of `modules` a FRESH interpreter cannot IMPORT.
 
-    Post-install verification must not ask this process: running as a
-    non-root user, pip defaults to a user-site install, and a user-site
-    directory created after this interpreter started is never added to its
-    ``sys.path`` (``site.py`` only does that at startup, and
+    Fresh interpreter, not this process: running as a non-root user, pip
+    defaults to a user-site install, and a user-site directory created after
+    the parent interpreter started is never added to its ``sys.path``
+    (``site.py`` only does that at startup, and
     ``importlib.invalidate_caches()`` cannot add path entries). Verified on
     all three runtime images: the same-process check reported the install
     missing while a fresh process imported it fine. What matters
     operationally is the worker process launched after this command --
     which is exactly a fresh interpreter.
+
+    Real import, not ``find_spec``: a package whose files are present but
+    whose native libraries cannot load (a broken or partially removed wheel)
+    has a spec and would be treated as installed, silently skipping the
+    install and deferring the failure to request time. Importing in the
+    probe subprocess keeps this process's module state untouched.
     """
     if not modules:
         return []
     probe = (
-        "import importlib.util, sys\n"
-        "missing = [m for m in sys.argv[1:]"
-        " if importlib.util.find_spec(m) is None]\n"
+        "import importlib, sys\n"
+        "missing = []\n"
+        "for m in sys.argv[1:]:\n"
+        "    try:\n"
+        "        importlib.import_module(m)\n"
+        "    except Exception:\n"
+        "        missing.append(m)\n"
         "print(' '.join(missing))\n"
     )
     try:
@@ -194,7 +196,14 @@ def _cross_process_lock() -> Iterator[None]:
     lock_file = None
     acquired = False
     try:
-        lock_file = open(_LOCK_PATH, "w")  # noqa: SIM115 - closed in finally
+        # The lock path is fixed and predictable inside a shared temp dir, so
+        # never open it with something that follows symlinks or truncates:
+        # a pre-planted symlink would redirect a truncate-on-open to an
+        # arbitrary file owned by whoever runs the install (often root in a
+        # Dockerfile RUN). O_NOFOLLOW refuses symlinks, the flag set carries
+        # no O_TRUNC, and 0600 keeps the file private to its creator.
+        fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        lock_file = os.fdopen(fd, "r+b", buffering=0)
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         acquired = True
     except OSError as exc:
@@ -267,8 +276,11 @@ def install_media_decoders(
                 f"unknown backend {backend!r}; expected one of "
                 f"{sorted(_BACKEND_DECODERS)}"
             )
-        # Install only what is not already importable.
-        missing = [d for d in decoders if not _module_available(d.module)]
+        # Install only what does not already import cleanly. The probe does a
+        # real import in a fresh interpreter, so a present-but-broken package
+        # counts as missing rather than being silently skipped.
+        missing_names = set(_modules_missing_fresh([d.module for d in decoders]))
+        missing = [d for d in decoders if d.module in missing_names]
         if not missing:
             logger.info(
                 "media decoder package(s) already present for %s; nothing to do",
@@ -293,10 +305,9 @@ def install_media_decoders(
     with _cross_process_lock():
         if verify_modules:
             # Another process may have installed while we waited on the lock.
+            still = set(_modules_missing_fresh(verify_modules))
             pending = [
-                (spec, mod)
-                for spec, mod in zip(specs, verify_modules)
-                if not _module_available(mod)
+                (spec, mod) for spec, mod in zip(specs, verify_modules) if mod in still
             ]
             if not pending:
                 logger.info(
@@ -314,6 +325,9 @@ def install_media_decoders(
         raise RuntimeError(
             "media decoder module(s) still not importable after install: "
             + " ".join(still_missing)
+            + ". If a package is present but broken, pip may have treated the "
+            "requirement as already satisfied -- rerun with --packages "
+            "'<spec>' --pip-args=--force-reinstall, or pip uninstall it first."
         )
     logger.info("media decoder package(s) ready: %s", _redact(" ".join(specs)))
     return specs
@@ -389,11 +403,13 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report and fail
+        # Redact: CalledProcessError/TimeoutExpired stringify the full pip
+        # command, which may carry a credentialed --pip-args index URL.
         logger.error(
             "media decoder install failed: %s. For offline/air-gapped hosts, "
             "point pip at a local wheelhouse, e.g. "
             "--pip-args='--no-index --find-links /wheels'.",
-            exc,
+            _redact(str(exc)),
         )
         return 1
     return 0

@@ -27,13 +27,11 @@ def sandboxed(monkeypatch):
         media_decoders, "_cross_process_lock", lambda: contextlib.nullcontext()
     )
     monkeypatch.setattr(media_decoders.importlib, "invalidate_caches", lambda: None)
-    # Route the fresh-interpreter probe through _module_available so one stub
-    # controls both, and the probe never spawns a real python (which would
-    # also collide with the subprocess.run recorders below).
+    # Default probe stub: nothing importable. Tests refine it via
+    # _set_available; stubbing keeps the probe from spawning a real python,
+    # which would also collide with the subprocess.run recorders below.
     monkeypatch.setattr(
-        media_decoders,
-        "_modules_missing_fresh",
-        lambda mods: [m for m in mods if not media_decoders._module_available(m)],
+        media_decoders, "_modules_missing_fresh", lambda mods: list(mods)
     )
     return monkeypatch
 
@@ -65,8 +63,16 @@ def _record_pip_kwargs(monkeypatch) -> list[dict]:
 
 
 def _set_available(monkeypatch, present) -> None:
-    """Stub _module_available; `present` is a set of importable module names."""
-    monkeypatch.setattr(media_decoders, "_module_available", lambda mod: mod in present)
+    """Stub the fresh-import probe; `present` = importable module names.
+
+    `present` is read at call time, so a recorder that updates it after the
+    mocked pip run makes post-install verification pass, mirroring reality.
+    """
+    monkeypatch.setattr(
+        media_decoders,
+        "_modules_missing_fresh",
+        lambda mods: [m for m in mods if m not in present],
+    )
 
 
 def _record_pip_and_mark(monkeypatch, present, *modules) -> list[list[str]]:
@@ -259,22 +265,22 @@ def test_dry_run_reports_without_installing(sandboxed):
 def test_pending_subset_installs_only_still_missing(sandboxed):
     """A racing process may install part of the set while we wait on the lock.
 
-    The pre-lock check sees both vLLM carriers missing; by the post-lock
-    re-check cv2 has appeared, so only the audio carrier should install.
+    Probe round 1 (pre-check) sees both vLLM carriers missing; round 2
+    (post-lock re-check) sees cv2 already installed by the racing process, so
+    only the audio carrier installs; round 3 (post-verify) sees everything.
     """
-    present: set[str] = set()
-    seen: list[str] = []
+    rounds = {"n": 0}
 
-    def available(mod: str) -> bool:
-        seen.append(mod)
-        # cv2 "appears" (installed by the racing process) at its second check,
-        # which is the post-lock re-check.
-        if seen.count("cv2") >= 2:
-            present.add("cv2")
-        return mod in present
+    def probe(mods):
+        rounds["n"] += 1
+        if rounds["n"] == 1:
+            return list(mods)
+        if rounds["n"] == 2:
+            return [m for m in mods if m != "cv2"]
+        return []
 
-    sandboxed.setattr(media_decoders, "_module_available", available)
-    calls = _record_pip_and_mark(sandboxed, present, "cv2", "av")
+    sandboxed.setattr(media_decoders, "_modules_missing_fresh", probe)
+    calls = _record_pip(sandboxed)
     installed = media_decoders.install_media_decoders("vllm")
     assert installed == [media_decoders.VALIDATED_SPECS["av"]]
     (cmd,) = calls
@@ -294,6 +300,60 @@ def test_modules_missing_fresh_real_probe():
     )
     assert missing == ["definitely_not_a_module_xyz"]
     assert media_decoders._modules_missing_fresh([]) == []
+
+
+def test_probe_treats_present_but_broken_package_as_missing(tmp_path, monkeypatch):
+    """A package whose files exist but whose import fails must count missing.
+
+    This is the review finding: find_spec sees a broken wheel (e.g. deleted
+    native libs) and the old probe skipped the install. The probe subprocess
+    inherits PYTHONPATH, so plant a module that raises on import.
+    """
+    pkg = tmp_path / "brokenmod"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("raise RuntimeError('native libs gone')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    assert media_decoders._modules_missing_fresh(["brokenmod"]) == ["brokenmod"]
+
+
+def test_lock_refuses_symlink_and_preserves_target(tmp_path, monkeypatch):
+    """A pre-planted symlink at the fixed lock path must not be followed.
+
+    The old open(_LOCK_PATH, "w") truncated the symlink target; reproduced on
+    a real runtime image before the fix. The lock must refuse the symlink
+    (O_NOFOLLOW), leave the victim untouched, and fall back to lock-less
+    operation rather than fail.
+    """
+    victim = tmp_path / "victim.txt"
+    victim.write_text("SENTINEL")
+    link = tmp_path / "lock"
+    link.symlink_to(victim)
+    monkeypatch.setattr(media_decoders, "_LOCK_PATH", link)
+    with media_decoders._cross_process_lock():
+        pass
+    assert victim.read_text() == "SENTINEL"
+
+
+def test_lock_normal_path_creates_private_file(tmp_path, monkeypatch):
+    """Without an attacker, the lock file is created 0600 and usable."""
+    lock = tmp_path / "lock"
+    monkeypatch.setattr(media_decoders, "_LOCK_PATH", lock)
+    with media_decoders._cross_process_lock():
+        assert lock.exists()
+        assert (lock.stat().st_mode & 0o777) == 0o600
+
+
+def test_cli_error_log_redacts_credentialed_pip_args(sandboxed, caplog):
+    """str(CalledProcessError) embeds the full pip command; the error log
+    must mask userinfo from a credentialed --pip-args index URL."""
+    _record_pip(sandboxed, fail=True)
+    _set_available(sandboxed, set())
+    rc = media_decoders.main(
+        ["sglang", "--pip-args=--index-url https://ci:tok3nzz@pypi.corp/simple"]
+    )
+    assert rc == 1
+    assert "tok3nzz" not in caplog.text
+    assert "***@pypi.corp" in caplog.text
 
 
 def test_redact_masks_url_credentials():
