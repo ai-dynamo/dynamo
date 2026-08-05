@@ -325,6 +325,22 @@ class TestValidateBenchmarkConfig:
 
 
 class TestEmbeddingWorkerProcesses:
+    @pytest.fixture(autouse=True)
+    def clear_port_and_failover_env(self, monkeypatch):
+        """Keep validation tests independent of the launcher environment."""
+        for env_name in (
+            "DYN_SYSTEM_PORT",
+            "DYN_TCP_RPC_PORT",
+            "DYN_FORWARDPASS_METRIC_PORT",
+            "NIXL_TELEMETRY_ENABLE",
+            "NIXL_TELEMETRY_EXPORTER",
+            "NIXL_TELEMETRY_PROMETHEUS_PORT",
+            "ENGINE_ID",
+            "CONTAINER_NAME",
+            "FAILOVER_LOCK_PATH",
+        ):
+            monkeypatch.delenv(env_name, raising=False)
+
     def test_default_single_process_is_accepted(self):
         config = create_config()
         config._validate_embedding_worker_processes()
@@ -367,6 +383,111 @@ class TestEmbeddingWorkerProcesses:
 
     def test_system_port_range_that_fits_is_accepted(self, monkeypatch):
         monkeypatch.setenv("DYN_SYSTEM_PORT", "19401")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        config._validate_embedding_worker_processes()
+
+    def test_system_port_range_collision_with_fpm_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "20379")
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "20380")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "DYN_SYSTEM_PORT reserves 20379-20381, while "
+                "DYN_FORWARDPASS_METRIC_PORT reserves 20380"
+            ),
+        ):
+            config._validate_embedding_worker_processes()
+
+    def test_system_port_range_adjacent_to_fpm_is_accepted(self, monkeypatch):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "20377")
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "20380")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
+    def test_enabled_nixl_prometheus_collision_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match="NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090",
+        ):
+            config._validate_embedding_worker_processes()
+
+    def test_disabled_nixl_prometheus_port_is_not_reserved(self, monkeypatch):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "n")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
+    def test_active_non_system_listeners_cannot_overlap(self, monkeypatch):
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "19090")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "DYN_FORWARDPASS_METRIC_PORT reserves 19090, while "
+                "NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090"
+            ),
+        ):
+            config._validate_embedding_worker_processes()
+
+    def test_fixed_tcp_rpc_port_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("DYN_TCP_RPC_PORT", "25000")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        config.request_plane = "tcp"
+
+        with pytest.raises(ValueError, match="DYN_TCP_RPC_PORT cannot be fixed"):
+            config._validate_embedding_worker_processes()
+
+    def test_fixed_tcp_rpc_port_is_ignored_for_nats(self, monkeypatch):
+        monkeypatch.setenv("DYN_TCP_RPC_PORT", "25000")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        config.request_plane = "nats"
+        config._validate_embedding_worker_processes()
+
+    def test_intra_pod_failover_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("ENGINE_ID", "1")
+        monkeypatch.setenv("CONTAINER_NAME", "engine-1")
+        monkeypatch.setenv("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+
+        with pytest.raises(ValueError, match="intra-pod failover"):
+            config._validate_embedding_worker_processes()
+
+    def test_inter_pod_failover_marker_is_not_rejected(self, monkeypatch):
+        monkeypatch.setenv("ENGINE_ID", "1")
+        monkeypatch.setenv("CONTAINER_NAME", "main")
+        monkeypatch.setenv("FAILOVER_LOCK_PATH", "/shared/failover.lock")
         config = create_config()
         config.embedding_worker = True
         config.embedding_worker_processes = 4

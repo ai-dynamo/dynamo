@@ -24,6 +24,44 @@ logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_BENCHMARK_AXIS_GRANULARITY = 1024
 MAX_BENCHMARK_GRID_POINTS = 4096
+MAX_PORT = 65535
+DEFAULT_NIXL_PROMETHEUS_PORT = 19090
+
+
+def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
+    """Return a configured fixed TCP port, ignoring disabled/invalid values.
+
+    The owning subsystem remains responsible for reporting malformed values.
+    This helper only identifies valid listeners for overlap validation.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if 0 < port <= MAX_PORT else None
+
+
+def _nixl_prometheus_port() -> int | None:
+    """Return the NIXL Prometheus listener port when it is enabled."""
+    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
+    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "prometheus")
+    if enabled != "y" or exporter.strip().lower() != "prometheus":
+        return None
+    return _configured_fixed_port(
+        "NIXL_TELEMETRY_PROMETHEUS_PORT",
+        default=DEFAULT_NIXL_PROMETHEUS_PORT,
+    )
+
+
+def _is_intra_pod_failover_engine() -> bool:
+    """Recognize the operator's cloned intra-pod engine containers."""
+    engine_id = os.environ.get("ENGINE_ID")
+    if engine_id is None or "FAILOVER_LOCK_PATH" not in os.environ:
+        return False
+    return os.environ.get("CONTAINER_NAME") == f"engine-{engine_id}"
 
 
 def _warn_deprecated(message: str) -> None:
@@ -199,7 +237,9 @@ class DynamoVllmArgGroup(ArgGroup):
             "processes share a single EngineCore, so adding processes adds "
             "request-handling and tokenization capacity, not GPU throughput. "
             "Each process binds DYN_SYSTEM_PORT + its index, so a pool of N "
-            "reserves DYN_SYSTEM_PORT through DYN_SYSTEM_PORT + N - 1.",
+            "reserves DYN_SYSTEM_PORT through DYN_SYSTEM_PORT + N - 1. "
+            "A fixed DYN_TCP_RPC_PORT and intra-pod failover are not currently "
+            "supported with more than one process.",
         )
 
         # Headless mode for multi-node TP/PP
@@ -710,9 +750,28 @@ class DynamoVllmConfig(ConfigBase):
                 "with --headless. Shared-EngineCore processes serve Dynamo "
                 "embedding endpoints and therefore require the runtime."
             )
-        self._validate_system_port_range()
+        if _is_intra_pod_failover_engine():
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with intra-pod failover. The operator assigns adjacent "
+                "DYN_SYSTEM_PORT values to engine containers, so their embedding "
+                "process port ranges would overlap."
+            )
 
-    def _validate_system_port_range(self) -> None:
+        request_plane = getattr(self, "request_plane", "tcp")
+        tcp_rpc_port = _configured_fixed_port("DYN_TCP_RPC_PORT")
+        if request_plane == "tcp" and tcp_rpc_port is not None:
+            raise ValueError(
+                "DYN_TCP_RPC_PORT cannot be fixed when "
+                "--embedding-worker-processes is greater than 1 because every "
+                "endpoint process needs a unique TCP RPC listener. Unset "
+                "DYN_TCP_RPC_PORT to use OS-assigned ports."
+            )
+
+        system_range = self._validate_system_port_range()
+        self._validate_port_reservation_collisions(system_range)
+
+    def _validate_system_port_range(self) -> tuple[int, int] | None:
         """Reject a system-port range that would not fit.
 
         Each embedding process binds DYN_SYSTEM_PORT + its index, so a pool of N
@@ -721,19 +780,59 @@ class DynamoVllmConfig(ConfigBase):
         """
         raw = os.environ.get("DYN_SYSTEM_PORT")
         if raw is None or not raw.strip():
-            return
+            return None
         try:
             base = int(raw)
         except ValueError:
-            return
+            return None
         if base <= 0:
-            return
+            return None
 
         highest = base + self.embedding_worker_processes - 1
-        if highest > 65535:
+        if highest > MAX_PORT:
             raise ValueError(
                 f"DYN_SYSTEM_PORT={base} with --embedding-worker-processes "
                 f"{self.embedding_worker_processes} needs ports {base}-{highest}, "
-                "which exceeds the maximum port 65535. Lower DYN_SYSTEM_PORT or "
+                f"which exceeds the maximum port {MAX_PORT}. Lower DYN_SYSTEM_PORT or "
                 "reduce the process count."
             )
+        return base, highest
+
+    def _validate_port_reservation_collisions(
+        self, system_range: tuple[int, int] | None
+    ) -> None:
+        """Reject overlaps between listeners active in this worker container."""
+        reservations: list[tuple[str, int, int]] = []
+        if system_range is not None:
+            reservations.append(("DYN_SYSTEM_PORT", *system_range))
+
+        if "DYN_FORWARDPASS_METRIC_PORT" in os.environ:
+            fpm_port = _configured_fixed_port("DYN_FORWARDPASS_METRIC_PORT")
+            if fpm_port is not None:
+                reservations.append(("DYN_FORWARDPASS_METRIC_PORT", fpm_port, fpm_port))
+
+        nixl_port = _nixl_prometheus_port()
+        if nixl_port is not None:
+            reservations.append(
+                ("NIXL_TELEMETRY_PROMETHEUS_PORT", nixl_port, nixl_port)
+            )
+
+        for index, (left_name, left_start, left_end) in enumerate(reservations):
+            for right_name, right_start, right_end in reservations[index + 1 :]:
+                if max(left_start, right_start) > min(left_end, right_end):
+                    continue
+                left_ports = (
+                    str(left_start)
+                    if left_start == left_end
+                    else f"{left_start}-{left_end}"
+                )
+                right_ports = (
+                    str(right_start)
+                    if right_start == right_end
+                    else f"{right_start}-{right_end}"
+                )
+                raise ValueError(
+                    "embedding worker port reservations overlap: "
+                    f"{left_name} reserves {left_ports}, while {right_name} "
+                    f"reserves {right_ports}. Configure non-overlapping ports."
+                )
