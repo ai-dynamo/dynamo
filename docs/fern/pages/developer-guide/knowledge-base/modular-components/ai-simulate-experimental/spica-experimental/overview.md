@@ -60,9 +60,10 @@ Spica source, documentation, and examples were migrated from
 ## Current Limitations
 
 KV-capacity filtering and `kv_load_ratio` require an AI Configurator performance database for the
-target `(hardware_sku, backend)`. Branch enumeration drops targets without one and raises
-`NoViableParallelConfig` only when no backend or deployment mode remains. Spica does not use the
-naive memory-estimation fallback.
+target `(hardware_sku, backend)`. Branch enumeration drops targets without one and backend or
+deployment-mode combinations without a KV-feasible shape within the capacity budget. It raises
+`NoViableParallelConfig` if no viable branch remains. Spica does not use the naive memory-estimation
+fallback.
 
 Treat workloads and search modes not covered by image smoke tests as unsupported experimental paths.
 See [Traffic](traffic.md#kv_load_ratio-candidate-relative-concurrency) for the KV-load contract.
