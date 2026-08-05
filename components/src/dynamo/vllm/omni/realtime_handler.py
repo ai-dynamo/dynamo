@@ -462,8 +462,10 @@ def tensor_to_numpy(value: Any) -> np.ndarray | None:
             arr = np.asarray(value)
         except Exception:  # noqa: BLE001 - non-array engine payloads are skipped
             return None
-    if arr.ndim > 1:
-        arr = arr.reshape(-1)
+    # Flatten unconditionally, including 0-d: a list payload yields its last
+    # entry, so a scalar there would reach waveform_to_deltas as a 0-d array and
+    # raise IndexError on the next step's shape[0].
+    arr = arr.reshape(-1)
     return arr.astype(np.float32, copy=False)
 
 
