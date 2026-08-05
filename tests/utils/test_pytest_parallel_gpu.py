@@ -14,10 +14,13 @@ from __future__ import annotations
 import pytest
 
 from tests.utils.pytest_parallel_gpu import (
+    _WATCHDOG_GRACE_S,
+    _WATCHDOG_TIMEOUT_MULTIPLIER,
     _GpuState,
     _priority_key,
     _select_launches,
     _TestEntry,
+    _watchdog_deadline,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -420,3 +423,91 @@ def test_simulation_conserves_work_and_respects_budget():
 
     assert makespan >= longest
     assert makespan >= total_work / 8 - 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# _watchdog_deadline
+#
+# The watchdog is a last resort behind the child's own --timeout. It must sit
+# clear of every legitimately slow run, because a false kill turns a passing
+# test into a failure. The margins below are the reason the multiplier is 4.
+# --------------------------------------------------------------------------- #
+def test_watchdog_deadline_clears_worst_case_retry_budget():
+    """One child may run its test 3x (DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2).
+
+    Each attempt gets its own --timeout window, so the budget must exceed 3x
+    the declared timeout or a legitimately retrying child gets killed.
+    """
+    for declared in (60.0, 320.0, 1200.0):
+        worst_case_legitimate = 3 * declared
+        assert _watchdog_deadline(declared) > worst_case_legitimate
+
+
+def test_watchdog_deadline_clears_slowest_observed_real_run():
+    """Slowest of 376 observed child runs was 0.78x its declared timeout."""
+    for declared in (60.0, 320.0, 1200.0):
+        assert _watchdog_deadline(declared) > 0.78 * declared * 3
+
+
+def test_watchdog_deadline_still_fires_well_inside_the_job_timeout():
+    """The point of the watchdog: fire long before timeout-minutes does.
+
+    The sglang post-merge job that motivated this used timeout-minutes: 120 and
+    wedged on a test declaring 320s, burning the full two hours.
+    """
+    job_timeout_s = 120 * 60
+    assert _watchdog_deadline(320.0) < job_timeout_s / 4
+
+
+def test_watchdog_deadline_grace_dominates_for_fast_tests():
+    """A 1s test must not get a 4s budget; the flat grace covers interpreter
+    start and collection, which dwarf the test itself."""
+    assert _watchdog_deadline(1.0) >= _WATCHDOG_GRACE_S
+
+
+def test_watchdog_deadline_is_monotonic_in_declared_timeout():
+    deadlines = [_watchdog_deadline(t) for t in (10.0, 100.0, 1000.0)]
+    assert deadlines == sorted(deadlines)
+    assert len(set(deadlines)) == len(deadlines)
+
+
+def test_watchdog_multiplier_exceeds_retry_attempt_count():
+    """Guard the constant itself: 3 attempts means the multiplier must be > 3.
+
+    If DD_CIVISIBILITY_FLAKY_RETRY_COUNT is ever raised in shared-test.yml,
+    this is the assertion that should fail and force the multiplier up with it.
+    """
+    max_attempts = 3  # 1 original + DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2
+    assert _WATCHDOG_TIMEOUT_MULTIPLIER > max_attempts
+
+
+# --------------------------------------------------------------------------- #
+# watchdog exit-status handling
+# --------------------------------------------------------------------------- #
+def test_psutil_reap_makes_popen_report_a_false_success():
+    """Why the watchdog cannot trust ``proc.poll()``.
+
+    ``terminate_process_tree`` reaps the child through psutil. The later
+    ``Popen.poll()`` then hits ``ChildProcessError`` and subprocess falls back
+    to reporting status 0 -- so a SIGKILLed child looks like a clean pass.
+    ``run_parallel`` therefore gates on ``watchdog_reason``, not on ``rc``.
+
+    This guards the platform behavior that motivates that gate: if it ever
+    changes, this test fails and the gate can be revisited.
+    """
+    import subprocess
+    import sys
+
+    import psutil
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        handle = psutil.Process(proc.pid)
+        handle.kill()
+        handle.wait(timeout=10)  # psutil reaps it here
+        # Real status is -SIGKILL, but subprocess can no longer see it.
+        assert proc.poll() == 0
+    finally:
+        if proc.poll() is None:  # pragma: no cover - safety net
+            proc.kill()
+            proc.wait(timeout=10)

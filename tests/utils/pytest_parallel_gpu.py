@@ -39,6 +39,9 @@ _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+import psutil  # noqa: E402
+
+from tests.utils.managed_process import terminate_process_tree  # noqa: E402
 from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
@@ -118,6 +121,7 @@ class _RunningTest:
     start_time: float
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
+    watchdog_reason: str | None = None
 
 
 def _print(msg: str = "") -> None:
@@ -266,6 +270,30 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+
+# Watchdog: a last-resort deadline for a single child pytest.
+#
+# The child is launched with --timeout=<test.timeout>, so pytest-timeout should
+# always fire first and this should never trigger. It does trigger in practice:
+# a wedged engine can leave the child alive far past its own timeout, and with
+# nothing above it the whole orchestrator stalls until the job's timeout-minutes
+# kills everything -- taking the queued tests with it.
+#
+# Sizing. One child may run its test more than once: Datadog Auto Test Retries
+# is enabled with DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2 (shared-test.yml), so up
+# to 3 attempts, each getting its own --timeout window. The multiplier must
+# therefore exceed 3, plus a flat grace for interpreter start and collection.
+# Measured against 376 real child runs, the slowest ever observed was 0.78x its
+# declared timeout, so 4x + 120s leaves a wide margin over anything healthy.
+#
+# If DD_CIVISIBILITY_FLAKY_RETRY_COUNT is raised, raise this multiplier with it.
+_WATCHDOG_TIMEOUT_MULTIPLIER = 4
+_WATCHDOG_GRACE_S = 120
+
+
+def _watchdog_deadline(test_timeout: float) -> float:
+    """Wall-clock budget for one child pytest before the watchdog kills it."""
+    return test_timeout * _WATCHDOG_TIMEOUT_MULTIPLIER + _WATCHDOG_GRACE_S
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -763,6 +791,34 @@ def run_parallel(
     while pending or running:
         now = time.monotonic()
 
+        # --- Watchdog ---
+        # Kill any child that blew past its deadline, then fall through to the
+        # completion check below, which reaps it in this same iteration and
+        # frees its GPU budget so the queued tests can finally launch.
+        for w_id, run_info in list(running.items()):
+            if run_info.watchdog_reason or run_info.proc.poll() is not None:
+                continue
+            elapsed = now - run_info.start_time
+            deadline = _watchdog_deadline(run_info.test.timeout)
+            if elapsed <= deadline:
+                continue
+            run_info.watchdog_reason = (
+                f"watchdog: wedged for {elapsed:.0f}s against a {deadline:.0f}s "
+                f"budget (declared timeout {run_info.test.timeout:.0f}s); the "
+                f"child's own --timeout never fired"
+            )
+            _print(
+                f"[watchdog] w{w_id} wedged for {elapsed:.0f}s against a "
+                f"{deadline:.0f}s budget (declared timeout "
+                f"{run_info.test.timeout:.0f}s) — killing the process tree"
+            )
+            try:
+                terminate_process_tree(
+                    run_info.proc.pid, immediate_kill=True, timeout=5
+                )
+            except (psutil.Error, OSError) as exc:
+                _print(f"[watchdog] w{w_id} tree kill error: {exc}")
+
         # Check for completed subprocesses
         for w_id in list(running.keys()):
             run_info = running[w_id]
@@ -771,12 +827,23 @@ def run_parallel(
                 if run_info.reader_thread is not None:
                     run_info.reader_thread.join(timeout=5)
                 duration = now - run_info.start_time
-                passed = rc == 0
+                # A watchdog kill must never read as a pass. `rc` is not
+                # trustworthy here: terminate_process_tree reaps the child via
+                # psutil, so the later Popen.poll() hits ChildProcessError and
+                # subprocess falls back to reporting status 0.
+                passed = rc == 0 and run_info.watchdog_reason is None
                 test = run_info.test
                 gi = test.assigned_gpu
 
                 # Detect retryable init errors (profiling race, OOM at startup)
-                if not passed and test.retries < _MAX_RETRIES:
+                # Never relaunch a wedged test: the retryable-init markers may
+                # well appear in its output, but a hang is not a transient
+                # startup failure and a retry just burns another full budget.
+                if (
+                    not passed
+                    and run_info.watchdog_reason is None
+                    and test.retries < _MAX_RETRIES
+                ):
                     matched_marker = None
                     for line in run_info.captured:
                         for marker in _RETRYABLE_INIT_MARKERS:
@@ -824,6 +891,10 @@ def run_parallel(
                         if stripped and not stripped.startswith("="):
                             fail_reason = stripped
                             break
+                    # Stated outright rather than scraped from the child's
+                    # output, which on a SIGKILL is whatever happened to flush.
+                    if run_info.watchdog_reason is not None:
+                        fail_reason = run_info.watchdog_reason
 
                 if skipped:
                     status = "SKIPPED"
