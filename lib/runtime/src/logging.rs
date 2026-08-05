@@ -1283,11 +1283,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         .with_default(LevelFilter::ERROR)
         .with_target("runtime", LevelFilter::TRACE)
         .with_target("tokio", LevelFilter::TRACE);
-    let l = fmt::layer()
-        .with_ansi(!disable_ansi_logging())
-        .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-        .with_writer(std::io::stderr)
-        .with_filter(filters(load_config()));
+    let l = console_layer(console_log_format(), FmtSpan::NONE, filters(load_config()));
     tracing_subscriber::registry()
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
@@ -3091,6 +3087,76 @@ pub mod tests {
                 "expected readable log line, got JSON: {line}"
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tokio_console_respects_console_format() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "--features",
+                "tokio-console",
+                "logging::tests::test_tokio_console_respects_console_format_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_TOKIO_CONSOLE_JSONL", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
+            .env_remove("DYN_LOGGING_JSONL")
+            .env_remove("OTEL_EXPORT_ENABLED")
+            .env("DYN_LOG", "info")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tokio_console_respects_console_format_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_TOKIO_CONSOLE_JSONL").is_err() {
+            return Ok(());
+        }
+        assert!(
+            cfg!(feature = "tokio-console"),
+            "subprocess test must run with the tokio-console feature"
+        );
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+        tracing::info!("tokio console jsonl marker");
+        drop(guard);
+
+        let content = std::fs::read_to_string(file_name)?;
+        let marker_line = content
+            .lines()
+            .find(|line| line.contains("tokio console jsonl marker"))
+            .unwrap_or_else(|| panic!("expected marker log in captured stderr, got: {content}"));
+        serde_json::from_str::<Value>(marker_line)
+            .unwrap_or_else(|error| panic!("expected JSONL marker, got '{marker_line}': {error}"));
 
         Ok(())
     }
