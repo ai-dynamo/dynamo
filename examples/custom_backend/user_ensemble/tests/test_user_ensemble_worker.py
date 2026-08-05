@@ -15,9 +15,8 @@ pytest.importorskip(
     reason="dynamo._core.backend not built — run maturin develop first",
 )
 
-from dynamo.llm.exceptions import InvalidArgument
-
-from examples.custom_backend.user_ensemble.worker import (
+from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
+from examples.custom_backend.user_ensemble.worker import (  # noqa: E402
     UserEnsembleEngine,
     _served_model_name,
 )

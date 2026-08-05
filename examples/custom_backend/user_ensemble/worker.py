@@ -60,7 +60,8 @@ logger = logging.getLogger(__name__)
 class Classifier(Protocol):
     """User-supplied asynchronous classifier over encoder artifacts."""
 
-    async def classify(self, artifacts: Sequence[Any]) -> str: ...
+    async def classify(self, artifacts: Sequence[Any]) -> str:
+        ...
 
 
 class Decoder(Protocol):
@@ -71,19 +72,24 @@ class Decoder(Protocol):
         prompt: Any,
         sampling_params: SamplingParams,
         request_id: str,
-    ) -> AsyncIterator[Any]: ...
+    ) -> AsyncIterator[Any]:
+        ...
 
-    async def abort(self, request_id: str) -> None: ...
+    async def abort(self, request_id: str) -> None:
+        ...
 
-    def shutdown(self) -> None: ...
+    def shutdown(self) -> None:
+        ...
 
 
 class Encoder(Protocol):
     """Subset of ``AsyncVisionEncoder`` used on the request path."""
 
-    async def encode(self, raws: list[str]) -> list[Any]: ...
+    async def encode(self, raws: list[str]) -> list[Any]:
+        ...
 
-    def shutdown(self) -> None: ...
+    def shutdown(self) -> None:
+        ...
 
 
 class DummyClassifier:
