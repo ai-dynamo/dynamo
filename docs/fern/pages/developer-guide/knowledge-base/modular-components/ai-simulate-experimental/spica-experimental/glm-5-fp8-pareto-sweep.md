@@ -13,9 +13,10 @@ subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 {/* Separate the adjacent admonitions for Markdown and MDX renderers. */}
 
 > [!IMPORTANT]
-> This experiment uses `kv_load_ratio` and requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. It fails fast before search starts in the default `dynamo-planner`
-> image, which currently retains AI Configurator 0.9.
+> This experiment uses `kv_load_ratio` and the KV-cache estimator from
+> `aiconfigurator_core.sdk.memory`. The default `dynamo-planner` image includes the matching AI
+> Configurator application and core packages. The B200/SGLang target requires a matching AI
+> Configurator performance database.
 
 This replay-backed sweep targets the InferenceX/SemiAnalysis (SA) **GLM-5-FP8 / B200 /
 Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Spica can discover competitive
@@ -154,17 +155,18 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 
 ## Reproduction Status
 
-This historical experiment cannot currently be reproduced with Dynamo's
-packaged AI Configurator 0.9 dependency. The configuration is retained as a
-reference until Dynamo upgrades to an AI Configurator release that provides
-`aiconfigurator.sdk.memory`.
+The missing memory-estimator dependency no longer blocks this historical configuration. The default
+`dynamo-planner` image imports `estimate_kv_cache` from `aiconfigurator_core.sdk.memory`. When the AI
+Configurator performance database covers `(b200_sxm, sglang)` and `zai-org/GLM-5-FP8`, the search
+reaches the KV-capacity and candidate-concurrency calculations. Reproducing the historical frontier
+still depends on the exact performance database and Replay behavior available in the runtime
+snapshot.
 
 ```bash
-# Reference command; fails fast with the currently packaged dependencies.
 python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
-The AIConfigurator performance model needs the `aic-forward-pass` binding. Dynamo must include the
-attention-DP KV-capacity fix so replay sees engine capacity as per-rank capacity multiplied by
-attention DP and replicas.
+The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo's attention-DP
+KV-capacity calculation multiplies per-rank capacity by attention DP and replicas before passing
+engine capacity to Replay.
