@@ -271,22 +271,12 @@ _RETRYABLE_INIT_MARKERS = [
 ]
 _MAX_RETRIES = 3
 
-# Watchdog: a last-resort deadline for a single child pytest.
-#
-# The child is launched with --timeout=<test.timeout>, so pytest-timeout should
-# always fire first and this should never trigger. It does trigger in practice:
-# a wedged engine can leave the child alive far past its own timeout, and with
-# nothing above it the whole orchestrator stalls until the job's timeout-minutes
-# kills everything -- taking the queued tests with it.
-#
-# Sizing. One child may run its test more than once: Datadog Auto Test Retries
-# is enabled with DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2 (shared-test.yml), so up
-# to 3 attempts, each getting its own --timeout window. The multiplier must
-# therefore exceed 3, plus a flat grace for interpreter start and collection.
-# Measured against 376 real child runs, the slowest ever observed was 0.78x its
-# declared timeout, so 4x + 120s leaves a wide margin over anything healthy.
-#
-# If DD_CIVISIBILITY_FLAKY_RETRY_COUNT is raised, raise this multiplier with it.
+# Last-resort deadline behind the child's own --timeout, for when pytest-timeout
+# is swallowed by a C-level block and the wedged child stalls the whole run.
+# Must exceed 3x: Datadog Auto Test Retries gives one child up to 3 attempts
+# (DD_CIVISIBILITY_FLAKY_RETRY_COUNT=2), each with its own --timeout window.
+# Raise the multiplier if that count is raised. Slowest of 376 observed child
+# runs was 0.78x its declared timeout, so 4x + 120s clears anything healthy.
 _WATCHDOG_TIMEOUT_MULTIPLIER = 4
 _WATCHDOG_GRACE_S = 120
 
@@ -791,10 +781,8 @@ def run_parallel(
     while pending or running:
         now = time.monotonic()
 
-        # --- Watchdog ---
-        # Kill any child that blew past its deadline, then fall through to the
-        # completion check below, which reaps it in this same iteration and
-        # frees its GPU budget so the queued tests can finally launch.
+        # Kill anything past its deadline; the completion check below reaps it
+        # this same iteration and frees its GPU budget for the queued tests.
         for w_id, run_info in list(running.items()):
             if run_info.watchdog_reason or run_info.proc.poll() is not None:
                 continue
@@ -827,18 +815,16 @@ def run_parallel(
                 if run_info.reader_thread is not None:
                     run_info.reader_thread.join(timeout=5)
                 duration = now - run_info.start_time
-                # A watchdog kill must never read as a pass. `rc` is not
-                # trustworthy here: terminate_process_tree reaps the child via
-                # psutil, so the later Popen.poll() hits ChildProcessError and
-                # subprocess falls back to reporting status 0.
+                # Not `rc == 0`: terminate_process_tree reaps the child via
+                # psutil, so Popen.poll() hits ChildProcessError and subprocess
+                # falls back to status 0 -- a kill would read as a pass.
                 passed = rc == 0 and run_info.watchdog_reason is None
                 test = run_info.test
                 gi = test.assigned_gpu
 
                 # Detect retryable init errors (profiling race, OOM at startup)
-                # Never relaunch a wedged test: the retryable-init markers may
-                # well appear in its output, but a hang is not a transient
-                # startup failure and a retry just burns another full budget.
+                # A wedge is not a transient startup failure, so never relaunch
+                # one even if its output happens to carry a retryable marker.
                 if (
                     not passed
                     and run_info.watchdog_reason is None
@@ -891,8 +877,8 @@ def run_parallel(
                         if stripped and not stripped.startswith("="):
                             fail_reason = stripped
                             break
-                    # Stated outright rather than scraped from the child's
-                    # output, which on a SIGKILL is whatever happened to flush.
+                    # Stated outright; after a SIGKILL the child's output is
+                    # only whatever happened to flush.
                     if run_info.watchdog_reason is not None:
                         fail_reason = run_info.watchdog_reason
 
