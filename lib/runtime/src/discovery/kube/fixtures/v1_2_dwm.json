@@ -1,0 +1,64 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "DynamoWorkerMetadata",
+  "metadata": {
+    "name": "legacy-worker"
+  },
+  "spec": {
+    "data": {
+      "endpoints": {
+        "dynamo/backend/generate/2a": {
+          "type": "Endpoint",
+          "namespace": "dynamo",
+          "component": "backend",
+          "endpoint": "generate",
+          "instance_id": 42,
+          "transport": {
+            "nats_tcp": "dynamo.backend.generate"
+          }
+        }
+      },
+      "model_cards": {
+        "dynamo/backend/generate/2a": {
+          "type": "Model",
+          "namespace": "dynamo",
+          "component": "backend",
+          "endpoint": "generate",
+          "instance_id": 42,
+          "card_json": {
+            "display_name": "Qwen/Qwen3-0.6B"
+          },
+          "model_suffix": null
+        }
+      },
+      "event_channels": {
+        "dynamo/backend/kv-events/2a": {
+          "type": "EventChannel",
+          "namespace": "dynamo",
+          "component": "backend",
+          "topic": "kv-events",
+          "instance_id": 42,
+          "transport": {
+            "kind": "Nats",
+            "config": {
+              "subject_prefix": "namespace.dynamo.component.backend"
+            }
+          }
+        },
+        "dynamo//kv_metrics/2a": {
+          "type": "EventChannel",
+          "namespace": "dynamo",
+          "component": "",
+          "topic": "kv_metrics",
+          "instance_id": 42,
+          "transport": {
+            "kind": "Nats",
+            "config": {
+              "subject_prefix": "namespace.dynamo"
+            }
+          }
+        }
+      }
+    }
+  }
+}

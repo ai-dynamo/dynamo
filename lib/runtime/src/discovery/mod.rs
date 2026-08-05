@@ -704,7 +704,7 @@ impl DiscoverySpec {
 
 /// Registered instances in the discovery plane
 /// Represents objects that have been successfully registered with an instance ID
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum DiscoveryInstance {
     /// Registered endpoint instance - wraps the component::Instance directly
@@ -737,6 +737,111 @@ pub enum DiscoveryInstance {
         publisher_id: u64,
         metadata: serde_json::Value,
     },
+}
+
+// Deserialize through a wire-only representation so v1.2 EventChannel records can be normalized
+// from their sibling `namespace` and `component` fields. Serialization remains canonical through
+// DiscoveryInstance's derived Serialize implementation.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum DiscoveryInstanceWire {
+    Endpoint(crate::component::Instance),
+    Model {
+        namespace: String,
+        component: String,
+        endpoint: String,
+        instance_id: u64,
+        card_json: serde_json::Value,
+        #[serde(default)]
+        model_suffix: Option<String>,
+    },
+    EventChannel {
+        #[serde(default)]
+        scope: Option<EventScope>,
+        #[serde(default)]
+        namespace: Option<String>,
+        #[serde(default)]
+        component: Option<String>,
+        topic: String,
+        instance_id: u64,
+        transport: EventTransport,
+    },
+    EventSource {
+        scope: EventScope,
+        topic: String,
+        publisher_id: u64,
+        metadata: serde_json::Value,
+    },
+}
+
+impl<'de> Deserialize<'de> for DiscoveryInstance {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = DiscoveryInstanceWire::deserialize(deserializer)?;
+
+        match wire {
+            DiscoveryInstanceWire::Endpoint(instance) => Ok(Self::Endpoint(instance)),
+            DiscoveryInstanceWire::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                card_json,
+                model_suffix,
+            } => Ok(Self::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                card_json,
+                model_suffix,
+            }),
+            DiscoveryInstanceWire::EventChannel {
+                scope,
+                namespace,
+                component,
+                topic,
+                instance_id,
+                transport,
+            } => {
+                let scope = match (scope, namespace, component) {
+                    (Some(scope), _, _) => scope,
+                    (None, Some(namespace), Some(component)) if component.is_empty() => {
+                        EventScope::Namespace { name: namespace }
+                    }
+                    (None, Some(namespace), Some(component)) => EventScope::Component {
+                        namespace,
+                        component,
+                    },
+                    (None, _, _) => {
+                        return Err(serde::de::Error::custom(
+                            "event channel is missing `scope` and legacy `namespace`/`component`",
+                        ));
+                    }
+                };
+
+                Ok(Self::EventChannel {
+                    scope,
+                    topic,
+                    instance_id,
+                    transport,
+                })
+            }
+            DiscoveryInstanceWire::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                metadata,
+            } => Ok(Self::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                metadata,
+            }),
+        }
+    }
 }
 
 /// Validate an idempotent registration for one semantic event-source incarnation.

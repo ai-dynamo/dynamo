@@ -123,7 +123,8 @@ pub async fn apply_cr(
 mod tests {
     use super::*;
     use crate::discovery::{
-        DiscoveryInstance, DiscoveryQuery, EventScope, EventSourceQuery, MAX_JSON_SAFE_PUBLISHER_ID,
+        DiscoveryInstance, DiscoveryQuery, EventChannelQuery, EventScope, EventSourceQuery,
+        MAX_JSON_SAFE_PUBLISHER_ID,
     };
     use crate::protocols::EndpointId;
     use kube::Resource;
@@ -163,6 +164,48 @@ mod tests {
             serde_json::from_str(&json).expect("Failed to deserialize CR");
 
         assert_eq!(deserialized.spec.data, data);
+    }
+
+    #[test]
+    fn v1_2_event_channels_deserialize_without_hiding_worker_metadata() {
+        let cr: DynamoWorkerMetadata =
+            serde_json::from_str(include_str!("fixtures/v1_2_dwm.json")).unwrap();
+        let metadata: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
+
+        assert_eq!(metadata.get_all_endpoints().len(), 1);
+        assert_eq!(metadata.get_all_model_cards().len(), 1);
+
+        let component_channels = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::topic("dynamo", "backend", "kv-events"),
+        ));
+        assert!(matches!(
+            component_channels.as_slice(),
+            [DiscoveryInstance::EventChannel {
+                scope: EventScope::Component {
+                    namespace,
+                    component
+                },
+                ..
+            }] if namespace == "dynamo" && component == "backend"
+        ));
+
+        let namespace_channels = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::namespace_topic("dynamo", "kv_metrics"),
+        ));
+        assert!(matches!(
+            namespace_channels.as_slice(),
+            [DiscoveryInstance::EventChannel {
+                scope: EventScope::Namespace { name },
+                ..
+            }] if name == "dynamo"
+        ));
+
+        let serialized = serde_json::to_value(metadata).unwrap();
+        for channel in serialized["event_channels"].as_object().unwrap().values() {
+            assert!(channel.get("scope").is_some());
+            assert!(channel.get("namespace").is_none());
+            assert!(channel.get("component").is_none());
+        }
     }
 
     #[test]
