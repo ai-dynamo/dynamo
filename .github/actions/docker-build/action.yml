@@ -67,16 +67,22 @@ runs:
       shell: bash
       env:
         FRAMEWORK: ${{ inputs.framework }}
+        TARGET: ${{ inputs.target }}
       run: |
         if [[ ! "${FRAMEWORK}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
           echo "::error::Invalid framework: ${FRAMEWORK}"
           exit 1
         fi
 
+        if [[ ! "${TARGET}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+          echo "::error::Invalid target: ${TARGET}"
+          exit 1
+        fi
+
         echo "::group::Generating Dockerfile"
-        echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${FRAMEWORK}"
+        echo "Generating Dockerfile for target: ${TARGET} and framework: ${FRAMEWORK}"
         python ./container/render.py \
-            --target=${{ inputs.target }} \
+            --target="${TARGET}" \
             --framework="${FRAMEWORK}" \
             --platform=${{ inputs.platform }} \
             --cuda-version=${{ inputs.cuda_version }} \
@@ -193,6 +199,9 @@ runs:
       shell: bash
       env:
         FRAMEWORK: ${{ inputs.framework }}
+        TARGET: ${{ inputs.target }}
+        WORKFLOW_ID: ${{ github.run_id }}
+        JOB_ID: ${{ job.check_run_id }}
       run: |
 
         # Create metrics directory
@@ -230,7 +239,7 @@ runs:
 
         # Create job-specific metrics file
         mkdir -p build-metrics
-        METRICS_FILE="build-metrics/metrics-${FRAMEWORK}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
+        METRICS_FILE="build-metrics/metrics-${FRAMEWORK}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         # Extract additional metadata from the built image
         if [ -n "$IMAGE_TAG" ]; then
@@ -251,7 +260,7 @@ runs:
         cat > "$METRICS_FILE" << EOF
         {
           "framework": "${FRAMEWORK}",
-          "target": "${{ inputs.target }}",
+          "target": "${TARGET}",
           "platform": "${{ inputs.platform }}",
           "platform_arch": "${PLATFORM_ARCH}",
           "cuda_version": "${{ inputs.cuda_version }}",
@@ -273,6 +282,8 @@ runs:
       shell: bash
       env:
         FRAMEWORK: ${{ inputs.framework }}
+        WORKFLOW_ID: ${{ github.run_id }}
+        JOB_ID: ${{ job.check_run_id }}
       run: |
         echo "=========================================="
         echo "📊 GENERATING COMPREHENSIVE BUILD METRICS"
@@ -287,8 +298,6 @@ runs:
         mkdir -p build-metrics
 
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
-        WORKFLOW_ID="${{ github.run_id }}"
-        JOB_ID="${{ job.check_run_id }}"
 
         # Make parser executable
         chmod +x .github/scripts/parse_buildkit_output.py
