@@ -143,7 +143,7 @@ docker push "$XPU_IMAGE"
 sed \
   -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag|nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}|g" \
   -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag|${XPU_IMAGE}|g" \
-  examples/backends/vllm/deploy/v1beta1/xpu/agg_xpu_dra.yaml \
+  examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml \
   | kubectl apply --namespace "$NAMESPACE" -f -
 ```
       </Tab>
@@ -238,7 +238,7 @@ kubectl delete dgd/"$DGD_NAME" --namespace "$NAMESPACE" --ignore-not-found
 
 ```bash
 kubectl delete \
-  --filename examples/backends/vllm/deploy/v1beta1/xpu/agg_xpu_dra.yaml \
+  --filename examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml \
   --namespace "$NAMESPACE" \
   --ignore-not-found
 ```

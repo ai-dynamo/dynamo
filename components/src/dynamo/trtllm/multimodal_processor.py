@@ -25,6 +25,7 @@ import httpx
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
+from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
@@ -35,10 +36,35 @@ from dynamo.common.http.url_validator import (
     validate_media_url,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
+
+def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
+    """Decode H.264/H.265 via NVDEC into TRT-LLM's ``VideoData`` (format="pt").
+
+    Mirrors ``tensorrt_llm.inputs.media_io._load_video_by_cv2``'s "pt" output for
+    the pinned v1.3.0rc21: RGB, a list of ``(C, H, W)`` float32 [0,1] tensors,
+    with the same metadata keys. Synchronous -- call via ``asyncio.to_thread``.
+    """
+    from dynamo.common.multimodal.nvdec_decoder import decode_video_nvdec
+
+    frames_np, meta = decode_video_nvdec(content, num_frames)  # (N,H,W,3) uint8 RGB
+    stacked = frames_np.astype("float32") * (1.0 / 255.0)
+    nchw = torch.from_numpy(stacked).permute(0, 3, 1, 2).contiguous()
+    frames_pt = list(torch.unbind(nchw, dim=0))
+    fps = float(meta.get("fps") or 0.0)
+    total = int(meta["total_num_frames"])
+    metadata = {
+        "total_num_frames": total,
+        "fps": fps,
+        "duration": (total / fps) if fps > 0 else 0.0,
+        "frames_indices": meta["frames_indices"],
+    }
+    return VideoData(frames=frames_pt, metadata=metadata, audio=None)
 
 
 class TokenizerProtocol(Protocol):
@@ -450,14 +476,33 @@ class MultimodalRequestProcessor:
                         content = await fetch_bytes(
                             normalized_url, 30.0, policy=self._url_policy
                         )
-                        with tempfile.NamedTemporaryFile(suffix=".mp4") as video_file:
-                            await asyncio.to_thread(video_file.write, content)
-                            await asyncio.to_thread(video_file.flush)
-                            videos.append(
-                                await async_load_video(
-                                    video_file.name, self.num_video_frames
+                        # Dual decode path: H.264/H.265 via NVDEC (hardware); other
+                        # codecs via the vendor cv2 loader. NVDEC failure falls back.
+                        nvdec_video = None
+                        if should_use_nvdec(probe_video_codec(content)):
+                            try:
+                                nvdec_video = await asyncio.to_thread(
+                                    _nvdec_video_data, content, self.num_video_frames
                                 )
-                            )
+                            except Exception as exc:  # noqa: BLE001 - fall back
+                                logging.warning(
+                                    "NVDEC decode failed (%s); using the vendor "
+                                    "video decoder",
+                                    exc,
+                                )
+                        if nvdec_video is not None:
+                            videos.append(nvdec_video)
+                        else:
+                            with tempfile.NamedTemporaryFile(
+                                suffix=".mp4"
+                            ) as video_file:
+                                await asyncio.to_thread(video_file.write, content)
+                                await asyncio.to_thread(video_file.flush)
+                                videos.append(
+                                    await async_load_video(
+                                        video_file.name, self.num_video_frames
+                                    )
+                                )
                     else:
                         videos.append(
                             await async_load_video(
