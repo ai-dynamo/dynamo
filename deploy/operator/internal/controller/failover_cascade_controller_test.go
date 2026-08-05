@@ -124,6 +124,8 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	differentPodIndex := newFailoverPod("different-pod-index", corev1.PodRunning, "0", "1")
 	differentMember := newFailoverPod("different-member", corev1.PodRunning, "0", "0")
 	differentMember.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = "false"
+	restoreTarget := newFailoverPod("restore-target", corev1.PodRunning, "0", "0")
+	restoreTarget.Labels[snapshotprotocol.RestoreTargetLabel] = commonconsts.KubeLabelValueTrue
 	differentNamespace := newFailoverPod("different-namespace", corev1.PodRunning, "0", "0")
 	differentNamespace.Namespace = "other-ns"
 
@@ -141,6 +143,7 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 			differentReplica,
 			differentPodIndex,
 			differentMember,
+			restoreTarget,
 			differentNamespace,
 		).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -158,16 +161,11 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Log("Verify the delete is namespace-scoped, selects all four labels, and uses zero grace")
+	t.Log("Verify the delete is namespace-scoped, excludes restore targets, and uses zero grace")
 	assert.Equal(t, cascadeTestNamespace, deleteOptions.Namespace)
-	selectedLabels, err := labels.ConvertSelectorToLabelsMap(deleteOptions.LabelSelector.String())
-	require.NoError(t, err)
-	assert.Equal(t, labels.Set{
-		commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-		groveLabelPCSG:             cascadeTestPCSG,
-		groveLabelPCSGReplicaIndex: "0",
-		groveLabelPodIndex:         "0",
-	}, selectedLabels)
+	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(failedPod.Labels)))
+	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(sibling.Labels)))
+	assert.False(t, deleteOptions.LabelSelector.Matches(labels.Set(restoreTarget.Labels)))
 	require.NotNil(t, deleteOptions.GracePeriodSeconds)
 	assert.Zero(t, *deleteOptions.GracePeriodSeconds)
 
@@ -183,6 +181,7 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	} {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 	}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(restoreTarget), &corev1.Pod{}))
 }
 
 func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {

@@ -13,6 +13,8 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -109,6 +111,15 @@ func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		groveLabelPCSGReplicaIndex: pcsgReplica,
 		groveLabelPodIndex:         podIndex,
 	}
+	restoreTargetRequirement, err := labels.NewRequirement(
+		snapshotprotocol.RestoreTargetLabel,
+		selection.NotEquals,
+		[]string{commonconsts.KubeLabelValueTrue},
+	)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to build restore-target selector: %w", err)
+	}
+	groupSelector := labels.SelectorFromSet(labels.Set(groupLabels)).Add(*restoreTargetRequirement)
 
 	// Force delete (grace=0) intentionally: the distributed inference group is
 	// already broken when we get here, so giving the surviving engines a SIGTERM
@@ -116,7 +127,8 @@ func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// half-torn-down NCCL/CUDA IPC state and stale UDS sockets on the shared
 	// hostPath. We deliberately skip preStop hooks and the graceful shutdown
 	// window; do NOT soften this to a positive grace period.
-	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels, client.GracePeriodSeconds(0)); err != nil {
+	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace),
+		client.MatchingLabelsSelector{Selector: groupSelector}, client.GracePeriodSeconds(0)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
 
