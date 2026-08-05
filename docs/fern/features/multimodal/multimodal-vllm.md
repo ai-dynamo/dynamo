@@ -20,8 +20,17 @@ This document provides a comprehensive guide for multimodal inference using the 
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
 | **Image** | Yes | Yes | Legacy entry point only |
-| **Video** | Yes | Yes | Processed by the language-model worker |
+| **Video** | Yes, H.264/H.265 | Yes, H.264/H.265 | Processed by the language-model worker |
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
+
+> [!IMPORTANT]
+> **Video input is limited to H.264 and H.265.** The runtime images ship no software
+> video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
+> (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
+> decode engine and a container granted the `video` driver capability — see
+> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
+> additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
 

@@ -12,8 +12,31 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
+| **Video** | HTTP/HTTPS, `file://`, `data:` | No | Yes, H.264/H.265, Qwen2-family only | Needs the encode worker; decoded on NVDEC, then the vision encoder produces embeddings |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
+
+> [!IMPORTANT]
+> **Video input is limited to H.264 and H.265, and requires a separate encode
+> worker.** The runtime image ships no software video decoder, so H.264 and H.265
+> video is decoded on the GPU by NVDEC. Video in any other format (VP8, VP9, AV1)
+> cannot be decoded at all.
+>
+> "Encode worker" here means Dynamo's `--disaggregation-mode encode` component,
+> which runs the model's vision encoder to turn frames into embeddings. It does
+> not encode video — nothing in this path produces a video stream. Hardware
+> decode is wired into that worker (as used by `multimodal_epd.sh`). In an
+> aggregated deployment SGLang resolves and decodes the media URL itself, so
+> Dynamo never sees the bytes and cannot route them to NVDEC — video input is
+> therefore unavailable in aggregated deployments of this image.
+>
+> Video is also skipped for model types whose preprocessing cannot accept
+> pre-decoded frames (the Qwen3-VL family); those requests fall back to the URL
+> path, which has no decoder in this image. Use a Qwen2-family vision model.
+>
+> NVDEC requires a GPU with a video decode engine and a container granted the
+> `video` driver capability — see
+> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
 
