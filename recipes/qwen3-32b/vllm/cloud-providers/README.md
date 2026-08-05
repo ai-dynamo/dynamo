@@ -33,9 +33,11 @@ This avoids replacing the full `args` list in each overlay.
 
 ## Applying and maintaining variants
 
-Cluster users select a checked-in `deploy-*.yaml` manifest below and apply it
-directly. Those manifests are the stable, reviewable deployment interface; no
-Kustomize command is required to consume this recipe.
+Kustomize is both the authoring model and documentation for these variants: the
+base and Components explain the provider settings, and each public overlay
+documents the concrete selection. Cluster users can apply the fully materialized
+`deploy-*.yaml` files below directly, or apply a public overlay with Kustomize.
+Neither path requires regeneration.
 
 | Rendered manifest | Provider fabric | Overlay |
 |-------------------|-----------------|---------|
@@ -45,12 +47,30 @@ Kustomize command is required to consume this recipe.
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
 
+For example, apply the GKE RoCE composition directly from its checked-in
+Kustomization:
+
+```bash
+kubectl apply -k kustomize/overlays/gke-roce -n ${NAMESPACE}
+```
+
+To make a local, uncommitted composition, create your own `kustomization.yaml` in
+the repository checkout or use `compose` from the repository root:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  recipes/qwen3-32b/vllm/cloud-providers/kustomize/base \
+  recipes/kustomize/components/aks-ib \
+  | kubectl apply -f - -n ${NAMESPACE}
+```
+
 For recipe contributors, the source of truth is
 [`.kustomize-matrix.yaml`](.kustomize-matrix.yaml), `kustomize/base/`, the
-recipe-local Components, plus the referenced shared
-Components under `recipes/kustomize/components/`. The public overlay
-`kustomization.yaml` files and `deploy-*.yaml` files are generated, committed
-for review, and must not be hand-edited. Regenerate them with:
+recipe-local Components, plus the referenced shared Components under
+`recipes/kustomize/components/`. Only contributors update committed derived
+artifacts: public overlay `kustomization.yaml` files and `deploy-*.yaml` files
+are generated, committed for review, and must not be hand-edited. Regenerate
+them with:
 
 ```bash
 scripts/kustomize-matrix.py unfold .kustomize-matrix.yaml

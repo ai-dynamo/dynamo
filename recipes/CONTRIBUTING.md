@@ -49,6 +49,43 @@ and easy to review:
         │   └── kustomization.yaml
 ```
 
+Kustomize is both the authoring model and the documentation of a variant: the
+base and Components explain individual settings, while each checked-in public
+overlay documents the selected composition. The rendered `deploy-<name>.yaml`
+is the exact, fully materialized result.
+
+### Using A Variant
+
+Recipe users may apply a checked-in rendered manifest directly:
+
+```bash
+kubectl apply -f <deployment>/deploy-<name>.yaml -n ${NAMESPACE}
+```
+
+They may instead inspect or apply the checked-in public Kustomization, which
+documents the base and selected Components:
+
+```bash
+kubectl apply -k <deployment>/kustomize/overlays/<name> -n ${NAMESPACE}
+```
+
+Users can also create an uncommitted `kustomization.yaml` in the repository
+checkout and apply it with `kubectl apply -k`. For an ad hoc composition without
+creating a directory, `compose` creates a temporary Kustomization and writes the
+real Kustomize output to stdout. Its target comes first, followed by Components
+and then Kustomize build options:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  <target-kustomization> \
+  <component-path>... \
+  | kubectl apply -f - -n ${NAMESPACE}
+```
+
+None of these user workflows requires `unfold` or `render`.
+
+### Contributing A Variant
+
 For a matrix-backed recipe, the source of truth is
 `.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, local Components,
 and any referenced Components under
@@ -118,16 +155,6 @@ artifacts in place; after reviewing them, clean them explicitly:
 ```bash
 scripts/kustomize-matrix.py unfold --clean <matrix.yaml>
 scripts/kustomize-matrix.py render --clean <matrix.yaml>
-```
-
-For an ad-hoc, uncommitted composition, use `compose`. The target is first,
-Components follow it, and Kustomize build options come last:
-
-```bash
-scripts/kustomize-matrix.py compose \
-  <target-kustomization> \
-  /absolute/path/to/recipes/kustomize/components/aws-efa-p8d16 \
-  --enable-helm
 ```
 
 ## Validation

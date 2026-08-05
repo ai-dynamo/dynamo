@@ -57,8 +57,11 @@ Provider-specific deltas live in Kustomize Components and are selected by
 Shared Kustomize building blocks belong under `recipes/kustomize/components/`;
 the disaggregated provider Components use the
 backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
-For cluster users, the checked-in `deploy-*.yaml` files are the stable deployment
-interface: review the matching provider manifest and apply it directly from GitHub.
+Kustomize is both the authoring model and documentation for the variants: the
+base and Components explain provider settings, and each public overlay documents
+the selected composition. Cluster users can apply a checked-in `deploy-*.yaml`
+manifest directly or apply its public overlay with `kubectl apply -k`; neither
+path requires regeneration.
 For recipe contributors, the source of truth is the matrix, `kustomize/base/`,
 recipe-local Components, plus any referenced shared Components under
 `recipes/kustomize/components/`. Public overlay
@@ -74,7 +77,25 @@ Comments inside literal block scalars already render in place.
 | `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `recipes/kustomize/components/disagg-workers/gke-roce/` |
 | `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `recipes/kustomize/components/disagg-workers/nscale-ib/` |
 
-After editing the base or overlays, render the apply-able manifests from the repo root:
+For example, apply the GKE RoCE composition from its checked-in Kustomization:
+
+```bash
+kubectl apply -k trtllm/disagg/blackwell/kustomize/overlays/gcp-roce -n ${NAMESPACE}
+```
+
+To make a local, uncommitted composition, create your own `kustomization.yaml` in
+the repository checkout or run `compose` from the repository root:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/kustomize/base \
+  recipes/kustomize/components/disagg-workers/gke-roce \
+  | kubectl apply -f - -n ${NAMESPACE}
+```
+
+Only recipe contributors update checked-in derived artifacts. After editing the
+matrix, base, or Components, regenerate the public overlays and apply-able
+manifests from the repository root:
 
 ```bash
 scripts/kustomize-matrix.py unfold trtllm/disagg/blackwell/.kustomize-matrix.yaml
