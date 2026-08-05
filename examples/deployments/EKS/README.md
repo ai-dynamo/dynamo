@@ -19,7 +19,7 @@ Supported manifests and cluster templates for the EKS deployment guide.
 |------|-------------|
 | `templates/eksctl.yaml` | eksctl cluster config for EKS Auto Mode |
 | `automode-np-gpu.yaml` | GPU NodePool for EKS Auto Mode |
-| `manifests/vllm/` | vLLM DGD manifests (v1alpha1 and `v1beta1/`) |
+| `manifests/vllm/` | vLLM `v1beta1` DGD manifests |
 | `manifests/model-download/` | Kustomize overlay for model-download Jobs |
 
 ## Working Directory

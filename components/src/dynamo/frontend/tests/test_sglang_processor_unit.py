@@ -337,6 +337,15 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] == 5
 
+    def test_logprobs_true_preserves_zero_top_logprobs(self):
+        result = _build_dynamo_preproc(
+            {"model": "test", "logprobs": True, "top_logprobs": 0},
+            [1],
+            "test",
+            None,
+        )
+        assert result["output_options"]["logprobs"] == 0
+
     def test_logprobs_true_without_top_logprobs(self):
         """logprobs=True without top_logprobs yields 1."""
         result = _build_dynamo_preproc(

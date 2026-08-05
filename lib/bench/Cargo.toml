@@ -72,6 +72,7 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
+request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -99,6 +100,16 @@ required-features = ["claude-trace-export"]
 name = "request_trace_to_satf"
 path = "request_trace_to_satf.rs"
 required-features = ["satf"]
+
+[[bin]]
+name = "request_trace_to_mooncake"
+path = "request_trace_to_mooncake.rs"
+required-features = ["request-trace-to-mooncake"]
+
+[[test]]
+name = "request_trace_to_mooncake"
+path = "tests/request_trace_to_mooncake.rs"
+required-features = ["request-trace-to-mooncake"]
 
 [[bench]]
 name = "offline_replay_bench"
