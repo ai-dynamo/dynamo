@@ -870,7 +870,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         """
         if self.engine is None:
             return False
-        return hasattr(self.engine.tokenizer_manager, "scale_elastic_ep")
+        # register_engine_routes() calls this on any engine object, including the
+        # bare stand-ins some route unit tests pass, so probe for tokenizer_manager
+        # defensively rather than assume it (direct access is only safe inside the
+        # handlers, which are reachable only once the route is registered).
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        return tokenizer_manager is not None and hasattr(
+            tokenizer_manager, "scale_elastic_ep"
+        )
 
     def _require_elastic_ep_backend(self) -> Optional[dict]:
         """Return an error dict if elastic EP is not enabled, else ``None``.
