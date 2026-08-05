@@ -166,15 +166,11 @@ def _write_watchdog_junit(test: _TestEntry, duration: float, reason: str) -> Non
     import xml.etree.ElementTree as ET
 
     classname, _, name = test.name.rpartition("::")
+    # _aggregate_junit_xml skips any file whose root is not a <testsuite> and
+    # sums these counters off it, so the wrapper is required even for one case.
+    # Its own name attribute is discarded there, so it is not worth inventing.
     suite = ET.Element(
-        "testsuite",
-        {
-            "name": "gpu-parallel-watchdog",
-            "tests": "1",
-            "errors": "0",
-            "failures": "1",
-            "time": f"{duration:.3f}",
-        },
+        "testsuite", {"tests": "1", "failures": "1", "time": f"{duration:.3f}"}
     )
     case = ET.SubElement(
         suite,
