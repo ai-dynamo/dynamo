@@ -54,8 +54,8 @@ def _tensor_from_pointer(
     device_type = get_vmm_device_type().value
 
     if device_type == "xpu":
-        # XPU: use _sycl_vmm.tensor_from_device_ptr (at::from_blob)
-        # PyTorch's internal _construct_storage_from_data_pointer doesn't support XPU.
+        # XPU: use _sycl_vmm.tensor_from_device_ptr (at::from_blob).
+        # _construct_CUDA_Tensor_From_Storage_And_Metadata hardcodes DispatchKey::CUDA.
         from gpu_memory_service.common.vmm import _sycl_vmm
 
         # c10::ScalarType enum values
