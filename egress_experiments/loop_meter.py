@@ -51,6 +51,15 @@ def item() -> None:
     _THREADS[name] = _THREADS.get(name, 0) + 1
 
 
+def count() -> int:
+    """Items the loop has finished, O(1).
+
+    Used for backpressure accounting on a 10 Hz sampler, where copying the
+    timestamp list would itself become the cost.
+    """
+    return len(_TIMES)
+
+
 def timestamps() -> List[int]:
     return list(_TIMES)
 

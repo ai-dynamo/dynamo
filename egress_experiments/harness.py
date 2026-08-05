@@ -326,7 +326,10 @@ class SimResult:
 
     @property
     def loop_capacity_per_s(self) -> float:
-        return 1e6 / self.loop_us_per_response
+        # cost_scale=0 is the natural way to isolate structural overhead from
+        # modelled work, and it made this a ZeroDivisionError.
+        cost = self.loop_us_per_response
+        return 1e6 / cost if cost > 0 else float("inf")
 
     @property
     def response_demand_per_s(self) -> float:
@@ -482,7 +485,14 @@ async def _run_async(cfg: SimConfig) -> SimResult:
     def sample_backlog() -> None:
         deadline = started_ns + int(cfg.duration_s * 1e9) if cfg.duration_s else None
         while not backlog_stop.wait(0.1):
-            backlog_samples.append(llm.responses_dispatched - driver.delivered)
+            # Loop-side, deliberately: `driver.delivered` counts items after
+            # the tokio-side consumer, which loop_meter's own docstring says
+            # must not be used to measure the loop. Using it HERE made the run
+            # LENGTH depend on that consumer -- windows of 2.6 s to 17.4 s for
+            # the same architecture and config -- so an architecture whose
+            # consumer keeps up was stopped at a different point for reasons
+            # unrelated to the loop. Found by the pump-fanout experiment.
+            backlog_samples.append(llm.responses_dispatched - loop_meter.count())
             over_backlog = (
                 cfg.max_backlog is not None and backlog_samples[-1] > cfg.max_backlog
             )
