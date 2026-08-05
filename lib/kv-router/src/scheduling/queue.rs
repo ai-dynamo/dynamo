@@ -201,7 +201,7 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
     supports_overlap_refresh: bool,
-    _marker: PhantomData<(Sel, RF)>,
+    _marker: PhantomData<fn() -> (Sel, RF)>,
 }
 
 impl<

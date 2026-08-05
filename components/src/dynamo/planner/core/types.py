@@ -205,6 +205,10 @@ class EngineCapabilities:
     max_kv_tokens: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
     speculative_nextn: Optional[int] = None
+    # DGD-resolved per-replica power draw (watts) for this stage: the per-GPU
+    # cap × the replica-wide GPU total. None when power awareness is off or the
+    # cap has not been resolved. The final budget clamp reads this.
+    power_watts_per_replica: Optional[int] = None
 
 
 @dataclass
