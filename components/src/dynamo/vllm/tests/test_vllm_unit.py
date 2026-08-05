@@ -1182,28 +1182,33 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
     }
 
 
-def test_prefill_kv_transfer_params_preserves_router_hint_only():
-    from dynamo.vllm.handlers import _with_preserved_router_hint
+@pytest.mark.parametrize(
+    "kv_transfer_params",
+    [
+        {"do_remote_decode": False, "transfer_id": "prefill-1"},
+        {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
+    ],
+)
+def test_kv_transfer_params_setter_preserves_router_hint_only(kv_transfer_params):
+    from dynamo.vllm.handlers import _set_kv_transfer_params_preserving_router_hint
 
     router_hint = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
         "block_hashes": [11, 22],
     }
-    extra_args = {
-        "kv_transfer_params": {
-            "router_hint": router_hint,
-            "untrusted_connector_param": "dropped",
+    sampling_params = SimpleNamespace(
+        extra_args={
+            "kv_transfer_params": {
+                "router_hint": router_hint,
+                "untrusted_connector_param": "dropped",
+            }
         }
-    }
-
-    merged = _with_preserved_router_hint(
-        {"do_remote_decode": False, "transfer_id": "prefill-1"},
-        extra_args,
     )
 
-    assert merged == {
-        "do_remote_decode": False,
-        "transfer_id": "prefill-1",
+    _set_kv_transfer_params_preserving_router_hint(sampling_params, kv_transfer_params)
+
+    assert sampling_params.extra_args["kv_transfer_params"] == {
+        **kv_transfer_params,
         "router_hint": router_hint,
     }
 

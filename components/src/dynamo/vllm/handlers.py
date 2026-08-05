@@ -119,7 +119,6 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
-_LORA_LOCK_STRIPES = 64
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 _ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
@@ -848,19 +847,17 @@ def build_sampling_params(
     return sampling_params
 
 
-def _with_preserved_router_hint(
+def _set_kv_transfer_params_preserving_router_hint(
+    sampling_params: SamplingParams,
     kv_transfer_params: Mapping[str, Any],
-    extra_args: Mapping[str, Any] | None,
-) -> dict[str, Any]:
+) -> None:
+    if sampling_params.extra_args is None:
+        sampling_params.extra_args = {}
     merged = dict(kv_transfer_params)
-    existing = (
-        extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-        if isinstance(extra_args, Mapping)
-        else None
-    )
+    existing = sampling_params.extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
     if isinstance(existing, Mapping) and _ROUTER_HINT_EXTRA_ARGS_KEY in existing:
         merged[_ROUTER_HINT_EXTRA_ARGS_KEY] = existing[_ROUTER_HINT_EXTRA_ARGS_KEY]
-    return merged
+    sampling_params.extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = merged
 
 
 def build_sampling_params_openai(
@@ -3284,9 +3281,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         if kv_params is not None:
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            _set_kv_transfer_params_preserving_router_hint(sampling_params, kv_params)
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
@@ -3596,13 +3591,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
             self.engine_client.vllm_config
         )
-        if sampling_params.extra_args is None:
-            sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-        ] = _with_preserved_router_hint(
-            kv_protocol.prefill_request_kv_transfer_params(),
-            sampling_params.extra_args,
+        _set_kv_transfer_params_preserving_router_hint(
+            sampling_params, kv_protocol.prefill_request_kv_transfer_params()
         )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
