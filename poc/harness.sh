@@ -37,6 +37,10 @@ export GMS_KV_INDEX_PATH="${GMS_KV_INDEX_PATH-$LOG_DIR/kv_index.log}"
 # Winner dumps its stable-point L0 KV fingerprint here (at CLEAN_HANDOFF sleep); the
 # standby compares its reattached L0 against it, position-sensitively, before serving.
 export GMS_KV_TARGET_FILE="${GMS_KV_TARGET_FILE:-$LOG_DIR/kv_target.json}"
+# Engine-side opt-in (M1): commit the KV layout once the pool is built, so the pages
+# outlive this engine and a standby can adopt them. There is no server-side flag -- the
+# engine expresses the intent by committing, and by asking to adopt on connect.
+export DYN_GMS_PERSIST_KV="${DYN_GMS_PERSIST_KV:-1}"
 
 GMS_W0_LOG="$LOG_DIR/gms_w0.log"   # device-0 weights GMS server (commit marker lives here)
 ENGINE_A_LOG="$LOG_DIR/engine_a.log"; ENGINE_B_LOG="$LOG_DIR/engine_b.log"
@@ -167,7 +171,7 @@ echo "=== Phase 0: Start GPU Memory Service x2/device (devices 0..$((TP_SIZE-1))
 for dev in $(seq 0 $((TP_SIZE-1))); do
     python3 -m gpu_memory_service --device "$dev" --tag weights  > "$LOG_DIR/gms_w${dev}.log"  2>&1 &
     GMS_PIDS+=($!)
-    python3 -m gpu_memory_service --device "$dev" --tag kv_cache --persist-on-abort > "$LOG_DIR/gms_kv${dev}.log" 2>&1 &
+    python3 -m gpu_memory_service --device "$dev" --tag kv_cache > "$LOG_DIR/gms_kv${dev}.log" 2>&1 &
     GMS_PIDS+=($!)
 done
 echo "GMS PIDs: ${GMS_PIDS[*]}"

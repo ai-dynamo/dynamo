@@ -28,17 +28,51 @@ class CommitResponse(msgspec.Struct, tag="commit_response"):
     success: bool
 
 
+class CommitLayoutRequest(msgspec.Struct, tag="commit_layout_request"):
+    """Seal the allocation set: the shape is final and the pages outlive this session.
+
+    Unlike ``CommitRequest`` this makes no claim about the contents and does not
+    relinquish write access -- the caller is downgraded to RW_DATA and keeps writing.
+    """
+
+    pass
+
+
+class CommitLayoutResponse(msgspec.Struct, tag="commit_layout_response"):
+    success: bool
+    memory_layout_hash: str = ""
+
+
+class ReleaseLayoutRequest(msgspec.Struct, tag="release_layout_request"):
+    """Abandon the whole layout: free every allocation and unseal.
+
+    The session is kept (so the lock is never dropped mid-recovery) and the caller is
+    upgraded back to RW, since there is no longer a sealed layout to protect.
+    """
+
+    pass
+
+
+class ReleaseLayoutResponse(msgspec.Struct, tag="release_layout_response"):
+    success: bool
+    released_count: int = 0
+
+
 class GetLockStateRequest(msgspec.Struct, tag="get_lock_state_request"):
     pass
 
 
 class GetLockStateResponse(msgspec.Struct, tag="get_lock_state_response"):
-    state: str  # "EMPTY", "RW", "COMMITTED", "RO"
+    state: str  # "EMPTY", "RW", "ALLOCATED", "COMMITTED", "RO"
     has_rw_session: bool
     ro_session_count: int
     waiting_writers: int
     committed: bool
     is_ready: bool
+    # Pages are sealed and outlive their session. Implied by `committed`; reported
+    # separately so "held because a writer is live" is distinguishable from "held
+    # deliberately for reattach".
+    layout_committed: bool = False
 
 
 class GetAllocationStateRequest(msgspec.Struct, tag="get_allocation_state_request"):
@@ -165,6 +199,7 @@ class GetRuntimeStateResponse(msgspec.Struct, tag="get_runtime_state_response"):
     is_ready: bool
     allocation_count: int = 0
     memory_layout_hash: str = ""
+    layout_committed: bool = False
 
 
 class GMSRuntimeEvent(msgspec.Struct):
@@ -185,6 +220,10 @@ Message = Union[
     HandshakeResponse,
     CommitRequest,
     CommitResponse,
+    CommitLayoutRequest,
+    CommitLayoutResponse,
+    ReleaseLayoutRequest,
+    ReleaseLayoutResponse,
     GetLockStateRequest,
     GetLockStateResponse,
     GetAllocationStateRequest,

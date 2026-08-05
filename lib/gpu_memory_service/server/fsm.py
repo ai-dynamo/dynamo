@@ -14,6 +14,10 @@ from gpu_memory_service.common.locks import GrantedLockType
 class ServerState(str, Enum):
     EMPTY = "EMPTY"
     RW = "RW"
+    # A committed layout with no session: the pages are durable and reattachable, but
+    # nothing is promised about their contents. Distinct from COMMITTED, which also
+    # asserts the contents are published and stable (and so admits RO readers).
+    ALLOCATED = "ALLOCATED"
     COMMITTED = "COMMITTED"
     RO = "RO"
 
@@ -22,6 +26,8 @@ class StateEvent(Enum):
     RW_CONNECT = auto()
     RW_COMMIT = auto()
     RW_ABORT = auto()
+    LAYOUT_COMMIT = auto()
+    LAYOUT_RELEASE = auto()
     RO_CONNECT = auto()
     RO_DISCONNECT = auto()
 
@@ -59,7 +65,9 @@ class Transition:
 
 TRANSITIONS: list[Transition] = [
     Transition(
-        from_states=frozenset({ServerState.EMPTY, ServerState.COMMITTED}),
+        from_states=frozenset(
+            {ServerState.EMPTY, ServerState.ALLOCATED, ServerState.COMMITTED}
+        ),
         event=StateEvent.RW_CONNECT,
         to_state=ServerState.RW,
     ),
@@ -68,10 +76,27 @@ TRANSITIONS: list[Transition] = [
         event=StateEvent.RW_COMMIT,
         to_state=ServerState.COMMITTED,
     ),
+    # Seal the shape. The writer keeps its session and its mappings -- only the
+    # allocation set is frozen -- so the derived state stays RW until it disconnects,
+    # at which point RW_ABORT resolves to ALLOCATED instead of EMPTY.
+    Transition(
+        from_states=frozenset({ServerState.RW}),
+        event=StateEvent.LAYOUT_COMMIT,
+        to_state=ServerState.RW,
+    ),
+    # Abandon the layout wholesale, returning to an unsealed pool the writer may
+    # reshape. The escape hatch for a standby that adopted an incompatible layout.
+    Transition(
+        from_states=frozenset({ServerState.RW}),
+        event=StateEvent.LAYOUT_RELEASE,
+        to_state=ServerState.RW,
+    ),
+    # Resolves to ALLOCATED when the layout was committed, EMPTY otherwise. The
+    # derived `state` property picks between them; death never demotes the layout.
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_ABORT,
-        to_state=ServerState.EMPTY,
+        to_state=None,
     ),
     Transition(
         from_states=frozenset({ServerState.COMMITTED, ServerState.RO}),
@@ -98,6 +123,7 @@ class GMSFSM:
         self._rw_conn: Optional[Connection] = None
         self._ro_conns: Set[Connection] = set()
         self._committed = False
+        self._layout_committed = False
 
     @property
     def state(self) -> ServerState:
@@ -105,8 +131,12 @@ class GMSFSM:
             return ServerState.RW
         if self._ro_conns:
             return ServerState.RO
+        # Content-committed is the stronger claim (it entails a durable layout), so it
+        # wins when both hold.
         if self._committed:
             return ServerState.COMMITTED
+        if self._layout_committed:
+            return ServerState.ALLOCATED
         return ServerState.EMPTY
 
     @property
@@ -124,6 +154,16 @@ class GMSFSM:
     @property
     def committed(self) -> bool:
         return self._committed
+
+    @property
+    def layout_committed(self) -> bool:
+        """The allocation set is sealed, so it outlives the session that built it.
+
+        Implied by ``committed``: publishing contents necessarily means the pages
+        persist. Kept as a separate field only because a *new* writer invalidates the
+        contents (``RW_CONNECT`` clears ``_committed``) without making the pages vanish.
+        """
+        return self._layout_committed or self._committed
 
     def _check_condition(self, condition: Optional[str], conn: Connection) -> bool:
         if condition is None:
@@ -152,10 +192,20 @@ class GMSFSM:
 
         if event == StateEvent.RW_CONNECT:
             self._rw_conn = conn
+            # A writer can mutate the bytes, so any published contents are no longer
+            # trustworthy. The pages are untouched, so a sealed layout stays sealed --
+            # unless the caller asked for full RW, which means "replace it".
             self._committed = False
+            if conn.mode == GrantedLockType.RW:
+                self._layout_committed = False
         elif event == StateEvent.RW_COMMIT:
             self._committed = True
             self._rw_conn = None
+        elif event == StateEvent.LAYOUT_COMMIT:
+            self._layout_committed = True
+        elif event == StateEvent.LAYOUT_RELEASE:
+            self._layout_committed = False
+            self._committed = False
         elif event == StateEvent.RW_ABORT:
             self._rw_conn = None
         elif event == StateEvent.RO_CONNECT:

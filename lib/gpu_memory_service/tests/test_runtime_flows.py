@@ -1071,3 +1071,172 @@ async def test_large_allocation_unblocks_after_export_fd_holder_dies(
         if holder is not None and holder.poll() is None:
             os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
             holder.wait(timeout=_EXPORT_HOLDER_READY_TIMEOUT_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Committed layouts (ALLOCATED / RW_DATA)
+#
+# `commit()` publishes contents: it unmaps the writer, closes the session, and admits
+# RO readers. `commit_layout()` publishes only the *shape*: the writer keeps its session
+# and mappings and goes on writing, but may no longer reshape what it froze. The pages
+# then outlive the session, which is what lets a standby adopt them after a crash.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gms_thread(monkeypatch, tmp_path):
+    """Start a GMS server over a FakeVMM and hand back (server, socket_path, thread)."""
+    fake_vmm = FakeVMM()
+    monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
+    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
+
+    socket_path = str(tmp_path / "gms_layout.sock")
+    server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
+    thread = _WhiteBoxServerThread(server, socket_path)
+    thread.start()
+    try:
+        yield server, socket_path, thread
+    finally:
+        thread.stop()
+
+
+def _build_sealed_layout(socket_path, size=4096, tag="kv_cache"):
+    """Connect, allocate one handle, seal the shape. Returns (manager, allocation_id)."""
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW_DATA_OR_RW)
+    assert writer.granted_lock_type == GrantedLockType.RW
+    va = writer.create_mapping(size=size, tag=tag)
+    allocation_id = writer.mappings[va].allocation_id
+    writer.commit_layout()
+    assert writer.granted_lock_type == GrantedLockType.RW_DATA
+    return writer, allocation_id
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_commit_layout_seals_shape_and_narrows_writer_to_rw_data(gms_thread):
+    server, socket_path, _thread = gms_thread
+    writer, _ = _build_sealed_layout(socket_path)
+
+    # Sealing does not publish contents, so nothing became readable...
+    assert not server._gms.committed
+    # ...but the shape is now frozen, and the writer is the one holding the restriction.
+    assert server._gms._sessions.layout_committed
+    with pytest.raises(Exception):
+        writer.allocate_handle(size=4096, tag="kv_cache")
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "seal, allocations_after_crash, state_after_crash",
+    [(False, 0, ServerState.EMPTY), (True, 1, ServerState.ALLOCATED)],
+    ids=["unsealed_is_discarded", "sealed_survives"],
+)
+def test_only_a_committed_layout_survives_the_writer(
+    gms_thread, seal, allocations_after_crash, state_after_crash
+):
+    """Atomicity: a writer that dies part-way through building leaves nothing behind."""
+    server, socket_path, thread = gms_thread
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW_DATA_OR_RW)
+    writer.create_mapping(size=4096, tag="kv_cache")
+    if seal:
+        writer.commit_layout()
+    assert server._gms._allocations.allocation_count == 1
+
+    thread.disconnect_rw_session()  # the writer dies
+
+    assert server._gms._allocations.allocation_count == allocations_after_crash
+    assert server._gms.state is state_after_crash
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_standby_adopts_a_committed_layout_and_replays_across_takeovers(gms_thread):
+    """The failover path: adopt the same allocation, repeatedly."""
+    server, socket_path, thread = gms_thread
+    writer, allocation_id = _build_sealed_layout(socket_path)
+    thread.disconnect_rw_session()
+
+    for _takeover in range(2):
+        standby = GMSClientMemoryManager(socket_path, device=0)
+        standby.connect(RequestedLockType.RW_DATA_OR_RW)
+        # Granted RW_DATA because a committed layout was there to adopt.
+        assert standby.granted_lock_type == GrantedLockType.RW_DATA
+        assert [h.allocation_id for h in standby.list_handles(tag="kv_cache")] == [
+            allocation_id
+        ]
+        # Adopting does not re-seal anything, so the next standby inherits it too.
+        thread.disconnect_rw_session()
+        assert server._gms.state is ServerState.ALLOCATED
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_requesting_rw_replaces_a_committed_layout(gms_thread):
+    """Adopt-vs-replace is chosen by the requested mode, not by server policy."""
+    server, socket_path, thread = gms_thread
+    _writer, _ = _build_sealed_layout(socket_path)
+    thread.disconnect_rw_session()
+    assert server._gms._allocations.allocation_count == 1
+
+    replacer = GMSClientMemoryManager(socket_path, device=0)
+    replacer.connect(RequestedLockType.RW)  # "wipe it, I'll build my own"
+
+    assert replacer.granted_lock_type == GrantedLockType.RW
+    assert server._gms._allocations.allocation_count == 0
+    assert server._gms.state is ServerState.RW
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_release_layout_frees_pages_and_widens_caller_back_to_rw(gms_thread):
+    """The mismatch escape: recover in-session, without ever dropping the lock."""
+    server, socket_path, thread = gms_thread
+    _writer, _ = _build_sealed_layout(socket_path)
+    thread.disconnect_rw_session()
+
+    standby = GMSClientMemoryManager(socket_path, device=0)
+    standby.connect(RequestedLockType.RW_DATA_OR_RW)
+    assert standby.granted_lock_type == GrantedLockType.RW_DATA
+
+    released = standby.release_layout()
+
+    assert released == 1
+    assert server._gms._allocations.allocation_count == 0
+    assert not server._gms._sessions.layout_committed
+    # State went down; capability went up -- RW_DATA only exists to protect a sealed
+    # layout, so with none left the restriction is meaningless and reshaping is allowed.
+    assert standby.granted_lock_type == GrantedLockType.RW
+    standby.create_mapping(size=4096, tag="kv_cache")
+    assert server._gms._allocations.allocation_count == 1
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
+    """The one failure ALLOCATED exists to prevent: a reader on a live, mutating pool."""
+    _server, socket_path, thread = gms_thread
+    _writer, _ = _build_sealed_layout(socket_path)
+    thread.disconnect_rw_session()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    with pytest.raises(Exception):
+        reader.connect(RequestedLockType.RO, timeout_ms=500)
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_content_commit_path_is_unchanged(gms_thread):
+    """Regression guard: the weights lifecycle must not notice any of this."""
+    server, socket_path, _thread = gms_thread
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    va = writer.create_mapping(size=4096, tag="weights")
+    writer.metadata_put("tensor.0", writer.mappings[va].allocation_id, 0, b"weights")
+    assert writer.commit()
+
+    assert server._gms.state is ServerState.COMMITTED
+    assert server._gms.is_ready()
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+    try:
+        assert reader.lock_type == GrantedLockType.RO
+        assert len(reader.list_allocations()) == 1
+    finally:
+        reader.close()

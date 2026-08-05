@@ -25,7 +25,6 @@ class Config:
     alloc_retry_timeout: Optional[float]
     verbose: bool
     device_type: VMMDeviceType
-    persist_on_abort: bool = False
 
 
 def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
@@ -81,14 +80,6 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
         choices=[d.value for d in VMMDeviceType],
         help="VMM device type (vendor driver) to use (default: cuda).",
     )
-    parser.add_argument(
-        "--persist-on-abort",
-        action="store_true",
-        help="Keep the allocated layout when an RW writer aborts (crashes) instead of "
-        "clearing it, so a standby can reattach the same physical memory. Intended for "
-        "the KV-cache server in shadow-failover setups (the server owns the physical, so "
-        "it outlives the engine that was writing it).",
-    )
 
     args = parser.parse_args(argv)
 
@@ -113,7 +104,6 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
             alloc_retry_timeout=args.alloc_retry_timeout,
             verbose=args.verbose,
             device_type=VMMDeviceType.from_str(args.device_type),
-            persist_on_abort=args.persist_on_abort,
         )
         for tag in tags
     ]

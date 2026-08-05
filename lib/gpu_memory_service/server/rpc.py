@@ -63,7 +63,6 @@ class GMSRPCServer:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
-        persist_on_abort: bool = False,
     ):
         self.socket_path = socket_path
         self.device = device
@@ -71,7 +70,6 @@ class GMSRPCServer:
             device,
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
-            persist_on_abort=persist_on_abort,
         )
         self._server: Optional[asyncio.Server] = None
         logger.info(

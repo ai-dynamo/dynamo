@@ -344,6 +344,55 @@ class GMSClientMemoryManager:
         self._granted_lock_type = None
         return True
 
+    def commit_layout(self) -> str:
+        """Seal the allocation set: the shape is final, the pages outlive this session.
+
+        The counterpart to :meth:`commit`, and deliberately narrower. ``commit`` publishes
+        *contents*: it unmaps the writer, closes the session, and lets RO readers attach.
+        This publishes only the *shape* -- mappings and session are untouched, so the
+        caller keeps writing bytes into a pool whose geometry can no longer change.
+
+        Call it once the pool is fully built. That call is the atomic boundary: a writer
+        that dies before it leaves nothing behind (a half-allocated pool is discarded),
+        and a writer that dies after it leaves a layout a standby can adopt by name.
+
+        The server narrows this session to RW_DATA, so allocate/free/metadata-put now
+        raise. Use :meth:`release_layout` to reshape.
+        """
+        self._require_rw()
+        # Publish barrier, matching commit(): make this process's GPU writes visible
+        # before the layout is advertised as reattachable.
+        self._vmm.synchronize()
+        layout_hash = self._client.commit_layout()
+        self._granted_lock_type = GrantedLockType.RW_DATA
+        self._last_memory_layout_hash = layout_hash
+        return layout_hash
+
+    def release_layout(self) -> int:
+        """Abandon the whole layout: unmap locally, then free it server-side.
+
+        The escape hatch for a caller that adopted a layout it cannot use -- typically a
+        standby whose geometry does not match the pool it inherited. Unmapping first is
+        required, not tidiness: the server's ``cuMemRelease`` only reclaims memory once
+        every mapping of it is gone, so releasing while still mapped would leave the
+        memory logically freed but resident.
+
+        VA *reservations* are preserved, so the caller can immediately
+        ``reallocate_all_handles()`` + ``remap_all_vas()`` and land fresh physical at the
+        same addresses -- which is why tensors already bound to those VAs survive this.
+
+        The session is kept throughout (the lock is never dropped mid-recovery) and the
+        caller is widened back to RW, since there is no longer a sealed layout to protect.
+        """
+        if self._client is None:
+            raise RuntimeError("Not connected")
+        if not self.is_unmapped:
+            self.unmap_all_vas()
+        released = self._client.release_layout()
+        self._granted_lock_type = GrantedLockType.RW
+        self._last_memory_layout_hash = ""
+        return released
+
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()
 
@@ -796,9 +845,17 @@ class GMSClientMemoryManager:
 
             state = _tag_states.get(self.tag)
             if state is not None and state.manager is self:
-                if self.granted_lock_type != GrantedLockType.RW:
+                # RW_DATA counts: a standby adopting a committed layout has to move the
+                # same scratch bookkeeping before it can remap, and this routine touches
+                # neither the driver nor the server (see the docstring). The narrower
+                # grant is still enforced where it matters -- the server refuses the
+                # allocations that server-backed routing would go on to request.
+                if self.granted_lock_type not in (
+                    GrantedLockType.RW,
+                    GrantedLockType.RW_DATA,
+                ):
                     raise RuntimeError(
-                        "prepare_scratch_for_reallocation requires RW grant "
+                        "prepare_scratch_for_reallocation requires a writer grant "
                         "before disabling scratch routing: "
                         f"tag={self.tag!r} "
                         f"granted_lock_type={self.granted_lock_type}"
