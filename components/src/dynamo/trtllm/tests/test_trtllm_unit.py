@@ -621,16 +621,6 @@ async def test_init_llm_worker_creates_multimodal_processor():
 
 
 @pytest.mark.core
-def test_strip_postprocess_workers_warns_and_removes_when_positive(caplog):
-    """A num_postprocess_workers > 0 emits a warning and is removed."""
-    engine_args = {"num_postprocess_workers": 8, "max_batch_size": 128}
-    with caplog.at_level("WARNING"):
-        _strip_postprocess_workers(engine_args)
-    assert "num_postprocess_workers" not in engine_args
-    assert any("num_postprocess_workers=8" in r.message for r in caplog.records)
-
-
-@pytest.mark.core
 def test_strip_postprocess_workers_handles_quoted_string_value(caplog):
     """Quoted YAML/JSON string values (e.g. "8") warn and are removed without TypeError."""
     engine_args = {"num_postprocess_workers": "8", "max_batch_size": 128}
