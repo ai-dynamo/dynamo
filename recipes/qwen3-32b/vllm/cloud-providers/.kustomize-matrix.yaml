@@ -9,7 +9,7 @@ matrix:
         - kustomize/components/aks-ib
     - name: aws-efa-p16d16
       components:
-        - ../../../kustomize/components/aws/components/efa/components/p16d16
+        - ../../../kustomize/components/aws-efa-p16d16
         - kustomize/components/vllm-efa
     - name: gke-roce
       components:

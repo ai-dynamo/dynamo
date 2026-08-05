@@ -64,7 +64,7 @@ overlay YAML before matching rendered fields. Comments inside literal block scal
 | Rendered manifest | Provider fabric | Patch source |
 |-------------------|-----------------|--------------|
 | `trtllm/disagg/blackwell/deploy-generic.yaml` | Provider-neutral baseline | `trtllm/disagg/blackwell/kustomize/overlays/generic/` |
-| `trtllm/disagg/blackwell/deploy-aws-efa-p8d16.yaml` | AWS EFA, 8 EFA prefill and 16 decode | `recipes/kustomize/components/aws/components/efa/components/p8d16/` |
+| `trtllm/disagg/blackwell/deploy-aws-efa-p8d16.yaml` | AWS EFA, 8 EFA prefill and 16 decode | `recipes/kustomize/components/aws-efa-p8d16/` |
 | `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `recipes/kustomize/components/disagg-workers/gke-roce/` |
 | `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `trtllm/disagg/blackwell/kustomize/components/nscale-ib/` |
 
