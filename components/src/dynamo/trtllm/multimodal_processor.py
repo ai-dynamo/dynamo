@@ -35,6 +35,7 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from dynamo.common.multimodal.codec_errors import video_decoder_missing
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -80,8 +81,7 @@ class TokenizerProtocol(Protocol):
         token_ids: List[int],
         skip_special_tokens: bool = True,
         clean_up_tokenization_spaces: bool = True,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 class MultimodalRequestProcessor:
@@ -479,7 +479,8 @@ class MultimodalRequestProcessor:
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
-                        if should_use_nvdec(probe_video_codec(content)):
+                        codec = probe_video_codec(content)
+                        if should_use_nvdec(codec):
                             try:
                                 nvdec_video = await asyncio.to_thread(
                                     _nvdec_video_data, content, self.num_video_frames
@@ -498,17 +499,34 @@ class MultimodalRequestProcessor:
                             ) as video_file:
                                 await asyncio.to_thread(video_file.write, content)
                                 await asyncio.to_thread(video_file.flush)
-                                videos.append(
-                                    await async_load_video(
-                                        video_file.name, self.num_video_frames
+                                try:
+                                    videos.append(
+                                        await async_load_video(
+                                            video_file.name, self.num_video_frames
+                                        )
                                     )
-                                )
+                                except ImportError as exc:
+                                    # The vendor loader needs cv2, which the
+                                    # image deliberately omits; its bare error
+                                    # names neither codec nor remedy.
+                                    raise video_decoder_missing(
+                                        "trtllm",
+                                        "opencv-python-headless",
+                                        "cv2",
+                                        codec,
+                                    ) from exc
                     else:
-                        videos.append(
-                            await async_load_video(
-                                normalized_url, self.num_video_frames
+                        try:
+                            videos.append(
+                                await async_load_video(
+                                    normalized_url, self.num_video_frames
+                                )
                             )
-                        )
+                        except ImportError as exc:
+                            # No bytes fetched on this branch, so no codec probe.
+                            raise video_decoder_missing(
+                                "trtllm", "opencv-python-headless", "cv2", None
+                            ) from exc
                 except UrlValidationError as e:
                     raise HttpStatusError(400, str(e), url) from e
                 except HttpStatusError:

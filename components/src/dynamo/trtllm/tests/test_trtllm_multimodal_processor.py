@@ -250,3 +250,42 @@ async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None
     assert str(upstream_error) in message
 
     nvdec.assert_not_called()  # VP9 must never take the hardware path
+
+
+@pytest.mark.asyncio
+async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
+    """cv2 absent: the vendor loader's ImportError must surface as guidance
+    naming the bounded spec and installer, not a bare module error."""
+    from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    fetch = AsyncMock(return_value=b"video bytes")
+    load_video = AsyncMock(
+        side_effect=ImportError("OpenCV (cv2) is required for video decoding")
+    )
+    monkeypatch.setattr(mmp, "fetch_bytes", fetch, raising=False)
+    monkeypatch.setattr(mmp, "async_load_video", load_video)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await processor.process_openai_request(
+            {
+                "multi_modal_data": {
+                    "video_url": [{"Url": "http://169.254.169.254/x.mp4"}]
+                },
+                "token_ids": [1],
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    # The processor maps everything to HttpStatusError; the actionable text
+    # must survive inside it.
+    msg = str(exc_info.value)
+    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "install_media_decoders trtllm" in msg

@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import numpy as np
 
 from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.multimodal.codec_errors import audio_decoder_missing
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -155,6 +156,14 @@ class AudioLoader:
             # its type and prevent the frontend from returning a 4xx.
             logger.error("URL rejected loading audio: '%s'", audio_url)
             raise
+        except ImportError as exc:
+            # The image ships no audio decoder (PyAV is deliberately omitted).
+            # vLLM's own hint here is "pip install vllm[audio]", which drags in
+            # an unpinned stack; point at the validated bounded install
+            # instead. NVDEC never decodes audio, so there is no hardware
+            # alternative to mention.
+            logger.error("No audio decoder available loading '%s'", audio_url)
+            raise audio_decoder_missing("vllm") from exc
         except Exception as exc:
             logger.error("Error loading audio from %s: %s", audio_url, exc)
             raise ValueError(f"Failed to load audio from {audio_url}: {exc}") from exc

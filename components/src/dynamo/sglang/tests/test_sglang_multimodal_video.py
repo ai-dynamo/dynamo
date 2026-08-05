@@ -186,3 +186,97 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
         assert meta_none is None
     finally:
         es.preprocess_video = saved
+
+
+# ---------------------------------------------------------------------------
+# Unsupported-codec preflight in _maybe_nvdec_decoder.
+# ---------------------------------------------------------------------------
+
+
+def _bare_handler():
+    """Handler skeleton for exercising _maybe_nvdec_decoder in isolation."""
+    from dynamo.common.http.url_validator import UrlValidationPolicy
+    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+        MultimodalEncodeWorkerHandler,
+    )
+
+    handler = object.__new__(MultimodalEncodeWorkerHandler)
+    handler._url_policy = UrlValidationPolicy.from_env()
+    return handler
+
+
+def _selective_find_spec(present: set[str]):
+    import importlib.util as _ilu
+
+    real = _ilu.find_spec
+
+    def fake(name, *args, **kwargs):
+        if name in ("torchcodec", "decord"):
+            return object() if name in present else None
+        return real(name, *args, **kwargs)
+
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
+    """A VP9 request on an image with neither torchcodec nor decord must fail
+    HERE with guidance, not deep inside SGLang with the video payload repr
+    embedded in a bare "No module named 'decord'" (observed on a real image).
+
+    Raising through _maybe_nvdec_decoder also proves the broad fallback
+    except-clause does not swallow the preflight error and pass the bytes on
+    anyway.
+    """
+    import importlib.util as _ilu
+
+    import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+    from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+    async def fake_validate(url, policy):
+        return url
+
+    async def fake_fetch(url, timeout, policy=None):
+        return b"vp9-bytes"
+
+    monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
+    monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(_ilu, "find_spec", _selective_find_spec(set()))
+
+    handler = _bare_handler()
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert VALIDATED_SPECS["decord2"] in msg
+    assert "install_media_decoders sglang" in msg
+
+
+@pytest.mark.asyncio
+async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
+    """With decord importable the preflight stays silent and the validated
+    bytes are handed to SGLang exactly as before."""
+    import importlib.util as _ilu
+
+    import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
+
+    async def fake_validate(url, policy):
+        return url
+
+    async def fake_fetch(url, timeout, policy=None):
+        return b"vp9-bytes"
+
+    monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
+    monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(_ilu, "find_spec", _selective_find_spec({"decord"}))
+
+    handler = _bare_handler()
+    result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
+
+    assert result == b"vp9-bytes"
