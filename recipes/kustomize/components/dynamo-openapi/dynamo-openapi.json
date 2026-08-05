@@ -1,4 +1,7 @@
 {
+  "x-generated-warning": "Generated file. Do not edit this checked-in copy.",
+  "x-regenerate-command": "python3 scripts/generate_kustomize_openapi.py",
+  "x-generated-by": "scripts/generate_kustomize_openapi.py",
   "definitions": {
     "nvidia.com.v1alpha1.DynamoCheckpoint": {
       "properties": {
@@ -2357,6 +2360,5 @@
         }
       ]
     }
-  },
-  "x-generated-by": "scripts/generate_kustomize_openapi.py"
+  }
 }

@@ -17,6 +17,8 @@ CRD_DIR = REPO_ROOT / "deploy/operator/config/crd/bases"
 OUTPUT_PATH = (
     REPO_ROOT / "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json"
 )
+GENERATED_WARNING = "Generated file. Do not edit this checked-in copy."
+REGENERATE_COMMAND = "python3 scripts/generate_kustomize_openapi.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,7 +90,7 @@ def pruned_schema(source: Any) -> dict[str, Any] | None:
 def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
     crd = yaml.safe_load(crd_path.read_text(encoding="utf-8"))
     if not isinstance(crd, dict):
-        raise ValueError(f"{crd_path} must contain one CustomResourceDefinition")
+        raise TypeError(f"{crd_path} must contain one CustomResourceDefinition")
     if crd.get("kind") != "CustomResourceDefinition":
         return {}
 
@@ -100,7 +102,7 @@ def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
         or not isinstance(kind, str)
         or not isinstance(versions, list)
     ):
-        raise ValueError(
+        raise TypeError(
             f"{crd_path} is missing CustomResourceDefinition identity fields"
         )
 
@@ -140,18 +142,25 @@ def generated_schema() -> str:
     if not definitions:
         raise ValueError("no Dynamo CRD definitions were generated")
 
-    schema = {
-        "x-generated-by": "scripts/generate_kustomize_openapi.py",
-        "definitions": definitions,
-    }
-    return json.dumps(schema, indent=2, sort_keys=True) + "\n"
+    definition_lines = json.dumps(definitions, indent=2, sort_keys=True).splitlines()
+    lines = [
+        "{",
+        f'  "x-generated-warning": {json.dumps(GENERATED_WARNING)},',
+        f'  "x-regenerate-command": {json.dumps(REGENERATE_COMMAND)},',
+        '  "x-generated-by": "scripts/generate_kustomize_openapi.py",',
+        f'  "definitions": {definition_lines[0]}',
+        *(f"  {line}" for line in definition_lines[1:-1]),
+        f"  {definition_lines[-1]}",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
     args = parse_args()
     try:
         rendered = generated_schema()
-    except (OSError, ValueError, yaml.YAMLError) as exc:
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
         print(f"generate_kustomize_openapi.py: {exc}", file=sys.stderr)
         return 1
 
@@ -163,7 +172,7 @@ def main() -> int:
             f"Generated Kustomize OpenAPI schema is stale: {OUTPUT_PATH.relative_to(REPO_ROOT)}",
             file=sys.stderr,
         )
-        print("Run: python3 scripts/generate_kustomize_openapi.py", file=sys.stderr)
+        print(f"Run: {REGENERATE_COMMAND}", file=sys.stderr)
         return 1
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -25,7 +25,19 @@ def load_generator_module():
 
 def test_generated_schema_includes_all_operator_crd_versions():
     generator = load_generator_module()
-    schema = json.loads(generator.generated_schema())
+    rendered = generator.generated_schema()
+    schema = json.loads(rendered)
+
+    assert rendered.splitlines()[1] == (
+        '  "x-generated-warning": "Generated file. Do not edit this checked-in copy.",'
+    )
+    assert rendered.splitlines()[2] == (
+        '  "x-regenerate-command": "python3 scripts/generate_kustomize_openapi.py",'
+    )
+    assert (
+        schema["x-regenerate-command"]
+        == "python3 scripts/generate_kustomize_openapi.py"
+    )
 
     expected_definitions = set()
     for crd_path in generator.crd_paths():
