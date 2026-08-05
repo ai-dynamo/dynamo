@@ -39,6 +39,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .thinking import runtime_default_thinking_mode
 from .utils import (
     extract_mm_urls,
     handle_engine_error,
@@ -85,6 +86,23 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
+
+
+def _ensure_chat_template(
+    tokenizer: Any, local_dir: str, chat_template_flag: str | None
+) -> None:
+    """Set tokenizer.chat_template so vLLM's renderer handles tool calls.
+
+    Skipped for MistralTokenizer (--tokenizer-mode mistral): it has no
+    chat_template attribute and renders via mistral_common, so leave it
+    untouched rather than attach an HF template it never uses.
+    """
+    if not hasattr(tokenizer, "chat_template"):
+        return
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
+    if chat_template_flag:
+        tokenizer.chat_template = load_chat_template(chat_template_flag)
 
 
 def _mm_feature_modality(feature: Any) -> str:
@@ -246,6 +264,7 @@ class VllmProcessor:
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        default_thinking_mode: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -257,6 +276,7 @@ class VllmProcessor:
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
         self.default_chat_template_kwargs = default_chat_template_kwargs
+        self.default_thinking_mode = default_thinking_mode
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -461,6 +481,7 @@ class VllmProcessor:
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
+                default_thinking_mode=self.default_thinking_mode,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -512,12 +533,14 @@ class VllmProcessor:
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:
-            sampling_params.logprobs = top_logprobs or 1
+            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
         elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
             sampling_params.logprobs = logprobs
         elif top_logprobs not in (None, 0):
             sampling_params.logprobs = top_logprobs
-        if sampling_params.logprobs is not None and sampling_params.logprobs > 0:
+        # TODO: Support logprobs in the distributed vLLM chat processor by
+        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
+        if sampling_params.logprobs is not None:
             logger.warning(
                 "Logprobs requested but not supported in distributed inference mode"
             )
@@ -977,16 +1000,9 @@ class EngineFactory:
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
 
-        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
-        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
-        if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
-
-        # --chat-template overrides; load_chat_template accepts either a file path
-        # or an inline Jinja template string.
-        chat_template_flag = getattr(self.flags, "chat_template", None)
-        if chat_template_flag:
-            tokenizer.chat_template = load_chat_template(chat_template_flag)
+        _ensure_chat_template(
+            tokenizer, local_dir, getattr(self.flags, "chat_template", None)
+        )
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval
@@ -1029,6 +1045,7 @@ class EngineFactory:
             )
         else:
             reasoning_parser_class = None
+        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -1044,6 +1061,7 @@ class EngineFactory:
             default_chat_template_kwargs=getattr(
                 self.flags, "default_chat_template_kwargs", None
             ),
+            default_thinking_mode=default_thinking_mode,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

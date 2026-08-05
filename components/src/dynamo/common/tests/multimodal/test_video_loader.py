@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.video_loader as video_loader_module
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.video_loader import VideoLoader
 
 pytestmark = [
@@ -26,8 +27,28 @@ async def test_load_video_rejects_http_by_default():
     """
     loader = VideoLoader(url_policy=UrlValidationPolicy())
 
-    with pytest.raises(ValueError, match="not allowed"):
+    with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_video("http://example.com/x.mp4")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.mp4"),
+    ],
+)
+async def test_load_video_preserves_client_error(client_error):
+    loader = VideoLoader()
+    loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=client_error
+    )
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_video("https://example.com/x.mp4")
+
+    assert exc_info.value is client_error
 
 
 @pytest.mark.asyncio
@@ -85,6 +106,27 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
 
 @pytest.mark.asyncio
+async def test_load_video_batch_prioritizes_typed_client_error():
+    loader = VideoLoader()
+    client_error = HttpStatusError(
+        415, "Unsupported Media Type", "https://example.com/bad.mp4"
+    )
+    loader.load_video = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("decode failed"), client_error]
+    )
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_video_batch(
+            [
+                {"Url": "https://example.com/bad.mp4"},
+                {"Url": "https://example.com/unsupported.mp4"},
+            ]
+        )
+
+    assert exc_info.value is client_error
+
+
+@pytest.mark.asyncio
 async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch):
     loader = VideoLoader(enable_frontend_decoding=False)
     loader._enable_frontend_decoding = True
@@ -109,3 +151,56 @@ async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch)
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_maybe_decode_with_nvdec_routes_h264(monkeypatch):
+    loader = VideoLoader()
+    frames = np.zeros((2, 4, 6, 3), dtype=np.uint8)
+    meta = {"fps": 30.0, "frames_indices": [0, 1], "total_num_frames": 2}
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "h264")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
+    monkeypatch.setattr(
+        video_loader_module, "decode_video_nvdec", lambda b, n: (frames, meta)
+    )
+
+    result = await loader._maybe_decode_with_nvdec(b"h264-bytes")
+
+    assert result is not None
+    got_frames, got_meta = result
+    np.testing.assert_array_equal(got_frames, frames)
+    assert got_meta == meta
+
+
+@pytest.mark.asyncio
+async def test_maybe_decode_with_nvdec_skips_royalty_free(monkeypatch):
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    called = {"decode": False}
+
+    def _decode(*a, **k):
+        called["decode"] = True
+
+    monkeypatch.setattr(video_loader_module, "decode_video_nvdec", _decode)
+
+    result = await loader._maybe_decode_with_nvdec(b"vp9-bytes")
+
+    assert result is None  # VP9 stays on the software path
+    assert called["decode"] is False  # NVDEC not invoked
+
+
+@pytest.mark.asyncio
+async def test_maybe_decode_with_nvdec_falls_back_on_failure(monkeypatch):
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "hevc")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("nvdec session limit")
+
+    monkeypatch.setattr(video_loader_module, "decode_video_nvdec", _boom)
+
+    result = await loader._maybe_decode_with_nvdec(b"hevc-bytes")
+
+    assert result is None  # a NVDEC failure falls back, never raises

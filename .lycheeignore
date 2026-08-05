@@ -39,3 +39,15 @@
 ^https://docs\.nvidia\.com/dynamo/dev/reference/releases/(release-history|v1-[0-9]+-[0-9]+)$
 ^https://github\.com/ai-dynamo/dynamo/blob/main/docs/fern/components/releases\.data\.ts$
 
+# The DGDR example manifests land with this docs refactor; the canonical
+# tree/main link in recipes/kubernetes-templates/dgdr.mdx 404s from CI until the PR is merged.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr$
+
+# This example is introduced by the same PR as its docs link, so the main-branch
+# URL returns 404 until merge.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$
+
+# The standalone on-ramp agg.yaml is added in this same PR, so blob/main links to
+# it 404 from CI until the PR merges. Remove this entry once agg.yaml lands on main
+# (afterwards lychee validates the URL again, catching any later rename/move).
+^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml

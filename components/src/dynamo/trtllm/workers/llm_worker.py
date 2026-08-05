@@ -168,6 +168,31 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
             setattr(config, field_name, engine_args[field_name])
 
 
+def _strip_postprocess_workers(engine_args: dict) -> None:
+    """Remove num_postprocess_workers from engine args, warning if it was > 0.
+
+    Dynamo manages its own post-processing pipeline; TRT-LLM's
+    num_postprocess_workers is not effective in this context.
+    """
+    value = engine_args.pop("num_postprocess_workers", None)
+    if value is None:
+        return
+    try:
+        if int(value) > 0:
+            logging.warning(
+                "num_postprocess_workers=%r was set in engine config but will be ignored: "
+                "Dynamo manages its own post-processing pipeline and does not make "
+                "TRT-LLM's num_postprocess_workers effective. The setting has been removed.",
+                value,
+            )
+    except (TypeError, ValueError):
+        logging.warning(
+            "num_postprocess_workers=%r was set in engine config with an unrecognised value "
+            "and has been removed.",
+            value,
+        )
+
+
 def _populate_kv_cache_capacity(
     runtime_config: ModelRuntimeConfig,
     engine: TensorRTLLMEngine,
@@ -364,6 +389,7 @@ async def init_llm_worker(
             sys.exit(1)
 
     _sync_config_from_engine_args(config, arg_map)
+    _strip_postprocess_workers(arg_map)
 
     event_buffer_max_size = 0
     if config.publish_events_and_metrics:
@@ -653,6 +679,11 @@ async def init_llm_worker(
         runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        if config.dyn_default_thinking_mode is not None:
+            runtime_config.set_engine_specific(
+                "default_thinking_mode",
+                json.dumps(config.dyn_default_thinking_mode),
+            )
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
@@ -777,6 +808,9 @@ async def init_llm_worker(
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
             conversation_affinity=config.conversation_affinity,
+            conversation_affinity_dp_rank_source=(
+                config.conversation_affinity_dp_rank_source
+            ),
         )
 
         media_decoder = None

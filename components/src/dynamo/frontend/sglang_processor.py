@@ -37,6 +37,7 @@ from .sglang_prepost import (
     detect_force_reasoning_from_template,
     preprocess_chat_request,
 )
+from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
     extract_mm_urls,
@@ -82,6 +83,42 @@ def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     if eos_token_ids:
         return eos_token_ids
     return _normalize_eos_token_ids(getattr(tokenizer, "eos_token_id", None))
+
+
+def _model_eos_token_ids(tokenizer: Any, source_path: str) -> list[int]:
+    """Merge tokenizer EOS IDs with the model generation configuration.
+
+    SGLang mode detokenizes in the frontend, bypassing both Dynamo's Rust EOS
+    resolution and SGLang's own ``trim_matched_stop``, so the merge is redone here.
+    For most models the tokenizer's EOS is already the real terminal token and this
+    is a no-op. Kimi-K3 splits them: it closes messages with the XTML protocol token
+    163586 ``<|end_of_msg|>``, declared only in generation config, while the
+    tokenizer reports a different token, 163585 ``[EOS]``.
+    Strips the trailing token only; splitting reasoning is ``force_reasoning``'s job.
+    """
+    token_ids = _tokenizer_eos_token_ids(tokenizer)
+    generation_config_path = os.path.join(source_path, "generation_config.json")
+    try:
+        with open(generation_config_path, encoding="utf-8") as config_file:
+            generation_config = json.load(config_file)
+    except FileNotFoundError:
+        return token_ids
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read EOS IDs from %s: %s",
+            generation_config_path,
+            exc,
+        )
+        return token_ids
+
+    configured_ids = _normalize_eos_token_ids(
+        generation_config.get("eos_token_id")
+        if isinstance(generation_config, dict)
+        else None
+    )
+    seen = set(token_ids)
+    token_ids.extend(token_id for token_id in configured_ids if token_id not in seen)
+    return token_ids
 
 
 def _load_tokenizer(source_path: str, trust_remote_code: bool):
@@ -145,6 +182,7 @@ _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
+_w_default_thinking_mode: str | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -194,10 +232,12 @@ def _init_worker(
     trust_remote_code: bool = False,
     template_force_reasoning: bool = False,
     chat_template: str | None = None,
+    default_thinking_mode: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
+    global _w_default_thinking_mode
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -205,6 +245,7 @@ def _init_worker(
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
+    _w_default_thinking_mode = default_thinking_mode
 
 
 def _preprocess_worker(
@@ -220,6 +261,7 @@ def _preprocess_worker(
         reasoning_parser_name=_w_reasoning_parser_name,
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
+        default_thinking_mode=_w_default_thinking_mode,
     )
 
     n = request.get("n", 1)
@@ -282,7 +324,7 @@ def _build_dynamo_preproc(
     logprobs = request.get("logprobs")
     top_logprobs = request.get("top_logprobs")
     if logprobs is True:
-        logprobs_val = top_logprobs or 1
+        logprobs_val = top_logprobs if top_logprobs is not None else 1
     elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
         logprobs_val = logprobs
     elif top_logprobs not in (None, 0):
@@ -358,6 +400,7 @@ class SglangProcessor:
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
         stream_interval: int = 1,
+        default_thinking_mode: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -381,6 +424,7 @@ class SglangProcessor:
         self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
+        self.default_thinking_mode = default_thinking_mode
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -437,6 +481,7 @@ class SglangProcessor:
                 reasoning_parser_name=self.reasoning_parser_name,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
+                default_thinking_mode=self.default_thinking_mode,
             )
 
             if self.debug_perf:
@@ -772,7 +817,7 @@ class SglangEngineFactory:
             logger.info("Using custom chat template override")
             tokenizer.chat_template = chat_template
 
-        eos_token_ids = _tokenizer_eos_token_ids(tokenizer)
+        eos_token_ids = _model_eos_token_ids(tokenizer, local_dir)
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the
@@ -789,11 +834,14 @@ class SglangEngineFactory:
             self.reasoning_parser_name
             or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
+        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
         if reasoning_parser_name:
             logger.info("SGLang reasoning parser: %s", reasoning_parser_name)
+        if default_thinking_mode:
+            logger.info("SGLang default thinking mode: %s", default_thinking_mode)
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -814,6 +862,7 @@ class SglangEngineFactory:
                     self.trust_remote_code,
                     template_force_reasoning,
                     chat_template,
+                    default_thinking_mode,
                 ),
             )
             futures = [
@@ -849,6 +898,7 @@ class SglangEngineFactory:
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
+            default_thinking_mode=default_thinking_mode,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

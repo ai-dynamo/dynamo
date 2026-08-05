@@ -40,18 +40,7 @@ python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
-Run the GLM-5-FP8 Pareto-front search:
-
-> [!IMPORTANT]
-> This configuration uses `kv_load_ratio` and requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. It fails closed in the default `dynamo-planner` image, which currently
-> retains AI Configurator 0.9. Trace workloads and fixed `concurrency` workloads remain usable in
-> the default image.
-
-```bash
-python -m aisimulate.spica \
-  --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
-```
+The GLM-5-FP8 Pareto-front configuration captures the setup from a previous experiment.
 
 Update `workload.trace_path` before running a trace-backed configuration.
 
@@ -74,5 +63,5 @@ python examples/aisimulate/spica/tools/run_load_predictor_sweep.py \
 
 ## Documentation
 
-Read the [Spica documentation](../../../docs/fern/components/aisimulate/spica/README.md)
+Read the [Spica documentation](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md)
 for the search flow, workload schema, optimization goals, and search-space reference.
