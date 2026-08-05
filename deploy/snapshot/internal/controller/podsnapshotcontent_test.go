@@ -356,6 +356,12 @@ func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	// Pre-create the artifact directory at the resolved destination so the resume check fires.
 	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
+	manifest := snapshottypes.NewCheckpointManifest("abc", snapshottypes.CRIUDumpManifest{}, snapshottypes.SourcePodManifest{}, snapshottypes.OverlayManifest{})
+	require.NoError(t, snapshottypes.WriteManifest(dest, manifest))
+	for _, name := range []string{"inventory.img", "pstree.img"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dest, name), []byte("test"), 0o600))
+	}
+	require.NoError(t, snapshottypes.WriteArtifactCompletion(dest, &snapshottypes.ArtifactCompletion{CheckpointID: "abc"}))
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	assert.False(t, fc.wasCalled())

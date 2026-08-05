@@ -122,6 +122,9 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		return nil, fmt.Errorf("invalid checkpoint id %q", req.CheckpointID)
 	}
 
+	if err := types.ValidateArtifactForRestore(checkpointPath, req.CheckpointID); err != nil {
+		return nil, fmt.Errorf("checkpoint artifact is incomplete or invalid: %w", err)
+	}
 	m, err := types.ReadManifest(checkpointPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)

@@ -47,11 +47,11 @@ const (
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
 	CheckpointVolumeName                = "checkpoint-storage"
-	// Version 2 may contain CRIU V1.2 LZ4-compressed memory page images.
-	DefaultCheckpointArtifactVersion    = "2"
-	DefaultCheckpointJobTTLSeconds      = int32(300)
-	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
-	StorageTypePVC                      = "pvc"
+	// Version 3 requires a validated completion record.
+	DefaultCheckpointArtifactVersion = "3"
+	DefaultCheckpointJobTTLSeconds   = int32(300)
+	DefaultSeccompLocalhostProfile   = "profiles/block-iouring.json"
+	StorageTypePVC                   = "pvc"
 
 	CheckpointStatusCompleted = "completed"
 	CheckpointStatusFailed    = "failed"

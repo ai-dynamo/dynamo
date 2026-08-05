@@ -234,6 +234,13 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 
+	// Operator scheduling settings apply only to the generated capture Job.
+	r.Config.Checkpoint.JobPriorityClassName = "checkpoint-bake"
+	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+	assert.Equal(t, "checkpoint-bake", job.Spec.Template.Spec.PriorityClassName)
+	r.Config.Checkpoint.JobPriorityClassName = ""
+
 	// Custom active deadlines override defaults, but checkpoint jobs never retry or use automatic TTL cleanup.
 	deadline := int64(7200)
 	backoff := int32(5)
@@ -261,6 +268,37 @@ func TestBuildCheckpointJob(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+}
+
+func TestCheckpointReconcilerDefersJobAtConcurrencyLimit(t *testing.T) {
+	t.Log("Create one active capture Job and a second pending checkpoint")
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Status.CheckpointID = testHash
+	active := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-job-active-3", Namespace: testNamespace},
+		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{snapshotprotocol.CheckpointSourceLabel: consts.KubeLabelValueTrue},
+		}}},
+	}
+	r := makeCheckpointReconciler(s, ckpt, active)
+	r.Config.Checkpoint.MaxConcurrentJobs = 1
+
+	t.Log("Reconcile the pending checkpoint while capacity is occupied")
+	result, err := r.handlePending(context.Background(), ckpt)
+	require.NoError(t, err)
+	assert.Equal(t, checkpointConcurrencyRequeue, result.RequeueAfter)
+
+	t.Log("Verify the checkpoint remains pending with a durable capacity reason")
+	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(ckpt), stored))
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, stored.Status.Phase)
+	condition := meta.FindStatusCondition(stored.Status.Conditions, string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated))
+	require.NotNil(t, condition)
+	assert.Equal(t, "ConcurrencyLimit", condition.Reason)
+	desired := &batchv1.Job{}
+	err = r.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: defaultCheckpointJobName}, desired)
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
@@ -816,7 +854,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
 		ckpt.Status.IdentityHash = testHash
 		ckpt.Status.JobName = defaultCheckpointJobName
-		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "3"}
+		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "4"}
 		r := makeCheckpointReconciler(s, ckpt)
 
 		_, err := r.Reconcile(ctx, ctrl.Request{
@@ -827,7 +865,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
-		assert.Equal(t, "checkpoint-job-"+testHash+"-3", updated.Status.JobName)
+		assert.Equal(t, "checkpoint-job-"+testHash+"-4", updated.Status.JobName)
 	})
 
 	t.Run("duplicate identity hash is rejected even with a readable name", func(t *testing.T) {
@@ -1117,7 +1155,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Message: "gms-saver exited 1",
 		}}
 		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
-
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)

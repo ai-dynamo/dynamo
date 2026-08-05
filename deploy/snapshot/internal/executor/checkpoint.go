@@ -95,14 +95,28 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
 	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
 
-	// Remove any previous checkpoint with the same identity hash, then
-	// promote the staged checkpoint directory into place.
+	// Build and persist the completion proof only after every capture phase succeeds.
+	completion := &types.ArtifactCompletion{
+		CheckpointID: req.CheckpointID,
+	}
+	if err := types.WriteArtifactCompletion(tmpDir, completion); err != nil {
+		return fmt.Errorf("write checkpoint completion proof: %w", err)
+	}
+
+	// Preserve an existing valid artifact. Otherwise replace it with the staged
+	// directory on the same filesystem.
 	finalizeStart := time.Now()
+	if _, err := types.ValidateArtifact(finalDir, req.CheckpointID); err == nil {
+		return nil
+	}
 	if err := os.RemoveAll(finalDir); err != nil {
-		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
+		return fmt.Errorf("remove invalid checkpoint directory: %w", err)
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+	}
+	if err := syncCheckpointParent(filepath.Dir(finalDir)); err != nil {
+		return err
 	}
 	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 
@@ -125,6 +139,18 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		)
 	}
 
+	return nil
+}
+
+func syncCheckpointParent(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open checkpoint parent directory: %w", err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync checkpoint parent directory: %w", err)
+	}
 	return nil
 }
 

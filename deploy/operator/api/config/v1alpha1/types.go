@@ -349,6 +349,12 @@ type CheckpointConfiguration struct {
 	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
 	// +kubebuilder:default="busybox:1.36"
 	CleanupImage string `json:"cleanupImage,omitempty"`
+	// JobPriorityClassName is applied only to checkpoint capture Jobs. Configure
+	// a lower-priority class so serving workloads can reclaim GPUs from bakes.
+	JobPriorityClassName string `json:"jobPriorityClassName,omitempty"`
+	// MaxConcurrentJobs limits active checkpoint capture Jobs per namespace.
+	// Zero preserves the legacy unlimited behavior.
+	MaxConcurrentJobs int32 `json:"maxConcurrentJobs,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied
