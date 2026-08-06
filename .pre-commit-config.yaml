@@ -105,6 +105,19 @@ repos:
       entry: python3 docs/fern/scripts/check_style_components.py
       language: system
       files: ^docs/fern/(components/.*Styles\.tsx|scripts/check_style_components\.py)$
+    - id: check-agent-twins
+      name: Check component-rendered data has an agent-readable twin
+      entry: python3 docs/fern/scripts/check_agent_twins.py
+      language: system
+      # Coarse trigger: the pages are what carry the twin, and the component
+      # list lives in the script, so a component rename should re-run it too.
+      files: ^docs/fern/(pages/.*\.mdx|components/.*\.tsx|scripts/check_agent_twins\.py)$
+      pass_filenames: false
+    - id: check-agent-twins-selftest
+      name: Self-test the agent-twin matcher
+      entry: python3 docs/fern/scripts/check_agent_twins.py --test
+      language: system
+      files: ^docs/fern/scripts/check_agent_twins\.py$
     - id: check-published-styles-selftest
       name: Self-test the published-styles regex helpers
       entry: python3 docs/fern/scripts/check_published_styles.py --test
