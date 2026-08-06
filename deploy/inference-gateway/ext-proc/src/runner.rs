@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone Rust EPP binary.
+//! Standard Rust EPP process bootstrap.
 //!
 //! Replaces the Go EPP + CGO bridge with a single native Rust binary that
 //! implements the Envoy ext_proc gRPC service and uses Dynamo's KV-aware
@@ -13,9 +13,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
+use dynamo_kv_router::services::selection::SelectionService;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
+
+use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
@@ -114,8 +116,17 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(tls_config)))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Run the stock EPP until it exits.
+pub async fn run() -> Result<()> {
+    run_inner(None).await
+}
+
+/// Run the standalone EPP around a caller-built selection service.
+pub async fn run_with_selection_service(service: SelectionService) -> Result<()> {
+    run_inner(Some(service)).await
+}
+
+async fn run_inner(selection_service: Option<SelectionService>) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -124,6 +135,9 @@ async fn main() -> Result<()> {
         .init();
 
     let standalone = matches!(EppMode::from_env()?, EppMode::Standalone);
+    if selection_service.is_some() && !standalone {
+        anyhow::bail!("a custom selection service requires DYN_EPP_MODE=standalone");
+    }
 
     let config = Config::from_env();
 
@@ -172,7 +186,12 @@ async fn main() -> Result<()> {
             "Initializing standalone selector mode (no Dynamo runtime)..."
         );
         metrics::set_served_model(&selector_cfg.model_name);
-        let router = Arc::new(dynamo_ext_proc::EppRouter::from_selector(selector_cfg).await?);
+        let router = Arc::new(match selection_service {
+            Some(service) => {
+                crate::EppRouter::from_selection_service(selector_cfg, service).await?
+            }
+            None => crate::EppRouter::from_selector(selector_cfg).await?,
+        });
         let ready_router = router.clone();
         serve(router, move || ready_router.is_ready(), health_reporter).await
     } else {
@@ -191,7 +210,7 @@ async fn main() -> Result<()> {
 
 /// Mirror the picker's live readiness onto the gRPC health status, then serve
 /// the ext_proc endpoint. Shared by both Dynamo-discovery and standalone modes.
-async fn serve<P: dynamo_ext_proc::EndpointPicker>(
+async fn serve<P: crate::EndpointPicker>(
     picker: Arc<P>,
     is_ready: impl Fn() -> bool + Send + 'static,
     health_reporter: tonic_health::server::HealthReporter,
@@ -203,7 +222,7 @@ async fn serve<P: dynamo_ext_proc::EndpointPicker>(
     // (set SERVING once) would strand those states, so a background task tracks
     // transitions and moves the health status in lock-step, dropping out of
     // SERVING when readiness drops and recovering when it returns. Health starts
-    // NOT_SERVING (set in `main`); the mirror polls a cheap closure (atomic loads).
+    // NOT_SERVING (set during startup); the mirror polls a cheap closure (atomic loads).
     {
         let health_reporter = health_reporter.clone();
         tokio::spawn(async move {

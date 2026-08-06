@@ -121,7 +121,7 @@ Build and run that binary in the custom image. `python3 -m dynamo.frontend` star
 
 ## Link a Custom EPP
 
-Build a `SelectionService` with the same factory and move it into `EppRouter`:
+Build a `SelectionService` with the same factory and pass it to the standard EPP runner:
 
 ```rust
 let service = SelectionServiceBuilder::new(kv_router_config)
@@ -129,11 +129,10 @@ let service = SelectionServiceBuilder::new(kv_router_config)
     .build()
     .await?;
 
-let epp_config = EppStandaloneConfig::from_env()?;
-let router = EppRouter::from_selection_service(epp_config, service).await?;
+dynamo_ext_proc::run_with_selection_service(service).await?;
 ```
 
-`EppRouter` takes exclusive ownership of the service so its workers, peer membership, and background tasks share the EPP lifecycle. The standard EPP path remains unchanged when the caller does not supply a prebuilt service.
+The runner uses the stock TLS, health, metrics, discovery, and readiness bootstrap. It requires `DYN_EPP_MODE=standalone` and takes ownership of the service so its workers, peer membership, and background tasks share the EPP lifecycle. The standard EPP binary calls the same runner without a prebuilt service.
 
 ## Policy Contract
 
