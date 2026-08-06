@@ -4,8 +4,9 @@ package snapshot.pagebroker;
 message Request {
   enum Operation {
     SUBMIT = 1;
-    COMMIT = 2;
-    ABORT = 3;
+    PREPARE_CHECKPOINT = 2;
+    COMMIT = 3;
+    ABORT = 4;
   }
   required Operation operation = 1;
   optional string transaction_id = 2;
