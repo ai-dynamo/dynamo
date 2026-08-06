@@ -31,18 +31,13 @@ agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, bloc
 **512**, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA
 knee: the highest value holding P50 TTFT < 5 s and P50 output >= 50 tok/s/user.
 
-The agentic trace is symlinked into `perf/traces/` and stored in Git LFS. Fetch it, then
-take the first 1,500 requests — enough to hold the KV-hit rate at about an hour per run:
+Use the agentic 15% trace in `perf/traces/` (Git LFS), first 1,500 requests:
 
 ```bash
 git lfs install
-git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
+git lfs pull --include "recipes/*/perf/traces/*"
 head -1500 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl > mooncake_1500.jsonl
 ```
-
-> [!NOTE]
-> A real trace file is several MB (`ls -lh`); if the first line starts with
-> `version https://git-lfs...`, it is still a pointer.
 
 ## Workflow
 
