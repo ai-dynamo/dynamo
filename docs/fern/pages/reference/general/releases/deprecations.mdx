@@ -21,7 +21,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.4.0 (upcoming)
 
-4 entries: 2 behavioral changes, 2 removed.
+4 entries — 2 behavioral changes, 2 removed.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Audit subsystem migrated into request trace** (`"log_type":"audit"` records and the `"Audit sinks ready"` readiness marker -> records carrying `"schema":"dynamo.request.trace.v1"` and the `"Request trace sinks ready"` marker); payload logging is unified under the request-trace pipeline and the standalone audit module is gone ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390), [#11180](https://github.com/ai-dynamo/dynamo/pull/11180)).
 
@@ -33,7 +33,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Removed the deprecated multimodal worker flags** (`--multimodal-worker` / `--multimodal-encode-worker` -> `--enable-multimodal` with `--disaggregation-mode` / `--dedicated-mm-encoder`) across the vLLM, SGLang, and TensorRT-LLM backends; deprecated in v1.3.0 ([#11887](https://github.com/ai-dynamo/dynamo/pull/11887)).
 
-  > **Migrate:** Replace the removed flags with `--enable-multimodal` plus the appropriate `--disaggregation-mode` / `--dedicated-mm-encoder` combination.
+  > **Migrate:** On vLLM and SGLang, replace the removed flags with `--enable-multimodal` plus the appropriate `--disaggregation-mode` / `--dedicated-mm-encoder` combination. On TensorRT-LLM, use `--modality multimodal`, which remains the supported path.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Removed the deprecated vLLM worker role flags** (`--is-prefill-worker` / `--is-decode-worker` -> `--disaggregation-mode`) ([#12089](https://github.com/ai-dynamo/dynamo/pull/12089)).
 
