@@ -50,6 +50,11 @@ impl VllmSidecarEngine {
         }
     }
 
+    /// Parse arguments and synchronously discover the vLLM model.
+    ///
+    /// Call this before `dynamo_backend_common::run`. Async callers must use
+    /// `spawn_blocking` or a dedicated thread because discovery uses
+    /// `Runtime::block_on`.
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         let parsing_process_args = argv.is_none();
         let parsed = match argv {
