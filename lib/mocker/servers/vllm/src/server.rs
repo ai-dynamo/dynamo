@@ -90,7 +90,7 @@ impl VllmMockerService {
             model_id: config.model.clone(),
             served_model_name: config.model.clone(),
             served_model_aliases: Vec::new(),
-            supports_text_input: true,
+            supports_text_input: false,
             supports_token_ids_input: true,
             supports_multimodal: false,
             reasoning_parser: String::new(),

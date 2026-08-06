@@ -63,8 +63,8 @@ impl DiscoveredModel {
     pub(crate) fn ensure_same_identity(&self, observed: &Self) -> Result<(), DynamoError> {
         if self.identity != observed.identity {
             return Err(client::protocol_error(format!(
-                "model identity changed between bootstrap and startup: expected `{}` served as `{}`, observed `{}` served as `{}`",
-                self.source, self.served_name, observed.source, observed.served_name
+                "model identity changed between bootstrap and startup: expected {:?}, observed {:?}",
+                self.identity, observed.identity
             )));
         }
         Ok(())
