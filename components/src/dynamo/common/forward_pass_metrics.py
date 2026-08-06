@@ -111,8 +111,8 @@ class ScheduledRequestMetrics(
     # requests -- the second moment matching sum_prefill_kv_tokens, mirroring
     # var_decode_kv_tokens on the decode side.
     #
-    # Together with var_prefill_length (variance of the FULL prompt length
-    # s + p) this pins the intra-batch attention work of a heterogeneous
+    # Together with var_prefill_end_length (variance of s + p for THIS forward
+    # pass) this pins the intra-batch attention work of a heterogeneous
     # prefill batch. Writing s for freshly computed tokens and p for KV read
     # tokens, full-attention work is the trapezoid s*p + s^2/2 per request,
     # and the excess over an equal-length batch with the same totals is
@@ -135,8 +135,22 @@ class ScheduledRequestMetrics(
     #
     # min over requests of the KV read tokens.
     min_prefill_kv_tokens: int = 0
-    # max over requests of the FULL prompt length (KV read + freshly computed).
-    max_prefill_length: int = 0
+    # max over requests of the length attended THIS pass (KV read + freshly
+    # computed). Not the prompt's final length: under chunked prefill a request
+    # reaches its full length only on its last chunk, and the classification
+    # this scalar exists for is a statement about the pass being measured.
+    max_prefill_end_length: int = 0
+
+    # Population variance of the length attended this pass, p + s, across
+    # prefill requests.
+    #
+    # Distinct from var_prefill_length, which keeps its existing contract: the
+    # variance of the FULL prompt length, where a 10k-token prompt counts as 10k
+    # even on a step that computes a 2k chunk of it. Both are needed -- the work
+    # identity above and the topk regime are stated in the length this pass
+    # actually attends to, and they coincide with the prompt length only when
+    # prefill is not chunked.
+    var_prefill_end_length: float = 0.0
 
     # Number of decode requests (generating output tokens).
     num_decode_requests: int = 0
