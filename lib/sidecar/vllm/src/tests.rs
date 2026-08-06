@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
-    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions,
+    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
+    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -102,10 +102,19 @@ impl pb::inference_server::Inference for FakeVllm {
             }
             None => return Err(Status::invalid_argument("prompt required")),
         };
+        let prompt_tokens = if request.media.is_empty() {
+            prompt_tokens
+        } else {
+            601
+        };
         let wants_logprobs = request
             .response
             .as_ref()
             .is_some_and(|response| response.output_logprobs);
+        let wants_prompt_token_ids = request
+            .response
+            .as_ref()
+            .is_some_and(|response| response.prompt_token_ids);
         let wants_prompt_logprobs = request
             .response
             .as_ref()
@@ -144,23 +153,28 @@ impl pb::inference_server::Inference for FakeVllm {
 
         let stream = async_stream::try_stream! {
             let _drop_signal = DropSignal(dropped);
-            let prompt_info = if wants_prompt_logprobs {
-                pb::PromptInfo {
-                    num_prompt_tokens: prompt_tokens,
-                    token_ids: vec![11, 22, 33],
-                    logprobs: vec![0.0, -0.2, -0.3],
-                    ranks: vec![0, 1, 2],
-                    candidate_tokens: vec![
-                        pb::CandidateTokenInfo { tokens: vec![] },
-                        pb::CandidateTokenInfo { tokens: vec![] },
-                        pb::CandidateTokenInfo { tokens: vec![] },
-                    ],
-                }
-            } else {
-                pb::PromptInfo {
-                    num_prompt_tokens: prompt_tokens,
-                    ..Default::default()
-                }
+            let prompt_info = pb::PromptInfo {
+                num_prompt_tokens: prompt_tokens,
+                token_ids: if wants_prompt_token_ids {
+                    (0..prompt_tokens).collect()
+                } else {
+                    Vec::new()
+                },
+                logprobs: if wants_prompt_logprobs {
+                    vec![-0.2; prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
+                ranks: if wants_prompt_logprobs {
+                    vec![1; prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
+                candidate_tokens: if wants_prompt_logprobs {
+                    vec![pb::CandidateTokenInfo::default(); prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
             };
             yield pb::GenerateResponse {
                 prompt_info: Some(prompt_info),
@@ -544,14 +558,19 @@ fn decode_request() -> PreprocessedRequest {
     request
 }
 
-fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmSidecarEngine {
+fn engine(
+    endpoint: &str,
+    mode: DisaggregationMode,
+    connections: usize,
+    model: pb::ModelInfo,
+) -> VllmSidecarEngine {
     let transport = GrpcTransportConfig {
         connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
         ..Default::default()
     };
     VllmSidecarEngine::new(
         GrpcEndpoint::parse(endpoint, "--vllm-endpoint").expect("valid test endpoint"),
-        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery"),
+        DiscoveredModel::from_proto(model, server_info()).expect("valid discovery"),
         mode,
         transport,
     )
@@ -735,11 +754,143 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 }
 
 #[tokio::test]
+async fn multimodal_image_is_forwarded_with_uuid() {
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let (aggregate, _) = engine_from_args(&server.endpoint).await;
+    aggregate.start(0).await.expect("start");
+
+    let mut image_request = request();
+    image_request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+    image_request.output_options.prompt_logprobs = None;
+    image_request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .extend([
+            (
+                "messages".to_string(),
+                json!([{"role": "user", "content": [{"type": "image_url"}]}]),
+            ),
+            ("formatted_prompt".to_string(), json!("<image>\nDescribe.")),
+            ("mm_hashes".to_string(), json!(["0123456789abcdef"])),
+        ]);
+
+    let outputs = collect(&aggregate, image_request.clone()).await;
+    assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let media = &requests.last().expect("recorded request").media;
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].modality(), pb::Modality::Image);
+    assert_eq!(
+        media[0].uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
+    );
+    assert!(matches!(
+        media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(_))
+    ));
+    drop(requests);
+
+    let prefill = engine(
+        &server.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        discovered.clone(),
+    );
+    let decode = engine(&server.endpoint, DisaggregationMode::Decode, 1, discovered);
+    prefill.start(1).await.expect("start prefill");
+    decode.start(2).await.expect("start decode");
+
+    let prefill_outputs = collect(&prefill, image_request.clone()).await;
+    let handoff = prefill_outputs[0]
+        .disaggregated_params
+        .clone()
+        .expect("multimodal handoff");
+    assert_eq!(
+        handoff["_dynamo_sidecar_multimodal_prompt_token_ids"]
+            .as_array()
+            .expect("expanded prompt token IDs")
+            .len(),
+        601
+    );
+
+    let mut decode_request = image_request;
+    decode_request.prefill_result = Some(PrefillResult {
+        disaggregated_params: handoff,
+        prompt_tokens_details: None,
+    });
+    let decode_outputs = collect(&decode, decode_request).await;
+    assert_eq!(
+        decode_outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("decode usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let prefill_wire = &requests[requests.len() - 2];
+    let decode_wire = &requests[requests.len() - 1];
+    assert_eq!(prefill_wire.media.len(), 1);
+    assert!(
+        prefill_wire
+            .response
+            .as_ref()
+            .expect("prefill response options")
+            .prompt_token_ids
+    );
+    assert!(decode_wire.media.is_empty());
+    assert_eq!(
+        decode_wire.prompt.as_ref(),
+        Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: (0..601).collect(),
+        }))
+    );
+    let decode_kv = struct_to_json(
+        decode_wire
+            .kv
+            .as_ref()
+            .and_then(|kv| kv.kv_transfer_params.clone())
+            .expect("decode KV handoff"),
+    )
+    .expect("decode KV JSON");
+    assert!(
+        decode_kv["_dynamo_sidecar_multimodal_prompt_token_ids"].is_null(),
+        "sidecar metadata must not reach vLLM"
+    );
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeVllm::default();
     service.reject.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
@@ -753,8 +904,18 @@ async fn grpc_request_errors_are_propagated() {
 #[tokio::test]
 async fn prefill_decode_handoff_is_opaque_and_repeatable() {
     let server = FakeServer::start(FakeVllm::default()).await;
-    let prefill = engine(&server.endpoint, DisaggregationMode::Prefill, 1);
-    let decode = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    let prefill = engine(
+        &server.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        model_info(),
+    );
+    let decode = engine(
+        &server.endpoint,
+        DisaggregationMode::Decode,
+        1,
+        model_info(),
+    );
     prefill.start(0).await.expect("start prefill");
     decode.start(1).await.expect("start decode");
 
@@ -868,7 +1029,12 @@ async fn cancellation_drops_the_remote_stream() {
     let service = FakeVllm::default();
     service.hang.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
@@ -897,7 +1063,12 @@ async fn cancellation_interrupts_pending_response_headers() {
     let service = FakeVllm::default();
     service.hang_before_headers.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
@@ -931,7 +1102,12 @@ async fn decode_cancellation_waits_for_submission_and_first_token() {
         .hold_before_first_token
         .store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Decode,
+        1,
+        model_info(),
+    );
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
@@ -1005,7 +1181,12 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
         .close_before_first_token
         .store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Decode,
+        1,
+        model_info(),
+    );
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
@@ -1028,7 +1209,12 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
 #[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
     let server = FakeServer::start(FakeVllm::default()).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
     engine.start(0).await.expect("start");
 
     let mut requests = Vec::new();
