@@ -93,9 +93,9 @@ RunWorkload(int ready_fd, int command_fd, const Options& options)
 
     const ReadyMessage ready{application, options.bytes};
     WriteAll(ready_fd, &ready, sizeof(ready));
-    char command = 0;
+    WorkloadCommand command{};
     ReadAll(command_fd, &command, sizeof(command));
-    if (command != 'V') {
+    if (command != WorkloadCommand::kVerify) {
       throw std::runtime_error("workload received an invalid command");
     }
 

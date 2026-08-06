@@ -45,6 +45,34 @@ class PinnedBuffer {
   size_t size_ = 0;
 };
 
+class ProcessUnlockGuard {
+ public:
+  ProcessUnlockGuard(pid_t pid, bool is_armed) : pid_(pid), is_armed_(is_armed) {}
+  ProcessUnlockGuard(const ProcessUnlockGuard&) = delete;
+  ProcessUnlockGuard& operator=(const ProcessUnlockGuard&) = delete;
+  ~ProcessUnlockGuard()
+  {
+    if (is_armed_) {
+      CUcheckpointUnlockArgs args{};
+      WarnCUDA(cuCheckpointProcessUnlock(pid_, &args), "cuCheckpointProcessUnlock after restore failure");
+    }
+  }
+
+  void Unlock()
+  {
+    CUcheckpointUnlockArgs args{};
+    const CUresult status = cuCheckpointProcessUnlock(pid_, &args);
+    if (status == CUDA_SUCCESS) {
+      is_armed_ = false;
+    }
+    CheckCUDA(status, "cuCheckpointProcessUnlock");
+  }
+
+ private:
+  pid_t pid_;
+  bool is_armed_;
+};
+
 void
 PWriteAll(int fd, const void* data, size_t size, size_t offset)
 {
@@ -236,6 +264,7 @@ RestoreProcess(pid_t pid, const fs::path& directory, const Artifact& artifact, C
 {
   CustomStorageOperation operation;
   const CUresult begin_status = operation.BeginRestore(pid);
+  ProcessUnlockGuard unlock_guard(pid, operation.has_started());
   if (begin_status != CUDA_SUCCESS) {
     ThrowRestoreRejected(begin_status, "cuCheckpointProcessRestore(CustomStorage)");
   }
@@ -251,8 +280,7 @@ RestoreProcess(pid_t pid, const fs::path& directory, const Artifact& artifact, C
     ThrowRestoreRejected(complete_status, "cuCheckpointOperationComplete(restore)");
   }
   ExpectProcessState(pid, CU_PROCESS_STATE_LOCKED, "after_restore_completion");
-  CUcheckpointUnlockArgs unlock_args{};
-  CheckCUDA(cuCheckpointProcessUnlock(pid, &unlock_args), "cuCheckpointProcessUnlock");
+  unlock_guard.Unlock();
   ExpectProcessState(pid, CU_PROCESS_STATE_RUNNING, "after_unlock");
 }
 

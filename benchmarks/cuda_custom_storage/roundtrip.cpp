@@ -195,8 +195,8 @@ Run(const Options& options)
     throw;
   }
 
-  const char verify = 'V';
-  WriteAll(command_write.get(), &verify, sizeof(verify));
+  const WorkloadCommand command = WorkloadCommand::kVerify;
+  WriteAll(command_write.get(), &command, sizeof(command));
   WorkloadResult result = WorkloadResult::kUnexpectedFailure;
   ReadAll(ready_read.get(), &result, sizeof(result), deadline);
   const int child_status = child.Wait(deadline);

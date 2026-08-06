@@ -43,6 +43,12 @@ enum class WorkloadResult : uint8_t {
 
 static_assert(sizeof(WorkloadResult) == 1);
 
+enum class WorkloadCommand : uint8_t {
+  kVerify = 1,
+};
+
+static_assert(sizeof(WorkloadCommand) == 1);
+
 struct Options {
   fs::path artifact_dir;
   size_t bytes = kDefaultBytes;

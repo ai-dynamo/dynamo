@@ -28,6 +28,7 @@ class CustomStorageOperation {
   [[nodiscard]] CUresult Complete();
 
   [[nodiscard]] const CUcheckpointCustomStorageInfo* storage_info() const { return storage_info_; }
+  [[nodiscard]] bool has_started() const { return has_started_; }
 
  private:
   CUresult Adopt(CUresult status, CUcheckpointCustomStorageInfo* storage_info);
