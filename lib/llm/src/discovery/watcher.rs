@@ -2037,7 +2037,7 @@ impl ModelWatcher {
                 .link(service_backend)?
                 .link(backend.backward_edge())?
                 .link(preprocessor.backward_edge())?
-                .link(frontend)?;
+                .link_terminal(frontend)?;
 
             worker_set.embeddings_engine = Some(embedding_engine);
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
@@ -2354,6 +2354,104 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
+    }
+
+    #[tokio::test]
+    async fn repeated_lora_registration_releases_chat_pipeline() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let watcher = ModelWatcher::new(
+            drt,
+            manager.clone(),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_lora_lifecycle_test".to_string(),
+            ))),
+        );
+        let mcid = ModelCardInstanceId {
+            namespace: "lora-lifecycle-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: Some("adapter".to_string()),
+        };
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.set_name("lora-lifecycle-adapter");
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.lora = Some(crate::model_card::LoraInfo {
+            name: card.name().to_string(),
+            max_gpu_lora_count: Some(1),
+        });
+        let mut released_engines = Vec::new();
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(&mcid),
+            card.model_type,
+            card.worker_type,
+        );
+
+        for _ in 0..3 {
+            watcher.handle_put(&mcid, &mut card).await.unwrap();
+            let engine = manager
+                .get_model(card.name())
+                .unwrap()
+                .get_worker_set(&ws_key)
+                .unwrap()
+                .chat_engine
+                .clone()
+                .unwrap();
+            let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+                serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
+                    .unwrap();
+            let request = NvCreateChatCompletionRequest {
+                inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+                    .model(card.name())
+                    .messages(messages)
+                    .build()
+                    .unwrap(),
+                common: Default::default(),
+                nvext: None,
+                chat_template_args: None,
+                thinking: None,
+                media_io_kwargs: None,
+                return_tokens_as_token_ids: None,
+                unsupported_fields: Default::default(),
+            };
+            assert!(engine.generate(SingleIn::new(request)).await.is_err());
+            released_engines.push(Arc::downgrade(&engine));
+            drop(engine);
+
+            watcher
+                .handle_delete_serialized(&mcid, &NamespaceFilter::Exact(mcid.namespace.clone()))
+                .await
+                .unwrap();
+            assert!(manager.get_model(card.name()).is_none());
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while released_engines
+                .iter()
+                .any(|engine| engine.strong_count() != 0)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed LoRA chat pipelines remained strongly referenced");
+
+        runtime.shutdown();
     }
 
     #[test]
