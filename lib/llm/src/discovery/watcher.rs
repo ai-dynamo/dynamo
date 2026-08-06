@@ -2275,6 +2275,8 @@ fn seed_lora_state_from_card(
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::Error;
 
     fn test_endpoint_id(name: &str) -> EndpointId {
         EndpointId {
@@ -2690,6 +2692,84 @@ mod tests {
         let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
         mm.add_realtime_model("rt-echo", "0", engine).unwrap();
         assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    /// Stand-in engine for registration-only tests; never invoked.
+    struct UncalledEngine;
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreatePoolingRequest>,
+            ManyOut<Annotated<NvCreatePoolingResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreatePoolingRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreatePoolingResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateClassifyRequest>,
+            ManyOut<Annotated<NvCreateClassifyResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreateClassifyRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateClassifyResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    /// Removing one model of a type must not retract the endpoint for the
+    /// models of that type that are still registered: the frontend maps a
+    /// `ModelUpdate::Removed` card onto process-wide endpoint flags, so an
+    /// over-eager removal card would 404 the surviving models' endpoint.
+    #[test]
+    fn removing_one_model_keeps_the_endpoint_for_surviving_models() {
+        let mm = ModelManager::new();
+        mm.add_pooling_model("model-a", "ck-a", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_pooling_model("model-b", "ck-b", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_classify_model("model-a", "ck-a", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_classify_model("model-b", "ck-b", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+
+        let mut card = ModelDeploymentCard::with_name_only("model-a");
+        card.model_type = ModelType::Classify | ModelType::Pooling;
+
+        // Mirrors `handle_delete`, which drops the model from the manager
+        // before computing the removal cards.
+        mm.remove_model("model-a");
+        assert!(
+            removed_model_cards(&mm, &card).is_empty(),
+            "removing model-a must emit no removal card while model-b is still registered"
+        );
+
+        // The last model of each type going away must still retract both.
+        mm.remove_model("model-b");
+        let removed = removed_model_cards(&mm, &card);
+        assert_eq!(removed.len(), 2);
+        assert!(
+            removed
+                .iter()
+                .any(|card| card.model_type == ModelType::Classify)
+        );
+        assert!(
+            removed
+                .iter()
+                .any(|card| card.model_type == ModelType::Pooling)
+        );
     }
 
     #[test]
