@@ -48,7 +48,7 @@ impl Drop for DropSignal {
 }
 
 #[tonic::async_trait]
-impl pb::generate_server::Generate for FakeGenerate {
+impl pb::inference_server::Inference for FakeGenerate {
     type GenerateStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send>>;
 
@@ -189,6 +189,7 @@ fn sequence_response(
                 finish_reason: pb::finish_info::FinishReason::Stop as i32,
                 stop_reason: Some(pb::finish_info::StopReason::StopTokenId(2)),
                 kv_transfer_params,
+                ec_transfer_params: None,
             }),
         }),
     }
@@ -326,7 +327,7 @@ impl FakeServer {
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(
-                    pb::generate_server::GenerateServer::new(server_service)
+                    pb::inference_server::InferenceServer::new(server_service)
                         .max_encoding_message_size(64 * 1024 * 1024)
                         .max_decoding_message_size(64 * 1024 * 1024),
                 )
