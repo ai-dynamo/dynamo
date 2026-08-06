@@ -22,10 +22,7 @@ from urllib.parse import urlparse
 import numpy as np
 
 from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import (
-    UrlValidationPolicy,
-    validate_media_url,
-)
+from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
 from dynamo.common.multimodal.media_source import (
     is_local_media_url,
     read_local_media_bytes,
