@@ -68,6 +68,20 @@ pub struct KvHints {
     pub evict_session: bool,
 }
 
+/// Causal trigger that produced an incoming agent request.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTrigger {
+    /// A new human/user message initiated the turn.
+    UserMessage,
+    /// A tool or function result was fed back, continuing the turn.
+    ToolResult,
+    /// A non-message continuation (e.g. a raw completions prompt or assistant echo).
+    Continuation,
+    /// Could not classify the trigger.
+    Unknown,
+}
+
 /// Identity metadata for agentic workloads.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +102,11 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hints: Option<KvHints>,
+
+    /// Causal trigger that produced the request, derived from inbound request content.
+    #[builder(default, setter(strip_option))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_trigger: Option<InputTrigger>,
 }
 
 impl AgentContext {
@@ -262,6 +281,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
             kv_hints,
+            input_trigger: None,
         }
     }
 }

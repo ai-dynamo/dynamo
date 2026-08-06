@@ -24,6 +24,7 @@ use dynamo_protocols::types::StopReason;
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
 pub mod extensions;
+pub mod input_trigger;
 pub mod llm_backend;
 pub mod metrics;
 pub mod postprocessor;
