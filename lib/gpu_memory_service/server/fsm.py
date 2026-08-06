@@ -16,7 +16,7 @@ class ServerState(str, Enum):
     RW = "RW"
     # Pages are durable and reattachable; nothing is promised about their contents.
     # COMMITTED additionally asserts the contents are stable, which is what admits readers.
-    ALLOCATED = "ALLOCATED"
+    LAYOUT_COMMITTED = "LAYOUT_COMMITTED"
     COMMITTED = "COMMITTED"
     RO = "RO"
 
@@ -25,6 +25,7 @@ class StateEvent(Enum):
     RW_CONNECT = auto()
     RW_COMMIT = auto()
     RW_ABORT = auto()
+    RW_DISCONNECT = auto()
     LAYOUT_COMMIT = auto()
     RO_CONNECT = auto()
     RO_DISCONNECT = auto()
@@ -64,7 +65,7 @@ class Transition:
 TRANSITIONS: list[Transition] = [
     Transition(
         from_states=frozenset(
-            {ServerState.EMPTY, ServerState.ALLOCATED, ServerState.COMMITTED}
+            {ServerState.EMPTY, ServerState.LAYOUT_COMMITTED, ServerState.COMMITTED}
         ),
         event=StateEvent.RW_CONNECT,
         to_state=ServerState.RW,
@@ -81,12 +82,17 @@ TRANSITIONS: list[Transition] = [
         event=StateEvent.LAYOUT_COMMIT,
         to_state=ServerState.RW,
     ),
-    # to_state is None: the derived state resolves to ALLOCATED if the layout was
-    # committed, EMPTY otherwise.
+    # The writer left without sealing, so its work is discarded.
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_ABORT,
-        to_state=None,
+        to_state=ServerState.EMPTY,
+    ),
+    # The writer left a sealed layout behind, so the pages survive it.
+    Transition(
+        from_states=frozenset({ServerState.RW}),
+        event=StateEvent.RW_DISCONNECT,
+        to_state=ServerState.LAYOUT_COMMITTED,
     ),
     Transition(
         from_states=frozenset({ServerState.COMMITTED, ServerState.RO}),
@@ -125,7 +131,7 @@ class GMSFSM:
         if self._committed:
             return ServerState.COMMITTED
         if self._layout_committed:
-            return ServerState.ALLOCATED
+            return ServerState.LAYOUT_COMMITTED
         return ServerState.EMPTY
 
     @property
@@ -190,7 +196,7 @@ class GMSFSM:
             self._rw_conn = None
         elif event == StateEvent.LAYOUT_COMMIT:
             self._layout_committed = True
-        elif event == StateEvent.RW_ABORT:
+        elif event in (StateEvent.RW_ABORT, StateEvent.RW_DISCONNECT):
             self._rw_conn = None
         elif event == StateEvent.RO_CONNECT:
             self._ro_conns.add(conn)

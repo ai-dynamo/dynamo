@@ -151,12 +151,12 @@ class GMSSessionManager:
         """Which writer mode a request earns against the current layout.
 
         ``RW`` means "replace it"; ``RW_DATA_OR_RW`` means "adopt it if it exists".
-        ``RW_DATA`` is only granted, never requested, and only from ALLOCATED: from
+        ``RW_DATA`` is only granted, never requested, and only from LAYOUT_COMMITTED: from
         COMMITTED the contents are published, so a writer arriving means replace.
         """
         if (
             requested is RequestedLockType.RW_DATA_OR_RW
-            and self._locking.state is ServerState.ALLOCATED
+            and self._locking.state is ServerState.LAYOUT_COMMITTED
         ):
             return GrantedLockType.RW_DATA
         return GrantedLockType.RW
@@ -288,8 +288,14 @@ class GMSSessionManager:
         # and wedge every later connect.
         if conn.mode in (GrantedLockType.RW, GrantedLockType.RW_DATA):
             if self._locking.rw_conn is conn and not self._locking.committed:
-                self._locking.transition(StateEvent.RW_ABORT, conn)
-                event = StateEvent.RW_ABORT
+                # A sealed layout survives its writer; an unsealed one, including a
+                # pool the writer died part-way through building, is discarded.
+                event = (
+                    StateEvent.RW_DISCONNECT
+                    if self._locking.layout_committed
+                    else StateEvent.RW_ABORT
+                )
+                self._locking.transition(event, conn)
         elif conn in self._locking.ro_conns:
             self._locking.transition(StateEvent.RO_DISCONNECT, conn)
             event = StateEvent.RO_DISCONNECT

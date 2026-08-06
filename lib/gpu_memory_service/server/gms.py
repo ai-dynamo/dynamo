@@ -225,25 +225,28 @@ class GMS:
     async def cleanup_connection(self, conn: Connection | None) -> None:
         event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
-            # A crash cannot withdraw a promise the writer already made. A committed
-            # layout outlives the session and resolves to ALLOCATED for a standby to
-            # adopt; an unsealed one, including a half-built pool, is discarded.
-            if self._sessions.layout_committed:
-                logger.warning(
-                    "RW aborted; layout is committed, keeping %d allocations for reattach",
-                    self._allocations.allocation_count,
+            logger.warning("RW aborted; clearing uncommitted layout")
+            cleared = self._clear_layout_state()
+            self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="allocations_cleared",
+                    allocation_count=cleared,
                 )
-                self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
-            else:
-                logger.warning("RW aborted; clearing uncommitted layout")
-                cleared = self._clear_layout_state()
-                self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
-                self._events.append(
-                    GMSRuntimeEvent(
-                        kind="allocations_cleared",
-                        allocation_count=cleared,
-                    )
+            )
+        elif event == StateEvent.RW_DISCONNECT:
+            # A crash cannot withdraw a promise the writer already made: the layout was
+            # sealed, so the pages outlive the session for a standby to adopt.
+            logger.info(
+                "Writer disconnected; layout is committed, keeping %d allocations",
+                self._allocations.allocation_count,
+            )
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="rw_disconnected",
+                    allocation_count=self._allocations.allocation_count,
                 )
+            )
         await self._sessions.finish_cleanup(conn)
 
     async def handle_request(

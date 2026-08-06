@@ -1074,7 +1074,7 @@ async def test_large_allocation_unblocks_after_export_fd_holder_dies(
 
 
 # ---------------------------------------------------------------------------
-# Committed layouts (ALLOCATED / RW_DATA)
+# Committed layouts (LAYOUT_COMMITTED / RW_DATA)
 #
 # `commit()` publishes contents: it unmaps the writer, closes the session, and admits
 # RO readers. `commit_layout()` publishes only the *shape*: the writer keeps its session
@@ -1132,7 +1132,7 @@ def test_commit_layout_seals_shape_and_narrows_writer_to_rw_data(gms_thread):
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize(
     "seal, allocations_after_crash, state_after_crash",
-    [(False, 0, ServerState.EMPTY), (True, 1, ServerState.ALLOCATED)],
+    [(False, 0, ServerState.EMPTY), (True, 1, ServerState.LAYOUT_COMMITTED)],
     ids=["unsealed_is_discarded", "sealed_survives"],
 )
 def test_only_a_committed_layout_survives_the_writer(
@@ -1171,7 +1171,7 @@ def test_standby_adopts_a_committed_layout_and_replays_across_takeovers(gms_thre
         ]
         # Adopting does not re-seal anything, so the next standby inherits it too.
         thread.disconnect_rw_session()
-        assert server._gms.state is ServerState.ALLOCATED
+        assert server._gms.state is ServerState.LAYOUT_COMMITTED
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
@@ -1195,7 +1195,7 @@ def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
     """A reader must never attach to a live, mutating pool.
 
     This needs no new code: can_acquire_ro already requires a content commit, which
-    ALLOCATED does not have. The reader waits exactly as it would for a loader that has
+    LAYOUT_COMMITTED does not have. The reader waits exactly as it would for a loader that has
     not committed yet, and times out.
     """
     server, socket_path, thread = gms_thread
@@ -1205,7 +1205,7 @@ def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
     reader = GMSClientMemoryManager(socket_path, device=0)
     with pytest.raises(TimeoutError):
         reader.connect(RequestedLockType.RO, timeout_ms=200)
-    assert server._gms.state is ServerState.ALLOCATED
+    assert server._gms.state is ServerState.LAYOUT_COMMITTED
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)

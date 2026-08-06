@@ -51,7 +51,7 @@ class GetLockStateRequest(msgspec.Struct, tag="get_lock_state_request"):
 
 
 class GetLockStateResponse(msgspec.Struct, tag="get_lock_state_response"):
-    state: str  # "EMPTY", "RW", "ALLOCATED", "COMMITTED", "RO"
+    state: str  # "EMPTY", "RW", "LAYOUT_COMMITTED", "COMMITTED", "RO"
     has_rw_session: bool
     ro_session_count: int
     waiting_writers: int
