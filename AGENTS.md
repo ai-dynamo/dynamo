@@ -137,13 +137,17 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
+- For fork PRs, automatic trusted-CI approval also requires every commit to have a
+  cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
+  satisfy this requirement.
 - Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
   routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
   coverage and `CODEOWNERS`↔`areas.yaml` drift. See
   `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. Fix failures before requesting human review.
+  triggers it. For fork PRs, the automatic approval flow posts that command only after every
+  PR commit is GitHub-verified. Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
