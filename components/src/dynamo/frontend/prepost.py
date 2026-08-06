@@ -22,7 +22,6 @@ from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -147,6 +146,8 @@ def build_tool_call_guided_decoding(
 
     tool_choice = request.tool_choice or "auto"
     if _is_forced_tool_choice(tool_choice):
+        from vllm.tool_parsers.utils import get_json_schema_from_tools
+
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
             return {"json": json_schema}
