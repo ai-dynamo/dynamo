@@ -2138,34 +2138,6 @@ article:has(.dynamo-community-page) { margin-bottom: 0; }
   text-transform: uppercase;
 }
 
-.dynamo-welcome__community {
-    position: static;
-    width: min(100%, 720px);
-    margin: 2rem auto 0;
-    flex-direction: row;
-  }
-
-.dynamo-welcome__notification {
-    flex: 1;
-    min-width: 0;
-  }
-
-.dynamo-welcome__community {
-    width: min(100%, 350px);
-    flex-direction: column;
-  }
-
-.dynamo-welcome__notification {
-    width: 100%;
-  }
-
-.dynamo-welcome__notification,
-  .dynamo-story__step,
-  .dynamo-story__step-copy,
-  .dynamo-story__stage-panel {
-    transition: none;
-  }
-
 @media (max-width: 1360px) {
 
   .dynamo-welcome__community {

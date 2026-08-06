@@ -1190,6 +1190,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name of the source pod. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID of the source pod, recorded so the node agent dumps that specific<br />pod and not a same-named recreation. |  | Optional: \{\} <br /> |
+| `containers` _string array_ | Containers narrows the capture to these containers of the source pod. The<br />node agent reads this instead of the source pod's target-container<br />annotation. v1alpha1 supports exactly one container; the cap is lifted when<br />the runtime supports multi-container capture. |  | MaxItems: 1 <br />MinItems: 1 <br />Required: \{\} <br />items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
 
 
 #### PodSnapshot
@@ -1322,7 +1323,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, target-container annotation,<br />checkpoint storage mount) before creating the PodSnapshot. |  | Required: \{\} <br /> |
+| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, checkpoint storage mount)<br />before creating the PodSnapshot. The capture target container is carried on<br />PodRef.Containers, not a pod annotation. |  | Required: \{\} <br /> |
 
 
 #### PodSnapshotSpec
@@ -2080,9 +2081,8 @@ _Appears in:_
 
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is a served version: the API server accepts reads and writes
-against it, and transparently converts to/from v1alpha1 (still the
-storage version until a later MR flips it). Conversion goes through the
+v1beta1 is the storage version. The API server transparently converts
+to and from the served v1alpha1 version through
 operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
@@ -2177,9 +2177,8 @@ _Appears in:_
 
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is a served version: the API server accepts reads and writes
-against it, and transparently converts to/from v1alpha1 (still the
-storage version until a later MR flips it). Conversion goes through the
+v1beta1 is the storage version. The API server transparently converts
+to and from the served v1alpha1 version through
 operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
@@ -2327,8 +2326,8 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1alpha1 remains the storage version; conversion between served versions is
-handled by the operator's conversion webhook
+v1beta1 is the storage version; conversion to and from the served v1alpha1
+version is handled by the operator's conversion webhook
 (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
