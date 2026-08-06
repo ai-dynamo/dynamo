@@ -251,8 +251,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
-                profiled_vram_gib=24.2,
-                requested_vllm_kv_cache_bytes=1_714_881_000,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 tests=[
                     MmCase(payload=make_image_payload(["green"])),
                     # Rust frontend decode -> NIXL RGB transfer -> Encode ->
