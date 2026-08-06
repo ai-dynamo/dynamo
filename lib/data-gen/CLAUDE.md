@@ -8,7 +8,8 @@ transient row lowering used to build replay models in memory.
 The crate is producer- and consumer-agnostic on purpose: it centralizes the
 Mooncake schema and request-trace ingestion primitives so replay consumers do
 not duplicate either representation. Dynamo request-trace replay does not emit
-an intermediate Mooncake file.
+an intermediate Mooncake file; the opt-in `dynamo-bench` exporter uses these
+shared primitives when a Mooncake export is required.
 
 ## Guardrails
 

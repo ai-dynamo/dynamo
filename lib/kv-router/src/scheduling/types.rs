@@ -78,6 +78,35 @@ pub struct SchedulingResponse {
     pub potential_decode_blocks: usize,
 }
 
+/// A routing decision that selected less KV overlap than another eligible worker.
+///
+/// This records the observable locality tradeoff without attributing its cause. The
+/// final selection may differ because of worker load, routing preferences, or
+/// temperature-based sampling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonMaxOverlapSelection {
+    /// Worker selected by the scheduler's complete scoring policy.
+    pub selected_worker: WorkerWithDpRank,
+    /// Eligible worker with the greatest effective KV overlap.
+    pub highest_overlap_worker: WorkerWithDpRank,
+    /// Effective overlap available on `highest_overlap_worker`.
+    pub highest_overlap_blocks: f64,
+    /// Effective overlap available on `selected_worker`.
+    pub selected_overlap_blocks: f64,
+}
+
+/// Callback dispatched off the scheduler actor after an admitted non-max-overlap selection is
+/// delivered.
+pub type NonMaxOverlapSelectionObserver =
+    Arc<dyn Fn(&str, NonMaxOverlapSelection) + Send + Sync + 'static>;
+
+impl NonMaxOverlapSelection {
+    /// Return the effective overlap blocks sacrificed by the final selection.
+    pub fn overlap_blocks_lost(self) -> f64 {
+        self.highest_overlap_blocks - self.selected_overlap_blocks
+    }
+}
+
 #[derive(Debug)]
 pub struct AdvisorySchedulingResponse {
     pub response: SchedulingResponse,

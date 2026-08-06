@@ -309,19 +309,14 @@ gpu_budget, backend)`:
    - `vllm` forbids `moe_tp > 1 & moe_ep > 1`.
    Large MoE that a node can't hold (`gpus_per_node * vram_per_gpu < 2 * weight_bytes`)
    auto-enables multi-node wideEP.
-5. **KV feasibility** (`aisimulate.spica.kv_estimate.feasible_shape_tokens`, via AI
-   Configurator's `estimate_kv_cache`): when the compatible memory estimator is installed, a shape
-   is kept iff its total KV capacity in tokens (after quantized weights + activation reservations)
-   holds at least one longest sequence —
+5. **KV feasibility** (`aisimulate.spica.kv_estimate.feasible_shape_tokens`, via
+   `aiconfigurator_core.sdk.memory.estimate_kv_cache`): a shape is kept iff its total KV capacity
+   in tokens (after quantized weights + activation reservations) holds at least one longest sequence —
    `total_kv_size_tokens > max_seq_len`, where `max_seq_len` = `context_length` if set, else
    the model's max context. This is per-shape (TEP / DEP / TP differ at the same GPU count)
-   and uses the real (often FP8) weights. SKUs with no perf DB raise `NoPerfDatabase` (no
-   naive fallback). If no shape is feasible within budget, `NoViableParallelConfig` is raised
-   for that branch. The default `dynamo-planner` image retains AI Configurator 0.9, which does not
-   provide `aiconfigurator.sdk.memory`; Spica warns and skips this pre-search filter in that image.
-   Trace and fixed-concurrency workloads still reach Replay, while `kv_load_ratio` fails fast
-   before branch enumeration because candidate-relative concurrency cannot be derived without the
-   estimator.
+   and uses the real (often FP8) weights. The estimator raises `NoPerfDatabase` for a target with no
+   perf DB, and branch enumeration removes that backend. Spica does not use the naive fallback. If
+   no shape is feasible within budget, `NoViableParallelConfig` is raised for that branch.
 6. **Replicas** fill the budget: for each kept worker shape, replica counts
    `r ∈ 1..(gpu_budget // g)` such that `g * r` lies in
    `[min_gpu_budget, gpu_budget]`.

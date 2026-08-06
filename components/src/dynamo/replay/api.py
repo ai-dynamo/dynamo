@@ -3,11 +3,56 @@
 
 import json
 import os
+from typing import Any, Literal, TypedDict, overload
+
+from typing_extensions import Unpack
 
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+
+
+class _CommonReplayOptions(TypedDict, total=False):
+    extra_engine_args: Any
+    prefill_engine_args: Any
+    decode_engine_args: Any
+    router_config: Any
+    aic_perf_config: Any
+    num_workers: int
+    num_prefill_workers: int
+    num_decode_workers: int
+    replay_concurrency: int | None
+    router_mode: Literal["round_robin", "kv_router"]
+    arrival_speedup_ratio: float
+    model_name: str | None
+    sla_ttft_ms: float | None
+    sla_itl_ms: float | None
+    sla_e2e_ms: float | None
+    planner_config: Any
+    benchmark_granularity: int
+    capture_per_request: bool
+    capture_planner_details: bool
+
+
+class _TraceReplayOptions(_CommonReplayOptions, total=False):
+    trace_block_size: int | None
+    trace_format: str
+    trace_shared_prefix_ratio: float
+    trace_num_prefix_groups: int
+    report_jsonl_path: str | os.PathLike[str] | None
+    max_sim_time_ms: float | None
+
+
+class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
+    request_rate: float | None
+    arrival_interval_ms: float | None
+    arrival_seed: int
+    turns_per_session: int
+    shared_prefix_ratio: float
+    num_prefix_groups: int
+    inter_turn_delay_ms: float
 
 
 def _normalize_trace_files(trace_files):
@@ -22,6 +67,49 @@ def _planner_config_arg(planner_config):
     if isinstance(planner_config, dict):
         return json.dumps(planner_config)
     return planner_config
+
+
+def _materialize_offline_report(
+    native,
+    *,
+    planner: PlannerReplayDetails | None,
+) -> ReplayReport:
+    return ReplayReport(
+        summary=native.summary,
+        per_request=native.per_request,
+        coverage=native.coverage,
+        planner=planner,
+    )
+
+
+@overload
+def run_trace_replay(
+    trace_files,
+    *,
+    replay_mode: Literal["offline"] = "offline",
+    **kwargs: Unpack[_TraceReplayOptions],
+) -> ReplayReport:
+    ...
+
+
+@overload
+def run_trace_replay(
+    trace_files,
+    *,
+    replay_mode: Literal["online"],
+    **kwargs: Unpack[_TraceReplayOptions],
+) -> dict[str, Any]:
+    ...
+
+
+@overload
+def run_trace_replay(
+    trace_files,
+    *,
+    replay_mode: str,
+    **kwargs: Unpack[_TraceReplayOptions],
+) -> ReplayReport | dict[str, Any]:
+    ...
 
 
 def run_trace_replay(
@@ -51,7 +139,9 @@ def run_trace_replay(
     sla_e2e_ms=None,
     planner_config=None,
     benchmark_granularity=8,
-):
+    capture_per_request=False,
+    capture_planner_details=True,
+) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
@@ -81,7 +171,14 @@ def run_trace_replay(
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
+        "capture_per_request": capture_per_request,
+        "capture_planner_details": capture_planner_details,
     }
+    if capture_per_request and replay_mode == "online":
+        raise ValueError(
+            "capture_per_request only supports replay_mode='offline'; "
+            "use report_jsonl_path for online request records"
+        )
     if planner_config is not None:
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
@@ -94,8 +191,6 @@ def run_trace_replay(
             raise ValueError(
                 "planner_config replay only supports trace_format='mooncake' or 'dynamo'"
             )
-        if report_jsonl_path is not None:
-            raise ValueError("report_jsonl_path is not supported with planner_config")
         if max_sim_time_ms is not None:
             raise ValueError("max_sim_time_ms is not supported with planner_config")
         if trace_format != "dynamo" and len(trace_files) != 1:
@@ -116,19 +211,65 @@ def run_trace_replay(
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
+            capture_details=capture_planner_details,
         )
         with adapter_scope as adapter:
-            trace_report = _run_mocker_trace_replay(
+            native = _run_mocker_trace_replay(
                 trace_files,
                 **replay_kwargs,
                 scaling_policy=adapter,
             )
-            return adapter.finalize(trace_report)
-    return _run_mocker_trace_replay(
+            return _materialize_offline_report(
+                native,
+                planner=adapter.finalize(native.lifecycle_operations),
+            )
+    result = _run_mocker_trace_replay(
         trace_files,
         **replay_kwargs,
         scaling_policy=None,
     )
+    if replay_mode == "online":
+        return result
+    return _materialize_offline_report(
+        result,
+        planner=None,
+    )
+
+
+@overload
+def run_synthetic_trace_replay(
+    input_tokens,
+    output_tokens,
+    request_count,
+    *,
+    replay_mode: Literal["offline"] = "offline",
+    **kwargs: Unpack[_SyntheticReplayOptions],
+) -> ReplayReport:
+    ...
+
+
+@overload
+def run_synthetic_trace_replay(
+    input_tokens,
+    output_tokens,
+    request_count,
+    *,
+    replay_mode: Literal["online"],
+    **kwargs: Unpack[_SyntheticReplayOptions],
+) -> dict[str, Any]:
+    ...
+
+
+@overload
+def run_synthetic_trace_replay(
+    input_tokens,
+    output_tokens,
+    request_count,
+    *,
+    replay_mode: str,
+    **kwargs: Unpack[_SyntheticReplayOptions],
+) -> ReplayReport | dict[str, Any]:
+    ...
 
 
 def run_synthetic_trace_replay(
@@ -161,7 +302,9 @@ def run_synthetic_trace_replay(
     sla_e2e_ms=None,
     planner_config=None,
     benchmark_granularity=8,
-):
+    capture_per_request=False,
+    capture_planner_details=True,
+) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same timing boundary as trace replay."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
@@ -187,7 +330,11 @@ def run_synthetic_trace_replay(
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
+        "capture_per_request": capture_per_request,
+        "capture_planner_details": capture_planner_details,
     }
+    if capture_per_request and replay_mode == "online":
+        raise ValueError("capture_per_request only supports replay_mode='offline'")
     if planner_config is not None:
         if replay_mode != "offline":
             raise ValueError(
@@ -201,20 +348,30 @@ def run_synthetic_trace_replay(
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
+            capture_details=capture_planner_details,
         )
         with adapter_scope as adapter:
-            trace_report = _run_mocker_synthetic_trace_replay(
+            native = _run_mocker_synthetic_trace_replay(
                 input_tokens,
                 output_tokens,
                 request_count,
                 **replay_kwargs,
                 scaling_policy=adapter,
             )
-            return adapter.finalize(trace_report)
-    return _run_mocker_synthetic_trace_replay(
+            return _materialize_offline_report(
+                native,
+                planner=adapter.finalize(native.lifecycle_operations),
+            )
+    result = _run_mocker_synthetic_trace_replay(
         input_tokens,
         output_tokens,
         request_count,
         **replay_kwargs,
         scaling_policy=None,
+    )
+    if replay_mode == "online":
+        return result
+    return _materialize_offline_report(
+        result,
+        planner=None,
     )
