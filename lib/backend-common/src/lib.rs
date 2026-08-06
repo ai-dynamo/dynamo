@@ -28,7 +28,7 @@ pub mod testing;
 mod validate;
 pub mod worker;
 
-pub use args::{CommonArgs, GrpcTransportConfig, normalize_grpc_endpoint};
+pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{

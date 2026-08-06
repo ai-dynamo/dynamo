@@ -9,6 +9,23 @@ use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
+fn is_kimi_k3_parser(parser_name: Option<&str>) -> bool {
+    parser_name.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
+}
+
+fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
+    // Named K3 calls cannot use Dynamo's generic JSON-schema fallback because
+    // K3 emits an XTML tools channel. Treat the K3 structural tag as part of
+    // implementing this standard OpenAI request shape, not as an operator
+    // opt-in. The global flag still controls optional structural enforcement
+    // for auto/required and every other model family.
+    is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_))
+}
+
+fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolChoice) -> bool {
+    exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
+}
+
 impl OpenAIPreprocessor {
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
@@ -19,11 +36,24 @@ impl OpenAIPreprocessor {
         prompt_injected_reasoning: bool,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
-        if self.runtime_config.structural_tag_mode == StructuralTagMode::Off {
+        let parser_name = self.tool_call_parser.as_deref();
+        if self.runtime_config.structural_tag_mode == StructuralTagMode::Off
+            && !requires_intrinsic_structural_tag(parser_name, tool_choice)
+        {
             return Ok(false);
         }
 
-        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+        if should_skip_tool_call_ban(
+            self.runtime_config.exclude_tools_when_tool_choice_none,
+            tool_choice,
+        ) {
+            // The prompt formatter already omits tools for this request. Avoid
+            // sending a redundant AnyTokens structural tag: vLLM cannot
+            // validate token-string exclusions without tokenizer metadata.
+            return Ok(false);
+        }
+
+        let Some(parser_name) = parser_name else {
             tracing::warn!(
                 "Structural tag is enabled but --dyn-tool-call-parser is not set; \
                  structural tags will not be applied"
@@ -157,5 +187,94 @@ impl OpenAIPreprocessor {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::PathBuf, sync::Arc};
+
+    use crate::{
+        model_card::ModelDeploymentCard,
+        protocols::common::{OutputOptions, SamplingOptions, StopConditions},
+    };
+
+    use super::*;
+
+    fn structural_tag_preprocessor(exclude_tools_when_none: bool) -> Arc<OpenAIPreprocessor> {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
+        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        mdc.runtime_config.exclude_tools_when_tool_choice_none = exclude_tools_when_none;
+
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    fn preprocessed_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn named_kimi_k3_is_intrinsic_even_when_global_mode_is_off() {
+        let named = ToolChoice::Named("get_weather".to_string());
+        assert!(requires_intrinsic_structural_tag(Some("kimi_k3"), &named));
+        assert!(requires_intrinsic_structural_tag(Some("kimi-k3"), &named));
+    }
+
+    #[test]
+    fn other_choices_and_parsers_still_follow_the_global_mode() {
+        assert!(!requires_intrinsic_structural_tag(
+            Some("kimi_k3"),
+            &ToolChoice::Required
+        ));
+        assert!(!requires_intrinsic_structural_tag(
+            Some("hermes"),
+            &ToolChoice::Named("get_weather".to_string())
+        ));
+    }
+
+    #[test]
+    fn tool_choice_none_skips_ban_only_when_prompt_excludes_tools() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+            strict: None,
+        }];
+
+        let preprocessor = structural_tag_preprocessor(true);
+        let mut request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_structural_tag(&ToolChoice::None, &tools, None, false, &mut request)
+            .unwrap();
+
+        assert!(!applied);
+        assert!(request.sampling_options.guided_decoding.is_none());
+
+        let preprocessor = structural_tag_preprocessor(false);
+        let mut request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_structural_tag(&ToolChoice::None, &tools, None, false, &mut request)
+            .unwrap();
+
+        assert!(applied);
+        let structural_tag = request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .and_then(|guided| guided.structural_tag.as_ref())
+            .expect("tool-call ban should be installed");
+        assert_eq!(
+            structural_tag["format"]["content"]["exclude_tokens"],
+            serde_json::json!(["<tool_call>"])
+        );
     }
 }

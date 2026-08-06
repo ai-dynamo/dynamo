@@ -10,6 +10,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 import importlib.util
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
@@ -448,6 +449,59 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("opaque user UUIDs must not be parsed as routing hashes")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    def fail_sender():
+        raise AssertionError("opaque user UUIDs must be processed by the worker")
+
+    monkeypatch.setattr(vllm_processor_module, "MmKwargsShmSender", fail_sender)
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    feature_hash = "derived-from-uuid-and-processor-kwargs"
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash=feature_hash,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {"multi_modal_uuids": {"image_url": ["opaque-user-key"]}}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "extra_args" not in dynamo_preproc
+
+
 class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
@@ -524,6 +578,102 @@ class TestReasoningParserMetadata:
         }
 
 
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_build_engine_inputs_preserves_multimodal_uuids(
+    vllm_processor_module,
+):
+    class Renderer:
+        async def process_for_engine_async(self, prompt, arrival_time):
+            assert prompt == {
+                "prompt": "rendered prompt",
+                "prompt_token_ids": [1, 2, 3],
+                "multi_modal_data": {"image": [image]},
+                "multi_modal_uuids": {"image": ["opaque-user-key"]},
+                "cache_salt": "salt",
+                "mm_processor_kwargs": {"do_sample_frames": False},
+            }
+            assert isinstance(arrival_time, float)
+            return {"type": "multimodal", "mm_hashes": ["opaque-user-key"]}
+
+    image = object()
+    engine_inputs = await vllm_processor_module._build_engine_inputs(
+        Renderer(),
+        {
+            "prompt": "rendered prompt",
+            "multi_modal_data": {"image": [image]},
+            "multi_modal_uuids": {"image": ["opaque-user-key"]},
+        },
+        [1, 2, 3],
+        cache_salt="salt",
+        mm_processor_kwargs={"do_sample_frames": False},
+    )
+
+    assert engine_inputs == {
+        "type": "multimodal",
+        "mm_hashes": ["opaque-user-key"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_build_engine_inputs_defers_uuid_only_processing_to_worker(
+    vllm_processor_module,
+):
+    class Renderer:
+        async def process_for_engine_async(self, prompt, arrival_time):
+            assert prompt == {
+                "prompt": "rendered prompt",
+                "prompt_token_ids": [1, 2, 3],
+                "cache_salt": "salt",
+                "mm_processor_kwargs": {"do_sample_frames": False},
+            }
+            assert isinstance(arrival_time, float)
+            return {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    engine_inputs = await vllm_processor_module._build_engine_inputs(
+        Renderer(),
+        {
+            "prompt": "rendered prompt",
+            "multi_modal_data": {"image": [None]},
+            "multi_modal_uuids": {"image": ["worker-cached-image"]},
+        },
+        [1, 2, 3],
+        cache_salt="salt",
+        mm_processor_kwargs={"do_sample_frames": False},
+        defer_multimodal_processing=True,
+    )
+
+    assert engine_inputs == {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+
+@pytest.mark.multimodal
+def test_normalize_vllm_image_parts_defaults_detail_without_lifting_nested_uuid(
+    vllm_processor_module,
+) -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": None,
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                }
+            ],
+        }
+    ]
+
+    vllm_processor_module._normalize_vllm_image_parts(messages)
+
+    part = messages[0]["content"][0]
+    assert "uuid" not in part
+    assert part["image_url"]["detail"] == "auto"
+
+
 class _FakeOutputProcessor:
     def __init__(self):
         self.request_states = {}
@@ -569,6 +719,75 @@ def vllm_processor_module(monkeypatch):
     monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
     monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
     return module
+
+
+@pytest.mark.asyncio
+async def test_generator_preserves_zero_top_logprobs(
+    vllm_processor_module,
+    monkeypatch,
+    caplog,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = {}
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=True,
+                    top_logprobs=0,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+            )
+        ),
+    )
+
+    class ProjectionObserved(Exception):
+        pass
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        assert sampling_params.logprobs == 0
+        raise ProjectionObserved
+
+    input_processor = SimpleNamespace(
+        generation_config_fields={},
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+    )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+
+    with pytest.raises(ProjectionObserved):
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "logprobs": True,
+                    "top_logprobs": 0,
+                }
+            )
+        )
+    assert (
+        "Logprobs requested but not supported in distributed inference mode"
+        in caplog.messages
+    )
 
 
 def _make_processor(module, routed_engine):
@@ -873,6 +1092,70 @@ class TestChatTemplateKwargsForwarding:
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
 
+    def test_reasoning_effort_takes_precedence_over_deployment_default(self, tokenizer):
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": "high",
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert chat_template_kwargs["reasoning_effort"] == "high"
+        assert "thinking" not in chat_template_kwargs
+        assert "enable_thinking" not in chat_template_kwargs
+        assert "thinking_mode" not in chat_template_kwargs
+
+    def test_default_thinking_mode_disabled_reaches_template_kwargs(self, tokenizer):
+        _, _, chat_template_kwargs, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        for kwargs in (chat_template_kwargs, chat_params.chat_template_kwargs):
+            assert kwargs["thinking"] is False
+            assert kwargs["enable_thinking"] is False
+            assert kwargs["thinking_mode"] == "disabled"
+
+    def test_default_thinking_mode_does_not_override_request_kwargs(self, tokenizer):
+        _, _, chat_template_kwargs, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        for kwargs in (chat_template_kwargs, chat_params.chat_template_kwargs):
+            assert kwargs["enable_thinking"] is True
+            assert "thinking" not in kwargs
+            assert "thinking_mode" not in kwargs
+
+    def test_null_root_thinking_does_not_suppress_deployment_default(self, tokenizer):
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "thinking": None,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert chat_template_kwargs["enable_thinking"] is False
+
 
 @pytest.mark.parametrize(
     ("runtime_config", "expected"),
@@ -891,3 +1174,59 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+# Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
+# attribute; a direct read used to crash vLLM preprocessing.
+
+
+def _make_mistral_tokenizer():
+    # Bare instance: these tests only touch attribute access, not tokenization.
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    return MistralTokenizer.__new__(MistralTokenizer)
+
+
+def test_mistral_tokenizer_has_no_chat_template_attribute():
+    """Direct read raises; getattr is safe; the attribute is assignable."""
+    tok = _make_mistral_tokenizer()
+
+    with pytest.raises(AttributeError):
+        _ = tok.chat_template
+
+    assert getattr(tok, "chat_template", None) is None
+    tok.chat_template = "x"
+    assert tok.chat_template == "x"
+
+
+def test_ensure_chat_template_mistral_no_crash(vllm_processor_module, tmp_path):
+    """_ensure_chat_template leaves a MistralTokenizer untouched (no attribute)."""
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_mistral_ignores_on_disk_template(
+    vllm_processor_module, tmp_path
+):
+    """A chat_template.jinja beside a Mistral model is not attached to it."""
+    (tmp_path / "chat_template.jinja").write_text("{{ messages }}")
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_preserves_existing_hf_template(
+    vllm_processor_module, tokenizer, tmp_path
+):
+    """An HF tokenizer's existing chat_template is left untouched."""
+    existing = tokenizer.chat_template
+    assert existing is not None
+
+    vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
+
+    assert tokenizer.chat_template == existing

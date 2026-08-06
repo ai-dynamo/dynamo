@@ -19,7 +19,6 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import TransferRequest
-from dynamo.common.multimodal.image_loader import decoded_content_hash_key
 from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
@@ -66,8 +65,7 @@ def _make_config(
 def test_validate_accepts_frontend_decoding_with_encode_worker():
     config = _make_config(frontend_decoding=True, multimodal_encode_worker=True)
 
-    with pytest.warns(DeprecationWarning, match="--multimodal-encode-worker"):
-        config.validate()
+    config.validate()
 
     assert config.enable_multimodal is True
 
@@ -259,21 +257,6 @@ async def test_encode_worker_missing_decoded_hash_bypasses_cache_and_warns_once(
     warning = "descriptor has a missing or invalid canonical content_hash"
     assert caplog.text.count(warning) == 1
     assert "compatible Dynamo versions" in caplog.text
-
-
-@pytest.mark.parametrize(
-    "content_hash",
-    [
-        "0x12345678901234",
-        "+123456789abcdef",
-        "01_23456789abcde",
-        "0123456789abcdeF",
-        "",
-        None,
-    ],
-)
-def test_encode_worker_rejects_noncanonical_decoded_content_hash(content_hash):
-    assert decoded_content_hash_key({"content_hash": content_hash}) is None
 
 
 @pytest.mark.asyncio

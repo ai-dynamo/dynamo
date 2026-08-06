@@ -12,6 +12,7 @@
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
+ * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -58,6 +59,19 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  // dev/local-dev templates build only the dev images -- they must NOT pull in
+  // `core` (all runtime builds + the GPU test matrix), and must not be silently
+  // uncovered the way they were when they sat in `ignore`.
+  {
+    file: 'container/templates/dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'dev.Dockerfile triggers dev image builds only'
+  },
+  {
+    file: 'container/templates/local_dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'local_dev.Dockerfile triggers dev image builds only'
+  },
   // Backend-specific files should only trigger their backend
   {
     file: 'examples/backends/vllm/launch/dsr1_dep.sh',
@@ -78,6 +92,38 @@ const testCases = [
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
+  },
+
+  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
+  {
+    file: 'lib/sidecar/common/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'common sidecar source avoids unrelated build and E2E filters'
+  },
+  {
+    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+  },
+  {
+    file: 'lib/sidecar/sglang/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sglang sidecar source avoids backend E2E'
+  },
+  {
+    file: 'lib/sidecar/trtllm/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+  },
+  {
+    file: 'lib/sidecar/vllm/deploy/agg.yaml',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar deployment config avoids Rust and E2E checks'
+  },
+  {
+    file: 'lib/sidecar/README.md',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar README avoids Rust, Fern, and E2E checks'
   },
 
   // Doc files should be excluded from core (negation patterns)
@@ -168,6 +214,56 @@ const testCases = [
     file: 'deploy/helm/charts/platform/values.yaml',
     expect: { core: false, deploy: true },
     desc: 'helm file triggers deploy'
+  },
+
+  // Framework snapshot lifecycle: backend filter + that framework's DynamoCheckpoint filter
+  {
+    file: 'components/src/dynamo/vllm/snapshot.py',
+    expect: {
+      vllm: true,
+      snapshot: false,
+      snapshot_vllm: true,
+      snapshot_sglang: false,
+      snapshot_trtllm: false,
+    },
+    desc: 'vllm snapshot.py gates only vllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/sglang/snapshot.py',
+    expect: {
+      sglang: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'sglang snapshot.py gates only sglang DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/trtllm/snapshot.py',
+    expect: {
+      trtllm: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: false,
+      snapshot_trtllm: true,
+    },
+    desc: 'trtllm snapshot.py gates only trtllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py',
+    expect: { trtllm: true, snapshot_trtllm: true, snapshot: false },
+    desc: 'trtllm snapshot unit test gates only trtllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/common/snapshot/lifecycle.py',
+    expect: { snapshot: true, snapshot_vllm: false, core: true },
+    desc: 'shared snapshot lifecycle triggers shared snapshot filter'
+  },
+  {
+    file: 'tests/deploy/test_dynamocheckpoint.py',
+    expect: { snapshot: true, deploy: true },
+    desc: 'DynamoCheckpoint deploy test triggers shared snapshot'
   },
 ];
 

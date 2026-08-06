@@ -231,6 +231,10 @@ impl RadixTree {
         event_id: u64,
         counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
+        // NOTE: This is a single-threaded indexer defense, not a cross-indexer validation
+        // contract. Publishers must not emit self-referencing stores; concurrent consumer
+        // indexers intentionally trust that guarantee to avoid this O(blocks) hot-path scan.
+        // Do not copy this validation into CRTC solely for implementation parity.
         if let Some(parent_hash) = store.parent_hash
             && store
                 .blocks

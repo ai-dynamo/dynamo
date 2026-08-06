@@ -73,6 +73,10 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
                     keys.push(key.to_string());
                 }
             }
+            // Opaque UUIDs are not content-derived routing keys. UUID-only
+            // reuse intentionally relies on text-prefix routing and affinity
+            // to the worker that owns the processor/embedding cache entry.
+            MultimodalData::UuidOnly(_) => {}
         }
     }
     keys.sort();
@@ -311,6 +315,9 @@ pub async fn build_preprocessed_routing(
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
+    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+        prefill_router.set_decode_session_affinity(affinity.clone());
+    }
 
     let backend_engine = preprocessed_backend_engine(
         router,

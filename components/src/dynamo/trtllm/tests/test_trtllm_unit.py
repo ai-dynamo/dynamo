@@ -24,7 +24,11 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
-from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from dynamo.trtllm.workers.llm_worker import (
+    _populate_kv_cache_capacity,
+    _strip_postprocess_workers,
+    init_llm_worker,
+)
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -39,13 +43,55 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
-    pytest.mark.profiled_vram_gib(0),
 ]
+
+# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
+# sequential GPU stage so TensorRT-LLM initialization is shared.
 
 
 # Create TRTLLM-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_trtllm_cli = make_cli_args_fixture("dynamo.trtllm")
+
+
+def test_populate_kv_cache_capacity_publishes_engine_values():
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {
+        "maxNumBlocks": 123,
+        "tokensPerBlock": 64,
+        "maxNumTokens": 7872,
+    }
+
+    block_size = _populate_kv_cache_capacity(runtime_config, engine, 32)
+
+    assert runtime_config.total_kv_blocks == 123
+    assert block_size == 64
+
+
+def test_populate_kv_cache_capacity_falls_back_when_unavailable(caplog):
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {}
+
+    with caplog.at_level("WARNING"):
+        block_size = _populate_kv_cache_capacity(runtime_config, engine, 32)
+
+    assert block_size == 32
+    assert "Planner KV-rate scaling will remain unavailable" in caplog.text
+
+
+def test_populate_kv_cache_capacity_rejects_invalid_values():
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {
+        "maxNumBlocks": 0,
+        "tokensPerBlock": 64,
+        "maxNumTokens": 0,
+    }
+
+    with pytest.raises(ValueError, match="Invalid TRT-LLM KV-cache capacity"):
+        _populate_kv_cache_capacity(runtime_config, engine, 32)
 
 
 def test_custom_jinja_template_invalid_path(mock_trtllm_cli):
@@ -240,13 +286,18 @@ def test_disaggregation_mode_accepts_pd_alias():
     assert config.component == "backend"
 
 
-def test_disaggregation_mode_legacy_aggregated_value_warns():
-    with pytest.warns(DeprecationWarning, match="prefill_and_decode"):
-        config = parse_args(
+def test_removed_disaggregation_mode_legacy_aggregated_value_is_rejected():
+    with pytest.raises(SystemExit):
+        parse_args(
             ["--model", "fake-model", "--disaggregation-mode", "prefill_and_decode"]
         )
 
-    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+
+def test_removed_disaggregation_mode_legacy_env_value_is_rejected(monkeypatch):
+    monkeypatch.setenv("DYN_TRTLLM_DISAGGREGATION_MODE", "prefill_and_decode")
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        parse_args(["--model", "fake-model"])
 
 
 def test_conversation_affinity_cli_flag(monkeypatch):
@@ -268,6 +319,40 @@ def test_conversation_affinity_defaults_false(monkeypatch):
     monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
     config = parse_args(["--model", "fake-model"])
     assert config.conversation_affinity is False
+
+
+def test_conversation_affinity_dp_rank_source_cli_flag(monkeypatch):
+    """The initial affinity placement owner can be selected on the CLI."""
+    monkeypatch.delenv(
+        "DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+        raising=False,
+    )
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--conversation-affinity-dp-rank-source",
+            "dynamo",
+        ]
+    )
+    assert config.conversation_affinity_dp_rank_source == "dynamo"
+
+
+def test_conversation_affinity_dp_rank_source_env_var(monkeypatch):
+    """DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE selects initial placement."""
+    monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE", "dynamo")
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity_dp_rank_source == "dynamo"
+
+
+def test_conversation_affinity_dp_rank_source_defaults_engine(monkeypatch):
+    """TRT-LLM keeps ownership of first-turn placement by default."""
+    monkeypatch.delenv(
+        "DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+        raising=False,
+    )
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity_dp_rank_source == "engine"
 
 
 def test_enable_multimodal_rejects_diffusion_modality():
@@ -472,6 +557,40 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
         assert config.max_batch_size == 512
 
 
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_publish_events_does_not_materialize_unset_kv_cache_defaults(monkeypatch):
+    """Event setup must not turn an omitted TRT-LLM field into an override."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    # Keep extra_engine_args unset so kv_cache_config reaches event setup as the
+    # typed model whose serialization caused this regression.
+    config = parse_args(["--model", "fake-model", "--publish-kv-events"])
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    kv_cache_config = exc_info.value.engine_args["kv_cache_config"]
+    assert (
+        kv_cache_config["free_gpu_memory_fraction"] == config.free_gpu_memory_fraction
+    )
+    assert kv_cache_config["event_buffer_max_size"] > 0
+    assert "enable_swa_scratch_reuse" not in kv_cache_config
+
+
 class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
 
@@ -498,3 +617,56 @@ async def test_init_llm_worker_creates_multimodal_processor():
                 config=config,
                 shutdown_event=asyncio.Event(),
             )
+
+
+# ---- Tests for _strip_postprocess_workers ----
+
+
+@pytest.mark.core
+def test_strip_postprocess_workers_handles_quoted_string_value(caplog):
+    """Quoted YAML/JSON string values (e.g. "8") warn and are removed without TypeError."""
+    engine_args = {"num_postprocess_workers": "8", "max_batch_size": 128}
+    with caplog.at_level("WARNING"):
+        _strip_postprocess_workers(engine_args)
+    assert "num_postprocess_workers" not in engine_args
+    assert any("num_postprocess_workers" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_args(
+    tmp_path, monkeypatch, caplog
+):
+    """num_postprocess_workers in an extra-engine-args YAML is stripped with a warning."""
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("max_batch_size: 64\nnum_postprocess_workers: 4\n")
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
+    )
+
+    with (
+        caplog.at_level("WARNING"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    engine_args = exc_info.value.engine_args
+    assert "num_postprocess_workers" not in engine_args
+    assert any("num_postprocess_workers=4" in r.message for r in caplog.records)

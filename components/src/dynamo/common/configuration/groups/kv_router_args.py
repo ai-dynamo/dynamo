@@ -29,6 +29,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_credit",
     "overlap_score_credit_decay",
     "prefill_load_scale",
+    "decode_active_request_weight",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
     "router_temperature",
@@ -38,6 +39,9 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_tracking_hash",
+    "router_tracking_key_file",
+    "router_tracking_key_id",
     "router_prefill_load_model",
     "router_ttl_secs",
     "router_queue_threshold",
@@ -108,6 +112,7 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_credit: float
     overlap_score_credit_decay: float
     prefill_load_scale: float
+    decode_active_request_weight: float
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
@@ -117,6 +122,9 @@ class KvRouterConfigBase(ConfigBase):
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_tracking_hash: str = "public-xxh3-v1"
+    router_tracking_key_file: Optional[str] = None
+    router_tracking_key_id: Optional[str] = None
     router_prefill_load_model: str
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
@@ -171,7 +179,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
                 "Must be finite and non-negative; values above 1.0 give device "
-                "overlap extra credit and can make the adjusted prefill cost negative."
+                "overlap extra credit, with adjusted prefill cost clamped at zero."
             ),
             arg_type=float,
             dest="overlap_score_credit",
@@ -210,6 +218,20 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-active-request-weight",
+            env_var="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+            default=0.0,
+            help=(
+                "[EXPERIMENTAL] KV Router: Block-equivalent decode cost added for "
+                "each active request on a candidate worker. Use this to balance "
+                "decode batch size when step latency depends more on request count "
+                "than resident KV footprint. Must be finite and non-negative."
+            ),
+            arg_type=float,
+            dest="decode_active_request_weight",
         )
         add_argument(
             g,
@@ -292,8 +314,9 @@ class KvRouterArgGroup(ArgGroup):
             dest="router_track_output_blocks",
             help=(
                 "KV Router: Track output blocks during generation. When enabled, the router adds "
-                "placeholder blocks as tokens are generated and applies fractional decay based on "
-                "progress toward expected output sequence length."
+                "placeholder blocks as tokens are generated. With expected output sequence length, "
+                "fractional decay applies to output blocks and the structurally exclusive prompt "
+                "suffix; shared prompt blocks retain full weight."
             ),
             obsolete_flag="--track-output-blocks",
         )
@@ -321,6 +344,28 @@ class KvRouterArgGroup(ArgGroup):
                 "Use --no-router-track-prefill-tokens to ignore prompt tokens in router "
                 "prefill-token load, queue pressure, and active_prefill_tokens metrics."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-hash",
+            env_var="DYN_ROUTER_TRACKING_HASH",
+            default="public-xxh3-v1",
+            choices=["public-xxh3-v1", "keyed-xxh3-v1"],
+            help="KV Router: Hash function for router-derived active-sequence identities.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-file",
+            env_var="DYN_ROUTER_TRACKING_KEY_FILE",
+            default=None,
+            help="KV Router: File containing the 32-byte provider tracking key.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-id",
+            env_var="DYN_ROUTER_TRACKING_KEY_ID",
+            default=None,
+            help="KV Router: Provider-managed tracking-key epoch identifier.",
         )
         add_argument(
             g,

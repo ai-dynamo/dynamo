@@ -6,17 +6,27 @@ use std::sync::Weak;
 use anyhow::{Context, Result};
 use dynamo_runtime::{
     component::Client,
+    discovery::EventTransportKind,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{EventPublisher, EventSubscriber},
+    transports::event_plane::{
+        Codec, EventPublisher, EventSubscriber, ValidatedEnvelope, uses_direct_zmq,
+    },
 };
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::coordinator::{AffinityCoordinatorInner, AffinityTarget};
+use crate::direct_zmq_fan_in::{
+    ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in,
+};
 
 pub(super) const SESSION_AFFINITY_SUBJECT: &str = "session_affinity_events";
 const OUTBOUND_CHANNEL_CAPACITY: usize = 4_096;
+const DIRECT_ZMQ_RCVHWM: i32 = 1_024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SessionAffinityUpdate {
@@ -51,6 +61,40 @@ impl ReplicaUpdateSender {
     }
 }
 
+#[derive(Clone)]
+struct ReplicaUpdateApplier {
+    router_id: u64,
+    local_worker_ids: watch::Receiver<Vec<u64>>,
+    coordinator: Weak<AffinityCoordinatorInner>,
+}
+
+impl ReplicaUpdateApplier {
+    fn apply(&self, update: SessionAffinityUpdate) -> bool {
+        let worker_ids = self.local_worker_ids.borrow();
+        if !should_apply_update(self.router_id, worker_ids.as_slice(), &update) {
+            return true;
+        }
+        drop(worker_ids);
+
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return false;
+        };
+        let target = AffinityTarget {
+            worker_id: update.worker_id,
+            dp_rank: update.dp_rank,
+        };
+        let outcome = coordinator.apply_replica_update(update.session_id, target);
+        drop(coordinator);
+        tracing::trace!(
+            worker_id = target.worker_id,
+            dp_rank = ?target.dp_rank,
+            ?outcome,
+            "processed best-effort session affinity update"
+        );
+        true
+    }
+}
+
 pub(super) struct ReplicaSyncRuntime {
     sender: ReplicaUpdateSender,
     cancel: CancellationToken,
@@ -66,16 +110,95 @@ impl ReplicaSyncRuntime {
     ) -> Result<Self> {
         let endpoint = &client.endpoint;
         let router_id = endpoint.drt().discovery().instance_id();
-        let publisher = EventPublisher::for_endpoint(endpoint, SESSION_AFFINITY_SUBJECT)
-            .await
-            .context("create session affinity event publisher")?;
-        let mut subscriber = EventSubscriber::for_endpoint(endpoint, SESSION_AFFINITY_SUBJECT)
-            .await
-            .context("create session affinity event subscriber")?
-            .typed::<SessionAffinityUpdate>();
-        let local_worker_ids = client.instance_avail_watcher();
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        let publisher = EventPublisher::for_endpoint_with_transport(
+            endpoint,
+            SESSION_AFFINITY_SUBJECT,
+            transport_kind,
+        )
+        .await
+        .context("create session affinity event publisher")?;
+        let publisher_id = publisher.publisher_id();
+        let applier = ReplicaUpdateApplier {
+            router_id,
+            local_worker_ids: client.instance_avail_watcher(),
+            coordinator,
+        };
 
         let cancel = parent_cancel.child_token();
+        let subscriber_task =
+            if should_use_direct_sync(transport_kind, uses_direct_zmq(transport_kind)) {
+                let codec = Codec::default();
+                let handler_applier = applier.clone();
+                let handler = move |envelope: ValidatedEnvelope| {
+                    let update = codec
+                        .decode_payload::<SessionAffinityUpdate>(&envelope.payload)
+                        .context("decode session affinity update")?;
+                    handler_applier.apply(update);
+                    Ok(())
+                };
+                let observer = |observation: FanInObservation| match observation.event {
+                    FanInEvent::SequenceGap { missing } => tracing::warn!(
+                        publisher_id = observation.publisher_id,
+                        generation = observation.generation,
+                        missing,
+                        "session affinity direct-ZMQ source skipped envelopes"
+                    ),
+                    FanInEvent::OutOfOrder => tracing::warn!(
+                        publisher_id = observation.publisher_id,
+                        generation = observation.generation,
+                        "session affinity direct-ZMQ source received a non-increasing sequence"
+                    ),
+                    _ => {}
+                };
+                start_direct_zmq_fan_in(
+                    endpoint.clone(),
+                    SESSION_AFFINITY_SUBJECT,
+                    DIRECT_ZMQ_RCVHWM,
+                    Some(publisher_id),
+                    ContinuityMode::TrackFromZero,
+                    cancel.clone(),
+                    handler,
+                    observer,
+                )
+                .await
+                .context("start direct-ZMQ session affinity subscriber")?
+            } else {
+                let mut subscriber = EventSubscriber::for_endpoint_with_transport(
+                    endpoint,
+                    SESSION_AFFINITY_SUBJECT,
+                    transport_kind,
+                )
+                .await
+                .context("create session affinity event subscriber")?
+                .typed::<SessionAffinityUpdate>();
+                let subscriber_cancel = cancel.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let event = tokio::select! {
+                            _ = subscriber_cancel.cancelled() => return,
+                            event = subscriber.next() => event,
+                        };
+                        let Some(event) = event else {
+                            return;
+                        };
+                        let update = match event {
+                            Ok((_envelope, update)) => update,
+                            Err(error) => {
+                                tracing::trace!(
+                                    %error,
+                                    "failed to receive best-effort session affinity update"
+                                );
+                                continue;
+                            }
+                        };
+                        if !applier.apply(update) {
+                            return;
+                        }
+                    }
+                })
+            };
+
         let (tx, mut rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         let sender = ReplicaUpdateSender { router_id, tx };
 
@@ -100,52 +223,6 @@ impl ReplicaSyncRuntime {
             }
         });
 
-        let subscriber_cancel = cancel.clone();
-        let subscriber_task = tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    _ = subscriber_cancel.cancelled() => return,
-                    event = subscriber.next() => event,
-                };
-                let Some(event) = event else {
-                    return;
-                };
-                let update = match event {
-                    Ok((_envelope, update)) => update,
-                    Err(error) => {
-                        tracing::trace!(
-                            %error,
-                            "failed to receive best-effort session affinity update"
-                        );
-                        continue;
-                    }
-                };
-                if update.router_id == router_id {
-                    continue;
-                }
-                let worker_ids = local_worker_ids.borrow();
-                if !should_apply_update(router_id, worker_ids.as_slice(), &update) {
-                    continue;
-                }
-                drop(worker_ids);
-                let Some(coordinator) = coordinator.upgrade() else {
-                    return;
-                };
-                let target = AffinityTarget {
-                    worker_id: update.worker_id,
-                    dp_rank: update.dp_rank,
-                };
-                let outcome = coordinator.apply_replica_update(update.session_id, target);
-                drop(coordinator);
-                tracing::trace!(
-                    worker_id = target.worker_id,
-                    dp_rank = ?target.dp_rank,
-                    ?outcome,
-                    "processed best-effort session affinity update"
-                );
-            }
-        });
-
         Ok(Self {
             sender,
             cancel,
@@ -163,9 +240,7 @@ impl ReplicaSyncRuntime {
         if let Some(task) = self.publisher_task.take() {
             task.abort();
         }
-        if let Some(task) = self.subscriber_task.take() {
-            task.abort();
-        }
+        drop(self.subscriber_task.take());
     }
 
     #[cfg(test)]
@@ -200,6 +275,10 @@ fn should_apply_update(
     update.router_id != local_router_id && local_worker_ids.contains(&update.worker_id)
 }
 
+fn should_use_direct_sync(transport_kind: EventTransportKind, direct_zmq_topology: bool) -> bool {
+    transport_kind == EventTransportKind::Zmq && direct_zmq_topology
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +304,13 @@ mod tests {
         assert!(!should_apply_update(7, &[10, 11], &update(7, 10)));
         assert!(!should_apply_update(7, &[10, 11], &update(8, 12)));
         assert!(should_apply_update(7, &[10, 11], &update(8, 10)));
+    }
+
+    #[test]
+    fn direct_sync_is_selected_only_for_unbrokered_zmq() {
+        assert!(should_use_direct_sync(EventTransportKind::Zmq, true));
+        assert!(!should_use_direct_sync(EventTransportKind::Zmq, false));
+        assert!(!should_use_direct_sync(EventTransportKind::Nats, false));
     }
 
     #[tokio::test]

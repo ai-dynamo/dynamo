@@ -19,11 +19,8 @@ from dynamo.common.multimodal import (
     NixlWriteEmbeddingSender,
 )
 from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingSender
-from dynamo.common.multimodal.image_loader import (
-    DECODED_VARIANT_KEY,
-    URL_VARIANT_KEY,
-    decoded_content_hash_key,
-)
+from dynamo.common.multimodal.image_loader import DECODED_VARIANT_KEY, URL_VARIANT_KEY
+from dynamo.common.multimodal.media_descriptor import decoded_content_hash_key
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime

@@ -17,7 +17,7 @@ use dynamo_runtime::{
 use futures::StreamExt;
 
 #[async_trait]
-pub(super) trait WorkerQueryTransport: Send + Sync {
+pub(crate) trait WorkerQueryTransport: Send + Sync {
     async fn query_worker(
         &self,
         worker_id: WorkerId,
@@ -55,6 +55,7 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
             dp_rank,
             start_event_id,
             end_event_id,
+            supports_tree_dump_failed: true,
         };
         let instance = target;
         let instance_id = instance.instance_id;

@@ -21,8 +21,21 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
+from dynamo.common.multimodal.media_source import (
+    is_local_media_url,
+    read_local_media_bytes,
+)
+from dynamo.common.multimodal.nvdec_decoder import (
+    decode_video_nvdec,
+    probe_video_codec,
+    should_use_nvdec,
+)
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
@@ -121,12 +134,58 @@ class VideoLoader:
             content = await fetch_bytes(
                 normalized_url, self._http_timeout, policy=self._url_policy
             )
+            # Dual decode path: hardware-decode H.264/H.265 on NVDEC; every other
+            # codec falls through to vLLM's software decoder below. Note the
+            # runtime images purge the software decode wheels (opencv/av/decord/
+            # torchcodec) for codec compliance, so that fallback only resolves
+            # where a decoder has been installed separately.
+            decoded = await self._maybe_decode_with_nvdec(content)
+            if decoded is not None:
+                return decoded
+            return await asyncio.to_thread(media_io.load_bytes, content)
+
+        # file:// and data: never touch the network, but they still deserve
+        # hardware decode: without this they reach only the software decoder,
+        # which the codec-compliant images do not ship, so H.264/H.265 from a
+        # local file or data URI would fail despite NVDEC being available and
+        # able to decode it. Reading is gated by the same url policy the vLLM
+        # connector below uses, so this adds no local-read surface.
+        if is_local_media_url(normalized_url):
+            content = await read_local_media_bytes(normalized_url, self._url_policy)
+            decoded = await self._maybe_decode_with_nvdec(content)
+            if decoded is not None:
+                return decoded
             return await asyncio.to_thread(media_io.load_bytes, content)
 
         connector = self._get_vllm_media_connector()
         return await connector.load_from_url_async(
             normalized_url, media_io, fetch_timeout=self._http_timeout
         )
+
+    async def _maybe_decode_with_nvdec(
+        self, content: bytes
+    ) -> tuple[np.ndarray, Dict[str, Any]] | None:
+        """Hardware-decode H.264/H.265 via NVDEC, or None to use the software path.
+
+        Returns None for VP8/VP9/AV1 (handled by the existing decoder), when NVDEC
+        is unavailable, or when NVDEC fails -- the caller then falls back to the
+        software decoder, which surfaces the actionable "unsupported codec" error
+        if it also cannot decode.
+        """
+        codec = probe_video_codec(content)
+        if not should_use_nvdec(codec):
+            return None
+        try:
+            return await asyncio.to_thread(
+                decode_video_nvdec, content, self._num_frames
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to software decode
+            logger.warning(
+                "NVDEC decode failed for a %s clip (%s); using software decode",
+                codec,
+                exc,
+            )
+            return None
 
     async def load_video(self, video_url: str) -> tuple[np.ndarray, Dict[str, Any]]:
         try:
@@ -137,6 +196,12 @@ class VideoLoader:
                 )
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
+            raise
+        except (UrlValidationError, HttpStatusError):
+            # Preserve deliberate client-error verdicts. UrlValidationError is
+            # a ValueError, so the generic handler below would otherwise erase
+            # its type and prevent the frontend from returning a 4xx.
+            logger.error("URL rejected loading video: '%s'", video_url)
             raise
         except Exception as exc:
             logger.error("Error loading video from %s: %s", video_url, exc)
@@ -182,6 +247,8 @@ class VideoLoader:
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
         collective_exceptions: list[str] = []
+        status_error: HttpStatusError | None = None
+        url_error: UrlValidationError | None = None
         for media_item, result in zip(video_mm_items, results):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -191,9 +258,18 @@ class VideoLoader:
                 collective_exceptions.append(
                     f"Failed to load video from {source[:80]}...: {result}\n"
                 )
+                if status_error is None and isinstance(result, HttpStatusError):
+                    status_error = result
+                elif url_error is None and isinstance(result, UrlValidationError):
+                    url_error = result
                 continue
             frames, metadata = result
             loaded_videos.append((np.ascontiguousarray(frames), metadata))
+
+        if status_error is not None:
+            raise status_error
+        if url_error is not None:
+            raise url_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))

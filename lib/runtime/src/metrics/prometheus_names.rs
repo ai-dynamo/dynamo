@@ -212,6 +212,12 @@ pub mod frontend_service {
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
 
+    /// Scheduler selections with less overlap than another eligible worker
+    pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "non_max_overlap_selections_total";
+
+    /// Effective KV overlap blocks lost by non-max-overlap selections
+    pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -240,6 +246,9 @@ pub mod frontend_service {
 
     /// Number of `audio_url` content parts per request (histogram)
     pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
+
+    /// Calculated image-placeholder token count per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
 
     /// Model configuration metrics
     ///
@@ -589,7 +598,7 @@ pub mod routing_overhead {
     /// Time spent querying the shared KV cache (Mooncake)
     pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
 
-    /// Total shared cache query errors (timeouts, HTTP failures)
+    /// Total shared cache failures (query and subscriber failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
@@ -638,6 +647,12 @@ pub mod router {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Scheduler selections with less overlap than another eligible worker
+    pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "router_non_max_overlap_selections_total";
+
+    /// Effective KV overlap blocks lost by non-max-overlap selections
+    pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";

@@ -2,19 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::future::{self, Future};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
-use crate::sequences::{SequencePublisher, SequenceSubscriber};
+use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSubscriber};
 use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
 
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
@@ -29,12 +29,27 @@ pub(crate) struct ScopedReplicaEvent {
     pub event: ActiveSequenceEvent,
 }
 
+impl ScopedReplicaEvent {
+    pub(crate) fn partition_ref(&self) -> RoutingPartitionRef<'_> {
+        RoutingPartitionRef::new(&self.model_name, &self.routing_group)
+    }
+
+    pub(crate) fn into_parts(self) -> (RoutingPartitionId, u32, ActiveSequenceEvent) {
+        (
+            RoutingPartitionId::new(self.model_name, self.routing_group),
+            self.block_size,
+            self.event,
+        )
+    }
+}
+
 pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReplicaSyncConfig {
     process_id: u64,
     outbound_tx: ReplicaEventSender,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -73,10 +88,15 @@ impl Drop for ReplicaSyncRuntime {
 }
 
 impl ReplicaSyncConfig {
-    pub(crate) fn new(process_id: u64, outbound_tx: ReplicaEventSender) -> Self {
+    pub(crate) fn new(
+        process_id: u64,
+        outbound_tx: ReplicaEventSender,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             process_id,
             outbound_tx,
+            cancel_token,
         }
     }
 
@@ -104,10 +124,10 @@ pub(crate) struct ScopedSequencePublisher {
 
 #[derive(Clone)]
 struct ScopedReplicaPublisher {
-    model_name: Arc<str>,
-    routing_group: Arc<str>,
+    partition: Arc<RoutingPartitionId>,
     block_size: u32,
     tx: ReplicaEventSender,
+    cancel_token: CancellationToken,
 }
 
 impl ScopedSequencePublisher {
@@ -116,52 +136,54 @@ impl ScopedSequencePublisher {
     }
 
     pub(crate) fn enabled(
-        model_name: Arc<str>,
-        routing_group: Arc<str>,
+        partition: Arc<RoutingPartitionId>,
         block_size: u32,
         tx: ReplicaEventSender,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             replica: Some(ScopedReplicaPublisher {
-                model_name,
-                routing_group,
+                partition,
                 block_size,
                 tx,
+                cancel_token,
             }),
         }
     }
 }
 
 impl SequencePublisher for ScopedSequencePublisher {
-    fn publish_event(
-        &self,
-        event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = Result<()>> + Send {
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> Result<()> {
         let Some(replica) = &self.replica else {
-            return future::ready(Ok(()));
+            return Ok(());
         };
         let envelope = ScopedReplicaEvent {
-            model_name: replica.model_name.to_string(),
-            routing_group: replica.routing_group.to_string(),
+            model_name: replica.partition.model_name.clone(),
+            routing_group: replica.partition.routing_group.clone(),
             block_size: replica.block_size,
-            event: event.clone(),
+            event,
         };
-        let result = match replica.tx.try_send(envelope) {
+        match replica.tx.try_send(envelope) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    model_name = %event.model_name,
-                    routing_group = %event.routing_group,
-                    request_id = %event.event.request_id,
-                    "Replica publisher channel full; dropping event"
+                let error = SequencePublishQueueError::full(event.event, replica.tx.max_capacity());
+                Err(anyhow::Error::new(error).context(format!(
+                    "replica publisher for model_name={} routing_group={}",
+                    event.model_name, event.routing_group
+                )))
+            }
+            Err(mpsc::error::TrySendError::Closed(event)) => {
+                let error = SequencePublishQueueError::closed(
+                    event.event,
+                    replica.tx.max_capacity(),
+                    replica.cancel_token.is_cancelled(),
                 );
-                Ok(())
+                Err(anyhow::Error::new(error).context(format!(
+                    "replica publisher for model_name={} routing_group={}",
+                    event.model_name, event.routing_group
+                )))
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(anyhow!("replica publisher channel is closed"))
-            }
-        };
-        future::ready(result)
+        }
     }
 
     fn publish_load(&self, _load: ActiveLoad) {}
@@ -232,7 +254,7 @@ pub(crate) fn setup_replica_sync(
     let (outbound_tx, publisher_task) =
         start_replica_publisher(&bind_endpoint, cancel_token.clone())?;
     Ok(Some(ReplicaSyncRuntime {
-        config: ReplicaSyncConfig::new(process_id, outbound_tx),
+        config: ReplicaSyncConfig::new(process_id, outbound_tx, cancel_token.clone()),
         cancel_token,
         publisher_task: Mutex::new(Some(publisher_task)),
     }))
@@ -240,8 +262,7 @@ pub(crate) fn setup_replica_sync(
 
 pub(crate) fn setup_scoped_replica_sync(
     config: Option<&ReplicaSyncConfig>,
-    model_name: &str,
-    routing_group: &str,
+    partition: &RoutingPartitionId,
     block_size: u32,
 ) -> ScopedReplicaSync {
     let Some(config) = config else {
@@ -256,10 +277,10 @@ pub(crate) fn setup_scoped_replica_sync(
     let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
     ScopedReplicaSync {
         publisher: ScopedSequencePublisher::enabled(
-            Arc::from(model_name),
-            Arc::from(routing_group),
+            Arc::new(partition.clone()),
             block_size,
             config.outbound_tx.clone(),
+            config.cancel_token.clone(),
         ),
         enabled: true,
         process_id: config.process_id,
@@ -289,10 +310,13 @@ pub(crate) fn start_replica_publisher(
             };
 
             let request_id = event.event.request_id.clone();
+            let partition = event.partition_ref();
             let payload = match rmp_serde::to_vec_named(&event) {
                 Ok(payload) => payload,
                 Err(error) => {
                     tracing::error!(
+                        model_name = %partition.model_name,
+                        routing_group = %partition.routing_group,
                         request_id = %request_id,
                         "Failed to encode active-sequence replica event: {error}"
                     );
@@ -304,6 +328,8 @@ pub(crate) fn start_replica_publisher(
                 .await
             {
                 tracing::error!(
+                    model_name = %partition.model_name,
+                    routing_group = %partition.routing_group,
                     request_id = %request_id,
                     "Failed to publish active-sequence replica event: {error}"
                 );
@@ -530,7 +556,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
     #[cfg(feature = "standalone-slot-tracker")]
-    use crate::services::slot_tracker::registry::{SlotTrackerRegistry, TrackerKey};
+    use crate::services::slot_tracker::registry::SlotTrackerRegistry;
 
     fn event() -> ScopedReplicaEvent {
         ScopedReplicaEvent {
@@ -573,12 +599,39 @@ mod tests {
     fn replica_event_wire_schema_uses_routing_group() {
         let payload = rmp_serde::to_vec_named(&event()).unwrap();
         let value: serde_json::Value = rmp_serde::from_slice(&payload).unwrap();
+        let fields = value.as_object().unwrap();
 
+        assert_eq!(fields.len(), 4);
+        assert!(fields.contains_key("model_name"));
         assert_eq!(value["routing_group"], "group");
+        assert!(fields.contains_key("block_size"));
+        assert!(fields.contains_key("event"));
+        assert!(value.get("partition").is_none());
         assert!(value.get("tenant_id").is_none());
 
         let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
-        assert_eq!(decoded.routing_group, "group");
+        assert_eq!(
+            decoded.partition_ref(),
+            RoutingPartitionRef::new("model", "group")
+        );
+    }
+
+    #[test]
+    fn previous_flat_replica_event_wire_schema_is_accepted() {
+        let previous = serde_json::json!({
+            "model_name": "model",
+            "routing_group": "group",
+            "block_size": 16,
+            "event": event().event,
+        });
+        let payload = rmp_serde::to_vec_named(&previous).unwrap();
+
+        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(
+            decoded.partition_ref(),
+            RoutingPartitionRef::new("model", "group")
+        );
+        assert_eq!(decoded.block_size, 16);
     }
 
     #[test]
@@ -595,17 +648,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_publisher_drops_when_outbound_channel_is_full() {
+    async fn scoped_publisher_reports_full_and_closed_channels() {
         let (tx, mut rx) = mpsc::channel(1);
-        let publisher =
-            ScopedSequencePublisher::enabled(Arc::from("model"), Arc::from("group"), 16, tx);
+        let cancel_token = CancellationToken::new();
+        let publisher = ScopedSequencePublisher::enabled(
+            Arc::new(RoutingPartitionId::new("model", "group")),
+            16,
+            tx,
+            cancel_token.clone(),
+        );
         let event = event().event;
 
-        publisher.publish_event(&event).await.unwrap();
-        publisher.publish_event(&event).await.unwrap();
+        publisher.enqueue_event(event.clone()).unwrap();
+        let full = publisher.enqueue_event(event.clone()).unwrap_err();
 
         assert_eq!(rx.len(), 1);
         assert_eq!(rx.recv().await.unwrap().event.request_id, "request");
+        let full = format!("{full:#}");
+        assert!(full.contains("queue full"));
+        assert!(full.contains("model_name=model"));
+        assert!(full.contains("routing_group=group"));
+        assert!(full.contains("capacity=1"));
+
+        drop(rx);
+        let unexpected_closed = publisher.enqueue_event(event.clone()).unwrap_err();
+        assert!(matches!(
+            unexpected_closed.downcast_ref::<SequencePublishQueueError>(),
+            Some(SequencePublishQueueError::Closed {
+                during_shutdown: false,
+                ..
+            })
+        ));
+
+        cancel_token.cancel();
+        let shutdown_closed = publisher.enqueue_event(event).unwrap_err();
+        assert!(matches!(
+            shutdown_closed.downcast_ref::<SequencePublishQueueError>(),
+            Some(SequencePublishQueueError::Closed {
+                during_shutdown: true,
+                ..
+            })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -666,11 +749,11 @@ mod tests {
             start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
         let registry_a = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            ReplicaSyncConfig::new(11, outbound_a),
+            ReplicaSyncConfig::new(11, outbound_a, cancel_token.clone()),
         ));
         let registry_b = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            ReplicaSyncConfig::new(22, outbound_b),
+            ReplicaSyncConfig::new(22, outbound_b, cancel_token.clone()),
         ));
         let dispatch_registry_b = Arc::clone(&registry_b);
         let peer_b =
@@ -678,7 +761,7 @@ mod tests {
                 dispatch_registry_b.dispatch_replica_event(event)
             })
             .unwrap();
-        let key = TrackerKey::new("model".to_string(), Some("group".to_string()));
+        let key = RoutingPartitionId::new("model", "group");
         registry_a.register(key.clone(), 1, 16, 0, 1).unwrap();
         registry_b.register(key.clone(), 1, 16, 0, 1).unwrap();
         let worker = WorkerWithDpRank::new(1, 0);

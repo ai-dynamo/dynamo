@@ -18,11 +18,12 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
+use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -31,6 +32,31 @@ use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
+    bytes.extend_from_slice(b"dynamo/model-card/indexer-identity/v1");
+    append_identity_dimension(bytes, spec.semantics());
+    append_identity_dimension(bytes, spec.routing_scope());
+}
+
+fn append_identity_dimension(bytes: &mut Vec<u8>, dimension: Option<&ExplicitIdentityMap>) {
+    let Some(dimension) = dimension else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(dimension.entries().len() as u32).to_le_bytes());
+    for (key, value) in dimension.entries() {
+        append_framed_identity_value(bytes, key.as_bytes());
+        append_framed_identity_value(bytes, value.as_bytes());
+    }
+}
+
+fn append_framed_identity_value(bytes: &mut Vec<u8>, value: &[u8]) {
+    let len = u32::try_from(value.len()).expect("validated identity values fit u32");
+    bytes.extend_from_slice(&len.to_le_bytes());
+    bytes.extend_from_slice(value);
+}
 
 fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
@@ -61,9 +87,12 @@ fn instrumented_tokenizer_cache(
     cache_bytes: usize,
     cache_extend: bool,
     model: &str,
-) -> Arc<dyn crate::tokenizers::traits::Tokenizer> {
-    Arc::new(
-        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+) -> Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
+    let cached = crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+        .context("failed to initialize tokenizer prefix cache")?;
+
+    Ok(Arc::new(
+        cached
             .with_extend(cache_extend)
             .with_observer(
                 Arc::new(|| {
@@ -74,7 +103,7 @@ fn instrumented_tokenizer_cache(
                 }),
             )
             .with_token_observer(tokenizer_cache_token_observer(model)),
-    )
+    ))
 }
 
 /// Identify model deployment cards in the key-value store
@@ -905,6 +934,14 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 
+    /// Optional authoritative KV-indexer compatibility and isolation material.
+    ///
+    /// A present dimension replaces its component-derived default. Entry labels are deliberately
+    /// uninterpreted so engine-specific compatibility facts do not expand this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub indexer_identity: Option<IndexerIdentitySpec>,
+
     /// Sibling files (e.g. `preprocessor_config.json`) the worker
     /// advertises alongside the typed slots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1097,6 +1134,10 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
+                if let Some(identity) = self.indexer_identity.as_ref() {
+                    append_indexer_identity_checksum(&mut bytes_to_hash, identity);
+                }
+
                 // Aliases participate in the checksum. Every worker in a
                 // deployment carries the same static --served-model-name list,
                 // so their checksums still match and they share one WorkerSet;
@@ -1133,8 +1174,8 @@ impl ModelDeploymentCard {
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
     /// Tokenizer backend controls:
-    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
-    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
+    /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
@@ -1144,10 +1185,7 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = self
-            .runtime_config
-            .effective_tokenizer_backend()
-            .is_fastokens();
+        let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
@@ -1166,9 +1204,9 @@ impl ModelDeploymentCard {
                 })?;
 
                 // Load HF first — needed both for fallback and (if cache is on) for
-                // extracting special-token strings. `FastTokenizer` does not re-expose
-                // `get_added_tokens_decoder`, so we must capture specials from the raw
-                // HF tokenizer before any swap.
+                // extracting special-token strings. Alternate backends do not re-expose
+                // `get_added_tokens_decoder`, so capture specials from the raw HF
+                // tokenizer before any swap.
                 let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -1189,6 +1227,33 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+
+                // Disable any truncation baked into `tokenizer.json`: the HF
+                // `tokenizers` crate honors it on `encode()`, silently clipping every
+                // prompt (e.g. `stepfun-ai/Step-3.7-Flash-*` caps at 2048), unlike
+                // Python `transformers`, which resets it on load. Match that: never
+                // truncate implicitly; over-length prompts are rejected elsewhere.
+                if hf.get_truncation().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a truncation config; disabling it so \
+                         prompts are not silently clipped"
+                    );
+                    // Hard-fail rather than warn: if we can't clear it, the prompt
+                    // would still be silently clipped, defeating the purpose.
+                    hf.with_truncation(None)
+                        .map_err(anyhow::Error::msg)
+                        .context("failed to disable tokenizer.json truncation")?;
+                }
+
+                // Padding belongs to the batching layer, not individual online requests.
+                if hf.get_padding().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a padding config; disabling it for online \
+                         tokenization"
+                    );
+                    hf.with_padding(None);
+                }
+
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
@@ -1201,30 +1266,54 @@ impl ModelDeploymentCard {
                     |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
                 // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                Arc::new(fast)
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
+                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                    TokenizerBackend::Fastokens => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                                Ok(fast) => {
+                                    tracing::info!("Using fastokens tokenizer backend");
+                                    Arc::new(fast)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load fastokens, falling back to HuggingFace"
+                                    );
+                                    Arc::new(wrap_hf(hf))
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
-                                );
-                                Arc::new(wrap_hf(hf))
-                            }
+                        } else {
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                            );
+                            Arc::new(wrap_hf(hf))
                         }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                        Arc::new(wrap_hf(hf))
                     }
-                } else {
-                    Arc::new(wrap_hf(hf))
+                    TokenizerBackend::Basetenkenizer => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
+                                Ok(baseten) => {
+                                    tracing::info!("Using basetenkenizer tokenizer backend");
+                                    Arc::new(baseten)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load basetenkenizer, falling back to HuggingFace"
+                                    );
+                                    Arc::new(wrap_hf(hf))
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
+                            );
+                            Arc::new(wrap_hf(hf))
+                        }
+                    }
                 };
 
                 if cache_enabled {
@@ -1240,7 +1329,7 @@ impl ModelDeploymentCard {
                         cache_bytes,
                         cache_extend,
                         self.name(),
-                    )
+                    )?
                 } else {
                     raw
                 }
@@ -1272,7 +1361,7 @@ impl ModelDeploymentCard {
                         cache_bytes,
                         cache_extend,
                         self.name(),
-                    )
+                    )?
                 } else {
                     raw
                 }
@@ -1663,6 +1752,7 @@ impl ModelDeploymentCard {
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
+            indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
         })
@@ -2933,6 +3023,17 @@ mod ownership_tests {
             Some("tensor")
         );
     }
+
+    #[test]
+    fn runtime_kv_event_capability_does_not_change_mdcsum() {
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.kv_event_publishing_enabled = Some(false);
+
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.kv_event_publishing_enabled = Some(true);
+
+        assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
 }
 
 #[cfg(test)]
@@ -2942,6 +3043,7 @@ mod worker_type_tests {
 
     use super::*;
     use crate::worker_type::WorkerType;
+    use std::collections::BTreeMap;
 
     #[test]
     fn default_card_has_no_worker_type_and_no_needs() {
@@ -3081,5 +3183,37 @@ mod worker_type_tests {
         let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
         assert_eq!(back.worker_type, None);
         assert!(back.needs.is_empty());
+    }
+
+    #[test]
+    fn indexer_identity_changes_mdcsum_and_missing_field_is_backward_compatible() {
+        fn spec(value: &str) -> IndexerIdentitySpec {
+            IndexerIdentitySpec::new(
+                Some(
+                    ExplicitIdentityMap::new(BTreeMap::from([(
+                        "weights".to_string(),
+                        value.to_string(),
+                    )]))
+                    .unwrap(),
+                ),
+                None,
+            )
+        }
+
+        let baseline = ModelDeploymentCard::with_name_only("model");
+        let mut explicit = ModelDeploymentCard::with_name_only("model");
+        explicit.indexer_identity = Some(spec("revision-a"));
+        assert_ne!(baseline.mdcsum(), explicit.mdcsum());
+
+        let mut serialized = serde_json::to_value(&explicit).unwrap();
+        assert!(
+            serialized
+                .as_object_mut()
+                .unwrap()
+                .remove("indexer_identity")
+                .is_some()
+        );
+        let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
+        assert!(restored.indexer_identity.is_none());
     }
 }

@@ -14,13 +14,14 @@ pub use dynamo_protocols::types::anthropic::*;
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage,
-    FunctionName, FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
 use uuid::Uuid;
 
@@ -131,9 +132,15 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
+                // Request cumulative usage on every chunk (not just the final
+                // one) so the Anthropic stream converter can stamp an
+                // authoritative per-chunk usage triple onto each
+                // `content_block_delta` and still report a token count if the
+                // client aborts mid-stream. Mirrors the running-usage behaviour
+                // of the OpenAI DeltaGenerator.
                 stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
-                    continuous_usage_stats: false,
+                    continuous_usage_stats: true,
                 }),
                 ..Default::default()
             },
@@ -186,24 +193,9 @@ fn convert_user_blocks(
                 ));
             }
             AnthropicContentBlock::Image { source } => {
-                if source.source_type != "base64" {
-                    anyhow::bail!(
-                        "unsupported image source type {:?}; only base64 is supported",
-                        source.source_type
-                    );
-                }
                 has_image = true;
-                let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
-                let url = url::Url::parse(&data_uri)
-                    .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                    ChatCompletionRequestMessageContentPartImage {
-                        image_url: ImageUrl {
-                            url,
-                            detail: None,
-                            uuid: None,
-                        },
-                    },
+                    convert_image(source)?,
                 ));
             }
             AnthropicContentBlock::ToolResult {
@@ -215,10 +207,14 @@ fn convert_user_blocks(
                 flush_user_content_parts(&mut content_parts, has_image, messages);
                 has_image = false;
 
-                let text = content.clone().map(|c| c.into_text()).unwrap_or_default();
+                let content = content
+                    .as_ref()
+                    .map(convert_tool_result_content)
+                    .transpose()?
+                    .unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(text),
+                        content,
                         tool_call_id: tool_use_id.clone(),
                     },
                 ));
@@ -238,6 +234,73 @@ fn convert_user_blocks(
     flush_user_content_parts(&mut content_parts, has_image, messages);
 
     Ok(())
+}
+
+fn convert_image(
+    source: &AnthropicImageSource,
+) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
+    if source.source_type != "base64" {
+        anyhow::bail!(
+            "unsupported image source type {:?}; only base64 is supported",
+            source.source_type
+        );
+    }
+
+    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+    let url =
+        url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
+    let image_url = ImageUrl::from(url.to_string());
+    let image = ChatCompletionRequestMessageContentPartImageArgs::default()
+        .image_url(image_url)
+        .build()?;
+    Ok(image)
+}
+
+fn convert_tool_result_content(
+    content: &ToolResultContent,
+) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
+    let blocks = match content {
+        ToolResultContent::Text(text) => {
+            return Ok(ChatCompletionRequestToolMessageContent::Text(text.clone()));
+        }
+        ToolResultContent::Blocks(blocks) => blocks,
+    };
+
+    if blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContentBlock::Other(_)))
+    {
+        anyhow::bail!(
+            "unsupported Anthropic tool_result content block; only text and image are supported"
+        );
+    }
+
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContentBlock::Image { .. }))
+    {
+        return Ok(ChatCompletionRequestToolMessageContent::Text(
+            content.clone().into_text(),
+        ));
+    }
+
+    let mut parts = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ToolResultContentBlock::Text { text } => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                ));
+            }
+            ToolResultContentBlock::Image { source } => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::ImageUrl(
+                    convert_image(source)?,
+                ));
+            }
+            ToolResultContentBlock::Other(_) => unreachable!("validated above"),
+        }
+    }
+    Ok(ChatCompletionRequestToolMessageContent::Array(parts))
 }
 
 /// Flush accumulated user content parts into a user message.
@@ -1347,6 +1410,74 @@ mod tests {
             },
             _ => panic!("expected blocks"),
         }
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let ChatCompletionRequestMessage::Tool(tool) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        assert_eq!(
+            tool.content,
+            ChatCompletionRequestToolMessageContent::Text("line 1line 2".into())
+        );
+    }
+
+    #[test]
+    fn test_tool_result_image_preserved() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {"type": "text", "text": "Screenshot captured"},
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "aGVsbG8="
+                        }}
+                    ]
+                }]
+            }]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let ChatCompletionRequestMessage::Tool(tool) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content else {
+            panic!("expected array content");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            ChatCompletionRequestToolMessageContentPart::Text(text)
+                if text.text == "Screenshot captured"
+        ));
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[1] else {
+            panic!("expected image_url part");
+        };
+        assert_eq!(
+            image.image_url.as_ref().unwrap().url.as_str(),
+            "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn test_tool_result_other_block_is_rejected() {
+        let content = ToolResultContent::Blocks(vec![ToolResultContentBlock::Other(
+            serde_json::json!({"type": "document"}),
+        )]);
+
+        let error = convert_tool_result_content(&content).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only text and image are supported")
+        );
     }
 
     #[test]
@@ -1913,7 +2044,12 @@ mod tests {
                     // Second part: image with data URI
                     match &parts[1] {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
-                            let url_str = img.image_url.url.to_string();
+                            let url_str = img
+                                .image_url
+                                .as_ref()
+                                .expect("converted image must contain a URL")
+                                .url
+                                .to_string();
                             assert!(
                                 url_str.starts_with("data:image/png;base64,"),
                                 "expected data URI, got: {url_str}"

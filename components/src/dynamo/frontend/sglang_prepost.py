@@ -28,6 +28,7 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
+from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ _THINKING_BY_DEFAULT = {
     "nemotron_3",
     "interns1",
     "kimi_k2",
+    "kimi_k3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
@@ -107,6 +109,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
+    "kimi-k3": "kimi_k3",
 }
 
 
@@ -126,9 +129,9 @@ def resolve_request_force_reasoning(
     Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
     combined with template_manager.force_reasoning:
 
-      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
-        ``thinking=False`` for ``kimi_k2``) disables it.
+        ``thinking=False`` for Kimi) disables it.
       * MiniMax-M3 defaults to adaptive, but SGLang still enables the
         reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
         explicitly ``"disabled"``.
@@ -157,7 +160,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
-            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"kimi_k2", "kimi_k3"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is not False
 
@@ -410,6 +415,7 @@ def _flatten_message_content(content: Any) -> Any:
 
 def _normalize_openai_thinking_template_kwargs(
     request: dict[str, Any],
+    default_thinking_mode: str | None = None,
 ) -> dict[str, Any]:
     request = copy.copy(request)
     chat_template_kwargs = dict(
@@ -434,8 +440,17 @@ def _normalize_openai_thinking_template_kwargs(
         elif thinking_type == "disabled":
             setdefault_reasoning(False)
 
-    if request.get("reasoning_effort") == "none":
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = reasoning_effort
+    if reasoning_effort == "none":
         setdefault_reasoning(False)
+
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=request.get("thinking") is not None,
+    )
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -703,6 +718,7 @@ def preprocess_chat_request(
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -713,7 +729,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _normalize_openai_thinking_template_kwargs(request)
+    request = _normalize_openai_thinking_template_kwargs(request, default_thinking_mode)
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -919,16 +935,10 @@ class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
     Handles:
-    - Incremental detokenization via sliding-window decode (6-token lookback)
+    - Incremental detokenization across tokenizer-safe boundaries
     - Reasoning content extraction via SGLang ReasoningParser
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
     """
-
-    # Lookback window size for incremental detokenization.  UTF-8 characters
-    # can span up to 4 bytes, each potentially its own token.  A lookback of
-    # 6 covers the worst case (4-token char) plus margin for BPE merges that
-    # cross the old/new boundary.
-    LOOKBACK = 6
 
     def __init__(
         self,
@@ -940,6 +950,7 @@ class SglangStreamingPostProcessor:
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
         eos_token_ids: list[int] | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -962,7 +973,13 @@ class SglangStreamingPostProcessor:
         )
         self._eos_token_ids = set(eos_token_ids or [])
 
-        self._all_token_ids: list[int] = []
+        # Keep a small, known-complete prompt suffix as decode context. Generated
+        # tokens are promoted to context only after they decode without a
+        # trailing replacement character, so the boundary never moves into an
+        # incomplete byte-fallback sequence.
+        self._decode_context_ids = list((prompt_token_ids or [])[-5:])
+        self._pending_decode_ids: list[int] = []
+        self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
         # chunks).  However, the base detector processes at most one event
@@ -992,43 +1009,40 @@ class SglangStreamingPostProcessor:
             self.history_tool_calls_count,
         )
 
-    def _incremental_decode(self, new_token_ids: list[int]) -> str:
-        """Decode new tokens with lookback window for multi-byte char boundaries.
-
-        Re-decodes a small window of previous tokens alongside new tokens so that
-        multi-byte characters spanning token boundaries are correctly resolved.
-        Only retains the last LOOKBACK tokens to bound memory usage.
-        """
-        prev_count = len(self._all_token_ids)
-        self._all_token_ids.extend(new_token_ids)
-
-        start = max(0, prev_count - self.LOOKBACK)
-
-        # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 16:
-            self._all_token_ids = self._all_token_ids[
-                -(self.LOOKBACK + len(new_token_ids)) :
-            ]
-            prev_count = len(self._all_token_ids) - len(new_token_ids)
-            start = max(0, prev_count - self.LOOKBACK)
-
-        # Decode lookback-only prefix (before new tokens)
-        prefix_tokens = self._all_token_ids[start:prev_count]
-        prefix_text = (
-            self.tokenizer.decode(
-                prefix_tokens, skip_special_tokens=self._skip_special_tokens
-            )
-            if prefix_tokens
-            else ""
+    def _decode_ids(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        return self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=self._skip_special_tokens,
         )
 
-        # Decode lookback + new tokens together
-        window_tokens = self._all_token_ids[start:]
-        window_text = self.tokenizer.decode(
-            window_tokens, skip_special_tokens=self._skip_special_tokens
-        )
+    def _with_initial_role(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_emitted_role:
+            delta["role"] = "assistant"
+            self._has_emitted_role = True
+        return delta
 
-        return window_text[len(prefix_text) :]
+    def _incremental_decode(
+        self, new_token_ids: list[int], *, flush: bool = False
+    ) -> str:
+        """Decode generated tokens without splitting a byte-fallback sequence."""
+        self._pending_decode_ids.extend(new_token_ids)
+        if not self._pending_decode_ids:
+            return ""
+
+        context_text = self._decode_ids(self._decode_context_ids)
+        decoded_text = self._decode_ids(
+            self._decode_context_ids + self._pending_decode_ids
+        )
+        delta_text = decoded_text[len(context_text) :]
+
+        if not flush and (not delta_text or delta_text.endswith("\ufffd")):
+            return ""
+
+        self._decode_context_ids = self._pending_decode_ids
+        self._pending_decode_ids = []
+        return delta_text
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1092,23 +1106,27 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
-        if finish_reason:
+        if finish_reason is not None:
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
 
-        delta_text = self._incremental_decode(token_ids) if token_ids else ""
+        delta_text = (
+            self._incremental_decode(token_ids, flush=finish_reason is not None)
+            if token_ids or finish_reason is not None
+            else ""
+        )
 
         if self._fast_plain_text:
             if delta_text:
                 return {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
+                    "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
             elif finish_reason:
                 return {
                     "index": 0,
-                    "delta": {},
+                    "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
@@ -1151,7 +1169,7 @@ class SglangStreamingPostProcessor:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
-        delta: dict[str, Any] = {"role": "assistant"}
+        delta: dict[str, Any] = {}
         has_content = False
 
         if content_text:
@@ -1325,7 +1343,7 @@ class SglangStreamingPostProcessor:
         if has_content or effective_finish:
             return {
                 "index": 0,
-                "delta": delta if has_content else {},
+                "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
                 "logprobs": None,
             }
