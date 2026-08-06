@@ -124,6 +124,11 @@ constitutes a real difference at a given percentile.
 **Status.** Named as a known gap on the shipped Performance Analysis Method page rather than
 papered over with a citation that does not fit.
 
+**Read next.** [ab-testing-request-distributions.md](ab-testing-request-distributions.md) is a
+standalone explainer for this gap: what is already solved (summarizing), what is not (which
+statistic decides, and whether a difference is real), worked through the embedding-cache
+benchmark, with a four-step fix that needs no new statistical machinery.
+
 ---
 
 ## 4. Published performance numbers carry no sample size or dispersion
