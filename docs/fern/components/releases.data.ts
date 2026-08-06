@@ -50,6 +50,9 @@ export interface Release {
   /** Docs-native release notes page (absolute site path); GitHub link used when absent. */
   notesHref?: string;
   pins?: BackendPins;
+  /** PyPI wheel version when it differs from the container tag (e.g. a .post
+   *  rebuild). Falls back to the container version when absent. */
+  wheel?: string;
   /** UCX version shipped with the release's NIXL builds — from the release's
    *  Key Dependencies table; omitted where the source never stated one
    *  (v1.0.0 and patch releases). */
@@ -89,7 +92,7 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.14", trtllm: "1.3.0rc19", vllm: "0.23.0", nixlSglang: "1.3.2", nixlTrtllm: "1.0.1", nixlVllm: "1.1.0" },
     ucx: "1.20.x",
     delta:
-      "Patch release. Fixes disaggregated SGLang serving over AWS EFA on GB200; EFA images move to EFA Installer 1.49.0. Same backend pins as v1.3.0.",
+      "Patch release. Fixes disaggregated SGLang serving over AWS EFA on GB200: the SGLang EFA runtime moves to NIXL 1.3.2 and all three EFA images to EFA Installer 1.49.0. Backend pins are otherwise unchanged from v1.3.0.",
   },
   {
     version: "v1.3.0",
@@ -99,6 +102,7 @@ export const RELEASES: Release[] = [
     github: `${GH}v1.3.0`,
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.14", trtllm: "1.3.0rc19", vllm: "0.23.0", nixlSglang: "1.3.0", nixlTrtllm: "1.0.1", nixlVllm: "1.1.0" },
+    wheel: "1.3.0.post1",
     ucx: "1.20.x",
     delta:
       "CUDA 12 container images discontinued; EFA variants go multi-arch as -efa; GA wheels published as 1.3.0.post1 (containers stay :1.3.0); UCX 1.20.x.",
