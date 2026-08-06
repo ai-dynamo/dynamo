@@ -381,12 +381,30 @@ def test_router_decisions_sglang_disagg(
     )
 
 
-# DYN-2784: Fixture setup hangs silently in nightly only (worker #2 dies
-# in SGLangProcess launch, KvRouter blocks forever on min_initial_workers=2;
-# pytest.mark.timeout signal gets swallowed at the C-level syscall).
-# Passes reliably in pre_merge/post_merge runs, so scope the skip to the
-# nightly pipeline via skip_in_nightly, which nightly-ci.yml excludes from
-# its sglang single-GPU marker filter. Remove once DYN-2784 lands a real fix.
+# DYN-2784: fixture setup hangs instead of failing. Worker #2 dies during
+# SGLangProcess launch and KvRouter then blocks forever on
+# min_initial_workers=2; the timeout below cannot fire because the signal is
+# swallowed at a C-level syscall.
+#
+# Skipped outright, because the containment this previously relied on does not
+# hold. The note here used to read "passes reliably in pre_merge/post_merge, so
+# scope the skip to nightly" -- measured over five days that is 82% of nightly
+# runs but also 63% of post_merge, and the runs that do hang burn a whole job:
+# observed hangs of 3659s, 4235s and 6077s, each holding a 12 GiB reservation
+# with three more workers queued behind it, because the VRAM-aware parallel
+# orchestrator has no hard-kill for a child that outlives its declared timeout.
+# That came to roughly 220 runner-hours in five days.
+#
+# skip_in_nightly is kept but is not what makes this safe: it only drops the
+# test from the nightly marker filter, and the hang is not nightly-specific.
+#
+# Re-enable once the launch race is fixed, or once the orchestrator can kill a
+# hung child -- either one alone turns this from a lost job into a normal
+# failure. The scenario itself is worth keeping; it is the hang that is not
+# affordable.
+@pytest.mark.skip(
+    reason="hangs to the job step cap instead of failing; see the note above"
+)
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip_in_nightly

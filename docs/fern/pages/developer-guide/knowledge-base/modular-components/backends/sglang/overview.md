@@ -207,7 +207,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 ### Multi-Node TP
 
-SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.ai/advanced_features/server_arguments.html) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).
+SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.io/docs/advanced_features/server_arguments) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).
 
 ### Kubernetes Deployment
 

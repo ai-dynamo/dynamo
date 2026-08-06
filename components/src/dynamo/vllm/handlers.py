@@ -3097,10 +3097,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
-            encodings = await self._custom_encoder.encode(image_urls)
+            artifacts = await self._custom_encoder.encode(image_urls)
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
-                encodings,
+                artifacts,
             )
         except Exception as exc:
             msg = f"CustomEncoder failed: {exc}"
@@ -3110,7 +3110,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
-            len(encodings),
+            len(artifacts),
         )
         return prepared, None
 

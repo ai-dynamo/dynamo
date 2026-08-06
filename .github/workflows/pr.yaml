@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.changes.outputs.core }}
+      dev_images: ${{ steps.changes.outputs.dev_images }}
       planner: ${{ steps.changes.outputs.planner }}
       operator: ${{ steps.changes.outputs.operator }}
       snapshot: ${{ steps.changes.outputs.snapshot }}
@@ -69,6 +70,9 @@ jobs:
       - snapshot-placeholder-trtllm
       - power-agent
       - vllm-build
+      - vllm-local-dev-build
+      - sglang-local-dev-build
+      - trtllm-local-dev-build
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
@@ -356,7 +360,7 @@ jobs:
   vllm-dev-build:
     name: vllm-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -366,6 +370,25 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
       build_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-local-dev-build:
+    name: vllm-local-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.vllm == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: local-dev
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      push_image: false
+      build_timeout_minutes: 60
+      # local-dev remaps to the host user; ARG USER_UID/USER_GID have no defaults.
+      extra_build_args: |
+        USER_UID=1000
+        USER_GID=1000
     secrets: inherit
 
   sglang-build:
@@ -408,7 +431,7 @@ jobs:
   sglang-dev-build:
     name: sglang-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -418,6 +441,25 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
       build_timeout_minutes: 60
+    secrets: inherit
+
+  sglang-local-dev-build:
+    name: sglang-local-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.sglang == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: local-dev
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      push_image: false
+      build_timeout_minutes: 60
+      # local-dev remaps to the host user; ARG USER_UID/USER_GID have no defaults.
+      extra_build_args: |
+        USER_UID=1000
+        USER_GID=1000
     secrets: inherit
 
   trtllm-build:
@@ -460,7 +502,7 @@ jobs:
   trtllm-dev-build:
     name: trtllm-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -470,6 +512,25 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
       build_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-local-dev-build:
+    name: trtllm-local-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: local-dev
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      push_image: false
+      build_timeout_minutes: 60
+      # local-dev remaps to the host user; ARG USER_UID/USER_GID have no defaults.
+      extra_build_args: |
+        USER_UID=1000
+        USER_GID=1000
     secrets: inherit
 
   vllm-efa-build:

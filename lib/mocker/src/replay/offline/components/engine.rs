@@ -1284,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn kv_visibility_follows_backend_contract_and_fpm_waits_for_completion() {
+    fn kv_events_wait_for_completion_for_all_backends() {
         let make_engine = |engine_type| {
             let args = MockEngineArgs::builder()
                 .engine_type(engine_type)
@@ -1315,21 +1315,25 @@ mod tests {
         };
         let mut collector = TraceCollector::default();
 
-        let mut vllm = make_engine(EngineType::Vllm);
-        vllm.dispatch(0, request(Uuid::from_u128(10))).unwrap();
-        let vllm_start = vllm.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert!(!vllm_start.pass_start_events.0.is_empty());
-        let vllm_end = take_only_completion(vllm_start);
-        assert!(vllm_end.engine_events.0.is_empty());
-        assert!(vllm_end.fpm.is_some());
-
-        let mut sglang = make_engine(EngineType::Sglang);
-        sglang.dispatch(0, request(Uuid::from_u128(11))).unwrap();
-        let sglang_start = sglang.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert!(sglang_start.pass_start_events.0.is_empty());
-        let sglang_end = take_only_completion(sglang_start);
-        assert!(!sglang_end.engine_events.0.is_empty());
-        assert!(sglang_end.fpm.is_some());
+        for (engine_type, uuid) in [
+            (EngineType::Vllm, Uuid::from_u128(10)),
+            (EngineType::Trtllm, Uuid::from_u128(11)),
+            (EngineType::Sglang, Uuid::from_u128(12)),
+        ] {
+            let mut engine = make_engine(engine_type);
+            engine.dispatch(0, request(uuid)).unwrap();
+            let pass_start = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+            assert!(
+                pass_start.pass_start_events.0.is_empty(),
+                "{engine_type:?} exposed KV events before pass completion"
+            );
+            let pass_end = take_only_completion(pass_start);
+            assert!(
+                !pass_end.engine_events.0.is_empty(),
+                "{engine_type:?} did not expose KV events at pass completion"
+            );
+            assert!(pass_end.fpm.is_some());
+        }
     }
 
     #[test]
