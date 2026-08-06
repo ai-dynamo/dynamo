@@ -489,6 +489,19 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
+
+    // The 404 fallback is not admission-gated: an unknown path under
+    // pressure still returns 404, not a misleading admission 503.
+    let unknown = reqwest::Client::new()
+        .post(format!(
+            "http://localhost:{}/definitely/not/a/route",
+            svc.port
+        ))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
