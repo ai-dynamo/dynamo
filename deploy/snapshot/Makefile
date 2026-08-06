@@ -44,9 +44,12 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
-.PHONY: test
-test: fmt vet ## Run tests.
+.PHONY: test pagebroker-test
+test: pagebroker-test fmt vet ## Run tests.
 	go test ./... -v -coverprofile cover.out
+
+pagebroker-test:
+	$(MAKE) -C pagebroker test
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.
@@ -58,9 +61,12 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 
 ##@ Build
 
-.PHONY: build
-build: fmt vet ## Build snapshot-agent binary.
+.PHONY: build pagebroker-build
+build: pagebroker-build fmt vet ## Build snapshot-agent binary.
 	go build -o bin/snapshot-agent ./cmd/agent
+
+pagebroker-build:
+	$(MAKE) -C pagebroker
 
 ##@ Docker
 

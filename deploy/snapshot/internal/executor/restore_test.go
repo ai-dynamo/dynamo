@@ -45,7 +45,7 @@ func TestExecNSRestoreRejectsRelativeContainerCheckpointLocation(t *testing.T) {
 			CheckpointPath: "/host/checkpoints/abc123",
 			PlaceholderPID: 1,
 		},
-	)
+		nil)
 	if err == nil {
 		t.Fatal("expected relative container checkpoint location to be rejected")
 	}
