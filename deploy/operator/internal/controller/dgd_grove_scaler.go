@@ -70,7 +70,7 @@ func (s *groveScaler) Reconcile(
 			replicas = 0
 		}
 
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		usesPCSG := component.UsesPCSG()
 		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
