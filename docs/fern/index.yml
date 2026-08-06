@@ -341,6 +341,9 @@ navigation:
             path: features/multimodal/multimodal-kv-routing.md
           - page: Encoder Disaggregation
             path: features/multimodal/encoder-disaggregation.md
+          - page: Video Decode GPU Requirements
+            slug: video-decode-gpu-requirements
+            path: features/multimodal/video-decode-gpu-requirements.md
       - section: Diffusion
         collapsed: true
         icon: wand-magic-sparkles
