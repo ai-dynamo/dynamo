@@ -79,64 +79,12 @@ produces more unchecked text.
 
 ---
 
-## 3. No procedure for A/B-ing request-level distributions
+## 3. No enabled playbook for repeated, comparable benchmark runs
 
-**Severity:** medium.
+**Severity:** high. This is the cheapest large improvement available in performance work.
 
-**Evidence.** The repository has exactly one worked statistical procedure:
-`.agents/skills/dynamo-kv-replay-parity/SKILL.md` Stage 7 — paired runs, arm order randomized
-within each pair, a bootstrap confidence interval on the median candidate/baseline ratio, an
-equivalence threshold, and an escalation rule when the interval straddles it.
-
-That procedure consumes **one elapsed scalar per run** — `replay_execution_ms`, timed narrowly
-around the replay call itself, deliberately excluding setup, engine preparation, and report
-aggregation — and collects a balanced 60-pair schedule per row (30 baseline-first, 30
-candidate-first, randomized), so 120 invocations per row, each a fresh process. That is
-affordable only because an offline replay is fast, deterministic, and single-process.
-`.agents/skills/dynamo-frontend-benchmark/SKILL.md` offers "interleave arms, take the median
-of 3+", which is a heuristic rather than a method.
-
-Note where its power comes from, because this is the part that does not transfer. Four
-mechanisms, and sample size is the weakest:
-
-1. **Narrow timing boundary** — excludes setup and initialization noise from the measurement
-   entirely, rather than averaging over it.
-2. **Pairing** — both arms run adjacently and are compared as a ratio, so common-mode drift
-   (frequency scaling, thermal, background load) divides out.
-3. **Balanced randomized order** — cancels ordering effects.
-4. **n = 60 pairs** — shrinks the interval around the median ratio.
-
-Note also what is and is not deterministic: replay's *output* is byte-identical across runs,
-but its *elapsed time* is not. Stage 7 measures a noisy quantity of a deterministic
-computation, which is precisely the condition that makes pairing so effective — the work is
-provably identical, so a timing difference is either the change or ambient noise.
-
-**Why it matters.** Most real questions are of the form "did p99 time to first token get
-worse under load", where the unit of analysis is the request, not the run. Neither existing
-procedure covers that, and the replay procedure's constants do not transfer: you cannot run
-60 paired GPU sweeps, and a threshold calibrated to simulator runtime means nothing for a
-latency percentile.
-
-**What fixing looks like.** A written procedure for comparing latency distributions between
-two arms, covering how many runs, how to pool or compare per-request samples, and what
-constitutes a real difference at a given percentile.
-
-**Status.** Named as a known gap on the shipped Performance Analysis Method page rather than
-papered over with a citation that does not fit.
-
-**Read next.** [ab-testing-request-distributions.md](ab-testing-request-distributions.md) is a
-standalone explainer for this gap: what is already solved (summarizing), what is not (which
-statistic decides, and whether a difference is real), worked through the embedding-cache
-benchmark, with a four-step fix that needs no new statistical machinery.
-
----
-
-## 4. Published performance numbers carry no sample size or dispersion
-
-**Severity:** medium.
-
-**Evidence.** `docs/fern/pages/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx:30-36`
-publishes:
+**Evidence.** Published benchmarks report one run per arm with no sample size or spread.
+`docs/fern/pages/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx:30-36` publishes:
 
 | Metric | Cache ON | Cache OFF | Delta |
 | --- | ---: | ---: | ---: |
@@ -145,21 +93,104 @@ publishes:
 
 Grepping that page, its source `recipes/qwen3-vl-30b/README.md`, and the `perf.yaml` that
 produced it for repetitions, median, standard deviation, or a confidence interval returns
-nothing. As recorded, this is one run per arm, quoted to 0.1 ms.
+nothing.
 
-The catalog schema's `results` object requires only `available: boolean` and accepts a
-free-text `summary`, so `+16.4% TPS` validates with no sample size attached.
+This is not carelessness — **the harness cannot currently do better**. Three blockers:
 
-**Why it matters.** The bar is inverted. The repository demands 120 paired invocations and a
-bootstrap interval before calling a small *simulator runtime* change real, while publishing
-hardware claims off an unstated sample size. Large effects with understood mechanisms are
-probably fine — but the reader cannot distinguish "large effect, obviously real" from
-"single sample, unknown dispersion" because the record does not say.
+1. **Artifact paths have no run dimension.** Across the 33 `recipes/**/perf.yaml` files the
+   directories are variable-driven (`${RUN_DIR}`, `${ARTIFACT_DIR}`) but carry no run index,
+   so a second run of the same arm overwrites the first.
+2. **No driver repeats a measurement.** Every loop in the four recipe drivers is argument
+   parsing (`while [[ $# -gt 0 ]]`) or config iteration (`for cfg in "${CONFIGS[@]}"`). Not
+   one repetition loop exists.
+3. **Nothing aggregates across runs.** AIPerf summarizes *within* a run;
+   `extract_throughput.py` reads one artifact directory. Given five artifact directories for
+   one arm, no tool computes a median and range across them.
 
-**What fixing looks like.** Extend `results` in
-`docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json` with `runs_per_arm`,
-a dispersion field, and an `interleaved: boolean`. Blocked on gap 2 — the schema needs an
-enforcer first.
+Recording is **not** blocked. `results.additionalProperties` is `true` in
+`docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json`, so `runs_per_arm` and
+`dispersion` can be added to any entry today. They stay unvalidated until the schema requires
+them and gap 2 puts the validator in CI.
+
+**Why it matters.** With one run per arm there is no basis for deciding whether a difference
+is real. The published +16.4% is almost certainly genuine — the mechanism is understood and
+the effect is large — but a +4% result would be indistinguishable from noise, and because
+artifacts are overwritten it could not be checked afterwards.
+
+Repetition was never actually unaffordable. The embedding-cache workload is 1,000 requests at
+concurrency 64 with roughly 2.6 s average latency, about **40 seconds of load**. The expensive
+part is deploying the worker, not running AIPerf; five runs against an already-deployed arm
+cost about three extra minutes. The cost was never measured.
+
+**What fixing looks like.** Three small code changes make a playbook followable, then the
+playbook itself:
+
+- **P1** — add a run index to artifact paths:
+  `RUN_DIR="${ARTIFACT_BASE_DIR}/${CACHE_MODE}/run-${RUN_INDEX}"`.
+- **P2** — a repetition loop in the driver, interleaved at the deployment level: deploy arm A
+  and run N times, deploy arm B and run N times, then repeat the sequence in the opposite
+  order so deployment-level variation is visible.
+- **P3** — a cross-run aggregator that reads N artifact directories and emits median and
+  min-max per statistic. New tooling, roughly 50 lines.
+- **Playbook** — name the deciding statistic in advance; n >= 5 per arm; interleave; report
+  median and range; **overlapping ranges mean inconclusive**, which today is not an available
+  verdict.
+- **Record** — `runs_per_arm`, `dispersion`, `interleaved`, and `deciding_statistic` in the
+  catalog entry.
+
+**Pilot.** `recipes/qwen3-vl-30b/vllm/agg-embedding-cache/`. Both arms share one `deploy.yaml`
+differing by a single environment variable, the workload is short and fixed, and the effect is
+large enough that a correct procedure must reproduce it — so it doubles as a calibration case
+for the procedure itself.
+
+**Explicitly not included.** Deciding whether a *small* difference in a *tail* statistic is
+real. That is item 4, and folding it in here would make this item unshippable.
+
+**Depends on** gap 2 for enforcement, but not for starting.
+
+**See also** [ab-testing-request-distributions.md](ab-testing-request-distributions.md), a
+standalone explainer of what is already solved (summarizing), what is not (which statistic
+decides, and whether a difference is real), worked through the same benchmark.
+
+---
+
+## 4. No method for judging small differences in tail statistics
+
+**Severity:** medium. Genuinely open, and the only item on this list that cannot be closed by
+deciding to be more careful.
+
+**Evidence.** The repository's one rigorous A/B procedure,
+`.agents/skills/dynamo-kv-replay-parity/SKILL.md` Stage 7, consumes **one scalar per run** —
+`replay_execution_ms`, timed narrowly around the replay call itself — and collects a balanced
+60-pair schedule per row, so 120 invocations, each a fresh process.
+
+Its power comes from four mechanisms, and sample size is the weakest:
+
+1. **Narrow timing boundary** — excludes setup and initialization noise from the measurement
+   rather than averaging over it.
+2. **Pairing** — both arms run adjacently and are compared as a ratio, so common-mode drift
+   such as frequency scaling and background load divides out.
+3. **Balanced randomized order** — cancels ordering effects.
+4. **n = 60 pairs** — tightens the interval around the median ratio.
+
+None of the first three survives the move to hardware. You cannot draw a narrow timing
+boundary around a distributed serving path the way you can around one function call, and
+pairing is far weaker when each arm needs its own deployment rather than its own process. The
+output is also a distribution rather than a scalar, so there is nothing for the ratio to
+operate on.
+
+**Why it matters.** Item 3's playbook resolves large effects through non-overlapping ranges.
+It does not answer whether p99 time to first token moving from 520 ms to 545 ms is real.
+Requests within a run are not independent — they share queueing state and cache warmth — so
+they cannot be pooled as thousands of samples. And a p99 drawn from 10,000 requests rests on
+the slowest 100 of them, so it is noisiest exactly where precision is wanted.
+
+**What fixing looks like.** Statistical design work rather than a documentation task: choose
+the unit of analysis, handle within-run non-independence, set a threshold appropriate to the
+percentile in question, and fit all of it to a sample size affordable on GPUs.
+
+**Status.** Named as a known gap on the shipped Performance Analysis Method page; conclusions
+about tail differences are labelled provisional there.
 
 ---
 
@@ -206,7 +237,25 @@ that currently sleep. Mechanical, script by script, no new abstraction required.
 
 ## Suggested order
 
-1. **Gap 2** — one workflow step, turns an existing contract into a guarantee.
-2. **Gap 1** — largest correctness risk; people size deployments on unvalidated output.
-3. **Gap 4** — depends on gap 2.
-4. **Gaps 3, 5, 6** — as capacity allows.
+1. **Gap 2** — one workflow step, and it turns an existing contract into a guarantee.
+2. **Gap 3** — three small code changes plus a written procedure, with a named pilot and a
+   measured cost of about three extra minutes per arm. Best effort-to-value ratio on the list.
+   Recording can start before gap 2 lands; enforcement follows it.
+3. **Gap 1** — largest correctness risk, since deployments are sized on unvalidated output.
+   Independent of the others.
+4. **Gaps 5, 6** — as capacity allows.
+5. **Gap 4** — last, not because it matters least but because it is the only item requiring
+   real statistical design. Do not let it block gap 3.
+
+## How these group
+
+| Theme | Items | Kind of work |
+| --- | --- | --- |
+| Measurement rigor for published claims | 3, 4 | 3 is plumbing plus policy; 4 is statistical design |
+| Enforcement of existing contracts | 2, 5 | CI wiring |
+| Correctness of the tooling itself | 1 | needs an external ground truth |
+| Ergonomics | 6 | mechanical |
+
+Items 3 and 4 were a single entry in an earlier draft. They were split because 3 is
+shippable — small, scoped, with a pilot — while 4 is open-ended, and combining them made the
+whole thing unshippable.

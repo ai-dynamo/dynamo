@@ -5,9 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Why Dynamo cannot currently tell a small performance win from noise
 
-Supplement to [gaps.md](gaps.md) gap 3, "No procedure for A/B-ing request-level
-distributions". This document is self-contained: it explains the problem from scratch, works
-through a benchmark the repository already publishes, and proposes a concrete fix.
+Supplement to [gaps.md](gaps.md) items 3 and 4 — "No enabled playbook for repeated,
+comparable benchmark runs" and "No method for judging small differences in tail statistics".
+This document is self-contained: it explains the problem from scratch, works through a
+benchmark the repository already publishes, and proposes a concrete fix for the part that is
+fixable now.
 
 Verified against `origin/main` @ `c574e4d7c1a`.
 
@@ -224,8 +226,10 @@ stand on that evidence.
 
 ### 4. Record it where the claim lives
 
-Extend the `results` object in
-`docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json`:
+No schema change is needed to start. `results.additionalProperties` is `true` in
+`docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json`, so these fields can be
+added to any catalog entry today. They stay unvalidated until the schema requires them and
+the validator runs in CI, but recording is not blocked:
 
 ```yaml
 results:
