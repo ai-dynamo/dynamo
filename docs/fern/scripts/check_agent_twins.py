@@ -54,6 +54,28 @@ ROOT = Path(__file__).resolve().parents[1]  # docs/fern
 REPO = ROOT.parents[1]
 DATA = ROOT / "components" / "releases.data.ts"
 
+# Pages this check governs. Scoped rather than repo-wide because 18 other
+# components are rendered across the docs and 9 of them read releases.data,
+# each needing its own decision about whether its page owes a twin. Guessing
+# at those would put unverified expectations into a merge-blocking gate.
+# Expanding this list is the follow-up; the compatibility page is here because
+# it is where component-rendered data replaced markdown that agents could read.
+IN_SCOPE: frozenset[str] = frozenset(
+    {
+        "pages/reference/general/compatibility.mdx",
+    }
+)
+
+# Rendered on an in-scope page but carrying no data of their own: styling, or
+# a summary whose numbers the twin already states in prose.
+EXEMPT: frozenset[str] = frozenset({"ReferenceStyles", "CompatibilityHero"})
+
+
+def _components() -> set[str]:
+    """Component names available to pages, from the components directory."""
+    return {p.stem for p in (ROOT / "components").glob("*.tsx")}
+
+
 LLMS_ONLY = re.compile(r"<llms-only>(.*?)</llms-only>", re.S)
 
 # Fraction of the derived items a twin must mention. Set from the current
@@ -89,22 +111,37 @@ def _features(source: str) -> set[str]:
     return set(re.findall(r'name:\s*"([^"]+)"', blk))
 
 
+def _interaction_backends(source: str) -> list[str]:
+    """Backend keys in FEATURE_INTERACTIONS, the array FeatureInteractions reads."""
+    try:
+        blk = source[source.index("export const FEATURE_INTERACTIONS") :]
+    except ValueError:
+        return []
+    blk = blk.split("\nexport const ", 1)[0]
+    return sorted(set(re.findall(r'backend:\s*"([^"]+)"', blk)))
+
+
 def expectations(source: str) -> dict[str, object]:
     """What each component's twin has to account for.
 
     A set means every item must appear: the support matrix either carries a
     release row or it does not.
 
-    The tuple-of-regexes shape is supported for a component whose data cannot
-    be expressed as a name list, because the names also appear in a
-    neighbouring table and would satisfy the check on their own. Nothing needs
-    it today. The pairwise interaction matrices are plain markdown, which
-    reaches the twin natively and needs no guard.
+    A tuple of regexes means the twin must have a particular shape. The
+    pairwise interaction matrices need this because their feature names also
+    appear in the feature-support table directly above them, so a name list is
+    satisfied by that table alone and the matrices could be deleted without
+    the check noticing.
     """
     feats = _features(source)
+    backends = _interaction_backends(source) or ["vLLM", "SGLang", "TensorRT-LLM"]
     return {
         "ReleaseSupportMatrix": _releases(source),
         "FeatureHeatmap": feats,
+        "FeatureInteractions": tuple(
+            [r"[Ff]eature interactions by backend"]
+            + [rf"\*{re.escape(b)}\*" for b in backends]
+        ),
     }
 
 
@@ -116,19 +153,19 @@ def _uses(text: str, component: str) -> bool:
 def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
     text = path.read_text(encoding="utf-8")
     used = [c for c in expected if _uses(text, c)]
-    # A component that renders data but is not declared above would slip past
-    # silently, so the naming convention is the tripwire: adding one forces a
-    # decision about its twin instead of defaulting to no coverage.
+    # Enumerated from the components directory, not guessed from the name. A
+    # suffix rule missed FeatureInteractions, which is exactly the component
+    # that most needed catching, so the repo's own component list is the
+    # source of truth and anything new is undeclared until someone decides.
     undeclared = sorted(
-        set(re.findall(r"<([A-Z]\w*(?:Matrix|Heatmap|Status|Table))[\s/>]", text))
-        - set(expected)
+        {c for c in _components() if _uses(text, c)} - set(expected) - EXEMPT
     )
     if undeclared:
         rel_u = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         return [
             f"{rel_u}: renders {', '.join(undeclared)}, which is not declared in "
-            f"expectations(). Add it with what its twin must carry, or rename it "
-            f"if it does not render data."
+            f"expectations() or EXEMPT. Say what its twin must carry, or exempt "
+            f"it if it renders no data."
         ]
     if not used:
         return []
@@ -177,38 +214,77 @@ def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
 
 
 def _selftest() -> int:
-    exp = {"ReleaseSupportMatrix": {"1.3.0", "1.3.1", "1.2.0", "1.2.1", "1.1.0"}}
+    """Cases that have actually failed here, not cases invented to pass.
+
+    Every one of these except the first two is a defect this file shipped with
+    at some point: substring matching that accepted release candidates, a
+    suffix-based tripwire that missed FeatureInteractions, and a structural
+    expectation that could not fail because it guarded a deleted component.
+    """
+    exp = {
+        "ReleaseSupportMatrix": {"1.3.0", "1.3.1", "1.2.0", "1.2.1", "1.1.0"},
+        "FeatureInteractions": (r"[Ff]eature interactions", r"\*vLLM\*", r"\*SGLang\*"),
+    }
+    twin = "<llms-only>{}</llms-only>"
+    full = twin.format("1.3.0 1.3.1 1.2.0 1.2.1 1.1.0")
     cases: list[tuple[str, str, bool]] = [
-        ("no component", "Prose mentioning 1.3.0 and nothing else.", True),
+        ("no component", "Prose mentioning 1.3.0.", True),
         ("component, no twin", "<ReleaseSupportMatrix />", False),
-        (
-            "twin covering everything",
-            "<ReleaseSupportMatrix />\n<llms-only>1.3.0 1.3.1 1.2.0 1.2.1 1.1.0</llms-only>",
-            True,
-        ),
+        ("twin covering everything", "<ReleaseSupportMatrix />\n" + full, True),
         (
             "twin at threshold",
-            "<ReleaseSupportMatrix />\n<llms-only>1.3.0 1.3.1 1.2.0 1.2.1</llms-only>",
+            "<ReleaseSupportMatrix />\n" + twin.format("1.3.0 1.3.1 1.2.0 1.2.1"),
             True,
         ),
         (
             "twin below threshold",
-            "<ReleaseSupportMatrix />\n<llms-only>1.3.0 only</llms-only>",
+            "<ReleaseSupportMatrix />\n" + twin.format("1.3.0"),
             False,
         ),
         (
             "import alone is not use",
-            'import { ReleaseSupportMatrix } from "@/components/ReleaseSupportMatrix";',
+            'import { ReleaseSupportMatrix } from "@/x";',
             True,
         ),
         ("open tag counts as use", "<ReleaseSupportMatrix>", False),
+        # rc and post builds must not satisfy a release row
+        (
+            "rc builds do not count",
+            "<ReleaseSupportMatrix />\n"
+            + twin.format("1.3.0rc19 1.3.1rc1 1.2.0rc4 1.2.1rc2 1.1.0rc9"),
+            False,
+        ),
+        (
+            "post builds do not count",
+            "<ReleaseSupportMatrix />\n"
+            + twin.format(
+                "1.3.0.post1 1.3.1.post1 1.2.0.post1 1.2.1.post1 1.1.0.post1"
+            ),
+            False,
+        ),
+        # structural expectation: shape, not names
+        (
+            "structure present",
+            "<FeatureInteractions />\n"
+            + twin.format("Feature interactions *vLLM* *SGLang*"),
+            True,
+        ),
+        (
+            "structure missing a backend",
+            "<FeatureInteractions />\n" + twin.format("Feature interactions *vLLM*"),
+            False,
+        ),
+        (
+            "structure heading gone",
+            "<FeatureInteractions />\n" + twin.format("*vLLM* *SGLang*"),
+            False,
+        ),
     ]
     tmp = Path("/tmp/_agent_twin_case.mdx")
     passed = 0
     for name, body, expect_ok in cases:
         tmp.write_text(body, encoding="utf-8")
-        ok = not check(tmp, exp)
-        if ok == expect_ok:
+        if (not check(tmp, exp)) == expect_ok:
             passed += 1
         else:
             print(f"  FAIL {name}: expected {'pass' if expect_ok else 'fail'}")
@@ -236,7 +312,20 @@ def main() -> int:
         return 1
 
     args = [Path(a) for a in sys.argv[1:] if not a.startswith("-")]
-    targets = [a for a in args if a.exists()] or sorted((ROOT / "pages").rglob("*.mdx"))
+    in_scope = [ROOT / rel for rel in sorted(IN_SCOPE)]
+    if args:
+        # Explicit paths (pre-commit passes none, but a human might) are still
+        # filtered to the governed set, so running it on an arbitrary page
+        # cannot produce a finding the gate would not also produce.
+        wanted = {p.resolve() for p in args}
+        targets = [p for p in in_scope if p.resolve() in wanted]
+    else:
+        targets = [p for p in in_scope if p.exists()]
+    missing = [p for p in in_scope if not p.exists()]
+    if missing:
+        for p in missing:
+            print(f"::error::in-scope page not found: {p}", file=sys.stderr)
+        return 1
 
     problems: list[str] = []
     for target in targets:
