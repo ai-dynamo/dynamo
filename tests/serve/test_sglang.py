@@ -10,6 +10,7 @@ from typing import Optional
 import pytest
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
@@ -567,7 +568,7 @@ sglang_configs = {
         # SGLang's video path decodes with decord; the shipped image omits it as
         # a media-codec carrier, so install it for this test only.
         # See common._install_test_only_packages.
-        env={"DYN_TEST_ONLY_PIP_INSTALL": "decord2"},
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"]},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -705,7 +706,7 @@ sglang_configs = {
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
             # SGLang's video path decodes with decord; the shipped image omits it
             # as a media-codec carrier, so install it for this test only.
-            "DYN_TEST_ONLY_PIP_INSTALL": "decord2",
+            "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"],
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
