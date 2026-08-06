@@ -174,10 +174,27 @@ class ThunderAgentScheduler:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
 
-        if not (was_new and program.assigned_worker_id is None):
+        capacities = self._capacity.snapshot()
+        needs_assignment = was_new and program.assigned_worker_id is None
+        if (
+            program.assigned_worker_id is not None
+            and capacities
+            and program.assigned_worker_id not in capacities
+        ):
+            stale_worker_id = program.assigned_worker_id
+            program.assigned_worker_id = None
+            needs_assignment = True
+            logger.info(
+                "thunderagent.worker stale_pin program=%s old_worker=%s "
+                "available_workers=%s",
+                program_id,
+                stale_worker_id,
+                sorted(capacities),
+            )
+
+        if not needs_assignment:
             return None, False
 
-        capacities = self._capacity.snapshot()
         if not capacities:
             # Cold start: MDC hasn't published yet. Let the request flow
             # through with no pin; the chunk-loop callback will populate
