@@ -585,9 +585,7 @@ class WorkerFactory:
             )
             return
 
-        # This getattr keeps the factory wiring dormant until the
-        # --classify-worker configuration flag is introduced.
-        if getattr(config, "classify_worker", False):
+        if config.classify_worker:
             await self._create_classify_worker(
                 runtime, config, shutdown_event, shutdown_endpoints
             )

@@ -462,3 +462,90 @@ class TestPoolingBatchExecution:
 
         assert len(response["data"]) == 8
         assert max_active == 2
+
+
+class TestClassificationOutputShape:
+    """`/classify` reports one probability vector of shape [num_classes].
+
+    Flattening a token-level result instead would report num_classes as
+    rows*classes and pick an argmax outside the label range, so the client
+    would get a 200 carrying a null label and a nonsense class count. Native
+    vLLM rejects classification output with ndim != 1.
+    """
+
+    def test_accepts_flat_vector(self):
+        assert mod._classification_output_to_list(
+            torch.tensor([0.1, 0.7, 0.2])
+        ) == pytest.approx([0.1, 0.7, 0.2])
+
+    def test_unwraps_singleton_batch_dim(self):
+        """vLLM's pooling pipeline may return shape [1, num_classes]."""
+        assert mod._classification_output_to_list(
+            torch.tensor([[0.1, 0.7, 0.2]])
+        ) == pytest.approx([0.1, 0.7, 0.2])
+        assert mod._classification_output_to_list([[0.1, 0.7, 0.2]]) == pytest.approx(
+            [0.1, 0.7, 0.2]
+        )
+
+    def test_rejects_token_level_tensor(self):
+        token_level = torch.tensor(
+            [[0.1, 0.2, 0.7], [0.1, 0.8, 0.1], [0.2, 0.7, 0.1], [0.05, 0.9, 0.05]]
+        )
+        with pytest.raises(ValueError, match=r"one probability vector"):
+            mod._classification_output_to_list(token_level)
+
+    def test_rejects_token_level_list(self):
+        with pytest.raises(ValueError, match=r"4 rows"):
+            mod._classification_output_to_list(
+                [[0.1, 0.2, 0.7], [0.1, 0.8, 0.1], [0.2, 0.7, 0.1], [0.05, 0.9, 0.05]]
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_classify_surfaces_token_level_output_as_error(self):
+        """End-to-end through the handler: a pooler emitting token-level output
+        must fail visibly rather than return a mislabelled 200."""
+        handler = _make_handler({0: "contradiction", 1: "entailment", 2: "neutral"})
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            yield _pooling_output([[0.1, 0.2, 0.7], [0.1, 0.8, 0.1]], [1, 2])
+
+        handler.engine_client.encode = fake_encode
+        with pytest.raises(ValueError, match=r"one probability vector"):
+            [
+                item
+                async for item in handler.generate(
+                    {"input": "premise", "model": "test-model"},
+                    _make_context(),
+                )
+            ]
+
+
+class TestDefaultTokenizeParams:
+    """Upstream vLLM runs every pooling/classify input through
+    apply_post_tokenization, which is also where default truncation to
+    max_model_len happens. Returning None with no caller overrides would skip
+    that for token-ID inputs.
+    """
+
+    def test_defaults_used_when_no_overrides(self):
+        defaults = object()
+        engine_client = SimpleNamespace(
+            renderer=SimpleNamespace(default_cmpl_tok_params=defaults)
+        )
+        assert mod._build_pooling_tokenize_params(engine_client, None) is defaults
+
+    def test_overrides_layer_onto_defaults(self):
+        sentinel = object()
+        default_params = MagicMock()
+        default_params.with_kwargs.return_value = sentinel
+        engine_client = SimpleNamespace(
+            renderer=SimpleNamespace(default_cmpl_tok_params=default_params)
+        )
+
+        result = mod._build_pooling_tokenize_params(
+            engine_client, {"truncate_prompt_tokens": 8}
+        )
+
+        assert result is sentinel
+        default_params.with_kwargs.assert_called_once_with(truncate_prompt_tokens=8)

@@ -748,3 +748,16 @@ class DynamoVllmConfig(ConfigBase):
                 "Benchmark mode injects InstrumentedScheduler, which is a "
                 "generation scheduler and not compatible with pooling engines."
             )
+        if self.headless:
+            raise ValueError(
+                "--classify-worker cannot be combined with --headless. "
+                "Headless mode returns before WorkerFactory.create(), so the "
+                "classify/pooling endpoint would never be registered."
+            )
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError(
+                "--classify-worker cannot be combined with --enable-lora. "
+                "The pooling-family handler does not forward lora_request to "
+                "engine_client.encode(), so an adapter-targeted request would "
+                "silently run against the base model."
+            )
