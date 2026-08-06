@@ -69,10 +69,10 @@ export const CURRENT_WHEEL = "1.3.0.post1";
 
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.16",
-  trtllm: "1.3.0rc22",
+  trtllm: "1.3.0rc23",
   vllm: "0.26.0",
   nixlSglang: "1.3.0",
-  nixlTrtllm: "1.0.1",
+  nixlTrtllm: "1.3.1",
   nixlVllm: "1.3.1",
 };
 
@@ -539,6 +539,13 @@ export interface Artifact {
   href: string;
   tags: { label: string; clipboard: string; variant?: "default" | "experimental" }[];
   badge?: "Preview" | "Experimental" | "Deprecated";
+}
+
+export interface NightlyBuild {
+  version: string;
+  date: string;
+  packages: string[];
+  note?: string;
 }
 
 const NGC_C = "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers";
@@ -1058,5 +1065,24 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
   "v0.6.0": { firstTimers: 4, breaking: 0, knownIssues: 3 },
 };
 
+export const NIGHTLY_BUILDS: NightlyBuild[] = [
+  {
+    version: "1.4.0.dev20260803",
+    date: "Aug 3, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
+  },
+  {
+    version: "1.4.0.dev20260802",
+    date: "Aug 2, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
+  },
+  {
+    version: "1.4.0.dev20260730",
+    date: "Jul 30, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime"],
+    note: "kvbm was not published for this nightly.",
+  },
+];
+
 export const NIGHTLIES_NOTE =
-  "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged *.devYYYYMMDD (since Apr 24, 2026). Install with pip or uv using --pre and the NVIDIA extra-index pattern shown above.";
+  "ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers use rolling `*-runtime-nightly:latest` tags on NGC.";

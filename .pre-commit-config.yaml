@@ -100,6 +100,16 @@ repos:
       entry: python3 docs/fern/scripts/check_asset_paths.py --test
       language: system
       files: ^docs/fern/scripts/check_asset_paths\.py$
+    - id: check-style-components
+      name: Check *Styles.tsx CSS template literals
+      entry: python3 docs/fern/scripts/check_style_components.py
+      language: system
+      files: ^docs/fern/(components/.*Styles\.tsx|scripts/check_style_components\.py)$
+    - id: check-published-styles-selftest
+      name: Self-test the published-styles regex helpers
+      entry: python3 docs/fern/scripts/check_published_styles.py --test
+      language: system
+      files: ^docs/fern/scripts/check_published_styles\.py$
       pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)

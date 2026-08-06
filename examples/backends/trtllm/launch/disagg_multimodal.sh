@@ -28,11 +28,16 @@ fi
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Disaggregated Multimodal Serving (2 GPUs)" "$MODEL_PATH" "$HTTP_PORT"
 
+# Multi-worker launchers use numbered status ports; do not pass the single-worker
+# alias to the frontend.
+unset DYN_SYSTEM_PORT
+
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
 # run prefill worker
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -42,6 +47,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --disaggregation-mode prefill &
 
 # run decode worker
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

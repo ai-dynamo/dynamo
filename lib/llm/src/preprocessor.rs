@@ -42,7 +42,12 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::Arc,
+};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -284,14 +289,23 @@ where
     attach_metrics_annotation(response, &metrics);
 }
 
-// Reasoning State for reasoning parsing transformation step
+// Reasoning State for reasoning parsing transformation step.
+//
+// The reasoning parser and the guided-JSON bypass decision are kept per
+// `choice.index` so that with `n > 1` one choice's bare-JSON bypass cannot
+// suppress another choice's reasoning split. This mirrors the per-choice state
+// already used by the tool-call jail and the leading-`<think>` strip stage.
+struct ChoiceReasoningState {
+    parser: Box<dyn ReasoningParser>,
+    guided_json_bypass_decision: Option<bool>,
+}
+
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    parser_name: String,
+    prompt_injected_reasoning: bool,
     bypass_bare_guided_json: bool,
-    // TODO: Track this per choice.index for n > 1. The current bypass
-    // decision and parser state are shared across all streamed choices.
-    guided_json_bypass_decision: Option<bool>,
+    choices: HashMap<u32, ChoiceReasoningState>,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -2698,6 +2712,30 @@ impl OpenAIPreprocessor {
         Ok(transformed_stream)
     }
 
+    /// Ensure the first emitted delta for each choice carries the assistant role.
+    ///
+    /// This runs after reasoning and tool-call parsing so a parser that buffers the
+    /// original role-bearing delta cannot leave downstream consumers without a role.
+    fn normalize_chat_stream_roles<S>(
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        let mut role_emitted_choices = HashSet::new();
+
+        stream.map(move |mut response| {
+            if let Some(data) = response.data.as_mut() {
+                for choice in &mut data.inner.choices {
+                    choice.delta.role = role_emitted_choices
+                        .insert(choice.index)
+                        .then_some(dynamo_protocols::types::Role::Assistant);
+                }
+            }
+            response
+        })
+    }
+
     pub fn transform_postprocessor_stream<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -3539,81 +3577,100 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Initialize reasoning parser from parser_name
-        let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
-            parser_name.as_ref(),
-        )) as Box<dyn ReasoningParser>;
-
-        if prompt_injected_reasoning {
-            reasoning_parser.set_in_reasoning(true);
-        }
-
+        // Parsers and bypass decisions are created lazily per `choice.index`
+        // inside the unfold loop, so `n > 1` choices never share state.
         let state = ReasoningState {
             stream: Box::pin(stream),
-            reasoning_parser: Some(reasoning_parser),
+            parser_name,
+            prompt_injected_reasoning,
             bypass_bare_guided_json,
-            guided_json_bypass_decision: None,
+            choices: HashMap::new(),
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
-                let guided_json_bypass_decision = if state.bypass_bare_guided_json {
-                    match state.guided_json_bypass_decision {
-                        Some(decision) => Some(decision),
-                        None => {
-                            // Decide once from the first non-whitespace content.
-                            let decision = response.data.as_ref().and_then(|data| {
-                                data.inner.choices.iter().find_map(|choice| {
-                                    if let Some(ChatCompletionMessageContent::Text(text)) =
-                                        choice.delta.content.as_ref()
-                                    {
-                                        let text = text.trim_start();
-                                        if text.is_empty() {
-                                            return None;
-                                        }
-                                        return Some(matches!(text.as_bytes()[0], b'[' | b'{'));
-                                    }
-                                    None
-                                })
-                            });
-                            if let Some(decision) = decision {
-                                state.guided_json_bypass_decision = Some(decision);
-                            }
-                            decision
-                        }
-                    }
-                } else {
-                    Some(false)
-                };
+                // Split disjoint field borrows so the per-choice map and the
+                // parser-factory inputs can be used together inside map_data.
+                // Scoped in a block so the borrows end before `state` moves.
+                let processed_response = {
+                    let ReasoningState {
+                        parser_name,
+                        prompt_injected_reasoning,
+                        bypass_bare_guided_json,
+                        choices,
+                        ..
+                    } = &mut state;
+                    let parser_name = &*parser_name;
+                    let prompt_injected_reasoning = *prompt_injected_reasoning;
+                    let bypass_bare_guided_json = *bypass_bare_guided_json;
 
-                // Process the response through reasoning parser if available
-                let processed_response = if guided_json_bypass_decision != Some(false) {
-                    // Keep bare JSON and leading whitespace available to the tool jail.
-                    response
-                } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
-                        // Process all choices, not just the first one
                         for choice in data.inner.choices.iter_mut() {
-                            // Reasoning parsing only applies to text content
-                            if let Some(ChatCompletionMessageContent::Text(text)) =
-                                choice.delta.content.as_ref()
-                            {
-                                let parser_result =
-                                    parser.parse_reasoning_streaming_incremental(text, &[]);
+                            let choice_state = choices.entry(choice.index).or_insert_with(|| {
+                                let mut parser =
+                                    Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+                                        parser_name,
+                                    ))
+                                        as Box<dyn ReasoningParser>;
+                                if prompt_injected_reasoning {
+                                    parser.set_in_reasoning(true);
+                                }
+                                ChoiceReasoningState {
+                                    parser,
+                                    guided_json_bypass_decision: None,
+                                }
+                            });
 
-                                // Update this specific choice with parsed content
+                            // Decide once per choice, from ITS OWN first
+                            // non-whitespace content, whether the backend
+                            // emitted bare guided JSON (`[`/`{`) that must reach
+                            // the tool jail unparsed.
+                            let bypass_decision = if bypass_bare_guided_json {
+                                match choice_state.guided_json_bypass_decision {
+                                    Some(decision) => Some(decision),
+                                    None => {
+                                        let decision = match choice.delta.content.as_ref() {
+                                            Some(ChatCompletionMessageContent::Text(text)) => {
+                                                let text = text.trim_start();
+                                                if text.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(matches!(text.as_bytes()[0], b'[' | b'{'))
+                                                }
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(decision) = decision {
+                                            choice_state.guided_json_bypass_decision =
+                                                Some(decision);
+                                        }
+                                        decision
+                                    }
+                                }
+                            } else {
+                                Some(false)
+                            };
+
+                            // Only a choice decided NOT to bypass is parsed. A
+                            // bare-JSON or still-undecided (whitespace-only)
+                            // choice keeps its content untouched for the jail.
+                            // Reasoning parsing only applies to text content;
+                            // multimodal content passes through unchanged.
+                            if bypass_decision == Some(false)
+                                && let Some(ChatCompletionMessageContent::Text(text)) =
+                                    choice.delta.content.as_ref()
+                            {
+                                let parser_result = choice_state
+                                    .parser
+                                    .parse_reasoning_streaming_incremental(text, &[]);
                                 choice.delta.content = parser_result
                                     .get_some_normal_text()
                                     .map(ChatCompletionMessageContent::Text);
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
-                            // For multimodal content, pass through unchanged
                         }
                         Ok(data)
                     })
-                } else {
-                    // No reasoning parser configured, pass through unchanged
-                    response
                 };
 
                 Some((processed_response, state))
@@ -3915,6 +3972,7 @@ impl
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
         )?;
+        let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Apply request payload aggregation strategy.
         // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
@@ -4219,6 +4277,69 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        Role,
+    };
+
+    fn chat_stream_chunk(
+        index: u32,
+        role: Option<Role>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                role,
+                content: Some(ChatCompletionMessageContent::Text("content".to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "test".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
+        let input = stream::iter(vec![
+            // Mirrors a parser releasing buffered content without the role that
+            // arrived on the original, swallowed chunk.
+            chat_stream_chunk(0, None),
+            chat_stream_chunk(1, None),
+            chat_stream_chunk(0, Some(Role::Assistant)),
+            chat_stream_chunk(1, Some(Role::Assistant)),
+        ]);
+
+        let output: Vec<_> = OpenAIPreprocessor::normalize_chat_stream_roles(input)
+            .collect()
+            .await;
+        let roles: Vec<_> = output
+            .iter()
+            .map(|response| response.data.as_ref().unwrap().inner.choices[0].delta.role)
+            .collect();
+
+        assert_eq!(
+            roles,
+            vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
 
     #[test]
     fn prompt_invalid_request_maps_to_invalid_argument() {
