@@ -85,10 +85,9 @@ Metrics land in `profile_export_aiperf.{csv,json}`: `Output Token Throughput`,
 `Output Token Throughput Per User`. KV-cache hit rate is on the frontend `/metrics`
 (`dynamo_component_router_kv_hit_rate_{sum,count}`).
 
-> Benchmark aggregated with the shipped `speculative-config` key. Real MTP measures an
-> acceptance length of ~3.2 on this trace, above the 2.937 that the
-> `speculative-config-synthetic` key forces, so the override is not needed here — use it
-> only on traces where acceptance collapses. The disaggregated profile runs without MTP.
+> Benchmark aggregated with the shipped `speculative-config` key — MTP measures an
+> acceptance length of ~3.2 on this trace, so the `speculative-config-synthetic` override
+> is not needed. Disaggregated runs without MTP.
 
 ## Running a concurrency sweep
 
