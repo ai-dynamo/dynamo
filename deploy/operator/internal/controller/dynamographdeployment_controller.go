@@ -42,6 +42,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/paused"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -196,7 +197,10 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			predicate.GenerationChangedPredicate{},
+			predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				paused.AnnotationChangedPredicate(),
+			),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -247,9 +251,14 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
+	pausedReconciler := paused.Wrap(
+		mgr.GetClient(),
+		&nvidiacomv1beta1.DynamoGraphDeployment{},
+		r,
+	)
+
 	// Wrap with metrics collection
-	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
-	return ctrlBuilder.Complete(observedReconciler)
+	return ctrlBuilder.Complete(observability.NewObservedReconciler(pausedReconciler, consts.ResourceTypeDynamoGraphDeployment))
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
