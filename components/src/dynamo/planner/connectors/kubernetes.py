@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import logging
 import os
@@ -41,9 +42,11 @@ from dynamo.planner.errors import (
     UserProvidedModelNameMismatchError,
 )
 from dynamo.planner.monitoring.dgd_services import (
+    ComponentPowerConfig,
     get_component_from_type_or_name,
     get_component_type,
     get_components_by_name,
+    resolve_component_power_configs,
 )
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
@@ -343,13 +346,29 @@ class KubernetesConnector(PlannerConnector):
 
         return model_name
 
+    def get_graph_deployment(self) -> dict:
+        """Fetch the DGD once for callers that share it across GPU/power reads.
+
+        Not on the base ``PlannerConnector`` protocol — power awareness is
+        Kubernetes-local and must not expand that ABC. The environment checks
+        ``is_power_aware_connector(controller)`` (all four methods present)
+        rather than duck-typing via ``getattr``.
+        """
+        return self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
     def get_gpu_counts(
         self,
         require_prefill: bool = True,
         require_decode: bool = True,
+        deployment: Optional[dict] = None,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode components."""
-        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        """Get the GPU counts for prefill and decode components.
+
+        Pass ``deployment`` to reuse an already-fetched DGD (avoids a second
+        GET when the environment also resolves power configs on the same tick).
+        """
+        if deployment is None:
+            deployment = self.get_graph_deployment()
         return self._get_gpu_counts_from_deployment(
             deployment,
             require_prefill=require_prefill,
@@ -404,6 +423,38 @@ class KubernetesConnector(PlannerConnector):
 
         return prefill_gpu_count, decode_gpu_count
 
+    def get_component_power_configs(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+        deployment: Optional[dict] = None,
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+        """Resolve DGD-owned per-role power configs from worker podTemplate annotations.
+
+        One DGD GET unless ``deployment`` is provided (shared with
+        ``get_gpu_counts`` on the same tick). ``watts_per_replica`` on each
+        config uses the replica-wide GPU total (nodeCount × per-pod) via
+        ``Service.get_total_gpu_count()``, independent of the per-pod
+        ``num_gpus`` the GPU-budget math consumes.
+
+        The typed parser errors (``PowerAnnotationMissingError`` /
+        ``PowerAnnotationInvalidError`` / ``SubComponentNotFoundError`` /
+        ``DuplicateSubComponentError`` / ``ValueError`` for a bad GPU count)
+        propagate so the environment can apply the startup-fail vs
+        runtime-conservative policy rather than the planner guessing a cap.
+        """
+        if deployment is None:
+            deployment = self.get_graph_deployment()
+        return resolve_component_power_configs(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            prefill_name=prefill_component_name,
+            decode_name=decode_component_name,
+        )
+
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
         """Auto-discover the frontend component's metrics URL from the DGD.
 
@@ -427,7 +478,12 @@ class KubernetesConnector(PlannerConnector):
         return None
 
     async def wait_for_deployment_ready(self, include_planner: bool = True):
-        """Wait for the deployment to be ready.
+        """Wait for the deployment to be ready (legacy replica-stability path).
+
+        Does **not** check pod annotation convergence or require
+        ``observedGeneration`` catch-up. Power-aware callers that permanently
+        cache DGD fields must use :meth:`wait_for_settled_graph_deployment`
+        instead.
 
         Args:
             include_planner: If False, skip the planner component when checking
@@ -437,6 +493,48 @@ class KubernetesConnector(PlannerConnector):
         await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,
             include_planner=include_planner,
+            require_backing_settled=False,
+        )
+
+    async def wait_for_settled_graph_deployment(
+        self,
+        include_planner: bool = False,
+        *,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> dict:
+        """Wait for a settled DGD snapshot and return that same object.
+
+        When ``include_planner`` is False, the snapshot has:
+        - non-planner worker replica counts stable (desired == updated == ready)
+        - ``status.observedGeneration >= metadata.generation``
+        - every non-terminal worker Pod carries the expected
+          ``dynamo.nvidia.com/gpu-power-limit`` annotation from the current
+          DGD snapshot, confirming the operator has propagated the DGD intent
+          to running Pods (hardware enforcement by the Power Agent/NVML is
+          separate and not verified here)
+
+        Power-relevant workers are selected with the same role/name resolution
+        as :meth:`get_component_power_configs` (typed roles, explicit-name
+        fallback for untyped workers, unique generic ``type: worker`` for agg).
+
+        Callers that permanently cache fields from the DGD (power caps) must
+        use this snapshot rather than issuing a later GET, so an
+        annotation-only generation bump cannot be adopted before workers
+        have rolled onto that generation. Active rolling updates
+        (``status.rollingUpdate.phase`` Pending/InProgress/Failed) also
+        block settlement because old Pods still carry the previous cap.
+        """
+        return await self.kube_api.wait_for_graph_deployment_ready(
+            self.graph_deployment_name,
+            include_planner=include_planner,
+            require_backing_settled=True,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
         )
 
     def _list_worker_metadata_crs(self) -> list[dict]:
@@ -630,15 +728,57 @@ class KubernetesConnector(PlannerConnector):
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
     ) -> tuple[int, int, bool]:
-        """
-        Get actual ready worker counts for prefill and decode from DGD status.
-
-        Returns:
-            tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
-            - is_stable: False if any component is in a rollout (scaling should be skipped)
-        """
+        """Get ready worker counts from DGD status without listing Pods."""
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        return self._worker_counts_from_snapshot(
+            deployment,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+        )
 
+    async def get_power_aware_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """Get power-safe worker counts without blocking the Planner event loop.
+
+        One thread dispatch contains the synchronous DGD GET and the single
+        DGD-scoped Pod LIST. The returned Pod snapshot is partitioned locally by
+        component before terminating-Pod checks run.
+        """
+        return await asyncio.to_thread(
+            self._get_power_aware_worker_counts_sync,
+            prefill_component_name,
+            decode_component_name,
+        )
+
+    def _get_power_aware_worker_counts_sync(
+        self,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+    ) -> tuple[int, int, bool]:
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        dgd_name = deployment.get("metadata", {}).get("name", "")
+        pods = self.kube_api.list_pods_for_graph(dgd_name) if dgd_name else []
+        pods_by_component = self.kube_api.partition_pods_by_component(pods)
+        return self._worker_counts_from_snapshot(
+            deployment,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+            pods_by_component=pods_by_component,
+            power_aware=True,
+        )
+
+    def _worker_counts_from_snapshot(
+        self,
+        deployment: dict,
+        *,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+        pods_by_component: Optional[dict[str, list]] = None,
+        power_aware: bool = False,
+    ) -> tuple[int, int, bool]:
         prefill_count = 0
         decode_count = 0
         all_stable = True
@@ -652,6 +792,14 @@ class KubernetesConnector(PlannerConnector):
             ready_replicas, is_stable = self.kube_api.get_service_replica_status(
                 deployment, service.name
             )
+            if (
+                is_stable
+                and power_aware
+                and self.kube_api.has_terminating_pods(
+                    (pods_by_component or {}).get(service.name, [])
+                )
+            ):
+                is_stable = False
             if not is_stable:
                 all_stable = False
             prefill_count = ready_replicas
@@ -665,9 +813,38 @@ class KubernetesConnector(PlannerConnector):
             ready_replicas, is_stable = self.kube_api.get_service_replica_status(
                 deployment, service.name
             )
+            if (
+                is_stable
+                and power_aware
+                and self.kube_api.has_terminating_pods(
+                    (pods_by_component or {}).get(service.name, [])
+                )
+            ):
+                is_stable = False
             if not is_stable:
                 all_stable = False
             decode_count = ready_replicas
+
+        if power_aware:
+            is_blocking, reason = self.kube_api.is_rolling_update_blocking_settlement(
+                deployment
+            )
+            if not is_blocking:
+                # Failed is not in ROLLING_UPDATE_BLOCKING_PHASES because at
+                # startup it raises immediately rather than blocking. At runtime
+                # there is no raise, so the dedicated power path treats Failed as
+                # fail-closed (unstable) and does not admit scale-ups.
+                rolling = deployment.get("status", {}).get("rollingUpdate") or {}
+                if rolling.get("phase") == "Failed":
+                    is_blocking = True
+                    reason = "rollingUpdate.phase=Failed"
+            if is_blocking:
+                logger.info(
+                    "%s: treating runtime counts as unstable: %s",
+                    self.graph_deployment_name,
+                    reason,
+                )
+                all_stable = False
 
         return prefill_count, decode_count, all_stable
 

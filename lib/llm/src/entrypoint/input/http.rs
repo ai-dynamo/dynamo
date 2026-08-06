@@ -108,7 +108,7 @@ pub async fn run_with_frontend_route_extensions(
             );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
-            let generate_engine_enabled = http_service.generate_api_enabled();
+            let generate_engine_capabilities = http_service.generate_engine_capabilities();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -122,7 +122,7 @@ pub async fn run_with_frontend_route_extensions(
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
-                generate_engine_enabled,
+                generate_engine_capabilities,
             )
             .await?;
             http_service
@@ -204,7 +204,7 @@ async fn run_watcher(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
-    generate_engine_enabled: bool,
+    generate_engine_capabilities: Vec<&'static str>,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
@@ -226,7 +226,7 @@ async fn run_watcher(
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
-    watch_obj.set_generate_engine_enabled(generate_engine_enabled);
+    watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

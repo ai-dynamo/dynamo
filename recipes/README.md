@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
-> If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
+> If not, follow the **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** first.
 
 ## Available Recipes
 
@@ -52,6 +52,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/)** | vLLM | Agg + Disagg | 4x B200 / 4x H200 | ✅ | ✅ | Text — MoE 284B / 13B active, NVFP4 (B200) / public FP8 (H200) + FP8 KV, agg TP4 (B200) / DP4+TP1+EP (H200), MTP (H200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 2P1D (12x B200) / 4P3D (28x H200) | ❌ |
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T / 49B active (1M ctx; 86k on H200), NVFP4 (B200) / public FP8 (H200) + FP8 KV, TP8 + EP, MTP-2 (B200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 1P1D (16x B200) / 1P3D (32x H200) | ❌ |
 | **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | ❌ |
+| **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
 | **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
 | **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | 4x B200 / 8x H200 | ✅ | ✅ | ~550B hybrid Mamba/Attention/MoE (~55B active), NVFP4 + FP8, TP4 (B200) / TP8 (H200) + EP, MTP, KV-aware routing; chat + agentic, plus 1P1D disagg on B200 | ❌ |
@@ -112,8 +113,8 @@ Each complete recipe follows this standard structure:
 
 The recipes require the Dynamo Kubernetes Platform to be installed. Follow the installation guide:
 
-- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Quickstart (~10 minutes)
-- **[Detailed Installation Guide](../docs/kubernetes/installation-guide.md)** - Advanced options
+- **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** - Quickstart (~10 minutes)
+- **[Detailed Installation Guide](../docs/fern/pages/kubernetes/installation/install-dynamo.md)** - Advanced options
 
 **2. GPU Cluster Requirements**
 
@@ -330,18 +331,18 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
 
 **For more troubleshooting:**
-- [Kubernetes Deployment Guide](../docs/kubernetes/README.md#troubleshooting)
-- [Observability Documentation](../docs/kubernetes/observability/)
+- [Dynamo Operator](../docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md)
+- [Observability Documentation](../docs/fern/pages/kubernetes/operations/observability.mdx)
 
 ## Related Documentation
 
-- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Platform installation and concepts
-- **[API Reference](../docs/kubernetes/api-reference.md)** - DynamoGraphDeployment CRD specification
-- **[vLLM Backend Guide](../docs/backends/vllm/README.md)** - vLLM-specific features
-- **[SGLang Backend Guide](../docs/backends/sglang/README.md)** - SGLang-specific features
-- **[TensorRT-LLM Backend Guide](../docs/backends/trtllm/README.md)** - TensorRT-LLM features
-- **[Observability](../docs/kubernetes/observability/)** - Monitoring and logging
-- **[Benchmarking Guide](../docs/benchmarks/benchmarking.md)** - Performance testing
+- **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** - Platform installation and concepts
+- **[API Reference](../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md)** - DynamoGraphDeployment CRD specification
+- **[vLLM Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md)** - vLLM-specific features
+- **[SGLang Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md)** - SGLang-specific features
+- **[TensorRT-LLM Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md)** - TensorRT-LLM features
+- **[Observability](../docs/fern/pages/kubernetes/operations/observability.mdx)** - Monitoring and logging
+- **[Benchmarking Guide](../docs/fern/pages/recipes/feature-benchmarks/benchmarking-guide.md)** - Performance testing
 
 ## Contributing
 

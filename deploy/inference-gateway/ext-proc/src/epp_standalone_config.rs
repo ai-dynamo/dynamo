@@ -19,6 +19,11 @@ const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Safety ceiling on concurrent in-flight `pick()`s (tunable), NOT a throughput
+/// throttle: it caps concurrent tokenizer/render calls and buffered request
+/// bodies so a burst can't exhaust memory. HTTP/2 stream multiplexing means the
+/// TCP-connection cap does not bound requests, so this is the actual guardrail.
+const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
 
 /// Environment variable that selects the EPP operating mode.
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
@@ -127,6 +132,11 @@ pub struct EppStandaloneConfig {
         message = "DYN_EPP_MAX_NUM_BATCHED_TOKENS must be greater than zero when set"
     ))]
     pub max_num_batched_tokens: Option<u64>,
+    /// Safety ceiling on concurrent in-flight `pick()`s: bounds concurrent
+    /// tokenizer/render calls and buffered bodies (a load-shed guardrail, not a
+    /// throughput throttle). Excess requests are shed with a 503, not queued.
+    #[validate(range(min = 1, message = "DYN_EPP_MAX_INFLIGHT_REQUESTS must be >= 1"))]
+    pub max_inflight_requests: usize,
 }
 
 impl EppStandaloneConfig {
@@ -165,6 +175,8 @@ impl EppStandaloneConfig {
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
             total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_TOTAL_KV_BLOCKS")?,
             max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
+            max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
+                .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
         })
     }
 
@@ -293,6 +305,7 @@ mod tests {
         assert_eq!(cfg.kv_event_port, DEFAULT_KV_EVENT_PORT);
         assert!(cfg.replay_port.is_none());
         assert!(cfg.total_kv_blocks.is_none());
+        assert_eq!(cfg.max_inflight_requests, DEFAULT_MAX_INFLIGHT_REQUESTS);
     }
 
     #[test]
@@ -400,6 +413,37 @@ mod tests {
                 ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
                 ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn max_inflight_requests_can_be_overridden() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+            ("DYN_EPP_MAX_INFLIGHT_REQUESTS", "256"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.max_inflight_requests, 256);
+    }
+
+    #[test]
+    fn zero_max_inflight_requests_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+                ("DYN_EPP_MAX_INFLIGHT_REQUESTS", "0"),
             ])
             .is_err()
         );

@@ -50,9 +50,11 @@ use crate::{
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
+            classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
@@ -103,6 +105,16 @@ fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
         component: mcid.component.clone(),
         name: mcid.endpoint.clone(),
     }
+}
+
+fn has_live_endpoint_card(
+    cards: &[(EndpointId, ModelDeploymentCard)],
+    namespace: &str,
+    component: &str,
+) -> bool {
+    cards
+        .iter()
+        .any(|(endpoint, _)| endpoint.namespace == namespace && endpoint.component == component)
 }
 
 fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
@@ -159,13 +171,17 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
             .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
-fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
+fn supports_generate_capability(card: &ModelDeploymentCard, capability: &str) -> bool {
     matches!(
-        card.runtime_config
-            .runtime_data
-            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        card.runtime_config.runtime_data.get(capability),
         Some(serde_json::Value::Bool(true))
     )
+}
+
+fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[&str]) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| supports_generate_capability(card, capability))
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -248,9 +264,9 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
-    /// Whether the frontend configured the vLLM-compatible Generate API.
-    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
-    generate_engine_enabled: bool,
+    /// Worker capabilities accepted by the frontend's engine-native Generate routes.
+    /// Keep raw pipelines out of default-off and backend-mismatched paths.
+    generate_engine_capabilities: Vec<&'static str>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -262,6 +278,8 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Realtime,
+    ModelType::Classify,
+    ModelType::Pooling,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -282,9 +300,33 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Realtime {
         manager.list_realtime_models().is_empty()
+    } else if model_type == ModelType::Classify {
+        manager.list_classify_models().is_empty()
+    } else if model_type == ModelType::Pooling {
+        manager.list_pooling_models().is_empty()
     } else {
         true
     }
+}
+
+fn removed_model_cards(
+    manager: &ModelManager,
+    card: &ModelDeploymentCard,
+) -> Vec<ModelDeploymentCard> {
+    ALL_MODEL_TYPES
+        .iter()
+        .filter_map(|model_type| {
+            if card.model_type.intersects(*model_type)
+                && is_model_type_list_empty(manager, *model_type)
+            {
+                let mut removed_card = card.clone();
+                removed_card.model_type = *model_type;
+                Some(removed_card)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// RAII guard that removes a key from a `DashSet` on drop and wakes any tasks
@@ -374,7 +416,7 @@ impl ModelWatcher {
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
-            generate_engine_enabled: false,
+            generate_engine_capabilities: Vec::new(),
         }
     }
 
@@ -390,8 +432,15 @@ impl ModelWatcher {
         self.tokenizer_backend = tokenizer_backend;
     }
 
+    pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
+        self.generate_engine_capabilities = capabilities;
+    }
+    /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
-        self.generate_engine_enabled = enabled;
+        self.generate_engine_capabilities = enabled
+            .then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .into_iter()
+            .collect();
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
@@ -1025,11 +1074,13 @@ impl ModelWatcher {
         // state. If discovery is temporarily unavailable, retaining the card
         // lets the next reconciliation pass retry this stale entry instead of
         // losing the key while leaving its WorkerSet behind.
-        let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, namespace_filter)
-            .await
-            .with_context(|| model_name.clone())?;
-
+        let all_cards = self.all_cards().await.with_context(|| model_name.clone())?;
+        let active_instances = all_cards
+            .iter()
+            .filter(|(endpoint_id, card)| {
+                card.name() == model_name && namespace_filter.matches(&endpoint_id.namespace)
+            })
+            .collect::<Vec<_>>();
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
@@ -1091,6 +1142,9 @@ impl ModelWatcher {
                 && worker_set_key(eid, other_card.model_type, other_card.worker_type) == ws_key
         });
 
+        let endpoint_has_instances =
+            has_live_endpoint_card(&all_cards, worker_namespace, worker_component);
+
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
             let removed = self.manager.remove_worker_set(&model_name, &ws_key);
@@ -1109,6 +1163,11 @@ impl ModelWatcher {
                         self.manager.unregister_alias_if_empty(alias, &model_name);
                     }
                 }
+            }
+
+            if !endpoint_has_instances {
+                self.manager
+                    .remove_hicache_caches(worker_namespace, worker_component);
             }
 
             // Activator-state cleanup depends on which component just went away.
@@ -1181,12 +1240,8 @@ impl ModelWatcher {
         }
 
         if let Some(tx) = &self.model_update_tx {
-            for model_type in ALL_MODEL_TYPES {
-                if card.model_type.intersects(*model_type)
-                    && is_model_type_list_empty(&self.manager, *model_type)
-                {
-                    tx.send(ModelUpdate::Removed(card.clone())).await.ok();
-                }
+            for removed_card in removed_model_cards(&self.manager, &card) {
+                tx.send(ModelUpdate::Removed(removed_card)).await.ok();
             }
         }
 
@@ -1580,7 +1635,7 @@ impl ModelWatcher {
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
-                self.generate_engine_enabled && supports_vllm_generate(card);
+                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -1591,11 +1646,12 @@ impl ModelWatcher {
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     Some(
                         self.manager
-                            .kv_chooser_for(
+                            .kv_chooser_for_with_worker_role(
                                 &endpoint,
                                 card.kv_cache_block_size,
                                 Some(router_config.kv_router_config.clone()),
                                 self.prefill_load_estimator.clone(),
+                                card.worker_type,
                                 WORKER_TYPE_DECODE, // This is the decode router
                                 Some(card.display_name.clone()),
                                 card.runtime_config.enable_eagle,
@@ -1671,6 +1727,7 @@ impl ModelWatcher {
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
+                    kv_chooser.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
@@ -1839,27 +1896,44 @@ impl ModelWatcher {
                     card.name()
                 );
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
-            // Case: Text + Embeddings
-            let push_router = PushRouter::<
-                NvCreateEmbeddingRequest,
-                Annotated<NvCreateEmbeddingResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.embeddings_engine = Some(Arc::new(push_router));
-        }
-        // Case: Text + (Images, Audio, Videos)
-        // Must come before the plain Text+Chat / Text+Completions branches because
-        // diffusion models often set both Images and Chat flags. The branch below
-        // handles the chat registration internally when supports_chat() is true.
-        else if card.model_input == ModelInput::Text
-            && (card.model_type.supports_images()
-                || card.model_type.supports_audios()
-                || card.model_type.supports_videos())
-        {
-            // Image/Audio/Video models can also support chat completions (vLLM omni way)
+        } else if card.model_input == ModelInput::Text {
+            // Text workers tokenize in the backend and can advertise multiple
+            // OpenAI surfaces. Build each declared surface independently:
+            // ModelType is a bitflag, so choosing one mutually-exclusive branch
+            // would silently omit engines for mixed-capability cards.
+            if card.model_type.supports_embedding() {
+                let push_router = PushRouter::<
+                    NvCreateEmbeddingRequest,
+                    Annotated<NvCreateEmbeddingResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.embeddings_engine = Some(Arc::new(push_router));
+            }
+
+            if card.model_type.supports_classify() {
+                let push_router = PushRouter::<
+                    NvCreateClassifyRequest,
+                    Annotated<NvCreateClassifyResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.classify_engine = Some(Arc::new(push_router));
+            }
+
+            if card.model_type.supports_pooling() {
+                let push_router = PushRouter::<
+                    NvCreatePoolingRequest,
+                    Annotated<NvCreatePoolingResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.pooling_engine = Some(Arc::new(push_router));
+            }
+
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
@@ -1869,6 +1943,17 @@ impl ModelWatcher {
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
+            }
+
+            if card.model_type.supports_completions() {
+                let completions_router = PushRouter::<
+                    NvCreateCompletionRequest,
+                    Annotated<NvCreateCompletionResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.completions_engine = Some(Arc::new(completions_router));
             }
 
             if card.model_type.supports_images() {
@@ -1899,25 +1984,30 @@ impl ModelWatcher {
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
-            // Case: Text + Chat (pure text-to-text, no diffusion)
-            let push_router =
-                PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(client, router_config.router_mode, None)
+
+            if card.model_type.supports_realtime() {
+                // `Text` is overloaded for Realtime; its I/O passes through.
+                let realtime_router = PushRouter::<
+                    RealtimeClientEvent,
+                    Annotated<RealtimeServerEvent>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
                 .await?;
-            worker_set.chat_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
-            // Case: Text + Completions
-            let push_router = PushRouter::<
-                NvCreateCompletionRequest,
-                Annotated<NvCreateCompletionResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.completions_engine = Some(Arc::new(push_router));
+                worker_set.realtime_engine = Some(Arc::new(realtime_router));
+            }
+
+            if card.model_type.is_empty() {
+                tracing::info!(
+                    model_name = card.name(),
+                    "Topology-only worker (empty model_type), registering for serving readiness only"
+                );
+            } else if !worker_set.has_any_serving_engine() {
+                anyhow::bail!(
+                    "Unsupported model configuration: {} with Text input",
+                    card.model_type
+                );
+            }
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
@@ -1961,17 +2051,6 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
-            // Case 7: Text + Realtime
-            // 'Text' is being overloaded here, it simply means the I/O will be passed through
-            let realtime_router = PushRouter::<
-                RealtimeClientEvent,
-                Annotated<RealtimeServerEvent>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.realtime_engine = Some(Arc::new(realtime_router));
         } else if card.model_type.is_empty() {
             // No OpenAI surface declared: a topology-only worker that exists
             // purely for serving-readiness accounting — e.g. a surface-less
@@ -1990,7 +2069,7 @@ impl ModelWatcher {
             // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Realtime), \
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Classify|Pooling|Realtime), \
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
@@ -2173,6 +2252,7 @@ fn seed_lora_state_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
 
     fn test_endpoint_id(name: &str) -> EndpointId {
@@ -2184,20 +2264,35 @@ mod tests {
     }
 
     #[test]
-    fn vllm_generate_requires_explicit_worker_capability() {
+    fn endpoint_liveness_considers_all_models() {
+        // This is the discovery snapshot after the last adapter card was removed: its base
+        // model remains on the same worker endpoint, so the endpoint is still live.
+        let cards = vec![(
+            test_endpoint_id("generate"),
+            ModelDeploymentCard::with_name_only("base-model"),
+        )];
+
+        assert!(has_live_endpoint_card(&cards, "ns1", "workers"));
+    }
+
+    #[test]
+    fn generate_requires_enabled_matching_worker_capability() {
+        const OTHER_GENERATE_CAPABILITY: &str = "other_generate";
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.model_type = ModelType::Chat | ModelType::Completions;
-        assert!(!supports_vllm_generate(&card));
-
         card.runtime_config
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
             .unwrap();
-        assert!(supports_vllm_generate(&card));
 
-        card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
-            .unwrap();
-        assert!(!supports_vllm_generate(&card));
+        assert!(supports_enabled_engine_generate(
+            &card,
+            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+        ));
+        assert!(!supports_enabled_engine_generate(&card, &[]));
+        assert!(!supports_enabled_engine_generate(
+            &card,
+            &[OTHER_GENERATE_CAPABILITY]
+        ));
     }
 
     #[test]
@@ -2215,6 +2310,50 @@ mod tests {
             .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, false)
             .unwrap();
         assert!(!supports_encoder_result_handoff(&card));
+    }
+
+    #[tokio::test]
+    async fn text_pooling_family_preserves_chat_engine() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let watcher = ModelWatcher::new(
+            drt,
+            manager.clone(),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_mixed_text_test".to_string(),
+            ))),
+        );
+        let mcid = ModelCardInstanceId {
+            namespace: "mixed-text-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("mixed-text-model");
+        card.model_input = ModelInput::Text;
+        card.model_type = ModelType::Chat | ModelType::Classify | ModelType::Pooling;
+        card.worker_type = Some(WorkerType::Aggregated);
+
+        watcher
+            .do_worker_set_registration(&mcid, &mut card)
+            .await
+            .unwrap();
+
+        let model = manager.get_model(card.name()).unwrap();
+        assert!(model.has_chat_engine());
+        assert!(model.has_classify_engine());
+        assert!(model.has_pooling_engine());
     }
 
     #[test]
@@ -2382,6 +2521,33 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+        assert!(is_model_type_list_empty(&mm, ModelType::Classify));
+        assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
+    }
+
+    #[test]
+    fn removal_cards_contain_only_the_empty_model_type() {
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Classify | ModelType::Pooling;
+
+        let removed_cards = removed_model_cards(&mm, &card);
+        assert_eq!(removed_cards.len(), 2);
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Classify)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Pooling)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .all(|card| card.model_type.bits().count_ones() == 1)
+        );
     }
 
     #[test]

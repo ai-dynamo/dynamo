@@ -157,14 +157,14 @@ class TestPriorityChain:
 
     @pytest.mark.asyncio
     async def test_aic_missing_package_falls_through_to_files(self):
-        """aiconfigurator not installed → ImportError is caught, files run."""
+        """aiconfigurator-core not installed → ImportError is caught, files run."""
         file_fpms = [_fpm()]
         with (
             patch.object(pm, "_try_endpoint", return_value=[]),
             patch.object(
                 pm,
                 "_try_aic_interpolation",
-                side_effect=ImportError("no module named aiconfigurator"),
+                side_effect=ImportError("no module named aiconfigurator_core"),
             ),
             patch.object(
                 pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
