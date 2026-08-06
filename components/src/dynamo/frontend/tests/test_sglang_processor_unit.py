@@ -20,6 +20,13 @@ from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+from _tool_guidance_parity import (
+    TOOL_GUIDANCE_PARITY_CASES,
+    assistant_response_format,
+    classify_guidance_source,
+    parity_tool,
+    tool_choice_value,
+)
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
@@ -1112,6 +1119,38 @@ class TestBuildResponseFormatGuidedDecoding:
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
+    # Keep SGLang's guidance decisions aligned with the shared backend matrix.
+    @pytest.mark.parametrize(
+        "case",
+        TOOL_GUIDANCE_PARITY_CASES,
+        ids=lambda case: case.name,
+    )
+    def test_shared_tool_guidance_policy(self, tokenizer, case):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if case.has_tools:
+            request["tools"] = [parity_tool()]
+            request["tool_choice"] = tool_choice_value(case.tool_choice)
+        if case.has_assistant_constraint:
+            request["response_format"] = assistant_response_format()
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name="kimi_k2",
+            reasoning_parser_name=None,
+        )
+
+        assert (
+            classify_guidance_source(
+                result.guided_decoding,
+                has_assistant_constraint=case.has_assistant_constraint,
+            )
+            == case.expected
+        )
+
     def test_none_when_no_tools(self):
         assert (
             build_tool_call_guided_decoding(

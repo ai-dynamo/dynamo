@@ -14,6 +14,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _tool_guidance_parity import (
+    TOOL_GUIDANCE_PARITY_CASES,
+    assistant_response_format,
+    classify_guidance_source,
+    parity_tool,
+    tool_choice_value,
+)
 from transformers import AutoTokenizer
 from vllm.sampling_params import StructuredOutputsParams
 
@@ -1054,6 +1061,20 @@ class _FakeAdjustRequestGrammarToolParser(_FakeGrammarToolParser):
         return request
 
 
+class _FakePassthroughToolParser(_FakeGrammarToolParser):
+    def __init__(self, tokenizer, tools):
+        del tokenizer, tools
+
+    def adjust_request(self, request):
+        return request
+
+
+class _FakeResponseFormatConsumingToolParser(_FakeAdjustRequestGrammarToolParser):
+    def adjust_request(self, request):
+        request.response_format = None
+        return super().adjust_request(request)
+
+
 class TestToolCallGuidedDecoding:
     def _request(self, tokenizer, **overrides):
         raw_request = {**TOOL_REQUEST, "tool_choice": "auto", **overrides}
@@ -1077,6 +1098,28 @@ class TestToolCallGuidedDecoding:
         assert guided is None
         assert parser.requests == []
 
+    # Forced choices need a JSON constraint even when structural tags are disabled.
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+    )
+    def test_forced_choice_uses_json_guidance_when_mode_off(
+        self, tokenizer, tool_choice
+    ):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice=tool_choice),
+            parser,
+            structural_tag_mode="off",
+        )
+
+        assert guided is not None
+        assert set(guided) == {"json"}
+        assert parser.requests == []
+
     def test_strict_schema_uses_copy(self, tokenizer):
         request = self._request(tokenizer)
         parser = _FakeStructuralTagParser()
@@ -1092,22 +1135,138 @@ class TestToolCallGuidedDecoding:
         assert request.tools[0].function.strict is None
         assert parser.requests[0].messages is request.messages
 
-    def test_parser_adjust_request_generated_grammar_is_forwarded(self, tokenizer):
-        request, parser, _, _, _ = _prepare_request(
-            {**TOOL_REQUEST, "tool_choice": "required"},
-            tokenizer=tokenizer,
-            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
+    # Auto schema mode must preserve an omitted strict flag as unset.
+    def test_auto_schema_preserves_unset_strict(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="auto",
         )
 
-        guided = build_tool_call_guided_decoding(
-            request,
-            parser,
+        assert guided == {"structural_tag": {"format": {"strict": [None]}}}
+
+    # Parser-created grammar must survive preprocessing as guided decoding.
+    @pytest.mark.asyncio
+    async def test_parser_adjust_request_generated_grammar_is_forwarded(
+        self, tokenizer
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "required"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
             structural_tag_mode="on",
             structural_tag_scope="auto",
             structural_tag_schema="strict",
         )
 
-        assert guided == {"grammar": 'root ::= "<tool_call>"'}
+        assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+
+    # Explicit assistant constraints must override automatic tool-call guidance.
+    @pytest.mark.parametrize(
+        "assistant_constraint, expected",
+        [
+            (
+                {"response_format": {"type": "json_object"}},
+                {"json": {"type": "object"}},
+            ),
+            ({"guided_regex": "yes|no"}, {"regex": "yes|no"}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_assistant_guidance_takes_precedence_over_auto_tool_guidance(
+        self, tokenizer, assistant_constraint, expected
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": "auto",
+                **assistant_constraint,
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert result.guided_decoding == expected
+
+    # Forced tool choices must not reuse a client-provided assistant grammar.
+    @pytest.mark.asyncio
+    async def test_forced_choice_does_not_reuse_client_structured_outputs(
+        self, tokenizer
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": "required",
+                "structured_outputs": {
+                    "grammar": 'root ::= "not_a_tool_call"'
+                },
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakePassthroughToolParser,
+            structural_tag_mode="on",
+        )
+
+        assert result.guided_decoding is not None
+        assert set(result.guided_decoding) == {"json"}
+
+    # Keep vLLM's guidance decisions aligned with the shared backend matrix.
+    @pytest.mark.parametrize(
+        "case",
+        TOOL_GUIDANCE_PARITY_CASES,
+        ids=lambda case: case.name,
+    )
+    @pytest.mark.asyncio
+    async def test_shared_tool_guidance_policy(self, tokenizer, case):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if case.has_tools:
+            request["tools"] = [parity_tool()]
+            request["tool_choice"] = tool_choice_value(case.tool_choice)
+        if case.has_assistant_constraint:
+            request["response_format"] = assistant_response_format()
+
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert (
+            classify_guidance_source(
+                result.guided_decoding,
+                has_assistant_constraint=case.has_assistant_constraint,
+            )
+            == case.expected
+        )
 
     def test_tool_choice_none_does_not_request_vllm_guidance(self, tokenizer):
         parser = _FakeStructuralTagParser()

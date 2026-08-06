@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -21,6 +22,7 @@ from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -53,6 +55,10 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
     return tool_choice is not None and not isinstance(tool_choice, str)
 
 
+def _is_forced_tool_choice(tool_choice: Any) -> bool:
+    return tool_choice == "required" or _is_named_tool_choice(tool_choice)
+
+
 def _tool_is_strict(tool: Any) -> bool:
     return tool.function.strict is True
 
@@ -64,13 +70,15 @@ def _should_build_tool_call_guidance(
     structural_tag_scope: str,
 ) -> bool:
     tool_choice = request.tool_choice or "auto"
-    if structural_tag_mode != "on" or not request.tools:
+    if not request.tools:
         return False
 
     if tool_choice == "none":
         return False
-    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+    if _is_forced_tool_choice(tool_choice):
         return True
+    if structural_tag_mode != "on":
+        return False
     if tool_choice != "auto":
         return False
     if structural_tag_scope == "always":
@@ -93,7 +101,7 @@ def _request_for_vllm_structural_tag(
             update={
                 "function": tool.function.model_copy(
                     update={
-                        "strict": strict_schema or tool.function.strict is True,
+                        "strict": True if strict_schema else tool.function.strict,
                     }
                 )
             }
@@ -107,6 +115,7 @@ def build_tool_call_guided_decoding(
     request: ChatCompletionRequest,
     tool_parser: ToolParser | None,
     *,
+    parser_guided_decoding: dict[str, Any] | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
@@ -119,7 +128,7 @@ def build_tool_call_guided_decoding(
     ):
         return None
 
-    if tool_parser is not None:
+    if structural_tag_mode == "on" and tool_parser is not None:
         request_for_tag = _request_for_vllm_structural_tag(
             request,
             structural_tag_schema=structural_tag_schema,
@@ -133,19 +142,70 @@ def build_tool_call_guided_decoding(
             )
             return {"structural_tag": tag_value}
 
-    # Some vLLM parsers build a constraint in adjust_request() rather than
-    # implementing get_structural_tag(). MistralToolParser, for example,
-    # stores a parser-native Lark grammar on the validated request.
-    structured_outputs = request.structured_outputs
+    if parser_guided_decoding is not None:
+        return parser_guided_decoding
+
+    tool_choice = request.tool_choice or "auto"
+    if _is_forced_tool_choice(tool_choice):
+        json_schema = get_json_schema_from_tools(tool_choice, request.tools)
+        if json_schema is not None:
+            return {"json": json_schema}
+    return None
+
+
+# Convert vLLM structured-output parameters into Dynamo guided-decoding options.
+def _guided_decoding_from_structured_outputs(
+    structured_outputs: Any,
+) -> dict[str, Any] | None:
     if structured_outputs is None:
         return None
-    if structured_outputs.grammar is not None:
-        return {"grammar": structured_outputs.grammar}
+
+    guided_decoding: dict[str, Any]
     if structured_outputs.json is not None:
-        return {"json": structured_outputs.json}
-    if structured_outputs.json_object:
-        return {"json": {"type": "object"}}
-    return None
+        guided_decoding = {"json": structured_outputs.json}
+    elif structured_outputs.regex is not None:
+        guided_decoding = {"regex": structured_outputs.regex}
+    elif structured_outputs.choice is not None:
+        guided_decoding = {"choice": structured_outputs.choice}
+    elif structured_outputs.grammar is not None:
+        guided_decoding = {"grammar": structured_outputs.grammar}
+    elif structured_outputs.json_object:
+        guided_decoding = {"json": {"type": "object"}}
+    elif structured_outputs.structural_tag is not None:
+        guided_decoding = {"structural_tag": structured_outputs.structural_tag}
+    else:
+        return None
+
+    if structured_outputs.whitespace_pattern is not None:
+        guided_decoding["whitespace_pattern"] = structured_outputs.whitespace_pattern
+    return guided_decoding
+
+
+# Explicit assistant constraints take precedence over automatic tool guidance.
+def _build_assistant_guided_decoding(
+    request: ChatCompletionRequest,
+) -> dict[str, Any] | None:
+    guided_decoding = _guided_decoding_from_structured_outputs(
+        request.extract_structured_outputs()
+    )
+
+    request_extra = request.model_extra or {}
+    legacy_guidance = {
+        key: value
+        for key, value in (
+            ("json", request_extra.get("guided_json")),
+            ("regex", request_extra.get("guided_regex")),
+            ("grammar", request_extra.get("guided_grammar")),
+            ("choice", request_extra.get("guided_choice") or None),
+        )
+        if value is not None
+    }
+    if legacy_guidance:
+        guided_decoding = {**(guided_decoding or {}), **legacy_guidance}
+        whitespace_pattern = request_extra.get("guided_whitespace_pattern")
+        if whitespace_pattern is not None:
+            guided_decoding["whitespace_pattern"] = whitespace_pattern
+    return guided_decoding
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
@@ -188,6 +248,28 @@ def _materialize_assistant_tool_calls(
     return normalized
 
 
+# Fully validate nested fields only when the fast path leaves raw dictionaries.
+def _validate_chat_completion_request(
+    request: dict[str, Any] | ChatCompletionRequest,
+) -> ChatCompletionRequest:
+    if isinstance(request, ChatCompletionRequest):
+        return request
+    if not SKIP_REQUEST_VALIDATION:
+        return ChatCompletionRequest.model_validate(request)
+
+    validated_request = ChatCompletionRequest.model_construct(**request)
+    has_unvalidated_tools = validated_request.tools and any(
+        not hasattr(tool, "model_dump") for tool in validated_request.tools
+    )
+    if (
+        has_unvalidated_tools
+        or isinstance(validated_request.response_format, dict)
+        or isinstance(validated_request.structured_outputs, dict)
+    ):
+        return ChatCompletionRequest.model_validate(request)
+    return validated_request
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -207,17 +289,7 @@ def _prepare_request(
         messages_for_render: Messages to pass as first arg to render_messages.
         chat_params: ChatParams for render_messages / render_messages_async.
     """
-    if isinstance(request, ChatCompletionRequest):
-        request_for_sampling = request
-    elif SKIP_REQUEST_VALIDATION:
-        # Trusted fast path; caller must provide OpenAI-compatible payload.
-        request_for_sampling = ChatCompletionRequest.model_construct(**request)
-        if request_for_sampling.tools and any(
-            not hasattr(tool, "model_dump") for tool in request_for_sampling.tools
-        ):
-            request_for_sampling = ChatCompletionRequest.model_validate(request)
-    else:
-        request_for_sampling = ChatCompletionRequest.model_validate(request)
+    request_for_sampling = _validate_chat_completion_request(request)
 
     tool_parser: ToolParser | None = None
     # With enable_auto_tool_choice the model may emit tool calls even when the
@@ -319,6 +391,14 @@ async def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
 ) -> PreprocessResult:
+    validated_request = _validate_chat_completion_request(request)
+    assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
+    client_structured_guidance = deepcopy(
+        _guided_decoding_from_structured_outputs(
+            validated_request.extract_structured_outputs()
+        )
+    )
+    is_forced_tool_choice = _is_forced_tool_choice(validated_request.tool_choice)
     (
         request_for_sampling,
         tool_parser,
@@ -326,7 +406,7 @@ async def preprocess_chat_request(
         messages,
         chat_params,
     ) = _prepare_request(
-        request,
+        validated_request,
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
@@ -335,12 +415,27 @@ async def preprocess_chat_request(
         default_thinking_mode=default_thinking_mode,
     )
 
-    guided_decoding = build_tool_call_guided_decoding(
+    adjusted_structured_guidance = _guided_decoding_from_structured_outputs(
+        request_for_sampling.structured_outputs
+    )
+    parser_guided_decoding = (
+        adjusted_structured_guidance
+        if tool_parser is not None
+        and adjusted_structured_guidance != client_structured_guidance
+        else None
+    )
+    tool_guided_decoding = build_tool_call_guided_decoding(
         request_for_sampling,
         tool_parser,
+        parser_guided_decoding=parser_guided_decoding,
         structural_tag_mode=structural_tag_mode,
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
+    )
+    guided_decoding = (
+        assistant_guided_decoding
+        if assistant_guided_decoding is not None and not is_forced_tool_choice
+        else tool_guided_decoding
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
