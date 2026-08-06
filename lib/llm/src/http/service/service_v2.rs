@@ -1208,6 +1208,7 @@ impl HttpServiceConfigBuilder {
             &config.request_template,
             anthropic_endpoints_enabled,
             generate_endpoint_enabled,
+            config.enable_batch_endpoints,
         )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1334,6 +1335,7 @@ impl HttpServiceConfigBuilder {
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
         enable_generate_endpoint: bool,
+        enable_batch_endpoints: bool,
     ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -1359,11 +1361,6 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
-        let (batch_docs, batch_route) = super::openai::batch_router(
-            state.clone(),
-            var(HTTP_SVC_FILES_PATH_ENV).ok(),
-            var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
-        );
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
@@ -1375,7 +1372,15 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
-        endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
+
+        if enable_batch_endpoints {
+            let (batch_docs, batch_route) = super::openai::batch_router(
+                state.clone(),
+                var(HTTP_SVC_FILES_PATH_ENV).ok(),
+                var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+            );
+            endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
+        }
 
         if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
