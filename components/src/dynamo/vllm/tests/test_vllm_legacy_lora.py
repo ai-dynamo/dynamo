@@ -39,6 +39,7 @@ def _make_prefill_handler():
         model="/models/base",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
+        rejection_frontend_request_concurrency_limit=17,
         engine_args=SimpleNamespace(block_size=16, max_loras=4),
     )
     handler.engine_client = SimpleNamespace(
@@ -94,6 +95,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
+    assert kwargs["rejection_frontend_request_concurrency_limit"] == 17
     # The adapter card must carry the engine-actual main-attention block size,
     # not engine_args.block_size (16) — see #11866.
     assert kwargs["kv_cache_block_size"] == 1056

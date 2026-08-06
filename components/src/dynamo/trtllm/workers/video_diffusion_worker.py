@@ -99,6 +99,9 @@ async def init_video_diffusion_worker(
         model_name,
         worker_type=WorkerType.Aggregated,
         needs=[],
+        rejection_frontend_request_concurrency_limit=(
+            config.rejection_frontend_request_concurrency_limit
+        ),
     )
 
     logging.info(f"Model registered, serving endpoint: {config.endpoint}")

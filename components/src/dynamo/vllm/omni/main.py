@@ -85,6 +85,9 @@ async def init_omni(
             # frontend, so they register as Aggregated.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            rejection_frontend_request_concurrency_limit=(
+                config.rejection_frontend_request_concurrency_limit
+            ),
         )
 
         logger.info("Starting to serve Omni worker endpoint...")
