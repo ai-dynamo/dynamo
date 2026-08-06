@@ -1207,7 +1207,8 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 
 	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := groveRenderDeployment(dgd, generatedPCS)
+	renderDGD, err := groveRenderDeployment(dgd, generatedPCS)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
 	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
@@ -1480,7 +1481,8 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 	)
 	desired, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := groveRenderDeployment(dgd, desired)
+	renderDGD, err := groveRenderDeployment(dgd, desired)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	prefill := renderDGD.GetComponentByName("prefill")
 	if prefill == nil {
 		t.Fatal("expected rendered prefill component")

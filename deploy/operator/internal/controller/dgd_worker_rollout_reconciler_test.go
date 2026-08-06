@@ -23,6 +23,7 @@ import (
 	"sort"
 	"testing"
 
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -85,6 +86,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	scheme := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(scheme)
 	_ = nvidiacomv1beta1.AddToScheme(scheme)
+	_ = grovev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	builder := fake.NewClientBuilder().
@@ -121,6 +123,94 @@ func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
+}
+
+func TestReconcileGroveWorkerHashSuffixDefersExistingDeploymentUntilWorkerChange(t *testing.T) {
+	ctx := context.Background()
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "MODEL_MAX_LEN", Value: "4096"}},
+		},
+	})
+	dgd.Generation = 7
+	pcs := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Namespace: dgd.Namespace,
+		},
+	}
+	r := createTestReconcilerWithStatus(dgd, withObjects(pcs))
+
+	require.NoError(t, r.ReconcileGroveWorkerHashSuffix(ctx, dgd))
+	adopted := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, adopted))
+	expectedHash, err := dynamo.ComputeDGDWorkersSpecHash(adopted)
+	require.NoError(t, err)
+	assert.Empty(t, adopted.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled])
+	assert.Equal(t, "7", adopted.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedGeneration])
+	assert.Equal(t, expectedHash, adopted.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2])
+
+	// A non-worker spec update remains in the unsuffixed generation.
+	adopted.Generation = 8
+	adopted.Spec.Components = append(adopted.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "frontend",
+		ComponentType: consts.ComponentTypeFrontend,
+	})
+	require.NoError(t, r.ReconcileGroveWorkerHashSuffix(ctx, adopted))
+	stillAdopted := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, stillAdopted))
+	assert.Empty(t, stillAdopted.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled])
+	assert.Equal(t, expectedHash, stillAdopted.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2])
+
+	// The first worker-spec change enables suffixing and removes the temporary
+	// adoption annotations.
+	stillAdopted.Generation = 9
+	stillAdopted.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: "example.com/model:8192",
+			}},
+		},
+	}
+	require.NoError(t, r.ReconcileGroveWorkerHashSuffix(ctx, stillAdopted))
+	enabled := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, enabled))
+	assert.Equal(t, "true", enabled.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled])
+	assert.Empty(t, enabled.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedGeneration])
+	assert.Empty(t, enabled.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2])
+}
+
+func TestReconcileGroveWorkerHashSuffixEnablesNewDeployment(t *testing.T) {
+	ctx := context.Background()
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	r := createTestReconcilerWithStatus(dgd)
+
+	require.NoError(t, r.ReconcileGroveWorkerHashSuffix(ctx, dgd))
+	enabled := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, enabled))
+	assert.Equal(t, "true", enabled.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled])
+	assert.Empty(t, enabled.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedGeneration])
+	assert.Empty(t, enabled.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2])
+}
+
+func TestGroveRenderDeploymentInjectsCanonicalWorkerHashSuffix(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+
+	rendered, err := groveRenderDeployment(dgd, nil)
+	require.NoError(t, err)
+	worker := rendered.GetComponentByName("worker")
+	require.NotNil(t, worker)
+	assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+	assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
 }
 
 func TestShouldTriggerRollingUpdate(t *testing.T) {

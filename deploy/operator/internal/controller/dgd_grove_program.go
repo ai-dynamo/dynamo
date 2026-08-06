@@ -103,6 +103,10 @@ func (p *groveProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
+	if err := p.rollout.ReconcileGroveWorkerHashSuffix(ctx, req.DGD); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to reconcile Grove worker hash suffix")
+		return programResult, failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+	}
 	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
