@@ -125,8 +125,14 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            {{- if .Values.daemonset.pageBroker.enabled }}
             - name: pagebroker-run
               mountPath: /run/pagebroker
+            - name: pagebroker-staging
+              mountPath: /staging
+            - name: pagebroker-scratch
+              mountPath: /scratch
+            {{- end }}
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             # Mount the checkpoint PVC directly in namespace-local agent mode
             - name: checkpoints
@@ -168,10 +174,16 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        {{- if .Values.daemonset.pageBroker.enabled }}
         - name: pagebroker
           image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
           imagePullPolicy: {{ .Values.daemonset.image.pullPolicy }}
-          command: ["/usr/local/bin/pagebroker", "serve"]
+          command:
+            - /usr/local/bin/pagebroker
+            - serve
+            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
+            - {{ .Values.storage.pvc.basePath | quote }}
+            {{- end }}
           securityContext:
             privileged: true
           ports:
@@ -195,16 +207,21 @@ spec:
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
-              readOnly: true
             {{- end }}
+          resources:
+            {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        {{- end }}
       volumes:
+        {{- if .Values.daemonset.pageBroker.enabled }}
         - name: pagebroker-staging
           emptyDir:
             medium: Memory
+            sizeLimit: {{ .Values.daemonset.resources.limits.memory }}
         - name: pagebroker-scratch
           emptyDir: {}
         - name: pagebroker-run
           emptyDir: {}
+        {{- end }}
         # Configuration ConfigMap
         - name: config
           configMap:

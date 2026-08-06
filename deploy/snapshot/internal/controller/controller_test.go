@@ -261,6 +261,80 @@ func TestCheckpointLocationsFromPod(t *testing.T) {
 	})
 }
 
+func TestPageBrokerEnabled(t *testing.T) {
+	tests := []struct {
+		name           string
+		annotation     string
+		storageType    string
+		accessMode     string
+		podStorageType string
+		want           bool
+		staging        bool
+	}{
+		{
+			name:        "direct bypasses PageBroker",
+			annotation:  "true",
+			storageType: snapshotprotocol.StorageTypePVC,
+			accessMode:  types.StorageAccessModeAgentMount,
+			want:        false,
+		},
+		{
+			name:        "explicit direct bypasses PageBroker",
+			annotation:  "direct",
+			storageType: snapshotprotocol.StorageTypePVC,
+			accessMode:  types.StorageAccessModeAgentMount,
+			want:        false,
+		},
+		{
+			name:        "explicit staging",
+			annotation:  "staged",
+			storageType: snapshotprotocol.StorageTypePVC,
+			accessMode:  types.StorageAccessModeAgentMount,
+			want:        true,
+			staging:     true,
+		},
+		{
+			name:        "annotation absent",
+			storageType: snapshotprotocol.StorageTypePVC,
+			accessMode:  types.StorageAccessModeAgentMount,
+		},
+		{
+			name:        "pod mount",
+			annotation:  "true",
+			storageType: snapshotprotocol.StorageTypePVC,
+			accessMode:  types.StorageAccessModePodMount,
+		},
+		{
+			name:           "pod storage type overrides config",
+			annotation:     "true",
+			storageType:    snapshotprotocol.StorageTypePVC,
+			accessMode:     types.StorageAccessModeAgentMount,
+			podStorageType: "s3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := makeTestController(t)
+			w.config.Storage.Type = tt.storageType
+			w.config.Storage.AccessMode = tt.accessMode
+			pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true, nil, map[string]string{
+				snapshotprotocol.PageBrokerAnnotation: tt.annotation,
+			})
+			if tt.podStorageType != "" {
+				pod.Annotations[snapshotprotocol.CheckpointStorageTypeAnnotation] = tt.podStorageType
+			}
+
+			if got := w.pageBrokerEnabled(pod); got != tt.want {
+				t.Fatalf("pageBrokerEnabled() = %t, want %t", got, tt.want)
+			}
+			if got := w.pageBrokerStaging(pod); got != tt.staging {
+				t.Fatalf("pageBrokerStaging() = %t, want %t", got, tt.staging)
+			}
+		})
+	}
+}
+
 func TestRestoreCheckpointReady(t *testing.T) {
 	w := makeTestController(t)
 	log := testr.New(t)
@@ -713,4 +787,3 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 		}
 	}
 }
-

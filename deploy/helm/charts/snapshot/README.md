@@ -41,6 +41,14 @@ suitable `ReadWriteOnce` storage classes for sequential checkpoint/restore
 workflows, as long as the backend can attach the volume to the node running that
 workload pod.
 
+`nvidia.com/snapshot-pagebroker: "true"` (or `"direct"`) uses the checkpoint
+filesystem directly and does not contact PageBroker. Use `"staged"` to require
+the PageBroker RAM buffer; that mode requires
+`daemonset.pageBroker.enabled=true` and `storage.accessMode=agentMount`.
+Its memory-backed staging volume and container use `daemonset.resources`; size
+that memory limit for the largest staged checkpoint. The annotation is ignored
+for `podMount` and non-PVC storage, which use the existing paths.
+
 Because `podMount` reaches storage through `/host/proc/<pid>/root`, the target
 container must still be alive and visible through host proc when the agent
 starts checkpoint or restore. A container restart, exited placeholder, runtime

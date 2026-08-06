@@ -69,6 +69,7 @@ public:
   Response prepare_checkpoint(const Request &request);
   Response commit(const Request &request);
   Response abort(const Request &request);
+  Response wait_for_staging(const Request &request, Response response);
   std::shared_ptr<StagingState>
   staging_state(const std::string &transaction_id);
   void cleanup();

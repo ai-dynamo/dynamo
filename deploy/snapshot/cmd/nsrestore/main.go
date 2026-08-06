@@ -22,7 +22,6 @@ func main() {
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	imageFD := flag.Int("pagebroker-image-fd", -1, "Inherited PageBroker image directory FD")
 	workFD := flag.Int("pagebroker-work-fd", -1, "Inherited PageBroker scratch directory FD")
-	providerFD := flag.Int("pagebroker-provider-fd", -1, "Inherited PageBroker provider socket FD")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -30,13 +29,12 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath:       *checkpointPath,
-		CUDADeviceMap:        *cudaDeviceMap,
-		CgroupRoot:           *cgroupRoot,
-		TargetPodIP:          *targetPodIP,
-		PageBrokerImageFD:    *imageFD,
-		PageBrokerWorkFD:     *workFD,
-		PageBrokerProviderFD: *providerFD,
+		CheckpointPath:    *checkpointPath,
+		CUDADeviceMap:     *cudaDeviceMap,
+		CgroupRoot:        *cgroupRoot,
+		TargetPodIP:       *targetPodIP,
+		PageBrokerImageFD: *imageFD,
+		PageBrokerWorkFD:  *workFD,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

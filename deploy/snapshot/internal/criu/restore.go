@@ -31,7 +31,6 @@ func ExecuteRestore(
 	checkpointPath string,
 	imageFD int,
 	workFD int,
-	providerFD *os.File,
 	log logr.Logger,
 ) (int32, func(), error) {
 	settings := m.CRIUDump.CRIU
@@ -91,9 +90,6 @@ func ExecuteRestore(
 		return 0, nil, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
 	}
 	c.SetCriuPath(settings.BinaryPath)
-	if providerFD != nil {
-		c.AddInheritFd("0-extmem-provider", providerFD)
-	}
 
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {

@@ -80,16 +80,6 @@ ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
-# =============================================================================
-# PageBroker C++23 builder
-# =============================================================================
-FROM ubuntu:22.04 AS pagebroker-builder
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /workspace/pagebroker
-COPY pagebroker ./
-RUN make clean && make
-
 # Emit a CycloneDX SBOM for snapshot-agent's Go module set. nsrestore's
 # deps are a subset of agent's, so a single SBOM keyed on ./cmd/agent is
 # sufficient. The git-init dance satisfies cyclonedx-gomod's main-module
@@ -128,6 +118,16 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     else \
         mkdir -p /tmp/go-vendor ; \
     fi
+
+# =============================================================================
+# PageBroker C++23 builder
+# =============================================================================
+FROM ubuntu:22.04 AS pagebroker-builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace/pagebroker
+COPY pagebroker ./
+RUN make clean && make
 
 # =============================================================================
 # Stage: CUDA checkpoint helper builder

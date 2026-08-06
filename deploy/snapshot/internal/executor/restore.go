@@ -76,7 +76,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			transaction, err = pagebroker.Direct(ctx, req.PageBrokerSocket, req.CheckpointLocation)
 		}
 		if err != nil {
-			return 0, fmt.Errorf("PageBroker staging failed: %w", err)
+			log.Error(err, "PageBroker request failed before restore launch; using checkpoint storage directly")
+			transaction = nil
 		}
 	}
 	result, err := execNSRestore(ctx, log, req, snap, transaction)
@@ -260,9 +261,8 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	if transaction != nil {
 		args = append(args,
-			"--pagebroker-provider-fd", "3",
-			"--pagebroker-image-fd", "4",
-			"--pagebroker-work-fd", "5",
+			"--pagebroker-image-fd", "3",
+			"--pagebroker-work-fd", "4",
 		)
 	}
 

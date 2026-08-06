@@ -962,14 +962,15 @@ Response TransactionManager::prepare_checkpoint(const Request &r) {
     fs::create_directories(destination.parent_path());
     if (!path_within(checkpoint_root_, destination))
       return fail(r.transaction_id, "checkpoint path is outside the configured root");
-    auto staging = checkpoint_staging_path(destination, r.transaction_id);
-    if (fs::exists(staging))
+    auto staging = tx_path(staging_root_, r.transaction_id);
+    auto durable_staging = checkpoint_staging_path(destination, r.transaction_id);
+    if (fs::exists(staging) || fs::exists(durable_staging))
       return fail(r.transaction_id,
                   "checkpoint transaction path already exists");
     fs::create_directory(staging);
     std::ofstream marker(
         checkpoint_marker_path(staging_root_, r.transaction_id));
-    marker << staging.string() << '\n';
+    marker << durable_staging.string() << '\n';
     if (!marker) {
       fs::remove_all(staging);
       return fail(r.transaction_id,
@@ -999,6 +1000,18 @@ TransactionManager::staging_state(const std::string &transaction_id) {
   return transaction == transactions_.end() ? nullptr
                                              : transaction->second.staging;
 }
+Response TransactionManager::wait_for_staging(const Request &request,
+                                              Response response) {
+  auto staging = staging_state(request.transaction_id);
+  if (!staging) return fail(request.transaction_id, "transaction is not staging");
+  std::unique_lock lock(staging->mutex);
+  staging->changed.wait(lock, [&] {
+    return staging->complete || staging->cancelled || !staging->error.empty();
+  });
+  if (!staging->error.empty()) return fail(request.transaction_id, staging->error);
+  if (staging->cancelled) return fail(request.transaction_id, "staging cancelled");
+  return response;
+}
 Response TransactionManager::commit(const Request &r) {
   auto started = std::chrono::steady_clock::now();
   std::lock_guard lock(mutex_);
@@ -1014,8 +1027,10 @@ Response TransactionManager::commit(const Request &r) {
         return fail(r.transaction_id, state.staging->error);
     }
     if (state.promote) {
-      auto staged = checkpoint_staging_path(state.checkpoint,
-                                            r.transaction_id);
+      auto staged = tx_path(staging_root_, r.transaction_id);
+      auto durable_staged = checkpoint_staging_path(state.checkpoint,
+                                                     r.transaction_id);
+      fs::copy(staged, durable_staged, fs::copy_options::recursive);
       auto backup = state.checkpoint.parent_path() /
                     ("." + state.checkpoint.filename().string() +
                      ".pagebroker-old-" + r.transaction_id);
@@ -1024,7 +1039,7 @@ Response TransactionManager::commit(const Request &r) {
       if (fs::exists(state.checkpoint))
         fs::rename(state.checkpoint, backup);
       try {
-        fs::rename(staged, state.checkpoint);
+        fs::rename(durable_staged, state.checkpoint);
       } catch (...) {
         if (fs::exists(backup) && !fs::exists(state.checkpoint))
           fs::rename(backup, state.checkpoint);
@@ -1035,6 +1050,8 @@ Response TransactionManager::commit(const Request &r) {
       cleanup_error.clear();
       fs::remove(checkpoint_marker_path(staging_root_, r.transaction_id),
                  cleanup_error);
+      cleanup_error.clear();
+      fs::remove_all(staged, cleanup_error);
       cleanup_error.clear();
       fs::remove_all(scratch_root_ / r.transaction_id, cleanup_error);
     } else {
@@ -1072,6 +1089,8 @@ Response TransactionManager::abort(const Request &r) {
       else if (transaction->second.uses_staging)
         fs::remove_all(tx_path(staging_root_, r.transaction_id));
       fs::remove(checkpoint_marker_path(staging_root_, r.transaction_id));
+      if (transaction->second.promote)
+        fs::remove_all(tx_path(staging_root_, r.transaction_id));
       fs::remove_all(scratch_root_ / r.transaction_id);
     } catch (const fs::filesystem_error &e) {
       return fail(r.transaction_id, e.what());
@@ -1113,6 +1132,8 @@ void Server::handle_client(int descriptor) {
     response = fail({}, error.empty() ? "invalid request" : error);
   } else if (request.operation == Request::Operation::Submit) {
     response = transactions_.submit(request);
+    if (response.ok && request.staging)
+      response = transactions_.wait_for_staging(request, std::move(response));
     if (response.ok) {
       provider_session = true;
       provider_root = response.staging_path;
