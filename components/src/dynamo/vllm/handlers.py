@@ -851,13 +851,17 @@ def _set_kv_transfer_params_preserving_router_hint(
     sampling_params: SamplingParams,
     kv_transfer_params: Mapping[str, Any],
 ) -> None:
-    if sampling_params.extra_args is None:
-        sampling_params.extra_args = {}
+    safe_extra_args = (
+        dict(sampling_params.extra_args)
+        if isinstance(sampling_params.extra_args, dict)
+        else {}
+    )
     merged = dict(kv_transfer_params)
-    existing = sampling_params.extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+    existing = safe_extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
     if isinstance(existing, Mapping) and _ROUTER_HINT_EXTRA_ARGS_KEY in existing:
         merged[_ROUTER_HINT_EXTRA_ARGS_KEY] = existing[_ROUTER_HINT_EXTRA_ARGS_KEY]
-    sampling_params.extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = merged
+    safe_extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = merged
+    sampling_params.extra_args = safe_extra_args
 
 
 def build_sampling_params_openai(

@@ -1213,6 +1213,43 @@ def test_kv_transfer_params_setter_preserves_router_hint_only(kv_transfer_params
     }
 
 
+def test_kv_transfer_params_setter_copies_extra_args_before_mutating():
+    from dynamo.vllm.handlers import _set_kv_transfer_params_preserving_router_hint
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    shared_extra_args = {
+        "kv_transfer_params": {
+            "router_hint": router_hint,
+            "internal": "kept-in-default",
+        },
+        "other_internal": "kept",
+    }
+    sampling_params = SimpleNamespace(extra_args=shared_extra_args)
+
+    _set_kv_transfer_params_preserving_router_hint(
+        sampling_params, {"transfer_id": "prefill-1"}
+    )
+
+    assert shared_extra_args == {
+        "kv_transfer_params": {
+            "router_hint": router_hint,
+            "internal": "kept-in-default",
+        },
+        "other_internal": "kept",
+    }
+    assert sampling_params.extra_args is not shared_extra_args
+    assert sampling_params.extra_args == {
+        "kv_transfer_params": {
+            "transfer_id": "prefill-1",
+            "router_hint": router_hint,
+        },
+        "other_internal": "kept",
+    }
+
+
 def test_build_sampling_params_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 
