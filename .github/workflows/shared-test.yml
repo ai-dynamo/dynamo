@@ -156,10 +156,6 @@ jobs:
         # coverage.py collects nothing ("No data was collected" warnings) and TIA
         # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
         DD_CIVISIBILITY_ITR_ENABLED: 'false'
-        # The GPU-parallel orchestrator's watchdog needs to fire before the step
-        # timeout below, or the runner dies first and it never gets a turn.
-        # GitHub exposes no variable for timeout-minutes, so pass it explicitly.
-        GPU_TEST_TIMEOUT_MINUTES: ${{ inputs.gpu_test_timeout_minutes }}
     permissions:
       contents: read
     services:

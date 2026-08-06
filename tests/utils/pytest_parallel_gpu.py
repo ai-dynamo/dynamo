@@ -316,7 +316,9 @@ _RETRYABLE_INIT_MARKERS = [
 _MAX_RETRIES = 3
 
 # Last-resort deadline behind the child's own --timeout, for when pytest-timeout
-# is swallowed by a C-level block and the stuck child stalls the whole run.
+# is swallowed by a C-level block and the stuck child stalls the whole run. A
+# test whose deadline lands past the step's own timeout-minutes is simply not
+# guarded, which is where it was before this existed.
 _WATCHDOG_GRACE_S = 120
 
 
@@ -335,21 +337,6 @@ def _watchdog_multiplier() -> int:
         return max(1, int(os.environ["DD_CIVISIBILITY_FLAKY_RETRY_COUNT"]))
     except (KeyError, ValueError):
         return 2  # matches the shipped retry count
-
-
-def _watchdog_cap() -> float:
-    """Most wall-clock the watchdog may spend before the job's own timeout.
-
-    The job kills the whole step at timeout-minutes, so a deadline past that
-    never fires and the runner dies first instead. GitHub exposes no variable
-    for it, so shared-test.yml passes it through. The 80% leaves room for image
-    pull, checkout and artifact upload, which sit outside the measured window.
-    """
-    try:
-        budget = float(os.environ["GPU_TEST_TIMEOUT_MINUTES"]) * 60
-    except (KeyError, ValueError):
-        budget = 120 * 60
-    return budget * 0.8
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -844,7 +831,6 @@ def run_parallel(
 
     env_base = os.environ.copy()
     watchdog_multiplier = _watchdog_multiplier()
-    watchdog_cap = _watchdog_cap()
 
     while pending or running:
         now = time.monotonic()
@@ -858,11 +844,6 @@ def run_parallel(
                 continue
             elapsed = now - run_info.start_time
             deadline = run_info.test.timeout * watchdog_multiplier + _WATCHDOG_GRACE_S
-            # Pull it in to the job budget, but never so far that it would cut
-            # into the test's own first attempt. A test too long to fit simply
-            # goes unguarded, which is what it was before this existed.
-            if watchdog_cap >= run_info.test.timeout + _WATCHDOG_GRACE_S:
-                deadline = min(deadline, watchdog_cap)
             if elapsed <= deadline:
                 continue
             if run_info.watchdog_reason is None:
