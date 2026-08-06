@@ -16,7 +16,7 @@ use dynamo_runtime::{
     discovery::DiscoveryQuery,
     pipeline::{PushRouter, RouterMode},
     prelude::DistributedRuntimeProvider,
-    protocols::annotated::Annotated,
+    protocols::{EndpointId, annotated::Annotated},
 };
 
 use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
@@ -30,6 +30,18 @@ use crate::{
     },
     session_affinity::create_affinity_coordinator,
 };
+
+struct ActivationConfig {
+    endpoint: Endpoint,
+    model_manager: Arc<ModelManager>,
+    router_mode: RouterMode,
+    kv_cache_block_size: u32,
+    kv_router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    session_affinity_ttl: Option<std::time::Duration>,
+    configured_is_eagle: bool,
+    model_name: String,
+}
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
@@ -55,6 +67,8 @@ impl PrefillRouter {
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            #[cfg(test)]
+            activation_task_state: Arc::new(()),
         })
     }
 
@@ -101,27 +115,65 @@ impl PrefillRouter {
             namespace,
             is_eagle,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            #[cfg(test)]
+            activation_task_state: Arc::new(()),
         });
 
         // Spawn background task to wait for activation
-        let router_clone = router.clone();
+        let router_weak = Arc::downgrade(&router);
+        #[cfg(test)]
+        let activation_task_state = router.activation_task_state.clone();
         tokio::spawn(async move {
+            #[cfg(test)]
+            let _activation_task_state = activation_task_state;
             tokio::select! {
                 result = activation_rx => {
                     let Ok(endpoint) = result else {
                         tracing::debug!("Prefill router activation channel closed without receiving endpoint");
                         return;
                     };
+                    let Some(router) = router_weak.upgrade() else {
+                        return;
+                    };
+                    let router_mode = router.router_mode;
+                    let session_affinity_ttl = router.session_affinity_ttl;
+                    let configured_is_eagle = router.is_eagle;
+                    let model_name = router.model_name.clone();
+                    let prefill_load_estimator = router.prefill_load_estimator.clone();
+                    drop(router);
 
-                    if let Err(e) = router_clone.activate(
+                    let activation_config = ActivationConfig {
                         endpoint,
                         model_manager,
+                        router_mode,
                         kv_cache_block_size,
                         kv_router_config,
-                        router_clone.prefill_load_estimator.clone(),
-                        worker_monitor.as_ref(),
-                    ).await {
-                        tracing::error!(error = %e, "Failed to activate prefill router");
+                        prefill_load_estimator,
+                        session_affinity_ttl,
+                        configured_is_eagle,
+                        model_name,
+                    };
+                    let activation = Self::build_activation(activation_config);
+                    let activation = tokio::select! {
+                        result = activation => result,
+                        _ = cancel_token.cancelled() => {
+                            tracing::debug!("Prefill router activation cancelled");
+                            return;
+                        }
+                    };
+                    match activation {
+                        Ok((endpoint_id, inner_router, prefill_client)) => {
+                            if let Some(router) = router_weak.upgrade() {
+                                Self::attach_prefill_client(
+                                    worker_monitor.as_ref(),
+                                    &prefill_client,
+                                );
+                                router.finish_activation(endpoint_id, inner_router);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to activate prefill router");
+                        }
                     }
                 }
                 _ = cancel_token.cancelled() => {
@@ -133,23 +185,23 @@ impl PrefillRouter {
         router
     }
 
-    /// Activate the prefill router with the provided endpoint
-    async fn activate(
-        &self,
-        endpoint: Endpoint,
-        model_manager: Arc<ModelManager>,
-        kv_cache_block_size: u32,
-        kv_router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
-    ) -> Result<()> {
-        tracing::info!(
-            router_mode = ?self.router_mode,
-            "Activating prefill router"
-        );
+    async fn build_activation(
+        config: ActivationConfig,
+    ) -> Result<(EndpointId, InnerPrefillRouter, Client)> {
+        let ActivationConfig {
+            endpoint,
+            model_manager,
+            router_mode,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            session_affinity_ttl,
+            configured_is_eagle,
+            model_name,
+        } = config;
+        tracing::info!(?router_mode, "Activating prefill router");
 
-        // Store endpoint metadata for bootstrap and topology preparation.
-        let _ = self.endpoint_id.set(endpoint.id());
+        let endpoint_id = endpoint.id();
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
@@ -157,7 +209,7 @@ impl PrefillRouter {
             .get_or_create_runtime_config_watcher(&endpoint)
             .await?;
 
-        let inner_router = if self.router_mode.is_kv_routing() {
+        let inner_router = if router_mode.is_kv_routing() {
             let endpoint_id = endpoint.id();
             let discovered_cards = endpoint
                 .component()
@@ -173,10 +225,10 @@ impl PrefillRouter {
                 Ok(instances) => instances
                     .into_iter()
                     .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
-                    .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle),
+                    .map_or(configured_is_eagle, |card| card.runtime_config.enable_eagle),
                 Err(error) => {
                     tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
-                    self.is_eagle
+                    configured_is_eagle
                 }
             };
 
@@ -189,16 +241,16 @@ impl PrefillRouter {
                     prefill_load_estimator,
                     Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
-                    Some(self.model_name.clone()),
+                    Some(model_name),
                     is_eagle,
                 )
                 .await?;
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
-            Self::attach_prefill_client(worker_monitor, &client);
             let affinity =
-                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
+                create_affinity_coordinator(session_affinity_ttl, client.clone()).await?;
+            let prefill_client = client.clone();
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -209,38 +261,48 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
-                push_router,
-                kv_chooser,
-                affinity,
-            )))
+            (
+                InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
+                    push_router,
+                    kv_chooser,
+                    affinity,
+                ))),
+                prefill_client,
+            )
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
-            Self::attach_prefill_client(worker_monitor, &client);
             let affinity =
-                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
+                create_affinity_coordinator(session_affinity_ttl, client.clone()).await?;
+            let prefill_client = client.clone();
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
                 client,
-                self.router_mode,
+                router_mode,
                 None, // worker_monitor
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(
-                crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
-                    push_router,
-                    affinity,
-                    self.router_mode.is_direct_routing(),
-                ),
-            ))
+            (
+                InnerPrefillRouter::SimpleRouter(Arc::new(
+                    crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
+                        push_router,
+                        affinity,
+                        router_mode.is_direct_routing(),
+                    ),
+                )),
+                prefill_client,
+            )
         };
 
-        // Set the router (ignore error if already set).
+        Ok((endpoint_id, inner_router.0, inner_router.1))
+    }
+
+    fn finish_activation(&self, endpoint_id: EndpointId, inner_router: InnerPrefillRouter) {
+        let _ = self.endpoint_id.set(endpoint_id);
         let _ = self.prefill_router.set(inner_router);
         match self.complete_activation() {
             PrefillLifecycleState::Active => {
@@ -257,8 +319,6 @@ impl PrefillRouter {
             }
             PrefillLifecycleState::Pending => unreachable!("activation must leave pending state"),
         }
-
-        Ok(())
     }
 
     pub(super) fn complete_activation(&self) -> PrefillLifecycleState {
