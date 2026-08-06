@@ -150,6 +150,9 @@ async def init_omni(
             worker_type=WorkerType.Aggregated,
             needs=[],
             max_gpu_lora_count=_base_model_lora_capacity(config, lora_enabled),
+            rejection_frontend_request_concurrency_limit=(
+                config.rejection_frontend_request_concurrency_limit
+            ),
         )
 
         logger.info("Starting to serve Omni worker endpoint...")

@@ -199,6 +199,9 @@ async def init_image_diffusion(
                 generate_endpoint,
                 server_args,
                 output_modalities=output_modalities,
+                rejection_frontend_request_concurrency_limit=(
+                    dynamo_args.rejection_frontend_request_concurrency_limit
+                ),
                 readiness_gate=ready_event,
             ),
         )
@@ -273,6 +276,9 @@ async def init_video_diffusion(
                 generator,
                 generate_endpoint,
                 server_args,
+                rejection_frontend_request_concurrency_limit=(
+                    dynamo_args.rejection_frontend_request_concurrency_limit
+                ),
                 readiness_gate=ready_event,
             ),
         )

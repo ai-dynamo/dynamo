@@ -2104,6 +2104,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             worker_type=lora_worker_type,
             needs=lora_needs,
             max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
+            rejection_frontend_request_concurrency_limit=(
+                self.config.rejection_frontend_request_concurrency_limit
+            ),
         )
 
     async def _unregister_lora_discovery(self, lora_name: str) -> None:

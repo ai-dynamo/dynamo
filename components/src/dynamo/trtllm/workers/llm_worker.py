@@ -869,6 +869,9 @@ async def init_llm_worker(
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            rejection_frontend_request_concurrency_limit=(
+                config.rejection_frontend_request_concurrency_limit
+            ),
         )
 
         health_check_payload = TrtllmHealthCheckPayload(

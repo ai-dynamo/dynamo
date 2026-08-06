@@ -82,6 +82,10 @@ async def init_omni_realtime(
             # endpoint, so it registers as Aggregated like the unary Omni worker.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            # No rejection_frontend_request_concurrency_limit: the frontend
+            # admission gate never runs for realtime sessions (the model is
+            # selected after the WebSocket upgrade), so the card field would
+            # advertise a limit nothing enforces.
         )
 
         logger.info("Starting to serve realtime Omni worker endpoint...")
