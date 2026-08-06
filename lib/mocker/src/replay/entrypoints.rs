@@ -482,6 +482,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
             sla,
         );
     }
@@ -854,6 +855,7 @@ pub fn simulate_trace_requests_with_router_mode(
         num_workers,
         arrival_speedup_ratio,
         router_mode,
+        false,
         sla,
         None,
     )
@@ -869,6 +871,7 @@ pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
@@ -886,7 +889,7 @@ pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
         num_workers,
         arrival_speedup_ratio,
         router_mode,
-        false,
+        record_per_request,
         None,
         sla,
         scaling_policy,
@@ -910,6 +913,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         requests,
         arrival_speedup_ratio,
         router_mode,
+        false,
         sla,
         None,
     )
@@ -924,6 +928,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
@@ -940,7 +945,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
         requests,
         arrival_speedup_ratio,
         router_mode,
-        false,
+        record_per_request,
         None,
         sla,
         scaling_policy,
@@ -1513,6 +1518,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
         max_in_flight,
         num_workers,
         router_mode,
+        false,
         sla,
         None,
     )
@@ -1528,6 +1534,7 @@ pub fn simulate_concurrency_requests_with_router_mode_and_scaling_policy(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
@@ -1551,7 +1558,7 @@ pub fn simulate_concurrency_requests_with_router_mode_and_scaling_policy(
         max_in_flight,
         num_workers,
         router_mode,
-        false,
+        record_per_request,
         None,
         sla,
         scaling_policy,
@@ -1574,6 +1581,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         requests,
         max_in_flight,
         router_mode,
+        false,
         sla,
         None,
     )
@@ -1588,6 +1596,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
@@ -1604,7 +1613,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
         requests,
         max_in_flight,
         router_mode,
-        false,
+        record_per_request,
         None,
         sla,
         scaling_policy,
@@ -2038,6 +2047,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
@@ -2049,6 +2059,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
         trace,
         num_workers,
         router_mode,
+        record_per_request,
         sla,
     )
 }

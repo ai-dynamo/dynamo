@@ -78,6 +78,34 @@ impl Default for LiveEngineOptions {
     }
 }
 
+/// Map a wire-protocol request ID to a deterministic scheduler UUID.
+pub fn stable_request_uuid(seed: u64, request_id: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed.to_le_bytes());
+    hasher.update(request_id.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    // Mark the digest as an RFC 4122 variant/version-4 UUID. The identifier
+    // remains deterministic; these bits only make diagnostics parse cleanly.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+/// Produce deterministic, tokenizer-independent output token IDs.
+pub fn deterministic_output_tokens(seed: u64, request_id: &str, count: usize) -> Vec<u32> {
+    (0..count)
+        .map(|position| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&seed.to_le_bytes());
+            hasher.update(request_id.as_bytes());
+            hasher.update(&(position as u64).to_le_bytes());
+            let bytes = hasher.finalize();
+            1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
+        })
+        .collect()
+}
+
 /// A running Mocker scheduler with request-scoped output streams.
 #[derive(Clone)]
 pub struct LiveEngine {

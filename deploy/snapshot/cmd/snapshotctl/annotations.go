@@ -9,12 +9,13 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
-// reconcileTargetContainers returns the normalized target-container annotation.
-// A flag value and manifest annotation may both be present only when they match.
-func reconcileTargetContainers(annotations map[string]string, flagValue string, minCount, maxCount int) (string, error) {
+// reconcileTargetContainers returns the normalized target-container list. A flag value and
+// manifest annotation may both be present only when they match. Callers format the result for
+// the target-containers annotation (restore) or set it on PodReference.Containers (capture).
+func reconcileTargetContainers(annotations map[string]string, flagValue string, minCount, maxCount int) ([]string, error) {
 	flagNames, flagErr := snapshotprotocol.ParseTargetContainers(flagValue)
 	if flagErr != nil {
-		return "", fmt.Errorf("--container(s) flag: %w", flagErr)
+		return nil, fmt.Errorf("--container(s) flag: %w", flagErr)
 	}
 
 	manifestRaw := ""
@@ -23,7 +24,7 @@ func reconcileTargetContainers(annotations map[string]string, flagValue string, 
 	}
 	manifestNames, manifestErr := snapshotprotocol.ParseTargetContainers(manifestRaw)
 	if manifestErr != nil {
-		return "", fmt.Errorf("manifest %s annotation: %w", snapshotprotocol.TargetContainersAnnotation, manifestErr)
+		return nil, fmt.Errorf("manifest %s annotation: %w", snapshotprotocol.TargetContainersAnnotation, manifestErr)
 	}
 
 	chosen := flagNames
@@ -31,7 +32,7 @@ func reconcileTargetContainers(annotations map[string]string, flagValue string, 
 		chosen = manifestNames
 	} else if len(manifestNames) > 0 {
 		if snapshotprotocol.FormatTargetContainers(flagNames) != snapshotprotocol.FormatTargetContainers(manifestNames) {
-			return "", fmt.Errorf(
+			return nil, fmt.Errorf(
 				"--container(s) flag %q does not match manifest %s %q; pass one or the other",
 				snapshotprotocol.FormatTargetContainers(flagNames),
 				snapshotprotocol.TargetContainersAnnotation,
@@ -41,13 +42,13 @@ func reconcileTargetContainers(annotations map[string]string, flagValue string, 
 	}
 
 	if len(chosen) == 0 {
-		return "", fmt.Errorf("target containers are required: pass --container(s) or set %s on the manifest", snapshotprotocol.TargetContainersAnnotation)
+		return nil, fmt.Errorf("target containers are required: pass --container(s) or set %s on the manifest", snapshotprotocol.TargetContainersAnnotation)
 	}
 	if minCount > 0 && len(chosen) < minCount {
-		return "", fmt.Errorf("expected at least %d target container(s), got %d", minCount, len(chosen))
+		return nil, fmt.Errorf("expected at least %d target container(s), got %d", minCount, len(chosen))
 	}
 	if maxCount > 0 && len(chosen) > maxCount {
-		return "", fmt.Errorf("expected at most %d target container(s), got %d", maxCount, len(chosen))
+		return nil, fmt.Errorf("expected at most %d target container(s), got %d", maxCount, len(chosen))
 	}
-	return snapshotprotocol.FormatTargetContainers(chosen), nil
+	return chosen, nil
 }

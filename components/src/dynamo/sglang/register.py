@@ -8,7 +8,6 @@ import os
 from typing import Any, List, Optional
 
 import sglang as sgl
-from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
@@ -232,33 +231,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         getattr(server_args, "hicache_storage_backend_extra_config", None)
     )
 
-    try:
-        from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
-            MooncakeStoreConfig,
-        )
-    except ImportError as e:
-        logging.warning(f"MooncakeStoreConfig import unavailable: {e}")
-        return None
-
-    # Graceful degradation: Mooncake runtime metadata is optional. If config
-    # resolution fails for any reason (file not found, malformed env vars,
-    # upstream API change), skip publishing the metadata rather than crashing
-    # the worker -- the worker still serves requests, just without HiCache
-    # router hints. Broad catch is intentional per python-guidelines.md.
-    try:
-        if extra_config and (
-            extra_config.get("master_server_address") is not None
-            or extra_config.get("client_server_address") is not None
-        ):
-            mooncake_config = MooncakeStoreConfig.load_from_extra_config(extra_config)
-        elif envs.SGLANG_HICACHE_MOONCAKE_CONFIG_PATH.is_set():
-            mooncake_config = MooncakeStoreConfig.from_file()
-        else:
-            mooncake_config = MooncakeStoreConfig.load_from_env()
-    except Exception as e:
-        logging.warning(f"Failed to resolve Mooncake config for runtime metadata: {e}")
-        return None
-
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
@@ -296,10 +268,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
         extra_backend_tag = None
 
-    master_server_address = getattr(mooncake_config, "master_server_address", None)
-    if not isinstance(master_server_address, str) or not master_server_address:
-        master_server_address = None
-
     return {
         "backend": "mooncake",
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
@@ -310,10 +278,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
-        "master_server_address": master_server_address,
-        "master_metrics_port": int(
-            getattr(mooncake_config, "master_metrics_port", 9003)
-        ),
+        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
 

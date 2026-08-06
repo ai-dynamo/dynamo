@@ -31,7 +31,7 @@ pub struct TraceSimulationReport {
     /// `TraceCollector::finish`. Intentionally NOT serialized into the summary
     /// JSON (see custom `Serialize` impl below) — consumers that want per-
     /// request granularity should access this field directly and serialize
-    /// it themselves (e.g., the `--report-jsonl` CLI path).
+    /// it themselves (e.g., the `--per-request-jsonl` CLI path).
     pub per_request: Vec<PerRequestRecord>,
 }
 
@@ -468,6 +468,58 @@ struct PerRequestDetail {
     decode_reused_input_tokens: Option<usize>,
     prefill_route_overlap_tokens: Option<usize>,
     decode_route_overlap_tokens: Option<usize>,
+    routing_history: Vec<PerRequestRoutingRecord>,
+    admission_history: Vec<PerRequestAdmissionRecord>,
+    pool_admission_counts: [usize; 3],
+    pressure_record_ordinals: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRequestPool {
+    Agg,
+    Prefill,
+    Decode,
+}
+
+impl ReplayRequestPool {
+    fn index(self) -> usize {
+        match self {
+            Self::Agg => 0,
+            Self::Prefill => 1,
+            Self::Decode => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRoutingOutcome {
+    Immediate,
+    Queued,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PerRequestRoutingRecord {
+    pub pool: ReplayRequestPool,
+    pub outcome: ReplayRoutingOutcome,
+    pub queue_entered_at_ms: Option<f64>,
+    pub released_at_ms: Option<f64>,
+    pub queue_wait_ms: Option<f64>,
+    pub logical_worker_id: Option<usize>,
+    pub scheduler_id: Option<usize>,
+    pub dp_rank: Option<u32>,
+    pub reported_overlap_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PerRequestAdmissionRecord {
+    pub admission_ordinal: usize,
+    pub pool_admission_ordinal: usize,
+    pub pool: ReplayRequestPool,
+    pub at_ms: f64,
+    pub reused_input_tokens: usize,
+    pub is_readmission: bool,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -479,7 +531,7 @@ pub enum ReplayTerminalStatus {
     Failed,
 }
 
-/// Flat per-request record for `--report-jsonl` emission. One JSON line per
+/// Flat per-request record for `--per-request-jsonl` emission. One JSON line per
 /// request in the JSONL output; consumed by external analysis tools that want
 /// per-request granularity (TTFT vs. ISL scatter, worker-residency analysis,
 /// bypass classification, etc.).
@@ -522,6 +574,11 @@ pub struct PerRequestRecord {
     pub decode_reused_input_tokens: Option<usize>,
     pub prefill_route_overlap_tokens: Option<usize>,
     pub decode_route_overlap_tokens: Option<usize>,
+    pub routing_history: Vec<PerRequestRoutingRecord>,
+    pub admission_history: Vec<PerRequestAdmissionRecord>,
+    pub admission_count: usize,
+    pub readmission_count: usize,
+    pub pressure_record_ordinals: Vec<u64>,
     pub terminal_status: ReplayTerminalStatus,
 }
 
@@ -847,6 +904,12 @@ impl TraceCollector {
         reused_input_tokens: usize,
     ) {
         self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        self.on_pool_admission(
+            uuid,
+            ReplayRequestPool::Prefill,
+            admit_time_ms,
+            reused_input_tokens,
+        );
         if let Some(detail) = self.detail_mut(uuid) {
             detail.prefill_admit_ms.get_or_insert(admit_time_ms);
             detail.prefill_reused_input_tokens = Some(
@@ -865,6 +928,12 @@ impl TraceCollector {
         reused_input_tokens: usize,
     ) {
         self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        self.on_pool_admission(
+            uuid,
+            ReplayRequestPool::Decode,
+            admit_time_ms,
+            reused_input_tokens,
+        );
         if let Some(detail) = self.detail_mut(uuid) {
             detail.decode_admit_ms.get_or_insert(admit_time_ms);
             detail.decode_reused_input_tokens = Some(
@@ -909,6 +978,109 @@ impl TraceCollector {
     pub(crate) fn on_decode_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
         if let Some(detail) = self.detail_mut(uuid) {
             detail.decode_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_route_immediate(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        logical_worker_id: usize,
+        scheduler_id: usize,
+        dp_rank: u32,
+        reported_overlap_tokens: usize,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        detail.routing_history.push(PerRequestRoutingRecord {
+            pool,
+            outcome: ReplayRoutingOutcome::Immediate,
+            queue_entered_at_ms: None,
+            released_at_ms: None,
+            queue_wait_ms: Some(0.0),
+            logical_worker_id: Some(logical_worker_id),
+            scheduler_id: Some(scheduler_id),
+            dp_rank: Some(dp_rank),
+            reported_overlap_tokens: Some(reported_overlap_tokens),
+        });
+    }
+
+    pub(crate) fn on_route_queued(&mut self, uuid: Uuid, pool: ReplayRequestPool, at_ms: f64) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        detail.routing_history.push(PerRequestRoutingRecord {
+            pool,
+            outcome: ReplayRoutingOutcome::Queued,
+            queue_entered_at_ms: Some(at_ms),
+            released_at_ms: None,
+            queue_wait_ms: None,
+            logical_worker_id: None,
+            scheduler_id: None,
+            dp_rank: None,
+            reported_overlap_tokens: None,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_route_released(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        at_ms: f64,
+        logical_worker_id: usize,
+        scheduler_id: usize,
+        dp_rank: u32,
+        reported_overlap_tokens: usize,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        let Some(route) = detail.routing_history.iter_mut().rev().find(|route| {
+            route.pool == pool
+                && route.outcome == ReplayRoutingOutcome::Queued
+                && route.released_at_ms.is_none()
+        }) else {
+            return;
+        };
+        let entered_at_ms = route.queue_entered_at_ms.unwrap_or(at_ms);
+        route.released_at_ms = Some(at_ms);
+        route.queue_wait_ms = Some((at_ms - entered_at_ms).max(0.0));
+        route.logical_worker_id = Some(logical_worker_id);
+        route.scheduler_id = Some(scheduler_id);
+        route.dp_rank = Some(dp_rank);
+        route.reported_overlap_tokens = Some(reported_overlap_tokens);
+    }
+
+    pub(crate) fn on_pool_admission(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        at_ms: f64,
+        reused_input_tokens: usize,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        let admission_ordinal = detail.admission_history.len();
+        let pool_count = &mut detail.pool_admission_counts[pool.index()];
+        let pool_admission_ordinal = *pool_count;
+        *pool_count += 1;
+        detail.admission_history.push(PerRequestAdmissionRecord {
+            admission_ordinal,
+            pool_admission_ordinal,
+            pool,
+            at_ms,
+            reused_input_tokens,
+            is_readmission: pool_admission_ordinal > 0,
+        });
+    }
+
+    pub(crate) fn on_pressure_reference(&mut self, uuid: Uuid, pressure_ordinal: u64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.pressure_record_ordinals.push(pressure_ordinal);
         }
     }
 
@@ -1020,7 +1192,7 @@ impl TraceCollector {
         // Build per-request records before we move `self.requests` into the
         // summary aggregation below. Gated on `capture_per_request` — the
         // ~100ms terminal pass + ~30MB allocation only runs when a caller
-        // (e.g. CLI `--report-jsonl`) asked for it. The summary report is
+        // (e.g. CLI `--per-request-jsonl`) asked for it. The summary report is
         // unaffected either way (custom Serialize impl skips `per_request`).
         let per_request = if self.capture_per_request {
             self.per_request_records()
@@ -1169,7 +1341,7 @@ impl TraceCollector {
     }
 
     /// Flatten each retained request into a serializable `PerRequestRecord`.
-    /// Used by the `--report-jsonl` CLI path to emit one JSON object per
+    /// Used by the `--per-request-jsonl` CLI path to emit one JSON object per
     /// request to the JSONL file, mirroring AIPerf's per-request output shape.
     ///
     /// Only requests with a terminal outcome are emitted. Requests truncated
@@ -1218,6 +1390,15 @@ impl TraceCollector {
                 decode_reused_input_tokens: detail.decode_reused_input_tokens,
                 prefill_route_overlap_tokens: detail.prefill_route_overlap_tokens,
                 decode_route_overlap_tokens: detail.decode_route_overlap_tokens,
+                routing_history: detail.routing_history.clone(),
+                admission_count: detail.admission_history.len(),
+                readmission_count: detail
+                    .pool_admission_counts
+                    .iter()
+                    .map(|count| count.saturating_sub(1))
+                    .sum(),
+                admission_history: detail.admission_history.clone(),
+                pressure_record_ordinals: detail.pressure_record_ordinals.clone(),
                 terminal_status,
             });
         }
@@ -1636,7 +1817,21 @@ mod tests {
         // Note: NOT calling set_capture_per_request — capture stays false.
         let uuid = Uuid::from_u128(1);
         collector.on_arrival(uuid, 0.0, 100, 2);
-        collector.on_admit(uuid, 5.0, 0);
+        collector.on_session_metadata(uuid, "session".to_string(), 0);
+        collector.on_prefill_route_overlap(uuid, 48);
+        collector.on_decode_route_overlap(uuid, 24);
+        collector.on_route_immediate(uuid, ReplayRequestPool::Prefill, 7, 14, 1, 48);
+        collector.on_route_queued(uuid, ReplayRequestPool::Decode, 1.0);
+        collector.on_route_released(uuid, ReplayRequestPool::Decode, 2.0, 8, 15, 2, 24);
+        collector.on_prefill_admit(uuid, 3.0, 48);
+        collector.on_decode_admit(uuid, 5.0, 24);
+        collector.on_pool_admission(uuid, ReplayRequestPool::Decode, 6.0, 24);
+        collector.on_pressure_reference(uuid, 9);
+        collector.on_source_held(uuid, 3.5);
+        collector.on_destination_reserved(uuid, 4.0);
+        collector.on_destination_activated(uuid, 4.5);
+        collector.on_source_released(uuid, 5.0);
+        collector.on_prefill_assigned(uuid, 14);
         collector.on_decode_assigned(uuid, 0);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
@@ -1800,7 +1995,7 @@ mod tests {
     }
 
     /// Each record must round-trip cleanly to JSON — this is the format we
-    /// emit to `--report-jsonl`. Guards against accidental serde regressions
+    /// emit to `--per-request-jsonl`. Guards against accidental serde regressions
     /// (e.g., adding a non-serializable field to `PerRequestRecord`).
     #[test]
     fn per_request_record_serializes_to_json_object() {

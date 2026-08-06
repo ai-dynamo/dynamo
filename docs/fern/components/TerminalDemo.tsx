@@ -28,7 +28,7 @@
  *   import { TerminalDemo } from "@/components/TerminalDemo";
  *
  *   <TerminalDemo
- *     src="/dynamo/assets/dynamo-demo.cast"
+ *     src="../../assets/dynamo-demo.cast"   // relative, so Fern rewrites it
  *     startAt={0}
  *     endAt={18}          // play only the first 18s of a long recording, then loop
  *     idleTimeLimit={2}   // compress dead air so pauses feel snappy

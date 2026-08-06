@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
 from dynamo.thunderagent_router.program_state import (
@@ -64,6 +64,14 @@ class ThunderAgentScheduler:
         self._lock = asyncio.Lock()
         self._scheduler_task: Optional[asyncio.Task] = None
         self._stat_forced_resumes = 0
+        self._stat_programs_created = 0
+        self._stat_programs_ended = 0
+        self._stat_requests_admitted = 0
+        self._stat_requests_paused = 0
+        self._stat_pauses = 0
+        self._stat_resumes = 0
+        self._stat_marked_for_pause = 0
+        self._stat_worker_assignments = 0
 
     def start(self) -> None:
         if self._scheduler_task is not None:
@@ -127,6 +135,10 @@ class ThunderAgentScheduler:
             if program is None:
                 return PauseDecision(program_id=program_id, waited_seconds=waited)
 
+            self._stat_requests_admitted += 1
+            if was_paused:
+                self._stat_requests_paused += 1
+
             priority_jump = self._cfg.resume_priority_boost if was_paused else 0.0
             soft_demoted = program.soft_demoted_until > time.monotonic()
             if soft_demoted:
@@ -149,6 +161,15 @@ class ThunderAgentScheduler:
         # Caller holds self._lock.
         was_new = program_id not in self._table.programs
         program = self._table.begin_request(program_id, estimated_prompt_tokens)
+        if was_new:
+            self._stat_programs_created += 1
+            logger.info(
+                "thunderagent.program created program=%s "
+                "estimated_prompt_tokens=%d active=%d",
+                program_id,
+                estimated_prompt_tokens,
+                len(self._table.programs),
+            )
         if program.lifecycle == ProgramLifecycle.PAUSED:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
@@ -168,16 +189,20 @@ class ThunderAgentScheduler:
         )
         if worker_id is not None:
             program.assigned_worker_id = worker_id
+            self._stat_worker_assignments += 1
             return None, False
 
         # All workers full: queue until the scheduler tick resumes us.
         program.waiting = program.waiting or asyncio.Event()
         program.lifecycle = ProgramLifecycle.PAUSED
         self._table.paused[program_id] = None
-        logger.debug(
-            "Queued new program %s (tokens=%d)",
+        self._stat_pauses += 1
+        logger.info(
+            "thunderagent.program paused program=%s reason=admission_full "
+            "tokens=%d paused=%d",
             program_id,
             program.token_total,
+            len(self._table.paused),
         )
         return program.waiting, True
 
@@ -214,6 +239,7 @@ class ThunderAgentScheduler:
             program = self._table.programs.get(program_id)
             if program is not None:
                 program.assigned_worker_id = worker_id
+                self._stat_worker_assignments += 1
 
     async def _scheduler_loop(self) -> None:
         consecutive_failures = 0
@@ -346,6 +372,7 @@ class ThunderAgentScheduler:
                             and reasoning.status == ProgramStatus.REASONING
                         ):
                             reasoning.marked_for_pause = True
+                            self._stat_marked_for_pause += 1
                             marked_this_tick += 1
                         continue
                     break
@@ -380,12 +407,11 @@ class ThunderAgentScheduler:
                     or program.token_total < smallest_acting.token_total
                 ):
                     smallest_acting = program
-            elif program.status == ProgramStatus.REASONING:
-                if (
-                    smallest_reasoning is None
-                    or program.token_total < smallest_reasoning.token_total
-                ):
-                    smallest_reasoning = program
+            elif program.status == ProgramStatus.REASONING and (
+                smallest_reasoning is None
+                or program.token_total < smallest_reasoning.token_total
+            ):
+                smallest_reasoning = program
         return smallest_acting, smallest_reasoning
 
     async def _pause_acting(self, program_id: str) -> bool:
@@ -408,7 +434,14 @@ class ThunderAgentScheduler:
         else:
             program.waiting.clear()
         self._table.paused[program_id] = None
-        logger.debug("Paused program %s (tokens=%d)", program_id, program.token_total)
+        self._stat_pauses += 1
+        logger.info(
+            "thunderagent.program paused program=%s reason=pressure "
+            "tokens=%d paused=%d",
+            program_id,
+            program.token_total,
+            len(self._table.paused),
+        )
         return True
 
     async def end_program(self, program_id: str) -> bool:
@@ -427,8 +460,9 @@ class ThunderAgentScheduler:
                 program.waiting.set()  # unblock any coroutine paused on this program
                 program.waiting = None
             self._table.release(program_id)
+            self._stat_programs_ended += 1
             logger.info(
-                "Released program %s (%d remaining)",
+                "thunderagent.program terminated program=%s remaining=%d",
                 program_id,
                 len(self._table.programs),
             )
@@ -523,14 +557,112 @@ class ThunderAgentScheduler:
             return
         program.lifecycle = ProgramLifecycle.ACTIVE
         program.assigned_worker_id = target_worker_id
+        if target_worker_id is not None:
+            self._stat_worker_assignments += 1
         notify = program.waiting
         program.waiting = None
         self._table.paused.pop(program.program_id, None)
         if notify is not None:
             notify.set()
-        logger.debug(
-            "Resumed program %s -> worker=%s (tokens=%d)",
+        self._stat_resumes += 1
+        logger.info(
+            "thunderagent.program resumed program=%s worker=%s tokens=%d paused=%d",
             program.program_id,
             target_worker_id,
             program.token_total,
+            len(self._table.paused),
         )
+
+    def _worker_snapshot_locked(
+        self, capacities: dict[int, int]
+    ) -> dict[str, dict[str, Any]]:
+        """Build worker metrics while the scheduler lock is held."""
+        used = dict.fromkeys(capacities, 0)
+        used_decayed = dict.fromkeys(capacities, 0)
+        active_programs = dict.fromkeys(capacities, 0)
+
+        for program in self._table.programs.values():
+            worker_id = program.assigned_worker_id
+            if (
+                program.lifecycle != ProgramLifecycle.ACTIVE
+                or worker_id is None
+                or worker_id not in capacities
+            ):
+                continue
+            active_programs[worker_id] += 1
+            used[worker_id] += self._program_tokens(program)
+            used_decayed[worker_id] += self._program_tokens(program, decayed=True)
+
+        workers = {}
+        for worker_id, capacity in capacities.items():
+            buffer_tokens = active_programs[worker_id] * self._cfg.buffer_per_program
+            worker_used = used[worker_id] + buffer_tokens
+            worker_used_decayed = used_decayed[worker_id] + buffer_tokens
+            workers[str(worker_id)] = {
+                "capacity": capacity,
+                "used": worker_used,
+                "used_decayed": worker_used_decayed,
+                "utilization": worker_used / capacity if capacity else None,
+                "utilization_decayed": worker_used_decayed / capacity
+                if capacity
+                else None,
+                "active_programs": active_programs[worker_id],
+            }
+        return workers
+
+    async def status_snapshot(self) -> dict:
+        async with self._lock:
+            capacities = self._capacity.snapshot()
+            lifecycle_counts = {lifecycle.value: 0 for lifecycle in ProgramLifecycle}
+            status_counts = {status.value: 0 for status in ProgramStatus}
+            programs = []
+
+            for program in self._table.programs.values():
+                lifecycle_counts[program.lifecycle.value] += 1
+                status_counts[program.status.value] += 1
+                programs.append(
+                    {
+                        "program_id": program.program_id,
+                        "lifecycle": program.lifecycle.value,
+                        "status": program.status.value,
+                        "assigned_worker_id": program.assigned_worker_id,
+                        "token_total": program.token_total,
+                        "step_count": program.step_count,
+                        "marked_for_pause": program.marked_for_pause,
+                        "soft_demoted": program.soft_demoted_until > time.monotonic(),
+                    }
+                )
+
+            workers = self._worker_snapshot_locked(capacities)
+
+            return {
+                "programs_total": len(self._table.programs),
+                "paused_total": len(self._table.paused),
+                "lifecycle_counts": lifecycle_counts,
+                "status_counts": status_counts,
+                "workers": workers,
+                "programs": programs,
+            }
+
+    async def metrics_snapshot(self) -> dict:
+        async with self._lock:
+            workers = self._worker_snapshot_locked(self._capacity.snapshot())
+            return {
+                "counters": {
+                    "programs_created_total": self._stat_programs_created,
+                    "programs_ended_total": self._stat_programs_ended,
+                    "requests_admitted_total": self._stat_requests_admitted,
+                    "requests_paused_total": self._stat_requests_paused,
+                    "program_pauses_total": self._stat_pauses,
+                    "program_resumes_total": self._stat_resumes,
+                    "programs_marked_for_pause_total": self._stat_marked_for_pause,
+                    "forced_resumes_total": self._stat_forced_resumes,
+                    "worker_assignments_total": self._stat_worker_assignments,
+                },
+                "gauges": {
+                    "programs_total": len(self._table.programs),
+                    "paused_total": len(self._table.paused),
+                    "workers_total": len(workers),
+                },
+                "workers": workers,
+            }

@@ -26,6 +26,7 @@ from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
+    _strip_postprocess_workers,
     init_llm_worker,
 )
 
@@ -42,8 +43,10 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
-    pytest.mark.profiled_vram_gib(0),
 ]
+
+# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
+# sequential GPU stage so TensorRT-LLM initialization is shared.
 
 
 # Create TRTLLM-specific CLI args fixture
@@ -614,3 +617,56 @@ async def test_init_llm_worker_creates_multimodal_processor():
                 config=config,
                 shutdown_event=asyncio.Event(),
             )
+
+
+# ---- Tests for _strip_postprocess_workers ----
+
+
+@pytest.mark.core
+def test_strip_postprocess_workers_handles_quoted_string_value(caplog):
+    """Quoted YAML/JSON string values (e.g. "8") warn and are removed without TypeError."""
+    engine_args = {"num_postprocess_workers": "8", "max_batch_size": 128}
+    with caplog.at_level("WARNING"):
+        _strip_postprocess_workers(engine_args)
+    assert "num_postprocess_workers" not in engine_args
+    assert any("num_postprocess_workers" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_args(
+    tmp_path, monkeypatch, caplog
+):
+    """num_postprocess_workers in an extra-engine-args YAML is stripped with a warning."""
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("max_batch_size: 64\nnum_postprocess_workers: 4\n")
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
+    )
+
+    with (
+        caplog.at_level("WARNING"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    engine_args = exc_info.value.engine_args
+    assert "num_postprocess_workers" not in engine_args
+    assert any("num_postprocess_workers=4" in r.message for r in caplog.records)
