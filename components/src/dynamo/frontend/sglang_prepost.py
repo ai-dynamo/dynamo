@@ -679,7 +679,10 @@ def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
 
 
 def _normalize_messages_for_template(
-    messages: list[dict[str, Any]], tokenizer: Any
+    messages: list[dict[str, Any]],
+    tokenizer: Any,
+    *,
+    content_format_override: str | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
     to the simple ``image``/``video``/``audio`` types most VLM chat templates
@@ -690,7 +693,9 @@ def _normalize_messages_for_template(
     step in sglang's own OpenAI server and dynamo's Rust default path.
     """
     chat_template = getattr(tokenizer, "chat_template", None) or ""
-    content_format = detect_jinja_template_content_format(chat_template)
+    content_format = content_format_override or detect_jinja_template_content_format(
+        chat_template
+    )
     # The media-data side outputs are discarded: dynamo's separate
     # ``extract_mm_urls()`` channel is the source of truth for the worker.
     image_sink: list = []
@@ -798,7 +803,36 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
-        template_messages = _normalize_messages_for_template(messages, tokenizer)
+        model_name = str(request.get("model") or "").lower().replace("_", "-")
+        is_kimi_k3 = (
+            reasoning_parser_name == "kimi_k3"
+            or "kimi-k3" in model_name
+            or (
+                type(tokenizer).__name__ == "TikTokenTokenizer"
+                and type(tokenizer).__module__.endswith(".tokenization_kimi")
+            )
+        )
+        template_messages = _normalize_messages_for_template(
+            messages,
+            tokenizer,
+            content_format_override="openai" if is_kimi_k3 else None,
+        )
+        if is_kimi_k3:
+            image_count = 0
+            for message in template_messages:
+                content = message.get("content")
+                if isinstance(content, list):
+                    image_count += sum(
+                        1
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "image"
+                    )
+            if image_count:
+                # K3's tokenizer otherwise emits its checkpoint-native
+                # <|kimi_image_placeholder|> sequence. SGLang's processor
+                # expects one stable structural pad per image and expands it
+                # after the media dimensions are known.
+                template_kwargs["image_prompts"] = ["<|media_pad|>"] * image_count
 
         prompt_token_ids = _normalize_prompt_token_ids(
             tokenizer.apply_chat_template(template_messages, **template_kwargs)
