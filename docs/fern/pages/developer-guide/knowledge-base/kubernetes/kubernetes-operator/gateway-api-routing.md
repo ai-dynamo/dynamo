@@ -9,7 +9,7 @@ Gateway API routing moves worker selection out of the public-facing Dynamo Front
 Dynamo Endpoint Picker Plugin (EPP). Kubernetes Gateway API owns traffic entry and route matching;
 Dynamo continues to own the serving graph, worker discovery, KV cache state, and endpoint scoring.
 
-For the task-oriented setup, see [Route Requests with Gateway API](../../../../kubernetes/kv-aware-routing/gateway-api.mdx).
+For the task-oriented setup, see [Using GAIE with Dynamo](../../../../kubernetes/kv-aware-routing/gateway-api.mdx).
 
 ## Component Responsibilities
 

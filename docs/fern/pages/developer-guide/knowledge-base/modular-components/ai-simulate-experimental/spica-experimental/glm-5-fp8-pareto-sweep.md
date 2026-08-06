@@ -10,13 +10,6 @@ subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 > treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
-{/* Separate the adjacent admonitions for Markdown and MDX renderers. */}
-
-> [!IMPORTANT]
-> This experiment uses `kv_load_ratio` and requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. It fails fast before search starts in the default `dynamo-planner`
-> image, which currently retains AI Configurator 0.9.
-
 This replay-backed sweep targets the InferenceX/SemiAnalysis (SA) **GLM-5-FP8 / B200 /
 Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Spica can discover competitive
 deployment mappings without pinning the parallel shape or replica count.
@@ -154,17 +147,15 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 
 ## Reproduction Status
 
-This historical experiment cannot currently be reproduced with Dynamo's
-packaged AI Configurator 0.9 dependency. The configuration is retained as a
-reference until Dynamo upgrades to an AI Configurator release that provides
-`aiconfigurator.sdk.memory`.
+The packaged dependencies support this configuration's KV-capacity and candidate-concurrency
+calculations. Reproducing the historical frontier still depends on AI Configurator performance
+database coverage for B200/SGLang/GLM-5-FP8 and on Replay behavior in the runtime snapshot.
 
 ```bash
-# Reference command; fails fast with the currently packaged dependencies.
 python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
-The AIConfigurator performance model needs the `aic-forward-pass` binding. Dynamo must include the
-attention-DP KV-capacity fix so replay sees engine capacity as per-rank capacity multiplied by
-attention DP and replicas.
+The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo's attention-DP
+KV-capacity calculation multiplies per-rank capacity by attention DP and replicas before passing
+engine capacity to Replay.

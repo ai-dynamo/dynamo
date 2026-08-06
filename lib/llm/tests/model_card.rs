@@ -203,6 +203,65 @@ fn test_basetenkenizer_load_failure_falls_back_to_hf() {
 
 #[test]
 #[serial_test::serial]
+fn test_hf_model_card_disables_serialized_padding_and_truncation() {
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
+        let dir = tempdir().unwrap();
+        let tokenizer_path = dir.path().join("tokenizer.json");
+        std::fs::write(
+            &tokenizer_path,
+            r#"{
+                "version": "1.0",
+                "truncation": {
+                    "direction": "Right",
+                    "max_length": 2,
+                    "strategy": "LongestFirst",
+                    "stride": 0
+                },
+                "padding": {
+                    "strategy": {"Fixed": 8},
+                    "direction": "Right",
+                    "pad_to_multiple_of": null,
+                    "pad_id": 0,
+                    "pad_type_id": 0,
+                    "pad_token": "[UNK]"
+                },
+                "added_tokens": [],
+                "normalizer": null,
+                "pre_tokenizer": {"type": "Whitespace"},
+                "post_processor": null,
+                "decoder": null,
+                "model": {
+                    "type": "WordLevel",
+                    "vocab": {"[UNK]": 0, "hello": 1, "world": 2, "again": 3},
+                    "unk_token": "[UNK]"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let raw = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            raw.encode("hello world again").unwrap().token_ids(),
+            &[1, 2, 0, 0, 0, 0, 0, 0],
+            "fixture must exercise serialized truncation and padding"
+        );
+
+        let mut mdc = ModelDeploymentCard::with_name_only("hf-online-normalization");
+        mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+            CheckedFile::from_disk(&tokenizer_path).unwrap(),
+        ));
+
+        let tokenizer = mdc.tokenizer().unwrap();
+        assert_eq!(
+            tokenizer.encode("hello world again").unwrap().token_ids(),
+            &[1, 2, 3],
+            "online tokenization must not apply serialized padding or truncation"
+        );
+    });
+}
+
+#[test]
+#[serial_test::serial]
 fn test_tiktoken_model_card_cache_matches_direct_tokenizer_and_records_tokens() {
     let model = "model-card-tiktoken-cache-integration";
     let mut mdc = ModelDeploymentCard::load_from_disk(TIKTOKEN_PATH, None).unwrap();
