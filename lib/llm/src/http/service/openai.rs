@@ -1356,7 +1356,6 @@ async fn classify(
         warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
-    validate_pooling_cache_salt(request.cache_salt.as_deref())?;
 
     // Resolve alias → primary served name before wrapping the request, so
     // engine routing, metrics, and the response model all use the canonical
@@ -1376,13 +1375,26 @@ async fn classify(
     let model = &request.model;
     let metric_model = state.manager().metric_model_for(model).to_string();
 
-    // Create inflight_guard early to ensure all errors are counted
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &metric_model,
         Endpoint::Classify,
         streaming,
         &request_id,
     );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -1614,14 +1626,6 @@ async fn pooling(
         warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
-    validate_pooling_cache_salt(request.cache_salt.as_deref())?;
-
-    // vLLM currently rejects dimensionality reduction on `/pooling`.
-    if request.dimensions.is_some() {
-        return Err(pooling_or_classify_bad_request(
-            "dimensions is currently not supported".to_string(),
-        ));
-    }
     let response_encoding = request.encoding_format;
     let response_dtype = request.embed_dtype.unwrap_or_default();
     let response_endianness = request.endianness.unwrap_or_default();
@@ -1643,13 +1647,34 @@ async fn pooling(
     let model = &request.model;
     let metric_model = state.manager().metric_model_for(model).to_string();
 
-    // Create inflight_guard early to ensure all errors are counted
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &metric_model,
         Endpoint::Pooling,
         streaming,
         &request_id,
     );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    // vLLM currently rejects dimensionality reduction on `/pooling`.
+    if request.dimensions.is_some() {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(pooling_or_classify_bad_request(
+            "dimensions is currently not supported".to_string(),
+        ));
+    }
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
