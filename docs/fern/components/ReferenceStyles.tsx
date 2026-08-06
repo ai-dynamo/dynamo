@@ -17,12 +17,16 @@
  * constraint, CSS injected this exact way.
  *
  * Server component (no "use client"); registered via docs.yml
- * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
- * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
- * fern/ root and is rewritten to a relative path at publish time:
- *   import { ReferenceStyles } from "@/components/ReferenceStyles";
- * Then place <ReferenceStyles /> once, right after the frontmatter, on every
- * Reference page that uses these components.
+ * `experimental.mdx-components: ./components`. Every page must pull in the
+ * named ReferenceStyles export from the specifier `@/components/ReferenceStyles`
+ * (ambient use is unsupported — renders "Unsupported JSX tag"); the @/ prefix
+ * resolves to the fern/ root and is rewritten to a relative path at publish
+ * time. Then place <ReferenceStyles /> once, right after the frontmatter, on
+ * every Reference page that uses these components.
+ *
+ * Do NOT spell that out as a literal ES module statement here, not even inside
+ * a comment — see the header of RecipeStyles.tsx for why it breaks the docs
+ * build. docs/fern/scripts/check_component_imports.py enforces this.
  */
 const REFERENCE_CSS = `
 /* Dark-mode variable re-bind.

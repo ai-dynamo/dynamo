@@ -11,12 +11,21 @@
  * constraint, CSS injected this exact way.
  *
  * Server component (no "use client"); registered via docs.yml
- * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
- * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
- * fern/ root and is rewritten to a relative path at publish time:
- *   import { RecipeStyles } from "@/components/RecipeStyles";
- * Then place <RecipeStyles /> once, right after the frontmatter, on every
+ * `experimental.mdx-components: ./components`. Every page must pull in the
+ * named RecipeStyles export from the specifier `@/components/RecipeStyles`
+ * (ambient use is unsupported — renders "Unsupported JSX tag"); the @/ prefix
+ * resolves to the fern/ root and is rewritten to a relative path at publish
+ * time. Then place <RecipeStyles /> once, right after the frontmatter, on every
  * recipe/benchmark page (and the two landing READMEs).
+ *
+ * Do NOT spell that out as a literal ES module statement here, not even inside
+ * a comment. Fern collects a component's third-party dependencies with a
+ * plain-text regex over the whole source file, so a commented-out example reads
+ * as a real dependency on `@/components`, which is outside Fern's allowlist
+ * (react, react-dom, @mdx-js/react, next). Fern then shells out to
+ * `npx rolldown` to bundle it and the docs build dies with "Failed to bundle
+ * third-party imports". docs/fern/scripts/check_component_imports.py enforces
+ * this.
  */
 const RECIPE_CSS = `
 /* Dark-mode variable re-bind.

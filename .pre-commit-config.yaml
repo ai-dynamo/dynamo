@@ -111,6 +111,20 @@ repos:
       language: system
       files: ^docs/fern/scripts/check_published_styles\.py$
       pass_filenames: false
+    - id: check-component-imports
+      name: Check mdx-components carry no unbundleable specifiers
+      entry: python3 docs/fern/scripts/check_component_imports.py
+      language: system
+      # Scan the whole components/ tree, not just the staged files: Fern
+      # bundles them together and reports whichever it reaches first.
+      files: ^docs/fern/(components/|scripts/check_component_imports\.py$)
+      pass_filenames: false
+    - id: check-component-imports-selftest
+      name: Self-test the component specifier matcher
+      entry: python3 docs/fern/scripts/check_component_imports.py --test
+      language: system
+      files: ^docs/fern/scripts/check_component_imports\.py$
+      pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py
