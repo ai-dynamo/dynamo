@@ -39,12 +39,17 @@ pytestmark = [
 ]
 PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 
-# Shared SGLang configuration for all tests
-# mem_fraction_static limits actual VRAM allocation (required for multi-worker on same GPU)
+# Shared SGLang configuration for all tests.
+# Memory is budgeted with the token-cap form (--max-total-tokens +
+# --mem-fraction-static 0.9, see tests/README.md "SGLang KV tokens") instead
+# of a fractional split: a fraction is measured against memory that moves
+# while a sibling worker on the same GPU is still allocating, so
+# multi-worker-per-GPU launches can fail the pool-admission check by a hair.
+# The token cap keeps the allocation small and deterministic.
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
-    "mem_fraction_static": 0.4,  # Limit VRAM allocation per worker (equivalent to vLLM's gpu_memory_utilization)
+    "max_total_tokens": 2048,  # matches the requested_sglang_kv_tokens(2048) markers
     "context_length": 1024,  # Limit context length to reduce KV cache size (equivalent to vLLM's max_model_len)
     "disable_cuda_graph": True,  # Disable CUDA graphs for faster startup & lower memory (equivalent to vLLM's enforce_eager)
 }
@@ -125,6 +130,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
         page_size = sglang_args.get("page_size", PAGE_SIZE)
         model = sglang_args.get("model", MODEL_NAME)
         mem_fraction_static = sglang_args.get("mem_fraction_static")
+        max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
 
@@ -166,8 +172,18 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 command.append("--disable-cuda-graph")
                 command.append("--disable-piecewise-cuda-graph")
 
-            # Limit VRAM allocation (required for multi-worker on same GPU)
-            if mem_fraction_static is not None:
+            # Limit VRAM allocation (required for multi-worker on same GPU).
+            # Prefer the token-cap form; see the SGLANG_ARGS comment.
+            if max_total_tokens is not None:
+                command.extend(
+                    [
+                        "--max-total-tokens",
+                        str(max_total_tokens),
+                        "--mem-fraction-static",
+                        "0.9",
+                    ]
+                )
+            elif mem_fraction_static is not None:
                 command.extend(["--mem-fraction-static", str(mem_fraction_static)])
 
             # Add optional context_length if specified
