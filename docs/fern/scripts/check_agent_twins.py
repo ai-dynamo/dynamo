@@ -23,8 +23,8 @@ page looks wrong, which is what makes it easy to ship.
 
 This has happened three times. The Python API reference was rebuilt on Fern's
 own MDX components for exactly this reason (#12110). The compatibility page
-replaced a generated support-matrix accordion with ReleaseSupportMatrix. The
-pairwise interaction matrices on that page moved to InteractionStatus.
+replaced a generated support-matrix accordion with ReleaseSupportMatrix, and
+its pairwise matrices moved to FeatureInteractions.
 
 The expectation is derived from releases.data.ts, the same source the
 components read, so it tracks the data instead of a hand-maintained keyword
@@ -32,15 +32,13 @@ list. Add a release and the twin must carry it; rename a feature and the twin
 must follow. A hardcoded list would drift the moment someone shipped a release
 without touching this file, which is precisely when the check needs to fire.
 
-Coverage is a threshold, not a demand for every item. The twin summarizes: a
-support matrix may legitimately group patch releases, and the feature tables
-name features without repeating every one in prose. Requiring 100% would make
-the check unusable and it would be turned off. Requiring most of them catches
-a twin that was never written or that silently stopped generating, which is
-the failure that actually occurs.
+Coverage floors are measured against the current twins, not guessed. Releases,
+artifacts and early-access models each sit at full coverage today, so anything
+lower only buys room for a regression. Feature names keep a margin because the
+twin names them in prose as well as in a table.
 
 Usage: python3 check_agent_twins.py [files...]
-With no arguments, checks every page under docs/fern/pages/.
+With no arguments, checks the pages in IN_SCOPE.
 Run with --test to exercise the matcher against its own cases.
 """
 
@@ -63,12 +61,22 @@ DATA = ROOT / "components" / "releases.data.ts"
 IN_SCOPE: frozenset[str] = frozenset(
     {
         "pages/reference/general/compatibility.mdx",
+        "pages/reference/general/release-artifacts.mdx",
+        "pages/reference/general/model-early-access-builds.mdx",
     }
 )
 
 # Rendered on an in-scope page but carrying no data of their own: styling, or
-# a summary whose numbers the twin already states in prose.
-EXEMPT: frozenset[str] = frozenset({"ReferenceStyles", "CompatibilityHero"})
+# a control whose values the twin already states through another component's
+# expectation on the same page.
+EXEMPT: frozenset[str] = frozenset(
+    {
+        "ReferenceStyles",
+        "CompatibilityHero",
+        "PinnedEnvironment",
+        "TagLookup",
+    }
+)
 
 
 def _components() -> set[str]:
@@ -78,14 +86,15 @@ def _components() -> set[str]:
 
 LLMS_ONLY = re.compile(r"<llms-only>(.*?)</llms-only>", re.S)
 
-# Fraction of the derived items a twin must mention, per component. A release
-# row either exists in the twin or it does not, so the support matrix is
-# all-or-nothing: at 0.8 over 15 releases, adding a sixteenth the twin never
-# gains still passes at 94%, which is the exact change this check exists to
-# catch. Feature names keep headroom because the twin names them in prose as
-# well as in the table, where an exact count is brittle without being safer.
+# Measured against the current twins rather than guessed: releases, artifacts
+# and EA models each sit at 100 percent coverage today, so a floor below that
+# only buys room for a regression. Features are 100 percent too but keep a
+# margin, because the twin names them in prose as well as in the table and an
+# exact count there would break on a rewording that loses nothing.
 THRESHOLD: dict[str, float] = {
     "ReleaseSupportMatrix": 1.0,
+    "ArtifactBrowser": 1.0,
+    "ModelEABuildCards": 1.0,
     "FeatureHeatmap": 0.8,
 }
 DEFAULT_THRESHOLD = 0.8
@@ -127,6 +136,44 @@ def _interaction_backends(source: str) -> list[str]:
     return sorted(set(re.findall(r'backend:\s*"([^"]+)"', blk)))
 
 
+INTERACTIONS_HEADING = r"[Ff]eature interactions by backend"
+
+
+def _interaction_features(source: str) -> set[str]:
+    """Row labels in the pairwise matrices.
+
+    INTERACTION_FEATURES also carries status literals ("yes", "wip"); those
+    start lowercase and are not row labels, so they are dropped.
+    """
+    try:
+        blk = source[source.index("export const INTERACTION_FEATURES") :]
+    except ValueError:
+        return set()
+    blk = blk.split("\nexport const ", 1)[0]
+    return {n for n in re.findall(r'"([^"]+)"', blk) if n[:1].isupper()}
+
+
+def _interactions_segment(blob: str) -> str:
+    """The twin from the interactions heading onward, or empty if absent.
+
+    Scoping matters: these row labels also appear in the feature-support table
+    above, so an unscoped search is satisfied by that table and every matrix
+    row can be deleted without the check noticing.
+    """
+    m = re.search(INTERACTIONS_HEADING, blob)
+    return blob[m.start() :] if m else ""
+
+
+def _named(source: str, const: str, field: str = "name") -> set[str]:
+    """Values of one field inside one exported array."""
+    try:
+        blk = source[source.index(f"export const {const}") :]
+    except ValueError:
+        return set()
+    blk = blk.split("\nexport const ", 1)[0]
+    return set(re.findall(rf'{field}:\s*"([^"]+)"', blk))
+
+
 def expectations(source: str) -> dict[str, object]:
     """What each component's twin has to account for.
 
@@ -148,6 +195,8 @@ def expectations(source: str) -> dict[str, object]:
             [r"[Ff]eature interactions by backend"]
             + [rf"\*{re.escape(b)}\*" for b in backends]
         ),
+        "ArtifactBrowser": _named(source, "ARTIFACTS"),
+        "ModelEABuildCards": _named(source, "MODEL_EA_BUILDS", "model"),
     }
 
 
@@ -156,7 +205,7 @@ def _uses(text: str, component: str) -> bool:
     return re.search(rf"<{re.escape(component)}[\s/>]", text) is not None
 
 
-def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
+def check(path: Path, expected: dict[str, object], source: str = "") -> list[str]:
     text = path.read_text(encoding="utf-8")
     used = [c for c in expected if _uses(text, c)]
     # Enumerated from the components directory, not guessed from the name. A
@@ -195,6 +244,21 @@ def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
                 problems.append(
                     f"{rel}: <llms-only> twin is missing the structure "
                     f"{component} renders. No match for: {', '.join(missing)}"
+                )
+                continue
+            # Shape alone is not enough: keeping the heading and the backend
+            # markers while deleting every table row under them passed. Row
+            # labels are therefore required inside the section itself, where
+            # the feature-support table above cannot satisfy them.
+            segment = _interactions_segment(blob)
+            rows = _interaction_features(source)
+            absent = sorted(r for r in rows if r not in segment)
+            if rows and absent:
+                shown = ", ".join(absent[:6])
+                more = f" (+{len(absent) - 6} more)" if len(absent) > 6 else ""
+                problems.append(
+                    f"{rel}: the interactions section of the twin is missing "
+                    f"{len(absent)} of {len(rows)} row labels: {shown}{more}"
                 )
             continue
 
@@ -325,7 +389,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    expected = expectations(DATA.read_text(encoding="utf-8"))
+    data = DATA.read_text(encoding="utf-8")
+    expected = expectations(data)
     if not any(expected.values()):
         print(
             "::error::derived no releases or features from releases.data.ts",
@@ -351,7 +416,7 @@ def main() -> int:
 
     problems: list[str] = []
     for target in targets:
-        problems.extend(check(target, expected))
+        problems.extend(check(target, expected, data))
 
     if problems:
         print("component-rendered data missing from the agent twin:\n", file=sys.stderr)
