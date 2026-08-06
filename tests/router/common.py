@@ -1480,6 +1480,7 @@ def _test_router_overload_529(
     tokens_threshold_frac: float | str | None = None,
     router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
+    extra_env: dict[str, str | None] | None = None,
 ):
     """Test that 529 is returned when all workers are busy, and verify rejection metrics.
 
@@ -1502,6 +1503,7 @@ def _test_router_overload_529(
         tokens_threshold_frac: Fractional active prefill tokens threshold for the router
         router_queue_threshold: Router queue threshold, or "None" to disable queueing
         max_tokens: Output token count for generated overload requests
+        extra_env: Environment variables passed only to the frontend process
 
     Raises:
         AssertionError: If success/rejection counts or metrics don't meet expectations
@@ -1519,6 +1521,7 @@ def _test_router_overload_529(
         tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
         router_queue_threshold=router_queue_threshold,
+        extra_env=extra_env,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
 

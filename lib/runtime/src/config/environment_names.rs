@@ -302,9 +302,10 @@ pub mod llm {
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
-    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
-    /// code (100–999) is accepted; an unparseable or out-of-range value falls
-    /// back to 529.
+    /// to 503 for Service Unavailable retry semantics. Status codes from 200
+    /// through 999 are accepted; an informational value from 100 through 199,
+    /// an unparseable value, or an out-of-range value falls back to 529. The
+    /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
     /// Emit an SSE comment at this interval while a streaming response has no
