@@ -1,208 +1,247 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the failover prefix-index log: step barrier, tombstones, replay.
+"""Prefix-index snapshot/replay across a failover.
 
-These cover the log's semantics without a GPU or a real ``BlockPool``:
-
-* ADD records are staged at schedule time and only published at the step barrier, so a
-  crash can never leave the log claiming bytes the forward pass never wrote.
-* Eviction tombstones retire a mapping, so replay cannot resurrect a block the primary
-  already reclaimed for other content.
-* Replay applies events in order, which is what makes cache/evict/re-cache cycles
-  reconstruct the primary's final index rather than a union of everything ever cached.
+The interesting cases are the two directions of staleness. A snapshot is a picture of
+the index at a moment; between that moment and the crash, blocks can be *added* to the
+cache (harmless -- they are simply missing, so those prefixes MISS and recompute) or
+*evicted and reused* (dangerous -- the snapshot still names them, and replaying that
+entry is a HIT on memory that has since been overwritten). Deletions are therefore
+streamed as they happen rather than waiting for the next snapshot, and most of what
+follows checks that asymmetry holds.
 """
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
+from _deps import HAS_GMS
 
-kvi = importlib.import_module("gpu_memory_service.integrations.vllm.kv_index_persist")
+if not HAS_GMS:  # pragma: no cover
+    pytest.skip("gpu_memory_service not importable", allow_module_level=True)
 
-pytestmark = [
-    pytest.mark.pre_merge,
-    pytest.mark.unit,
-    pytest.mark.none,
-    pytest.mark.gpu_0,
-]
+vllm = pytest.importorskip("vllm")
+import gpu_memory_service.integrations.vllm.kv_index_persist as kvi  # noqa: E402
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId  # noqa: E402
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+LAYOUT = "layout-aaaa|layout-bbbb"
+OTHER_LAYOUT = "layout-cccc|layout-dddd"
 
 
-class _FakeBlock:
+# --------------------------------------------------------------------------- fakes
+
+
+class FakeBlock:
     def __init__(self, block_id: int):
         self.block_id = block_id
         self.block_hash = None
-        self.block_hash_num_tokens = None
+        self.block_hash_num_tokens = 0
         self.ref_cnt = 0
 
-    def set_block_hash(self, block_hash, num_tokens=None):
-        self.block_hash = block_hash
-        self.block_hash_num_tokens = num_tokens
 
-    def reset_hash(self):
-        self.block_hash = None
-
-
-class _FakeQueue:
-    """Just enough FreeKVCacheBlockQueue to observe ordering."""
+class FakeFreeQueue:
+    """Only the two operations the requeue uses, plus visible order for assertions."""
 
     def __init__(self, blocks):
-        self._q = list(blocks)
+        self.order = list(blocks)
 
     def remove(self, block):
-        self._q.remove(block)
+        self.order.remove(block)
 
     def append(self, block):
-        self._q.append(block)
-
-    def ids(self):
-        return [b.block_id for b in self._q]
+        self.order.append(block)
 
 
-class _FakePool:
-    def __init__(self, num_blocks: int = 16):
-        self.blocks = [_FakeBlock(i) for i in range(num_blocks)]
+class FakeBlockPool:
+    def __init__(self, n_blocks: int = 64):
+        self.blocks = [FakeBlock(i) for i in range(n_blocks)]
         self.null_block = self.blocks[0]
-        self.free_block_queue = _FakeQueue(self.blocks[1:])
-        self.cached_block_hash_to_block = {}
-        self.cached_block_hashes_by_block = {}
+        self.free_block_queue = FakeFreeQueue(self.blocks[1:])
+        self.cached_block_hashes_by_block: dict[int, set] = {}
 
-    def _insert_block_hash(self, block_hash, block, num_tokens):
-        if block.block_hash is None:
-            block.set_block_hash(block_hash, num_tokens)
-        else:
-            self.cached_block_hashes_by_block.setdefault(block.block_id, set()).add(
-                block_hash
-            )
-        self.cached_block_hash_to_block[block_hash] = block
+    def _insert_block_hash(self, key, block, num_tokens):
+        block.block_hash = key
+        block.block_hash_num_tokens = num_tokens
 
-    def installed(self):
-        """hash bytes -> block_id, for whatever replay put in the index."""
-        return {
-            bytes(h): b.block_id for h, b in self.cached_block_hash_to_block.items()
-        }
+    # -- helpers the tests use to drive the pool ---------------------------------
+    def cache(self, block_id: int, h: bytes, ntok: int = 16):
+        blk = self.blocks[block_id]
+        blk.block_hash = BlockHashWithGroupId(h)
+        blk.block_hash_num_tokens = ntok
+        return blk
+
+    def evict(self, block_id: int):
+        """Reclaim a cached block, as get_new_blocks does when it pops a cached one."""
+        blk = self.blocks[block_id]
+        hashes = [bytes(blk.block_hash)] if blk.block_hash is not None else []
+        blk.block_hash = None
+        blk.block_hash_num_tokens = 0
+        kvi.append_deletions(hashes)
 
 
 @pytest.fixture
-def log_path(tmp_path, monkeypatch):
-    path = tmp_path / "kv_index.log"
-    monkeypatch.setattr(kvi, "_log_path", str(path))
-    monkeypatch.setattr(kvi, "_staged", [], raising=False)
-    return str(path)
+def idx(tmp_path, monkeypatch):
+    """Point the module at a scratch snapshot path and reset its module state."""
+    path = str(tmp_path / "kv_index")
+    monkeypatch.setenv("GMS_KV_INDEX_PATH", path)
+    monkeypatch.setattr(kvi, "_log_path", None)
+    monkeypatch.setattr(kvi, "_last_snapshot", 0.0)
+    return path
 
 
-def _add(h: bytes, block_id: int, num_tokens: int = 16):
-    return (kvi._OP_ADD, h, block_id, num_tokens)
+def h(n: int) -> bytes:
+    return bytes([n]) * 32
 
 
-def _delete(h: bytes, block_id: int):
-    return (kvi._OP_DEL, h, block_id, None)
+# --------------------------------------------------------------------------- tests
 
 
-def test_staged_adds_are_not_published_until_the_step_barrier(log_path):
-    """A crash between schedule and forward must not leave a record on the log."""
-    kvi._stage_records([_add(b"h1", 1)])
+def test_snapshot_round_trips(idx):
+    pool = FakeBlockPool()
+    pool.cache(5, h(1), ntok=16)
+    pool.cache(9, h(2), ntok=8)
 
-    import os
+    kvi.write_snapshot(pool, LAYOUT, idx)
+    layout_id, records = kvi.read_snapshot(idx)
 
-    assert not os.path.exists(log_path) or os.path.getsize(log_path) == 0
-
-    kvi.flush_staged_records()
-
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
-    assert pool.installed() == {b"h1": 1}
+    assert layout_id == LAYOUT
+    assert sorted(records) == sorted([(h(1), 5, 16), (h(2), 9, 8)])
 
 
-def test_flush_is_idempotent_when_nothing_is_staged(log_path):
-    kvi.flush_staged_records()
-    kvi._stage_records([_add(b"h1", 1)])
-    kvi.flush_staged_records()
-    kvi.flush_staged_records()
+def test_replay_installs_the_prior_index(idx):
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    src.cache(9, h(2))
+    kvi.write_snapshot(src, LAYOUT, idx)
 
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
-    assert pool.installed() == {b"h1": 1}
-
-
-def test_eviction_tombstone_prevents_resurrecting_a_reclaimed_block(log_path):
-    """Without the DEL, replay would hand a standby a HIT on overwritten bytes."""
-    kvi._append_records([_add(b"h1", 1), _add(b"h2", 2)])
-    kvi._append_records([_delete(b"h1", 1)])  # block 1 reclaimed for other content
-
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
-
-    assert pool.installed() == {b"h2": 2}
-    assert pool.blocks[1].block_hash is None
+    dst = FakeBlockPool()
+    assert kvi.replay_index(dst, LAYOUT) == 2
+    assert bytes(dst.blocks[5].block_hash) == h(1)
+    assert bytes(dst.blocks[9].block_hash) == h(2)
 
 
-def test_replay_applies_events_in_order_for_cache_evict_recache(log_path):
-    """A hash re-cached on a different block must land on the NEW block."""
-    kvi._append_records([_add(b"h1", 1)])
-    kvi._append_records([_delete(b"h1", 1)])
-    kvi._append_records([_add(b"h1", 5)])
+def test_replay_refuses_a_snapshot_from_a_different_layout(idx):
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
 
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
-
-    assert pool.installed() == {b"h1": 5}
-
-
-def test_stale_tombstone_does_not_retire_a_newer_mapping(log_path):
-    """A DEL naming an older block must not cancel a later ADD of the same hash."""
-    kvi._append_records([_add(b"h1", 1)])
-    kvi._append_records([_add(b"h1", 5)])  # re-cached elsewhere
-    kvi._append_records([_delete(b"h1", 1)])  # old block finally evicted
-
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
-
-    assert pool.installed() == {b"h1": 5}
+    dst = FakeBlockPool()
+    # The snapshot describes pages this engine did not adopt; replaying it would point
+    # hashes at memory that never held those prefixes.
+    assert kvi.replay_index(dst, OTHER_LAYOUT) == 0
+    assert dst.blocks[5].block_hash is None
 
 
-def test_truncated_tail_record_is_dropped(log_path):
-    kvi._append_records([_add(b"h1", 1), _add(b"h2", 2)])
-    with open(log_path, "ab") as f:
-        f.write(b"\x40\x00\x00\x00partial")  # length prefix promising more than exists
+def test_block_evicted_after_the_snapshot_is_not_replayed(idx):
+    """The dangerous direction of staleness: the snapshot still names a reused block."""
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    src.cache(9, h(2))
+    kvi.write_snapshot(src, LAYOUT, idx)
 
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
+    src.evict(5)  # reclaimed and overwritten with something else, then we crash
 
-    assert pool.installed() == {b"h1": 1, b"h2": 2}
+    dst = FakeBlockPool()
+    installed = kvi.replay_index(dst, LAYOUT)
 
-
-def test_rehydrated_blocks_move_to_the_free_queue_tail(log_path):
-    """Cached-but-free blocks must be handed out LAST, or the next request clobbers them."""
-    kvi._append_records([_add(b"h1", 1), _add(b"h2", 2), _add(b"h3", 3)])
-
-    pool = _FakePool(num_blocks=8)
-    assert pool.free_block_queue.ids() == [1, 2, 3, 4, 5, 6, 7]
-
-    kvi.rehydrate_block_pool(pool)
-
-    ids = pool.free_block_queue.ids()
-    assert ids[:4] == [4, 5, 6, 7], f"uncached blocks must come first, got {ids}"
-    # Descending block_id at the tail: the prefix's LAST blocks evict first, which
-    # leaves a usable leading prefix.
-    assert ids[4:] == [3, 2, 1], f"expected descending rehydrated tail, got {ids}"
+    assert installed == 1
+    assert dst.blocks[5].block_hash is None, "evicted block must not be resurrected"
+    assert bytes(dst.blocks[9].block_hash) == h(2)
 
 
-def test_replay_never_disturbs_a_block_the_standby_is_already_using(log_path):
-    kvi._append_records([_add(b"h1", 1), _add(b"h2", 2)])
+def test_block_cached_after_the_snapshot_is_simply_missing(idx):
+    """The harmless direction: a late addition costs a MISS, never a wrong hit."""
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
 
-    pool = _FakePool()
-    pool.blocks[1].ref_cnt = 1  # in flight on the standby
+    src.cache(9, h(2))  # cached after the snapshot, then we crash
 
-    kvi.rehydrate_block_pool(pool)
+    dst = FakeBlockPool()
+    assert kvi.replay_index(dst, LAYOUT) == 1
+    assert bytes(dst.blocks[5].block_hash) == h(1)
+    assert dst.blocks[9].block_hash is None
 
-    assert pool.installed() == {b"h2": 2}
-    assert pool.blocks[1].block_hash is None
+
+def test_a_later_snapshot_supersedes_earlier_deletions(idx):
+    """Deletions already reflected in a snapshot are dropped, not applied forever."""
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    src.cache(9, h(2))
+    kvi.write_snapshot(src, LAYOUT, idx)
+    src.evict(5)
+
+    # Second snapshot: block 5 has no hash, so its absence is already recorded. The
+    # deletion list is cleared, and block 5 being cached again afterwards must survive.
+    kvi.maybe_snapshot(_FakeScheduler(src, LAYOUT))
+    src.cache(5, h(3))
+    kvi.maybe_snapshot(_FakeScheduler(src, LAYOUT, force=True))
+
+    dst = FakeBlockPool()
+    kvi.replay_index(dst, LAYOUT)
+    assert bytes(dst.blocks[5].block_hash) == h(3)
 
 
-def test_absent_log_is_a_noop(tmp_path, monkeypatch):
-    monkeypatch.setattr(kvi, "_log_path", str(tmp_path / "missing.log"))
-    pool = _FakePool()
-    kvi.rehydrate_block_pool(pool)
-    assert pool.installed() == {}
+def test_replay_never_disturbs_a_block_this_engine_is_using(idx):
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    dst = FakeBlockPool()
+    dst.blocks[5].ref_cnt = 1  # in flight on the standby already
+    assert kvi.replay_index(dst, LAYOUT) == 0
+    assert dst.blocks[5].block_hash is None
+
+
+def test_replayed_blocks_move_to_the_free_queue_tail(idx):
+    """vLLM hands out the head of the free queue, so reused blocks must not sit there."""
+    src = FakeBlockPool()
+    for i in (5, 6, 7):
+        src.cache(i, h(i))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    dst = FakeBlockPool()
+    kvi.replay_index(dst, LAYOUT)
+
+    order = [b.block_id for b in dst.free_block_queue.order]
+    assert order[0] not in (5, 6, 7), "reused blocks must not be handed out first"
+    # Descending id, so the prefix's last blocks are evicted first and a usable
+    # leading prefix survives.
+    assert order[-3:] == [7, 6, 5]
+
+
+def test_a_torn_deletion_tail_does_not_lose_the_rest(idx):
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    src.cache(9, h(2))
+    kvi.write_snapshot(src, LAYOUT, idx)
+    src.evict(5)
+
+    with open(kvi._del_path(), "ab") as f:  # crash mid-append
+        f.write(b"\x20\x00partial")
+
+    dst = FakeBlockPool()
+    kvi.replay_index(dst, LAYOUT)
+    assert dst.blocks[5].block_hash is None, "the complete deletion still applies"
+    assert bytes(dst.blocks[9].block_hash) == h(2)
+
+
+def test_disabled_without_the_env_var(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_KV_INDEX_PATH", raising=False)
+    monkeypatch.setattr(kvi, "_log_path", None)
+    assert not kvi.is_enabled()
+    kvi.enable_kv_index_persistence()  # must be a no-op, not an error
+
+
+def test_missing_snapshot_is_not_an_error(idx):
+    assert kvi.replay_index(FakeBlockPool(), LAYOUT) == 0
+
+
+class _FakeScheduler:
+    def __init__(self, pool, layout_id, force: bool = False):
+        self.kv_cache_manager = type("M", (), {"block_pool": pool})()
+        self._gms_kv_layout_id = layout_id
+        if force:
+            kvi._last_snapshot = 0.0

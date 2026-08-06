@@ -396,14 +396,21 @@ class GMSWorker(Worker):
             used_bytes / (1 << 30),
         )
 
-    def gms_kv_reattached(self) -> bool:
-        """Whether the last wake adopted a prior engine's KV rather than allocating.
+    def gms_kv_takeover_state(self) -> tuple[bool, str]:
+        """``(adopted, layout_hash)`` for this rank's KV layout.
 
-        Queried by the scheduler via ``collective_rpc``: replaying the prefix index onto
-        a freshly allocated pool would point hashes at memory that never held that
-        prefix, so the replay is gated on every rank having adopted.
+        Queried by the scheduler via ``collective_rpc``, because the prefix-index replay
+        happens in the scheduler's process, which at TP>1 is not this one.
+
+        ``adopted`` gates the replay: installing a prior engine's hashes onto a freshly
+        allocated pool would point them at memory that never held those prefixes.
+        ``layout_hash`` identifies *which* pages were adopted, so a snapshot taken
+        against a different layout can be refused rather than silently misapplied.
         """
-        return bool(getattr(self, "_gms_kv_reattached", False))
+        return (
+            bool(getattr(self, "_gms_kv_reattached", False)),
+            str(getattr(self, "_gms_kv_layout_hash", "")),
+        )
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration."""
@@ -484,9 +491,6 @@ class GMSWorker(Worker):
             else:
                 kv_cache_manager.reallocate_all_handles(tag="kv_cache")
                 kv_cache_manager.remap_all_vas()
-            # The prefix-index replay happens in the scheduler's process, which at TP>1
-            # is not this one, so the takeover decision has to be readable from there.
-            self._gms_kv_reattached = adopted
             # Seal the shape. The atomic boundary for KV durability: from here the
             # pages outlive this engine. Dying before it leaves a half-built pool the
             # server discards. Skipped when we adopted an already-sealed layout.
@@ -499,6 +503,14 @@ class GMSWorker(Worker):
                     len(kv_cache_manager.mappings),
                     commit.granted_lock_type.name,
                 )
+            # The prefix-index replay runs in the scheduler's process, which at TP>1 is
+            # not this one, so both the takeover decision and the identity of the layout
+            # it applies to have to be readable from there. Read after the commit above,
+            # so a freshly sealed layout reports the hash it was just given.
+            self._gms_kv_reattached = adopted
+            self._gms_kv_layout_hash = (
+                kv_cache_manager.get_memory_layout_hash() if kv_reuse_enabled() else ""
+            )
             self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()
