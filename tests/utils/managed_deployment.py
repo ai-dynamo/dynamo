@@ -1639,14 +1639,12 @@ class ManagedDeployment:
                     self._active_port_forwards.append(port_forward)
                 # Create a fresh portforward object so local_port=0 picks a new
                 # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
+                # port that may still be in TIME_WAIT. Reuse the retry helper so a
+                # tunnel blip during the reopen is retried, not treated as fatal.
                 try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
+                    port_forward = _retry_api_call(
+                        _open_port_forward, logger=self._logger
                     )
-                    port_forward.start()
                 except Exception as e:
                     self._logger.debug(
                         f"Error restarting port forward for pod {pod.name}: {e}"
