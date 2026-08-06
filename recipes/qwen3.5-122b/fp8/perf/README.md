@@ -31,14 +31,19 @@ agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, bloc
 **512**, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA
 knee: the highest value holding P50 TTFT < 5 s and P50 output >= 50 tok/s/user.
 
-Reported numbers use the first 1,500 requests of the 15% agentic trace shipped with the
-Kimi-K2.6 recipe. The trace is stored in Git LFS — fetch it, then take the prefix:
+The recipe reuses the agentic 15% trace shipped with the Kimi-K2.6 recipe
+([../../../kimi-k2.6/perf/traces/](../../../kimi-k2.6/perf/traces/)). Reported numbers use
+its **first 1,500 requests**, which keeps a run to roughly an hour while preserving the
+KV-hit rate. Traces are Git LFS objects, so fetch them before staging:
 
 ```bash
-git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
-head -1500 recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
-  > mooncake_1500.jsonl
+git lfs install
+git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
 ```
+
+> [!NOTE]
+> A real trace file is several MB (`ls -lh`); if the first line starts with
+> `version https://git-lfs...`, it is still a pointer.
 
 ## Workflow
 
@@ -52,12 +57,23 @@ See the deployment instructions in the recipe [README](../README.md).
 
 ### 2. Stage the trace on the PVC
 
-Copy the Mooncake JSONL onto the `model-cache` PVC via a helper pod that mounts it:
+Build the 1,500-request prefix and copy it onto the `model-cache` PVC via a helper pod
+that mounts it:
 
 ```bash
-kubectl -n ${NAMESPACE} cp mooncake_trace.jsonl \
-  ${NAMESPACE}/<pvc-helper-pod>:/model-cache/traces/mooncake_trace.jsonl
+head -1500 ../../../kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  > mooncake_1500.jsonl
+
+kubectl run pvc-helper -n ${NAMESPACE} --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+
+kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
+kubectl cp mooncake_1500.jsonl ${NAMESPACE}/pvc-helper:/model-cache/traces/
 ```
+
+Keep `pvc-helper` around for fetching artifacts later, or
+`kubectl delete pod pvc-helper -n ${NAMESPACE}` once you are done staging.
 
 ### 3. Run AIPerf
 
@@ -106,7 +122,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | per profile — see the table above | |
 | `CONCURRENCY` | sweep to the SLA knee | Single value per run; restart server pods between values |
-| `TRACE_FILE` | `/model-cache/traces/mooncake_trace.jsonl` | 1,500-request agentic trace |
+| `TRACE_FILE` | `/model-cache/traces/mooncake_1500.jsonl` | first 1,500 requests of the agentic 15% trace |
 | `TARGET_MODEL` | `Qwen/Qwen3.5-122B-A10B` | Must match `--served-model-name` |
 
 ## Artifacts
