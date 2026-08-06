@@ -58,11 +58,6 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.core,
-    # gpu_0: CPU-only in the sglang image -- proven by the arm64 CPU test
-    # lane, which already runs `sglang and gpu_0` and imports these same
-    # packages. GPU markers mean GPUs REQUIRED; a gpu_1 mark here routes
-    # the file through the VRAM-scheduled stage at ~24s/test of pure
-    # scheduling+import overhead against an idle GPU.
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,

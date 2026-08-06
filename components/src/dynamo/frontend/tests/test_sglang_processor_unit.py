@@ -63,7 +63,6 @@ from dynamo.frontend.utils import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    # gpu_0: CPU-only test
     pytest.mark.gpu_0,
     # Download tokenizer once per module scope
     pytest.mark.model("Qwen/Qwen3-0.6B"),

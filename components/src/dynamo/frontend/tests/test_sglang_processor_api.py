@@ -16,7 +16,6 @@ import pytest
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    # gpu_0: CPU-only test
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),

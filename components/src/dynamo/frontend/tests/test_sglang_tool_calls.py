@@ -25,11 +25,6 @@ from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    # gpu_0: CPU-only in the sglang image -- proven by the arm64 CPU test
-    # lane, which already runs `sglang and gpu_0` and imports these same
-    # packages. GPU markers mean GPUs REQUIRED; a gpu_1 mark here routes
-    # the file through the VRAM-scheduled stage at ~24s/test of pure
-    # scheduling+import overhead against an idle GPU.
     pytest.mark.gpu_0,
     # This file builds a real tokenizer at module scope; declare the model so
     # predownload_tokenizers warms the HF cache once per session instead of
