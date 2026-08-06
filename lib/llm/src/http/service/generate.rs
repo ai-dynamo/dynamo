@@ -309,6 +309,13 @@ async fn handler_generate(
         }
     };
 
+    // Resolve alias -> primary before readiness, engine lookup, metrics, and
+    // admission (matching the OpenAI and Anthropic handlers). Without this an
+    // alias-named request gets its own inflight gauge and its own concurrency
+    // budget, so traffic split across a primary and its aliases could exceed
+    // the configured per-model limit.
+    let model = state.manager().resolve_canonical_name(&model);
+
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return response.into_response();
     }
@@ -1192,6 +1199,62 @@ mod tests {
                 "test-model",
             ),
             1
+        );
+        holder.mark_ok();
+    }
+
+    #[tokio::test]
+    async fn generate_handler_canonicalizes_alias_for_admission() {
+        // An alias-named request must share its primary's inflight gauge and
+        // concurrency budget instead of receiving its own.
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+        let service = HttpService::builder()
+            .admission_gate_config(
+                crate::frontend_config::AdmissionGateConfig::new(Some(1), None, None)
+                    .expect("valid admission gate config"),
+            )
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("test-model", "0", engine)
+            .expect("register generate model");
+        assert!(state.manager().register_alias("test-alias", "test-model"));
+
+        let metrics = state.metrics_clone();
+        let mut holder = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::Generate,
+            false,
+            "holder",
+        );
+
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-alias",
+            "token_ids": [1, 2],
+            "sampling_params": {},
+        }))
+        .expect("deserialize request");
+        let response =
+            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            metrics.get_admission_rejection_count(
+                dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                "test-model",
+            ),
+            1,
+            "rejection must be attributed to the canonical primary, not the alias"
+        );
+        assert_eq!(
+            metrics.get_admission_rejection_count(
+                dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                "test-alias",
+            ),
+            0
         );
         holder.mark_ok();
     }
