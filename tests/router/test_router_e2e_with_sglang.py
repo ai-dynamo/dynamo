@@ -41,11 +41,7 @@ PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 
 # Shared SGLang configuration for all tests.
 # Memory is budgeted with the token-cap form (--max-total-tokens +
-# --mem-fraction-static 0.9, see tests/README.md "SGLang KV tokens") instead
-# of a fractional split: a fraction is measured against memory that moves
-# while a sibling worker on the same GPU is still allocating, so
-# multi-worker-per-GPU launches can fail the pool-admission check by a hair.
-# The token cap keeps the allocation small and deterministic.
+# --mem-fraction-static 0.9, see tests/README.md "SGLang KV tokens").
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
@@ -86,6 +82,9 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - page_size: KV cache page size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - mem_fraction_static: Fraction of GPU memory to allocate (optional)
+                - max_total_tokens: Max KV cache tokens; takes precedence over
+                  mem_fraction_static and is emitted with --mem-fraction-static 0.9
+                  (see tests/README.md "SGLang KV tokens")
                 - context_length: Maximum sequence length (optional)
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
             num_workers: Number of SGLang worker processes
@@ -133,6 +132,12 @@ class SGLangProcess(ManagedEngineProcessMixin):
         max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
+        # Resolved memory budget, for startup logs (mirrors the command flags).
+        mem_budget = (
+            f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
+            if max_total_tokens is not None
+            else f"mem_frac={mem_fraction_static}"
+        )
 
         self.model_name = model
 
@@ -250,13 +255,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
