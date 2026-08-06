@@ -147,6 +147,8 @@ def test_default_thinking_mode_rejects_invalid_value(monkeypatch):
 
     with pytest.raises(SystemExit):
         _parse_runtime_args(["--dyn-default-thinking-mode", "adaptive"])
+
+
 # --- Per-model frontend admission override (DEP #9755) ---
 
 

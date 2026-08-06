@@ -2033,9 +2033,12 @@ impl ModelManager {
             .rejection_frontend_request_concurrency_limit
             .is_some_and(|limit| limit > 0)
         {
-            // Publish the hint before the WorkerSet is inserted so a request
-            // can never observe a routable override while retaining the
-            // fully-disabled fast path.
+            // Publish the hint before the WorkerSet is inserted so the flag
+            // is at worst conservatively true. This does not close the
+            // admission race entirely: a request that loads the flag just
+            // before this store can still be admitted ungated once the model
+            // becomes routable — bounded, transient, and indistinguishable
+            // from a request that arrived before registration.
             self.has_seen_request_concurrency_limit_override
                 .store(true, Ordering::Release);
         }

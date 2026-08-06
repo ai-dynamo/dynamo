@@ -416,6 +416,53 @@ async fn test_concurrency_gate_mdc_override_wins_over_global_default() {
 }
 
 #[tokio::test]
+async fn test_concurrency_gate_alias_shares_primary_mdc_override() {
+    // An alias routes to its primary's engine and inflight gauge; the
+    // primary's MDC override must cap alias-addressed requests too, even
+    // with no frontend-global limit configured.
+    const PRIMARY: &str = "override-primary";
+    const ALIAS: &str = "override-alias";
+
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, None, None).expect("valid admission gate config"),
+    )
+    .await;
+    let manager = svc.state.manager();
+    add_model_with_override(manager, PRIMARY, 1);
+    let namespace = format!("__local_chat_{PRIMARY}");
+    let worker_set = manager
+        .get_model(PRIMARY)
+        .and_then(|model| model.get_worker_set(&namespace))
+        .expect("primary WorkerSet should be registered");
+    assert!(manager.register_alias(ALIAS, PRIMARY));
+    assert!(manager.add_worker_set_arc(ALIAS, &namespace, worker_set));
+    let metrics = svc.state.metrics_clone();
+    let port = svc.port;
+
+    let holder = tokio::spawn(async move { post_chat(port, &chat_request(PRIMARY, 300)).await });
+    wait_for_inflight(&metrics, PRIMARY, 1).await;
+
+    let rejected = post_chat(port, &chat_request(ALIAS, 1)).await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = rejected.text().await.unwrap();
+    assert!(
+        body.contains("per-model MDC override"),
+        "rejection should identify the MDC limit source: {body}"
+    );
+    assert!(
+        body.contains(PRIMARY),
+        "rejection should identify the canonical model: {body}"
+    );
+    assert_eq!(
+        metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, PRIMARY),
+        1
+    );
+
+    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    wait_for_inflight(&metrics, PRIMARY, 0).await;
+}
+
+#[tokio::test]
 async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
     // A live tokio runtime always has far more than one alive task, so
     // limit=1 rejects every inference request.
