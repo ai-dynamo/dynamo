@@ -1613,9 +1613,10 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
 ///
 /// The admin API is enabled by default, so the route is mounted. Without a
 /// `DistributedRuntime` wired into the service the handler cannot reach workers,
-/// but it must still respond `200 OK` with a clear "runtime not available"
-/// message rather than a `404` — proving the route is wired up rather than
-/// silently missing (the original bug in #6291 was a `404` on this control).
+/// so it responds `503 Service Unavailable` with a clear message — proving the
+/// route is wired up rather than silently missing (the original bug in #6291 was
+/// a `404` on this control) while still signalling the failure via the status
+/// code rather than masking it behind a `200`.
 #[tokio::test]
 async fn test_reset_prefix_cache_route_is_registered() {
     let (listener, port) = bind_random_port().await;
@@ -1638,12 +1639,12 @@ async fn test_reset_prefix_cache_route_is_registered() {
 
     assert_eq!(
         status,
-        StatusCode::OK,
-        "POST /reset_prefix_cache should be routed under the admin API (on by default); got {status}, body: {text}"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "without a runtime, POST /reset_prefix_cache should be routed (admin API on by default) and return 503 rather than 404; got {status}, body: {text}"
     );
     assert!(
         text.contains("Distributed runtime not available"),
-        "without a runtime the handler should report it clearly instead of 404ing; got: {text}"
+        "without a runtime the handler should report it clearly; got: {text}"
     );
 
     cancel_token.cancel();
