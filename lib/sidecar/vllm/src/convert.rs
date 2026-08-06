@@ -52,7 +52,7 @@ pub(crate) fn build_generate_request(
     let sampling = request.sampling_options;
     let stop_conditions = request.stop_conditions;
     let mut extra_args = request.extra_args;
-    consume_redundant_cache_salt(&mut extra_args, cache_salt.as_deref())?;
+    consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     let kv = build_kv_parameters(extra_args, request.prefill_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
@@ -106,7 +106,7 @@ pub(crate) fn build_generate_request(
     })
 }
 
-fn consume_redundant_cache_salt(
+fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
 ) -> Result<(), DynamoError> {
@@ -117,27 +117,35 @@ fn consume_redundant_cache_salt(
         let Some(serde_json::Value::Object(nvext)) = extra.get_mut("nvext") else {
             return Ok(());
         };
-        let Some(value) = nvext.remove("cache_salt") else {
-            return Ok(());
-        };
-        let value = value
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                client::invalid_argument("extra_args.nvext.cache_salt must be a non-empty string")
-            })?;
-        match cache_namespace {
-            Some(expected) if value == expected => {}
-            Some(expected) => {
-                return Err(client::invalid_argument(format!(
-                    "extra_args.nvext.cache_salt `{value}` does not match routing.cache_namespace `{expected}`"
-                )));
+        if let Some(value) = nvext.remove("cache_salt") {
+            let value = value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "extra_args.nvext.cache_salt must be a non-empty string",
+                    )
+                })?;
+            match cache_namespace {
+                Some(expected) if value == expected => {}
+                Some(expected) => {
+                    return Err(client::invalid_argument(format!(
+                        "extra_args.nvext.cache_salt `{value}` does not match routing.cache_namespace `{expected}`"
+                    )));
+                }
+                None => {
+                    return Err(client::invalid_argument(
+                        "extra_args.nvext.cache_salt requires routing.cache_namespace",
+                    ));
+                }
             }
-            None => {
-                return Err(client::invalid_argument(
-                    "extra_args.nvext.cache_salt requires routing.cache_namespace",
-                ));
-            }
+        }
+        if let Some(token_in) = nvext.remove("token_in")
+            && token_in != serde_json::Value::Bool(true)
+        {
+            return Err(client::invalid_argument(
+                "extra_args.nvext.token_in must be true when present",
+            ));
         }
         nvext.is_empty()
     };

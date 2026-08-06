@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
@@ -327,29 +329,51 @@ impl LLMEngine for VllmSidecarEngine {
             .client
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
-        client
-            .kv_event_sources()
-            .await?
-            .into_iter()
-            .filter(|source| source.transport == "zmq")
-            .map(|source| {
-                let dp_rank = source.data_parallel_rank.ok_or_else(|| {
-                    client::protocol_error(
-                        "GetKvEventSources returned a ZMQ source without data_parallel_rank",
-                    )
-                })?;
-                if source.endpoint.trim().is_empty() {
-                    return Err(client::protocol_error(
-                        "GetKvEventSources returned a ZMQ source without an endpoint",
-                    ));
-                }
-                Ok(KvEventSource::Zmq {
-                    endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint)?,
-                    topic: source.topic,
-                    dp_rank,
-                })
-            })
-            .collect()
+        let expected_dp_size = self.model.data_parallel_size();
+        let mut ranks = HashSet::new();
+        let mut sources = Vec::new();
+        for source in client.kv_event_sources().await? {
+            if source.transport != "zmq" {
+                tracing::warn!(
+                    transport = %source.transport,
+                    endpoint = %source.endpoint,
+                    "Skipping unsupported vLLM KV-event transport"
+                );
+                continue;
+            }
+            let dp_rank = source.data_parallel_rank.ok_or_else(|| {
+                client::protocol_error(
+                    "GetKvEventSources returned a ZMQ source without data_parallel_rank",
+                )
+            })?;
+            if dp_rank >= expected_dp_size {
+                return Err(client::protocol_error(format!(
+                    "GetKvEventSources returned rank {dp_rank}, outside the expected range 0..{expected_dp_size}",
+                )));
+            }
+            if !ranks.insert(dp_rank) {
+                return Err(client::protocol_error(format!(
+                    "GetKvEventSources returned duplicate rank {dp_rank}",
+                )));
+            }
+            if source.endpoint.trim().is_empty() {
+                return Err(client::protocol_error(
+                    "GetKvEventSources returned a ZMQ source without an endpoint",
+                ));
+            }
+            sources.push(KvEventSource::Zmq {
+                endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint)?,
+                topic: source.topic,
+                dp_rank,
+            });
+        }
+        if ranks.len() != expected_dp_size as usize {
+            return Err(client::protocol_error(format!(
+                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} data-parallel ranks; KV routing requires one source for every rank",
+                ranks.len()
+            )));
+        }
+        Ok(sources)
     }
 }
 
