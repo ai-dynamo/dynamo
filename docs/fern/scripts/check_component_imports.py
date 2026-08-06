@@ -120,7 +120,7 @@ def check_pin_drift() -> list[str]:
     """Report when fern.config.json has moved past the ported-from release."""
     config_path = ROOT / "fern.config.json"
     try:
-        pinned = json.loads(config_path.read_text()).get("version", "")
+        pinned = json.loads(config_path.read_text(encoding="utf-8")).get("version", "")
     except (OSError, ValueError) as exc:
         return [
             f"{display(config_path)}: could not read the pinned Fern version: {exc}"
@@ -144,7 +144,9 @@ def display(path: Path) -> str:
 
 
 def check(path: Path) -> list[str]:
-    text = path.read_text()
+    # Explicit encoding: most component sources carry non-ASCII (em dashes in
+    # the doc headers), and the locale default is not UTF-8 everywhere.
+    text = path.read_text(encoding="utf-8")
     return [
         f"{display(path)}:{line}: {specifier}\n"
         f"      Fern reads this as a third-party dependency and bundles the file"
