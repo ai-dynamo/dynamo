@@ -170,7 +170,7 @@ def test_parse_served_model_ids_rejects_invalid_responses(content: str) -> None:
         parse_served_model_ids(content)
 
 
-async def test_lifecycle_preserves_combined_deployment_timeout() -> None:
+async def test_lifecycle_uses_deployment_timeout_after_profiling() -> None:
     manager = ManagedDGDR(
         DGDRTestConfig(
             namespace="test-namespace",
@@ -193,7 +193,7 @@ async def test_lifecycle_preserves_combined_deployment_timeout() -> None:
         verify_configmap=False,
     )
 
-    manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 28)
+    manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 11)
 
 
 async def test_cleanup_reports_all_failures_and_retains_failed_names() -> None:
