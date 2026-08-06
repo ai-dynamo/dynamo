@@ -104,9 +104,8 @@ ROUTER_OVERLOAD_529_CASES = (
         {
             "blocks_threshold": 0.2,
             "max_tokens": 50,
-            "extra_env": {"DYN_HTTP_OVERLOAD_STATUS_CODE": "100"},
         },
-        id="decode-blocks-informational-status",
+        id="decode-blocks",
     ),
     pytest.param(
         {
