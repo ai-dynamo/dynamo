@@ -545,7 +545,7 @@ class DynamoVllmConfig(ConfigBase):
     # its uniform points are an ordinary sweep. Leaving them out therefore
     # means "collect less", never "collect something different".
     benchmark_collect_imbalanced: bool = False
-    benchmark_imbalance_repeats: int = 5
+    benchmark_imbalance_repeats: int = 1
     # None -> probe the model config for a sparse-attention index budget.
     benchmark_imbalance_topk: Optional[int] = None
     # None -> a sibling of --benchmark-output-path.

@@ -10,13 +10,16 @@ Measuring that difference needs batches built on purpose, because natural
 traffic offers only one imbalance ratio per shape and the resulting equations
 are parallel.
 
-Around one cell ``(b, s_bar, p_bar)`` the batches hold both conserved sums
-exactly, ``N = b * s_bar`` and ``P = b * p_bar``, so the label
+Around one cell the batches hold both of its conserved sums exactly -- the
+cell's own ``N`` and ``P``, which are ``b * s_bar`` and ``b * p_bar`` only when
+they divide by ``b`` -- so the label
 
-    y = T_batch - T_uniform
+    y = T_batch - T_reference
 
 cancels every term that depends on the totals alone and leaves the cost of the
-spread.
+spread. Conserving a floored total instead would leave a token-count change in
+the label, and at the C+1 coordinates the sweep samples on purpose that change
+is a whole CUDA-graph capture size rather than one token of work.
 
 Three prices, not two. A request whose full length stays at or below ``topk``
 short-circuits the indexer and runs the dense kernel; one above it runs the
@@ -119,9 +122,17 @@ def runs_sparse(s: float, p: float, topk: int) -> bool:
 
 
 def work_columns(
-    rows: list[tuple[int, int]], s_bar: float, p_bar: float, topk: int
+    rows: list[tuple[int, int]],
+    reference: list[tuple[int, int]],
+    topk: int,
 ) -> tuple[float, float, float]:
-    """``(x_idx, x_mla_sparse, x_mla_dense)`` against the cell's uniform batch.
+    """``(x_idx, x_mla_sparse, x_mla_dense)`` against the cell's reference batch.
+
+    The subtrahend is the reference batch's own rows rather than ``b`` copies of
+    the average request. Those agree whenever the cell's totals divide by ``b``,
+    and where they do not the reference carries the remainder on one row -- a
+    row that can sit on the other side of ``topk`` from its neighbours, which
+    ``b`` copies of the average cannot express.
 
     The indexer column carries EVERY row, on both sides of the subtraction:
     ``idx_work`` is not gated on ``topk`` (see its docstring -- the scoring pass
@@ -129,22 +140,18 @@ def work_columns(
     reintroduce exactly the error that docstring records, and it would do it
     where it hurts most: a mixed batch is mostly short rows.
 
-    Attention is different, and is credited per row to the column for the kernel
-    that row actually runs on. Its subtrahend goes to whichever column the
-    UNIFORM batch runs on -- decided by the average point's own length, not by
-    the calibration batch's regime.
+    Attention is different, and is credited per row -- on both sides -- to the
+    column for the kernel that row actually runs on.
     """
-    b = len(rows)
-    x_idx = sum(idx_work(s, p, topk) for s, p in rows) - b * idx_work(
-        s_bar, p_bar, topk
-    )
-    x_sp = sum(mla_work(s, p, topk) for s, p in rows if runs_sparse(s, p, topk))
-    x_dn = sum(mla_work(s, p, topk) for s, p in rows if not runs_sparse(s, p, topk))
-    if runs_sparse(s_bar, p_bar, topk):
-        x_sp -= b * mla_work(s_bar, p_bar, topk)
-    else:
-        x_dn -= b * mla_work(s_bar, p_bar, topk)
-    return x_idx, x_sp, x_dn
+
+    def split(batch: list[tuple[int, int]]) -> tuple[float, float, float]:
+        idx = sum(idx_work(s, p, topk) for s, p in batch)
+        sp = sum(mla_work(s, p, topk) for s, p in batch if runs_sparse(s, p, topk))
+        dn = sum(mla_work(s, p, topk) for s, p in batch if not runs_sparse(s, p, topk))
+        return idx, sp, dn
+
+    got, want = split(rows), split(reference)
+    return got[0] - want[0], got[1] - want[1], got[2] - want[2]
 
 
 def key_column(
@@ -246,6 +253,12 @@ def uniform_rows(b: int, s_bar: int, p_bar: int) -> list[tuple[int, int]]:
     return [(s_bar, p_bar)] * b
 
 
+def _block_split(kv_tokens: int, b: int, kv_block: int) -> list[int]:
+    """``kv_tokens`` dealt across ``b`` rows in whole ``kv_block``s, exactly."""
+    base, spare = divmod(kv_tokens // kv_block, b)
+    return [(base + (1 if i < spare else 0)) * kv_block for i in range(b)]
+
+
 def reference_rows(
     b: int, total_new: int, total_kv: int, kv_block: int
 ) -> list[tuple[int, int]] | None:
@@ -273,14 +286,8 @@ def reference_rows(
         # later by the loader.
         return None
     s_lo, s_extra = divmod(total_new, b)
-    blk_lo, blk_extra = divmod(total_kv // kv_block, b)
-    return [
-        (
-            s_lo + (1 if i < s_extra else 0),
-            (blk_lo + (1 if i < blk_extra else 0)) * kv_block,
-        )
-        for i in range(b)
-    ]
+    p = _block_split(total_kv, b, kv_block)
+    return [(s_lo + (1 if i < s_extra else 0), p[i]) for i in range(b)]
 
 
 def _settle(
@@ -303,7 +310,16 @@ def _settle(
 
 
 def pure_rows(
-    b: int, s_bar: int, p_bar: int, m: int, want: Regime, topk: int, reach: float = 1.0
+    b: int,
+    s_bar: int,
+    p_bar: int,
+    m: int,
+    want: Regime,
+    topk: int,
+    reach: float = 1.0,
+    *,
+    totals: tuple[int, int] | None = None,
+    kv_block: int = 1,
 ) -> list[tuple[int, int]] | None:
     """``m`` long and ``b - m`` short requests, all holding ``p = p_bar``.
 
@@ -312,10 +328,17 @@ def pure_rows(
     tokens split, and the regime pins whichever group is its binding one --
     saturated pins the shortest row one token above the bound, unsaturated pins
     the longest row at it -- with conservation fixing the other.
+
+    ``totals`` is what the batch must conserve. It defaults to ``b * s_bar`` and
+    ``b * p_bar``, but a cell whose totals do not divide by ``b`` has to pass
+    its exact pair: the reference batch carries the remainder, so a shape that
+    dropped it would differ from the reference by a token count as well as by
+    a spread, and at the C+1 coordinates the sweep deliberately samples that
+    one token is a whole CUDA-graph capture size.
     """
     if not 1 <= m < b:
         return None
-    new_tokens, kv_tokens = b * s_bar, b * p_bar
+    new_tokens, kv_tokens = (b * s_bar, b * p_bar) if totals is None else totals
     total = new_tokens + kv_tokens
     short_count = b - m
 
@@ -343,19 +366,36 @@ def pure_rows(
         if short_len >= long_len:
             return None
 
-    s = [long_len - p_bar] * m + [short_len - p_bar] * short_count
+    if kv_tokens % kv_block:
+        return None
+    # The prefix is dealt in whole blocks for the same reason mixed_rows deals
+    # it that way: a ragged KV length is served at a different length than the
+    # plan specified. Where the block count divides, every row still holds
+    # p_bar and the regime's "prefix cannot move" premise is untouched; where it
+    # does not, one block of slack is the price of conserving the exact total,
+    # and classify() below rejects the shape if that slack breaks the segment.
+    p = _block_split(kv_tokens, b, kv_block)
+    s = [long_len - p[i] for i in range(m)] + [short_len - p[i] for i in range(m, b)]
     if min(s) < 1:
         return None
     # Saturated pins the short rows, so the long rows have headroom for the
     # remainder; unsaturated pins the long rows, so it has to go the other way.
-    rows = _settle(s, [p_bar] * b, new_tokens, kv_tokens, 0 if want == SAT else b - 1)
+    rows = _settle(s, p, new_tokens, kv_tokens, 0 if want == SAT else b - 1)
     if rows is None or min(a for a, _ in rows) < MIN_NEW_TOKENS:
         return None
     return rows if classify(rows, topk) == want else None
 
 
 def mixed_rows(
-    b: int, s_bar: int, p_bar: int, m: int, short_len: int, topk: int, kv_block: int = 1
+    b: int,
+    s_bar: int,
+    p_bar: int,
+    m: int,
+    short_len: int,
+    topk: int,
+    kv_block: int = 1,
+    *,
+    totals: tuple[int, int] | None = None,
 ) -> list[tuple[int, int]] | None:
     """``m`` long requests carrying ALL the prefix, ``b - m`` short ones with none.
 
@@ -372,7 +412,7 @@ def mixed_rows(
     """
     if not 1 <= m < b:
         return None
-    new_tokens, kv_tokens = b * s_bar, b * p_bar
+    new_tokens, kv_tokens = (b * s_bar, b * p_bar) if totals is None else totals
     total = new_tokens + kv_tokens
     short_count = b - m
     long_len = (total - short_count * short_len) // m
@@ -443,6 +483,12 @@ class CellPlan:
 
     @property
     def uniform(self) -> list[tuple[int, int]]:
+        """The equal batch of the average point.
+
+        Only the same thing as the batch the labels are measured against when
+        the cell's totals divide by ``b``; ``plan_cell`` subtracts the reference
+        batch it actually emits.
+        """
         return uniform_rows(self.b, self.s_bar, self.p_bar)
 
     def by_regime(self, regime: Regime) -> list[CalibrationBatch]:
@@ -514,15 +560,25 @@ def plan_cell(
     *,
     max_model_len: int = 131072,
     kv_block: int = 1,
+    totals: tuple[int, int] | None = None,
 ) -> CellPlan | None:
     """Plan the calibration batches around one average point.
+
+    ``totals`` is the cell's exact conserved pair. Every shape is built to hold
+    it and is scored against the reference batch that holds it too, so the label
+    is a pure spread even where the totals do not divide by ``b``. Defaults to
+    ``b * s_bar`` and ``b * p_bar``, which is the same pair when they do.
 
     Returns ``None`` when no segment yields a usable batch, which happens for
     cells whose totals leave no room to redistribute.
     """
     plan = CellPlan(b, s_bar, p_bar, topk, segments_for(b, s_bar, p_bar, topk))
     avg_is_sat = plan.avg_is_sat
-    reference = b * (idx_work(s_bar, p_bar, topk) + mla_work(s_bar, p_bar, topk))
+    exact = (b * s_bar, b * p_bar) if totals is None else totals
+    ref_rows = reference_rows(b, exact[0], exact[1], kv_block)
+    if ref_rows is None:
+        return None
+    reference = sum(idx_work(s, p, topk) + mla_work(s, p, topk) for s, p in ref_rows)
     if reference <= 0:
         return None
     # A pure segment holds p = p_bar on every row, so the whole cell is
@@ -538,15 +594,30 @@ def plan_cell(
         for m, short_len, reach in _knobs(b, s_bar, regime, topk, avg_is_sat):
             tried += 1
             rows = (
-                mixed_rows(b, s_bar, p_bar, m, short_len, topk, kv_block)
+                mixed_rows(b, s_bar, p_bar, m, short_len, topk, kv_block, totals=exact)
                 if regime == MIXED
-                else pure_rows(b, s_bar, p_bar, m, regime, topk, reach)
+                else pure_rows(
+                    b,
+                    s_bar,
+                    p_bar,
+                    m,
+                    regime,
+                    topk,
+                    reach,
+                    totals=exact,
+                    kv_block=kv_block,
+                )
             )
             if rows is None or not admits(rows, regime, topk):
                 continue
             if max(s + p for s, p in rows) > max_model_len:
                 continue
-            columns = work_columns(rows, s_bar, p_bar, topk)
+            # Conservation is the premise of the whole label, so it is asserted
+            # rather than assumed: a shape that drifted would carry the cost of
+            # the drift into a coefficient.
+            if (sum(s for s, _ in rows), sum(p for _, p in rows)) != exact:
+                continue
+            columns = work_columns(rows, ref_rows, topk)
             key = key_column(columns, regime, avg_is_sat) / reference
             if key < MIN_RELATIVE_DELTA:
                 continue
@@ -605,7 +676,7 @@ def build_manifest(
     with the reason. Those are reported rather than dropped silently -- a cell
     with no spread is a coefficient nothing will pin.
     """
-    prefill: list[dict] = []
+    shapes: list[dict] = []
     notes: list[str] = []
     seen: set[tuple] = set()
 
@@ -614,8 +685,7 @@ def build_manifest(
         if key in seen:
             return
         seen.add(key)
-        point = _point(rows)
-        prefill.extend(dict(point) for _ in range(repeats))
+        shapes.append(_point(rows))
 
     for batch_size, total_new, total_kv in cells:
         s_bar, p_bar = total_new // batch_size, total_kv // batch_size
@@ -644,6 +714,7 @@ def build_manifest(
             topk,
             max_model_len=max_model_len,
             kv_block=kv_block,
+            totals=(total_new, total_kv),
         )
         if plan is None:
             notes.append(
@@ -656,4 +727,15 @@ def build_manifest(
             f"b={batch_size} avg_s={s_bar} avg_p={p_bar}: {reason}"
             for reason in plan.unusable
         )
+    # Every shape is sampled alike, the reference batch included: the label is a
+    # difference between two measured points, so sampling one of them harder
+    # than the other buys nothing the difference can use. The default is one
+    # pass, which is what the ordinary generated grid does with a coordinate.
+    #
+    # The extra passes go over the whole sweep rather than back to back per
+    # shape. Contiguous repeats sit inside the same thermal and clock excursion,
+    # so they average a correlated error and buy less than their count suggests;
+    # separating them by a full pass is what makes the extra forwards
+    # independent enough to be worth their cost.
+    prefill = [dict(point) for _ in range(repeats) for point in shapes]
     return {"schema_version": 3, "prefill": prefill, "decode": decode or []}, notes

@@ -166,7 +166,7 @@ class BenchmarkConfig:
     collect_imbalanced: bool = False
     # Repeats per constructed shape. The label is a difference between two
     # measurements, so its noise is the pair's, not one run's.
-    imbalance_repeats: int = 5
+    imbalance_repeats: int = 1
     # None -> probe the model config; see _bench_imbalance_topk.
     imbalance_topk: int | None = None
     # None -> a sibling of output_path.
@@ -1867,9 +1867,13 @@ class InstrumentedScheduler(AsyncScheduler):
         num_prefill = 0
         sum_prefill_tokens = 0
         prefill_lengths = WelfordAccumulator()
+        # The length this forward pass actually attends to, p + s, as opposed to
+        # the prompt's final length. They differ under chunked prefill, and it is
+        # this one the work identity and the topk regime are stated in.
+        prefill_end_lengths = WelfordAccumulator()
         prefill_kv = WelfordAccumulator()
         min_prefill_kv = None
-        max_prefill_len = 0
+        max_prefill_end_len = 0
         decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
@@ -1877,28 +1881,34 @@ class InstrumentedScheduler(AsyncScheduler):
                 decode_kv.add(req.num_computed_tokens)
                 continue
             num_prefill += 1
-            sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
+            scheduled_now = num_scheduled.get(req.req_id, 0)
+            sum_prefill_tokens += scheduled_now
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
             prefill_lengths.add(prompt_len)
+            end_len = req.num_computed_tokens + scheduled_now
+            prefill_end_lengths.add(end_len)
             prefill_kv.add(req.num_computed_tokens)
             if min_prefill_kv is None or req.num_computed_tokens < min_prefill_kv:
                 min_prefill_kv = req.num_computed_tokens
-            max_prefill_len = max(max_prefill_len, prompt_len)
+            max_prefill_end_len = max(max_prefill_end_len, end_len)
             self._prompt_len_per_req[req.req_id] = prompt_len
 
         for i, req_id in enumerate(cached.req_ids):
             if cached.is_context_phase(req_id):
                 num_prefill += 1
-                sum_prefill_tokens += num_scheduled.get(req_id, 0)
+                scheduled_now = num_scheduled.get(req_id, 0)
+                sum_prefill_tokens += scheduled_now
                 cached_prompt_len = self._prompt_len_per_req.get(req_id, 0)
                 prefill_lengths.add(cached_prompt_len)
+                end_len = cached.num_computed_tokens[i] + scheduled_now
+                prefill_end_lengths.add(end_len)
                 prefill_kv.add(cached.num_computed_tokens[i])
                 if (
                     min_prefill_kv is None
                     or cached.num_computed_tokens[i] < min_prefill_kv
                 ):
                     min_prefill_kv = cached.num_computed_tokens[i]
-                max_prefill_len = max(max_prefill_len, cached_prompt_len)
+                max_prefill_end_len = max(max_prefill_end_len, end_len)
             else:
                 decode_kv.add(cached.num_computed_tokens[i])
 
@@ -1906,10 +1916,11 @@ class InstrumentedScheduler(AsyncScheduler):
             num_prefill_requests=num_prefill,
             sum_prefill_tokens=sum_prefill_tokens,
             var_prefill_length=prefill_lengths.variance(),
+            var_prefill_end_length=prefill_end_lengths.variance(),
             sum_prefill_kv_tokens=prefill_kv.s,
             var_prefill_kv_tokens=prefill_kv.variance(),
             min_prefill_kv_tokens=min_prefill_kv or 0,
-            max_prefill_length=max_prefill_len,
+            max_prefill_end_length=max_prefill_end_len,
             num_decode_requests=decode_kv.n,
             sum_decode_kv_tokens=decode_kv.s,
             var_decode_kv_tokens=decode_kv.variance(),

@@ -198,6 +198,49 @@ def test_extract_scheduled_aggregates_batched_prefill_kv_reads():
     assert metrics.var_prefill_length == 0.0
 
 
+def test_extract_scheduled_reports_the_length_this_pass_attends_to():
+    """Under chunked prefill the prompt's final length is not the length this
+    forward pass attends to, and the work identity and the topk regime are both
+    stated in the latter. A 16k prompt computing its first 2k chunk attends to
+    2k, not 16k -- classifying it by 16k puts it on the sparse side of a 2048
+    budget on a pass that is entirely dense."""
+    metrics = _run_extract_scheduled(
+        [_make_new_request("req-1", prompt_len=16384, num_computed_tokens=0)],
+        {"req-1": 2048},
+    )
+
+    assert metrics.max_prefill_end_length == 2048
+    # The full-prompt fields keep their existing contract.
+    assert metrics.var_prefill_length == 0.0
+    assert metrics.sum_prefill_tokens == 2048
+
+
+def test_extract_scheduled_end_length_variance_is_the_spread_of_this_pass():
+    """Two requests whose prompts are equally long but whose chunks land at
+    different offsets are a heterogeneous batch for this pass, and a batch of
+    equal-length prompts at equal offsets is not -- neither of which the
+    full-prompt variance can tell apart."""
+    same_prompt_same_offset = _run_extract_scheduled(
+        [
+            _make_new_request("req-1", prompt_len=16384, num_computed_tokens=4096),
+            _make_new_request("req-2", prompt_len=16384, num_computed_tokens=4096),
+        ],
+        {"req-1": 2048, "req-2": 2048},
+    )
+    assert same_prompt_same_offset.var_prefill_end_length == 0.0
+
+    same_prompt_different_offset = _run_extract_scheduled(
+        [
+            _make_new_request("req-1", prompt_len=16384, num_computed_tokens=0),
+            _make_new_request("req-2", prompt_len=16384, num_computed_tokens=8192),
+        ],
+        {"req-1": 2048, "req-2": 2048},
+    )
+    assert same_prompt_different_offset.var_prefill_length == 0.0
+    assert same_prompt_different_offset.var_prefill_end_length > 0.0
+    assert same_prompt_different_offset.max_prefill_end_length == 10240
+
+
 def test_extract_scheduled_counts_benchmark_decode_new_requests_as_decode():
     metrics = _run_extract_scheduled(
         [
