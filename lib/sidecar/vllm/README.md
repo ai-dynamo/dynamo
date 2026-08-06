@@ -53,7 +53,7 @@ provided through the environment.
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-Control reports the global data-parallel size, the rank hosted by the connected frontend, and whether explicit rank routing is supported. Dynamo forwards the selected rank on each generation request and uses discovered KV-event sources for KV-aware routing. Startup fails for data-parallel deployments when the server does not advertise explicit rank routing.
+The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size and whether explicit rank routing is supported; Dynamo forwards the selected rank on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 

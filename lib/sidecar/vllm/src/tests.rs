@@ -215,18 +215,20 @@ impl pb::control_server::Control for FakeVllm {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         Ok(Response::new(pb::GetKvEventSourcesResponse {
-            sources: vec![pb::KvEventSource {
-                transport: "zmq".to_string(),
-                endpoint: "tcp://127.0.0.1:20081".to_string(),
-                topic: String::new(),
-                replay_endpoint: String::new(),
-                data_parallel_rank: Some(2),
-                encoding: "msgpack".to_string(),
-                schema_version: 1,
-                buffer_steps: 0,
-                hwm: 0,
-                max_queue_size: 0,
-            }],
+            sources: (0..2)
+                .map(|rank| pb::KvEventSource {
+                    transport: "zmq".to_string(),
+                    endpoint: format!("tcp://127.0.0.1:{}", 20081 + rank),
+                    topic: String::new(),
+                    replay_endpoint: String::new(),
+                    data_parallel_rank: Some(rank),
+                    encoding: "msgpack".to_string(),
+                    schema_version: 1,
+                    buffer_steps: 0,
+                    hwm: 0,
+                    max_queue_size: 0,
+                })
+                .collect(),
         }))
     }
 }
@@ -252,8 +254,8 @@ fn server_info() -> pb::ServerInfo {
         parallelism: Some(pb::ParallelismInfo {
             tensor_parallel_size: 2,
             pipeline_parallel_size: 1,
-            data_parallel_size: 4,
-            data_parallel_rank: 2,
+            data_parallel_size: 2,
+            data_parallel_rank: 0,
             decode_context_parallel_size: 1,
         }),
         max_model_len: 8192,
@@ -506,7 +508,7 @@ fn request() -> PreprocessedRequest {
             ..Default::default()
         }))
         .extra_args(Some(json!({
-            "nvext": {"cache_salt": "cache-salt"},
+            "nvext": {"cache_salt": "cache-salt", "token_in": true},
             "bypass_prefix_cache": true,
             "kv_transfer_params": {
                 "connector_data": {"values": [1, true, null]}
@@ -636,19 +638,25 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.total_kv_blocks, Some(4096));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
-    assert_eq!(registration.data_parallel_size, Some(4));
-    assert_eq!(registration.data_parallel_start_rank, Some(2));
+    assert_eq!(registration.data_parallel_size, Some(2));
+    assert_eq!(registration.data_parallel_start_rank, Some(0));
 
     let sources = engine.kv_event_sources().await.expect("KV event sources");
-    assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].dp_rank(), 2);
-    assert!(matches!(
-        &sources[0],
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.dp_rank())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([0, 1])
+    );
+    assert!(sources.iter().all(|source| matches!(
+        source,
         dynamo_backend_common::KvEventSource::Zmq { topic, .. } if topic.is_empty()
-    ));
+    )));
 
     let mut routed_request = serde_json::to_value(request()).expect("serialize request");
-    routed_request["routing"] = json!({"dp_rank": 2, "cache_salt": "cache-salt"});
+    routed_request["routing"] = json!({"dp_rank": 1, "cache_salt": "cache-salt"});
     let outputs = collect(
         &engine,
         serde_json::from_value(routed_request).expect("deserialize routed request"),
@@ -669,7 +677,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let sent = requests.first().expect("recorded request");
     assert_eq!(sent.model, "served-model");
     assert_eq!(sent.priority, 0);
-    assert_eq!(sent.data_parallel_rank, Some(2));
+    assert_eq!(sent.data_parallel_rank, Some(1));
     let sampling = sent.sampling.as_ref().unwrap();
     assert_eq!(
         (sampling.top_k, sampling.top_p, sampling.min_p),

@@ -46,6 +46,19 @@ impl DiscoveredModel {
                 "vLLM reports data parallelism greater than one but does not advertise explicit data-parallel rank routing",
             ));
         }
+        if let Some(parallelism) = server.parallelism.as_ref() {
+            if parallelism.data_parallel_size == 0 {
+                return Err(client::protocol_error(
+                    "vLLM reports a data-parallel size of zero",
+                ));
+            }
+            if parallelism.data_parallel_rank != 0 {
+                return Err(client::protocol_error(format!(
+                    "vLLM reports data_parallel_rank {}; the sidecar currently requires one frontend hosting the complete data-parallel group starting at rank 0",
+                    parallelism.data_parallel_rank
+                )));
+            }
+        }
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -95,11 +108,17 @@ impl DiscoveredModel {
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
                 data_parallel_size: parallelism
                     .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
-                data_parallel_start_rank: parallelism
-                    .map(|parallelism| parallelism.data_parallel_rank),
+                data_parallel_start_rank: parallelism.map(|_| 0),
                 ..Default::default()
             }),
         }
+    }
+
+    pub(crate) fn data_parallel_size(&self) -> u32 {
+        self.server
+            .parallelism
+            .as_ref()
+            .map_or(1, |parallelism| parallelism.data_parallel_size)
     }
 }
 
