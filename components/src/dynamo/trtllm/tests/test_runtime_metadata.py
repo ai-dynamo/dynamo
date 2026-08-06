@@ -36,6 +36,14 @@ def test_token_budget_matches_trtllm_policy():
     }
 
 
+def test_token_budget_is_omitted_when_trtllm_infers_limit():
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+
+    publish_trtllm_token_budget(runtime_config, None)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
 def test_spec_decode_runtime_data_uses_max_draft_len():
     engine_args = {
         "speculative_config": {

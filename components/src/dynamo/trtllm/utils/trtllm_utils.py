@@ -10,8 +10,11 @@ from typing import Any
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 
-def publish_trtllm_token_budget(runtime_config: Any, max_seq_len: int) -> None:
-    """Publish TensorRT-LLM's request-overflow contract."""
+def publish_trtllm_token_budget(runtime_config: Any, max_seq_len: int | None) -> None:
+    """Publish TensorRT-LLM's request-overflow contract when its limit is known."""
+    if max_seq_len is None:
+        return
+
     publish_token_budget(
         runtime_config,
         TokenBudget(
