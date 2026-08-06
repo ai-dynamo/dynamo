@@ -344,10 +344,33 @@ class TestClassifyWorkerExclusivity:
         with pytest.raises(ValueError, match="benchmark-mode"):
             config._validate_classify_worker_exclusivity()
 
+    def test_headless_combination_rejected(self):
+        """Headless returns from main.worker() before WorkerFactory.create(),
+        so the classify/pooling endpoint would never register — the process
+        would come up healthy and serve nothing."""
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.headless = True
+        with pytest.raises(ValueError, match="headless"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_enable_lora_combination_rejected(self):
+        """The pooling-family handler never forwards lora_request to
+        engine_client.encode(), so an adapter-targeted request would silently
+        run against the base model."""
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = SimpleNamespace(enable_lora=True)
+        with pytest.raises(ValueError, match="enable-lora"):
+            config._validate_classify_worker_exclusivity()
+
     def test_no_op_when_classify_worker_disabled(self):
         config = create_config()
         config.classify_worker = False
         config.benchmark_mode = "agg"
+        config.headless = True
         config._validate_classify_worker_exclusivity()
 
 
