@@ -1208,6 +1208,7 @@ impl HttpServiceConfigBuilder {
             system_router = system_router.merge(route);
         }
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
+        let anthropic_gate_prefix = anthropic_messages_path.clone();
         let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
             state.clone(),
             &config.request_template,
@@ -1238,6 +1239,7 @@ impl HttpServiceConfigBuilder {
             let gate_state = Arc::new(super::admission::FrontendLocalGateState::new(
                 state.clone(),
                 request_plane_exempt_path,
+                anthropic_gate_prefix,
             ));
             inference_router = inference_router.route_layer(axum::middleware::from_fn_with_state(
                 gate_state,

@@ -45,18 +45,32 @@ use dynamo_runtime::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
 pub(crate) struct FrontendLocalGateState {
     state: Arc<State>,
     request_plane_exempt_path: Option<Box<str>>,
+    /// The Anthropic Messages route prefix. Rejections on this surface (and
+    /// its subroutes, e.g. count_tokens) are shaped as the Anthropic error
+    /// envelope instead of the OpenAI-style body.
+    anthropic_path_prefix: Box<str>,
 }
 
 impl FrontendLocalGateState {
-    pub(crate) fn new(state: Arc<State>, request_plane_exempt_path: Option<String>) -> Self {
+    pub(crate) fn new(
+        state: Arc<State>,
+        request_plane_exempt_path: Option<String>,
+        anthropic_path_prefix: String,
+    ) -> Self {
         Self {
             state,
             request_plane_exempt_path: request_plane_exempt_path.map(String::into_boxed_str),
+            anthropic_path_prefix: anthropic_path_prefix.into_boxed_str(),
         }
     }
 
     fn route_uses_request_plane(&self, path: &str) -> bool {
         self.request_plane_exempt_path.as_deref() != Some(path)
+    }
+
+    fn is_anthropic_route(&self, path: &str) -> bool {
+        path.strip_prefix(self.anthropic_path_prefix.as_ref())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     }
 }
 
@@ -157,10 +171,7 @@ pub(crate) fn check_model_concurrency_gate(
 /// Frontend-local self-protection gates (runtime tasks and request-plane
 /// pressure). Model-independent, evaluated by middleware before the request
 /// body is parsed. Rejection metrics and logs are recorded here.
-fn check_frontend_local_gates(
-    state: &State,
-    route_uses_request_plane: bool,
-) -> Result<(), ErrorResponse> {
+fn check_frontend_local_gates(state: &State, route_uses_request_plane: bool) -> Result<(), String> {
     let config = state.admission_gate_config();
 
     if let Some(limit) = config.runtime_task_limit() {
@@ -170,7 +181,7 @@ fn check_frontend_local_gates(
         // This measurement already includes the task executing the middleware,
         // so `>` admits exactly `limit` live tasks and rejects the excess.
         if alive_tasks > limit {
-            return Err(ErrorMessage::service_unavailable_with_body(reject(
+            return Err(reject(
                 state,
                 admission_gate::RUNTIME_TASK,
                 "",
@@ -179,7 +190,7 @@ fn check_frontend_local_gates(
                      runtime tasks exceeds --rejection-frontend-runtime-task-limit={limit}; \
                      retry later"
                 ),
-            )));
+            ));
         }
     }
 
@@ -192,7 +203,7 @@ fn check_frontend_local_gates(
         // increment the gauge. This is a best-effort pressure trigger, not a
         // strict concurrency cap.
         if inflight_streams >= limit as f64 {
-            return Err(ErrorMessage::service_unavailable_with_body(reject(
+            return Err(reject(
                 state,
                 admission_gate::REQUEST_PLANE_CONNECTION,
                 "",
@@ -201,7 +212,7 @@ fn check_frontend_local_gates(
                      request-plane stream count ({inflight_streams}) has reached \
                      --rejection-frontend-request-plane-connection-limit={limit}; retry later"
                 ),
-            )));
+            ));
         }
     }
 
@@ -215,11 +226,16 @@ pub(crate) async fn enforce_frontend_local_gates(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let route_uses_request_plane = gate_state.route_uses_request_plane(request.uri().path());
-    if let Err(err_response) =
-        check_frontend_local_gates(&gate_state.state, route_uses_request_plane)
-    {
-        return err_response.into_response();
+    let path = request.uri().path();
+    let route_uses_request_plane = gate_state.route_uses_request_plane(path);
+    if let Err(message) = check_frontend_local_gates(&gate_state.state, route_uses_request_plane) {
+        // A rejection returns before any route-level middleware runs, so the
+        // surface shaping must happen here: Anthropic routes get the
+        // Anthropic error envelope, everything else the OpenAI-style body.
+        if gate_state.is_anthropic_route(path) {
+            return super::anthropic::overloaded_error_response(&message);
+        }
+        return ErrorMessage::service_unavailable_with_body(message).into_response();
     }
     next.run(request).await
 }

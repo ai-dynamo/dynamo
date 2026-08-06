@@ -131,32 +131,6 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
         );
     }
 
-    // The frontend-local admission gates (runtime-task / request-plane
-    // pressure) reject from middleware with a flat OpenAI-style body; reshape
-    // those into the Anthropic envelope. Handler-produced 503s are already
-    // Anthropic-shaped (top-level `"type": "error"`) and pass through.
-    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-        let (parts, body) = response.into_parts();
-        let body_bytes = axum::body::to_bytes(body, get_body_limit())
-            .await
-            .unwrap_or_default();
-        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            Ok(value) if value.get("type").and_then(|t| t.as_str()) != Some("error") => {
-                let message = value
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| String::from_utf8_lossy(&body_bytes).to_string());
-                return anthropic_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "overloaded_error",
-                    &message,
-                );
-            }
-            _ => return Response::from_parts(parts, Body::from(body_bytes)),
-        }
-    }
-
     response
 }
 
@@ -586,6 +560,19 @@ async fn anthropic_messages(
         let stream_with_check = super::openai::check_for_backend_error(engine_stream, None)
             .await
             .map_err(|(status, _json_err)| {
+                // Classify the request counter by the backend status instead
+                // of letting the guard drop with the default Internal label.
+                inflight_guard.mark_error(if status == StatusCode::SERVICE_UNAVAILABLE {
+                    super::metrics::ErrorType::Unavailable
+                } else if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
+                    super::metrics::ErrorType::Overload
+                } else if status.as_u16() == 499 {
+                    super::metrics::ErrorType::Cancelled
+                } else if status.is_client_error() {
+                    super::metrics::ErrorType::Validation
+                } else {
+                    super::metrics::ErrorType::Internal
+                });
                 // check_for_backend_error has already sanitized the body and
                 // logged the backend detail; preserve its status when
                 // re-wrapping in Anthropic format. Status classification is
@@ -978,6 +965,12 @@ fn find_invalid_argument_in_chain<'a>(
 
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
+/// Frontend-local admission rejections (shaped by the gate middleware, which
+/// runs before this module's route middleware) as the Anthropic envelope.
+pub(crate) fn overloaded_error_response(message: &str) -> Response {
+    anthropic_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded_error", message)
+}
+
 fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
     let mapped_type = match status.as_u16() {
         400 => "invalid_request_error",

@@ -285,9 +285,15 @@ async fn handler_generate(
     let model = match &request.model {
         Some(model) => model.clone(),
         None => {
-            let models = state
+            // Aliases mirror their primary's WorkerSet under a separate model
+            // name; canonicalize and deduplicate so a single primary with
+            // aliases still counts as one model for the no-model default.
+            let models: std::collections::BTreeSet<String> = state
                 .manager()
-                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY);
+                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+                .into_iter()
+                .map(|model| state.manager().resolve_canonical_name(&model))
+                .collect();
             match models.len() {
                 1 => models.into_iter().next().unwrap(),
                 0 => {
@@ -1257,6 +1263,48 @@ mod tests {
             0
         );
         holder.mark_ok();
+    }
+
+    #[tokio::test]
+    async fn generate_handler_no_model_dedups_alias_mirrors() {
+        // Production alias registration mirrors the primary's WorkerSet under
+        // the alias name; a single primary with one alias must still count as
+        // one model for the omitted-`model` default path.
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("gen-primary", "0", engine)
+            .expect("register generate model");
+        let namespace = "__local_generate_gen-primary";
+        let worker_set = state
+            .manager()
+            .get_model("gen-primary")
+            .and_then(|model| model.get_worker_set(namespace))
+            .expect("primary generate WorkerSet should be registered");
+        assert!(state.manager().register_alias("gen-alias", "gen-primary"));
+        assert!(
+            state
+                .manager()
+                .add_worker_set_arc("gen-alias", namespace, worker_set)
+        );
+
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {},
+        }))
+        .expect("deserialize request");
+        let response =
+            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "one primary plus its alias mirror must not count as multiple models"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]

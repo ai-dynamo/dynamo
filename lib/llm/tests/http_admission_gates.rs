@@ -577,11 +577,38 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
     // inference route and remains subject to the runtime-task pressure gate.
     let count_tokens = post_count_tokens(svc.port).await;
     assert_eq!(count_tokens.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Anthropic routes get the Anthropic error envelope even for
+    // middleware-level (frontend-local) gate rejections.
+    let ct_body: serde_json::Value = count_tokens.json().await.unwrap();
+    assert_eq!(
+        ct_body["type"], "error",
+        "Anthropic envelope expected on count_tokens rejection: {ct_body}"
+    );
+    assert_eq!(
+        ct_body["error"]["type"], "overloaded_error",
+        "Anthropic overload classification expected: {ct_body}"
+    );
+    let messages = post_messages(
+        svc.port,
+        &serde_json::json!({
+            "model": "fast",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        }),
+    )
+    .await;
+    assert_eq!(messages.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let msg_body: serde_json::Value = messages.json().await.unwrap();
+    assert_eq!(
+        msg_body["type"], "error",
+        "Anthropic envelope expected on /v1/messages rejection: {msg_body}"
+    );
+    assert_eq!(msg_body["error"]["type"], "overloaded_error");
     assert_eq!(
         svc.state
             .metrics_clone()
             .get_admission_rejection_count(admission_gate::RUNTIME_TASK, ""),
-        2
+        3
     );
 
     // System routes bypass the inference admission middleware.
