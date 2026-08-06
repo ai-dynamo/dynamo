@@ -88,15 +88,33 @@ produces more unchecked text.
 within each pair, a bootstrap confidence interval on the median candidate/baseline ratio, an
 equivalence threshold, and an escalation rule when the interval straddles it.
 
-That procedure consumes **one elapsed scalar per run** and needs a large sample, which is
-affordable only because an offline replay is a fast, deterministic, single-process
-invocation. `.agents/skills/dynamo-frontend-benchmark/SKILL.md` offers "interleave arms, take
-the median of 3+", which is a heuristic rather than a method.
+That procedure consumes **one elapsed scalar per run** — `replay_execution_ms`, timed narrowly
+around the replay call itself, deliberately excluding setup, engine preparation, and report
+aggregation — and collects a balanced 60-pair schedule per row (30 baseline-first, 30
+candidate-first, randomized), so 120 invocations per row, each a fresh process. That is
+affordable only because an offline replay is fast, deterministic, and single-process.
+`.agents/skills/dynamo-frontend-benchmark/SKILL.md` offers "interleave arms, take the median
+of 3+", which is a heuristic rather than a method.
+
+Note where its power comes from, because this is the part that does not transfer. Four
+mechanisms, and sample size is the weakest:
+
+1. **Narrow timing boundary** — excludes setup and initialization noise from the measurement
+   entirely, rather than averaging over it.
+2. **Pairing** — both arms run adjacently and are compared as a ratio, so common-mode drift
+   (frequency scaling, thermal, background load) divides out.
+3. **Balanced randomized order** — cancels ordering effects.
+4. **n = 60 pairs** — shrinks the interval around the median ratio.
+
+Note also what is and is not deterministic: replay's *output* is byte-identical across runs,
+but its *elapsed time* is not. Stage 7 measures a noisy quantity of a deterministic
+computation, which is precisely the condition that makes pairing so effective — the work is
+provably identical, so a timing difference is either the change or ambient noise.
 
 **Why it matters.** Most real questions are of the form "did p99 time to first token get
 worse under load", where the unit of analysis is the request, not the run. Neither existing
 procedure covers that, and the replay procedure's constants do not transfer: you cannot run
-30 paired GPU sweeps, and a 5% threshold calibrated to simulator runtime means nothing for a
+60 paired GPU sweeps, and a threshold calibrated to simulator runtime means nothing for a
 latency percentile.
 
 **What fixing looks like.** A written procedure for comparing latency distributions between
@@ -127,8 +145,8 @@ nothing. As recorded, this is one run per arm, quoted to 0.1 ms.
 The catalog schema's `results` object requires only `available: boolean` and accepts a
 free-text `summary`, so `+16.4% TPS` validates with no sample size attached.
 
-**Why it matters.** The bar is inverted. The repository demands 30 randomized pairs and a
-bootstrap interval before calling a 5% *simulator runtime* change real, while publishing
+**Why it matters.** The bar is inverted. The repository demands 120 paired invocations and a
+bootstrap interval before calling a small *simulator runtime* change real, while publishing
 hardware claims off an unstated sample size. Large effects with understood mechanisms are
 probably fine — but the reader cannot distinguish "large effect, obviously real" from
 "single sample, unknown dispersion" because the record does not say.
