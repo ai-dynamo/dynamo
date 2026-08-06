@@ -15,6 +15,15 @@ import (
 
 const defaultSocket = "/run/pagebroker/pagebroker.sock"
 
+type operation uint64
+
+const (
+	submitOperation            operation = 1
+	prepareCheckpointOperation operation = 2
+	commitOperation            operation = 3
+	abortOperation             operation = 4
+)
+
 type Client struct{ socket string }
 
 func NewClient(socket string) *Client {
@@ -50,7 +59,7 @@ func (c *Client) Stage(ctx context.Context, checkpoint string) (*Transaction, er
 		_ = provider.Close()
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_, _ = c.call(cleanup, 4, id, "")
+		_, _ = c.call(cleanup, abortOperation, id, "")
 		return nil, fmt.Errorf("checkpoint is unavailable after submit: %w", err)
 	}
 	return &Transaction{client: c, id: id, staging: checkpoint, scratch: r.scratch, provider: provider}, nil
@@ -62,7 +71,7 @@ func PrepareCheckpoint(ctx context.Context, socket, checkpoint string) (*Transac
 
 func (c *Client) PrepareCheckpoint(ctx context.Context, checkpoint string) (*Transaction, error) {
 	id := "tx-" + uuid.NewString()
-	r, err := c.call(ctx, 2, id, checkpoint)
+	r, err := c.call(ctx, prepareCheckpointOperation, id, checkpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +105,7 @@ func (t *Transaction) Files() ([]*os.File, error) {
 }
 func (t *Transaction) Commit(ctx context.Context) error {
 	t.closeProvider()
-	r, err := t.client.call(ctx, 3, t.id, "")
+	r, err := t.client.call(ctx, commitOperation, t.id, "")
 	if err != nil {
 		return err
 	}
@@ -107,7 +116,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 }
 func (t *Transaction) Abort(ctx context.Context) error {
 	t.closeProvider()
-	r, err := t.client.call(ctx, 4, t.id, "")
+	r, err := t.client.call(ctx, abortOperation, t.id, "")
 	if err != nil {
 		return err
 	}
@@ -140,7 +149,7 @@ func varint(v uint64) []byte {
 func field(n int, v []byte) []byte {
 	return append(append(varint(uint64(n*8+2)), varint(uint64(len(v)))...), v...)
 }
-func request(op int, id, path string) []byte {
+func request(op operation, id, path string) []byte {
 	b := append(varint(8), varint(uint64(op))...)
 	if id != "" {
 		b = append(b, field(2, []byte(id))...)
@@ -179,7 +188,7 @@ func (c *Client) submit(ctx context.Context, id, checkpoint string) (response, *
 	if !ok {
 		return response{}, nil, fmt.Errorf("PageBroker connection is %T, want UnixConn", connection)
 	}
-	if _, err := connection.Write(request(1, id, checkpoint)); err != nil {
+	if _, err := connection.Write(request(submitOperation, id, checkpoint)); err != nil {
 		return response{}, nil, contextError(ctx, err)
 	}
 	buf := make([]byte, 65536)
@@ -198,11 +207,11 @@ func (c *Client) submit(ctx context.Context, id, checkpoint string) (response, *
 	return r, provider, nil
 }
 
-func call(ctx context.Context, socket string, op int, id, path string) (response, error) {
+func call(ctx context.Context, socket string, op operation, id, path string) (response, error) {
 	return NewClient(socket).call(ctx, op, id, path)
 }
 
-func (c *Client) call(ctx context.Context, op int, id, path string) (response, error) {
+func (c *Client) call(ctx context.Context, op operation, id, path string) (response, error) {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unixpacket", c.socket)
 	if err != nil {
 		return response{}, err

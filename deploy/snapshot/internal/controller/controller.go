@@ -583,7 +583,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
-		PageBrokerEnabled:           pod.Annotations[snapshotprotocol.PageBrokerAnnotation] == "true",
+		PageBrokerEnabled:           w.pageBrokerEnabled(pod),
 		PageBrokerSocket:            "/run/pagebroker/pagebroker.sock",
 	}
 	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
@@ -740,6 +740,18 @@ func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointI
 		return checkpointLocations{HostPath: hostLocation, ContainerPath: location}, nil
 	}
 	return checkpointLocations{HostPath: location, ContainerPath: location}, nil
+}
+
+func (w *NodeController) pageBrokerEnabled(pod *corev1.Pod) bool {
+	if pod.Annotations[snapshotprotocol.PageBrokerAnnotation] != "true" ||
+		strings.TrimSpace(w.config.Storage.AccessMode) != types.StorageAccessModeAgentMount {
+		return false
+	}
+	storageType := strings.TrimSpace(pod.Annotations[snapshotprotocol.CheckpointStorageTypeAnnotation])
+	if storageType == "" {
+		storageType = strings.TrimSpace(w.config.Storage.Type)
+	}
+	return storageType == snapshotprotocol.StorageTypePVC
 }
 
 func (w *NodeController) refreshRestoreCheckpointLocation(ctx context.Context, pod *corev1.Pod, containerID string, checkpointID string, checkpointLocation checkpointLocations) (checkpointLocations, error) {

@@ -44,7 +44,8 @@ type CheckpointParams struct {
 	HostPath string
 	// ContainerPath is the destination as seen inside the workload container's mount
 	// namespace (equal to HostPath under agentMount storage).
-	ContainerPath string
+	ContainerPath     string
+	PageBrokerEnabled bool
 	// StartedAt marks when the controller observed the work order, for timing.
 	StartedAt time.Time
 }
@@ -262,14 +263,15 @@ func (w *NodeController) runCheckpoint(
 	go w.renewLease(leaseCtx, leaseKey, stopLease)
 
 	params := CheckpointParams{
-		Pod:           pod,
-		ContainerName: containerName,
-		ContainerID:   containerID,
-		ContainerPID:  containerPID,
-		CheckpointID:  checkpointID,
-		HostPath:      loc.HostPath,
-		ContainerPath: loc.ContainerPath,
-		StartedAt:     time.Now(),
+		Pod:               pod,
+		ContainerName:     containerName,
+		ContainerID:       containerID,
+		ContainerPID:      containerPID,
+		CheckpointID:      checkpointID,
+		HostPath:          loc.HostPath,
+		ContainerPath:     loc.ContainerPath,
+		PageBrokerEnabled: w.pageBrokerEnabled(pod),
+		StartedAt:         time.Now(),
 	}
 	if err := w.checkpointFn(leaseCtx, params); err != nil {
 		if cause := context.Cause(leaseCtx); cause != nil && !errors.Is(cause, context.Canceled) {
@@ -451,6 +453,8 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		PodNamespace:       params.Pod.Namespace,
 		PodIP:              params.Pod.Status.PodIP,
 		Clientset:          w.clientset,
+		PageBrokerEnabled:  params.PageBrokerEnabled,
+		PageBrokerSocket:   "/run/pagebroker/pagebroker.sock",
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed")

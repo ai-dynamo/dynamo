@@ -55,6 +55,10 @@ pagebroker-test:
 lint: golangci-lint ## Run golangci-lint linter.
 	$(GOLANGCI_LINT) run
 
+.PHONY: helm-lint
+helm-lint: ## Lint the Snapshot Helm chart.
+	helm lint ../helm/charts/snapshot
+
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 	$(GOLANGCI_LINT) run --fix

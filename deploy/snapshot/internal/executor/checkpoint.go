@@ -17,6 +17,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -33,6 +34,8 @@ type CheckpointRequest struct {
 	PodNamespace       string
 	PodIP              string
 	Clientset          kubernetes.Interface
+	PageBrokerEnabled  bool
+	PageBrokerSocket   string
 }
 
 type checkpointPhaseTimings struct {
@@ -63,6 +66,23 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	finalDir := req.CheckpointLocation
+	if req.PageBrokerEnabled {
+		transaction, prepareErr := pagebroker.PrepareCheckpoint(ctx, req.PageBrokerSocket, finalDir)
+		if prepareErr == nil {
+			captureTimings, captureErr := captureCheckpointTo(ctx, rt, log, req, cfg, transaction.StagingPath(), prepareStart)
+			if captureErr == nil {
+				if err := transaction.Commit(ctx); err != nil {
+					_ = transaction.Abort(ctx)
+					return fmt.Errorf("commit checkpoint through PageBroker: %w", err)
+				}
+				log.Info("Checkpoint committed through PageBroker", "duration", time.Since(checkpointStart), "prepare_duration", captureTimings.PrepareDuration.String())
+				return nil
+			}
+			_ = transaction.Abort(ctx)
+			return captureErr
+		}
+		log.Error(prepareErr, "PageBroker unavailable; falling back to local checkpoint staging")
+	}
 	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
 	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
 		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
@@ -74,23 +94,11 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	defer os.RemoveAll(tmpDir)
 
 	// Phase 1: Inspect container state
-	state, err := inspectContainer(ctx, rt, log, req)
+	captureTimings, err := captureCheckpointTo(ctx, rt, log, req, cfg, tmpDir, prepareStart)
 	if err != nil {
 		return err
 	}
-
-	// Phase 2: Configure CRIU options and build checkpoint manifest
-	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
-	if err != nil {
-		return err
-	}
-	phaseTimings.PrepareDuration = time.Since(prepareStart)
-
-	// Phase 3: Capture — CRIU dump, rootfs diff
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
-	if err != nil {
-		return err
-	}
+	phaseTimings.PrepareDuration = captureTimings.PrepareDuration
 	phaseTimings.CUDADuration = captureTimings.CUDADuration
 	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
 	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
@@ -126,6 +134,23 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	return nil
+}
+
+func captureCheckpointTo(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig, checkpointDir string, prepareStart time.Time) (*checkpointPhaseTimings, error) {
+	state, err := inspectContainer(ctx, rt, log, req)
+	if err != nil {
+		return nil, err
+	}
+	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, checkpointDir)
+	if err != nil {
+		return nil, err
+	}
+	timings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, checkpointDir, log)
+	if err != nil {
+		return nil, err
+	}
+	timings.PrepareDuration = time.Since(prepareStart)
+	return timings, nil
 }
 
 func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {

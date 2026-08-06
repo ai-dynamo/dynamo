@@ -99,6 +99,9 @@ daemonset:
       cpu: 2
       memory: 1Gi
 
+  pageBroker:
+    enabled: false
+
   # Node selector - target GPU nodes
   nodeSelector:
     nvidia.com/gpu.present: "true"
