@@ -84,7 +84,7 @@ const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
 export const RELEASES: Release[] = [
   {
     version: "v1.3.1",
-    notesHref: "/dynamo/dev/reference/releases/v1-3-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-3-0#v131",
     date: "Aug 5, 2026",
     kind: "patch",
     github: `${GH}v1.3.1`,
