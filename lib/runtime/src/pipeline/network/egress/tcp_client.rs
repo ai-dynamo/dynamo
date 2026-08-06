@@ -1500,8 +1500,29 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get shared connection from pool (Arc, not exclusive borrow)
-        let conn = self.pool.get_connection(addr).await?;
+        // Get shared connection from pool (Arc, not exclusive borrow).
+        //
+        // A connect failure means the worker is gone (ECONNREFUSED) or
+        // unreachable. Type it the same way the post-connect failure arms below
+        // do: `PushRouter::is_inhibited` matches `DynamoError` variants through
+        // `match_error_chain`, and a bare `std::io::Error` matches nothing, so
+        // leaving this untyped means the router never quarantines a dead
+        // instance and keeps dispatching to it until discovery expires it.
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connect failed; instance unreachable");
+            let cause = crate::error::DynamoError::from(
+                e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+            );
+            anyhow::anyhow!(
+                crate::error::DynamoError::builder()
+                    .error_type(crate::error::ErrorType::CannotConnect)
+                    .message(format!("TCP connect to {addr} failed"))
+                    .cause(cause)
+                    .build()
+            )
+        })?;
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
@@ -2831,6 +2852,82 @@ mod tests {
             conn_count.load(Ordering::SeqCst),
             1,
             "Should use only 1 connection"
+        );
+    }
+
+    /// Bind then drop, yielding a port the OS will refuse connections on.
+    async fn closed_port() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    /// A worker that is *gone* (process dead, port refusing) must surface a
+    /// `CannotConnect`-typed error.
+    ///
+    /// `PushRouter::is_inhibited` matches on `DynamoError` variants via
+    /// `match_error_chain`; a bare `std::io::Error` matches nothing, so an
+    /// untyped ECONNREFUSED means `report_instance_down` never fires and the
+    /// router keeps dispatching to the dead instance for the full discovery
+    /// liveness window.
+    #[tokio::test]
+    async fn connect_refused_is_typed_cannot_connect() {
+        let addr = closed_port().await;
+        let client = TcpRequestClient::default();
+
+        let err = client
+            .send_request(
+                format!("{addr}/test_endpoint"),
+                Bytes::from("ping"),
+                Headers::new(),
+            )
+            .await
+            .expect_err("connecting to a closed port must fail");
+
+        assert!(
+            crate::error::match_error_chain(
+                err.as_ref(),
+                &[crate::error::ErrorType::CannotConnect],
+                &[]
+            ),
+            "ECONNREFUSED must be typed CannotConnect so the router quarantines the dead \
+             worker; got untyped error: {err:?}"
+        );
+    }
+
+    /// Contrast case, and the reason the gap is easy to miss: a worker that dies
+    /// *mid-request* (connection established, then reset) is already typed
+    /// correctly by the `Ok(Err(_))` arm of `send_request`. Same fault class as
+    /// the test above, opposite classification.
+    #[tokio::test]
+    async fn established_connection_failure_is_typed_cannot_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept, then drop immediately without responding -> peer reset.
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+
+        let client = TcpRequestClient::default();
+        let err = client
+            .send_request(
+                format!("{addr}/test_endpoint"),
+                Bytes::from("ping"),
+                Headers::new(),
+            )
+            .await
+            .expect_err("a reset connection must fail the request");
+
+        assert!(
+            crate::error::match_error_chain(
+                err.as_ref(),
+                &[crate::error::ErrorType::CannotConnect],
+                &[]
+            ),
+            "mid-request failure should already be typed CannotConnect: {err:?}"
         );
     }
 }
