@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import numpy as np
 import yaml
+from aiconfigurator_core.sdk.perf_database import get_latest_database_version
 
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
@@ -707,10 +708,24 @@ def build_aic_perf_model_spec(
     if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
         return None
 
+    backend_version = get_latest_database_version(
+        system=system,
+        backend=resolved_backend,
+    )
+    if backend_version is None:
+        logger.warning(
+            "No AIC performance database is available for system=%s, backend=%s; "
+            "Planner will use FPM regression instead of native AIC estimates.",
+            system,
+            resolved_backend,
+        )
+        return None
+
     return AICPerfModelSpec(
         hf_id=dgdr.model,
         system=system,
         backend=resolved_backend,
+        backend_version=backend_version,
         prefill_pick=best_prefill_pick,
         decode_pick=best_decode_pick,
     )

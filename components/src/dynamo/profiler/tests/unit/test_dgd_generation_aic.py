@@ -331,7 +331,17 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
-    def test_aic_perf_model_threads_into_planner_config(self):
+    def test_aic_perf_model_threads_into_planner_config(self, monkeypatch):
+        resolved_versions = []
+
+        def resolve_backend_version(*, system, backend):
+            resolved_versions.append((system, backend))
+            return "0.24.0"
+
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            resolve_backend_version,
+        )
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -360,8 +370,32 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.aic_perf_model.hf_id == dgdr.model
         assert cfg.aic_perf_model.system == "h200_sxm"
         assert cfg.aic_perf_model.backend == "vllm"
+        assert cfg.aic_perf_model.backend_version == "0.24.0"
         assert cfg.aic_perf_model.prefill_pick == prefill_pick
         assert cfg.aic_perf_model.decode_pick == decode_pick
+        assert resolved_versions == [("h200_sxm", "vllm")]
+
+    def test_aic_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            lambda **_: None,
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=PickedParallelConfig(tp=1),
+            best_decode_pick=PickedParallelConfig(tp=2),
+            resolved_backend="vllm",
+            system="unknown_system",
+        )
+
+        assert spec is None
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),
