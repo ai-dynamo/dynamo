@@ -10,7 +10,7 @@ triton
 vllm
 transformers
 tokenizers
-# vLLM-Omni (v0.26.0rc1) may require a newer safetensors than the upstream
+# vLLM-Omni (v0.26.0) may require a newer safetensors than the upstream
 # vLLM 0.26.0 image ships, so safetensors is intentionally left unfrozen here.
 # safetensors
 msgspec
