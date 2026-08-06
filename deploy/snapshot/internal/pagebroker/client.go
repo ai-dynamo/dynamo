@@ -62,11 +62,28 @@ func (c *Client) open(ctx context.Context, checkpoint string, staging bool) (*Tr
 		_ = provider.Close()
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_, _ = c.call(cleanup, 3, id, "", false)
+		_, _ = c.call(cleanup, 4, id, "", false)
 		return nil, fmt.Errorf("checkpoint is unavailable after submit: %w", err)
 	}
 	return &Transaction{client: c, id: id, staging: checkpoint, scratch: r.scratch, provider: provider}, nil
 }
+
+func PrepareCheckpoint(ctx context.Context, socket, checkpoint string) (*Transaction, error) {
+	return NewClient(socket).PrepareCheckpoint(ctx, checkpoint)
+}
+
+func (c *Client) PrepareCheckpoint(ctx context.Context, checkpoint string) (*Transaction, error) {
+	id := "tx-" + uuid.NewString()
+	r, err := c.call(ctx, 2, id, checkpoint, false)
+	if err != nil {
+		return nil, err
+	}
+	if !r.ok {
+		return nil, fmt.Errorf("checkpoint prepare rejected: %s", r.err)
+	}
+	return &Transaction{client: c, id: id, staging: r.staging, scratch: r.scratch}, nil
+}
+
 func (t *Transaction) Files() ([]*os.File, error) {
 	if t.provider == nil {
 		return nil, fmt.Errorf("PageBroker provider connection is unavailable")
@@ -91,7 +108,7 @@ func (t *Transaction) Files() ([]*os.File, error) {
 }
 func (t *Transaction) Commit(ctx context.Context) error {
 	t.closeProvider()
-	r, err := t.client.call(ctx, 2, t.id, "", false)
+	r, err := t.client.call(ctx, 3, t.id, "", false)
 	if err != nil {
 		return err
 	}
@@ -102,7 +119,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 }
 func (t *Transaction) Abort(ctx context.Context) error {
 	t.closeProvider()
-	r, err := t.client.call(ctx, 3, t.id, "", false)
+	r, err := t.client.call(ctx, 4, t.id, "", false)
 	if err != nil {
 		return err
 	}

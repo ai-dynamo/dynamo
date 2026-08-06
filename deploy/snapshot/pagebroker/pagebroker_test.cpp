@@ -221,26 +221,27 @@ int main() {
   std::ofstream(source / "image").write("checkpoint", 10);
   assert(pagebroker::filesystem_budget(root) > 0);
 
-  auto outside = root / "outside";
-  std::ofstream(outside) << "outside";
+  auto outside_file = root / "symlink-target";
+  std::ofstream(outside_file) << "outside";
   std::filesystem::create_directory(source / "nested");
-  std::filesystem::create_symlink(outside, source / "nested/link");
+  std::filesystem::create_symlink(outside_file, source / "nested/link");
   auto unsafe = pagebroker::TransactionManager(
-                    root / "staging-unsafe", root / "scratch-unsafe", 100)
+                    root / "staging-unsafe", root / "scratch-unsafe",
+                    root / "checkpoints", 100)
                     .submit({pagebroker::Request::Operation::Submit,
                              "tx-symlink", source, true});
   assert(!unsafe.ok);
   assert(!std::filesystem::exists(root / "staging-unsafe/tx/outside"));
   std::filesystem::remove(source / "nested/link");
   pagebroker::TransactionManager manager(root / "staging", root / "scratch",
-                                         10);
+                                         root / "checkpoints", 10);
   pagebroker::Request submit{pagebroker::Request::Operation::Submit, "tx-1",
                              source, true};
   auto ok = manager.submit(submit);
   assert(ok.ok);
   pagebroker::TransactionManager concurrent_manager(root / "staging-concurrent",
                                                     root / "scratch-concurrent",
-                                                    15);
+                                                    root / "checkpoints", 15);
   auto first = concurrent_manager.submit(submit);
   assert(first.ok);
   auto second = concurrent_manager.submit(
@@ -252,7 +253,7 @@ int main() {
   assert(!duplicate.ok);
   auto invalid_source = root / "invalid-source";
   std::filesystem::create_directories(invalid_source);
-  std::filesystem::create_symlink(outside, invalid_source / "link");
+  std::filesystem::create_symlink(outside_file, invalid_source / "link");
   auto invalid_duplicate = manager.submit(
       {pagebroker::Request::Operation::Submit, "tx-1", invalid_source,
        true});
@@ -266,12 +267,13 @@ int main() {
   assert(committed.ok);
   assert(!std::filesystem::exists(root / "staging/tx/tx-1"));
   auto too_big =
-      pagebroker::TransactionManager(root / "staging2", root / "scratch2", 1)
+      pagebroker::TransactionManager(root / "staging2", root / "scratch2",
+                                     root / "checkpoints", 1)
           .submit(submit);
   assert(!too_big.ok);
 
-  pagebroker::TransactionManager direct_manager(root / "staging-direct",
-                                                 root / "scratch-direct", 0);
+  pagebroker::TransactionManager direct_manager(
+      root / "staging-direct", root / "scratch-direct", root / "checkpoints", 0);
   pagebroker::Request direct{pagebroker::Request::Operation::Submit,
                              "tx-direct", source};
   auto direct_result = direct_manager.submit(direct);
@@ -280,6 +282,48 @@ int main() {
   assert(!std::filesystem::exists(root / "staging-direct/tx/tx-direct"));
   assert(direct_manager.commit(direct).ok);
   assert(std::filesystem::exists(source / "image"));
+
+  auto checkpoint_root = root / "checkpoints";
+  auto destination = checkpoint_root / "nested" / "final";
+  pagebroker::TransactionManager checkpoint_manager(
+      root / "staging3", root / "scratch3", checkpoint_root, 100);
+  std::filesystem::create_directories(destination);
+  std::ofstream(destination / "old-manifest").write("old", 3);
+  pagebroker::Request prepare{
+      pagebroker::Request::Operation::PrepareCheckpoint, "tx-checkpoint",
+      destination};
+  auto prepared = checkpoint_manager.prepare_checkpoint(prepare);
+  assert(prepared.ok);
+  std::ofstream(std::filesystem::path(prepared.staging_path) / "manifest")
+      .write("ok", 2);
+  assert(checkpoint_manager.commit(prepare).ok);
+  assert(std::filesystem::exists(destination / "manifest"));
+  assert(!std::filesystem::exists(destination / "old-manifest"));
+  assert(!std::filesystem::exists(
+      destination.parent_path() / ".final.pagebroker-old-tx-checkpoint"));
+
+  auto outside = checkpoint_manager.prepare_checkpoint(pagebroker::Request{
+      pagebroker::Request::Operation::PrepareCheckpoint, "tx-outside",
+      root / "outside"});
+  assert(!outside.ok);
+
+  auto leaked = checkpoint_manager.prepare_checkpoint(pagebroker::Request{
+      pagebroker::Request::Operation::PrepareCheckpoint, "tx-leaked",
+      checkpoint_root / "leaked"});
+  assert(leaked.ok);
+  pagebroker::TransactionManager restarted(
+      root / "staging3", root / "scratch3", checkpoint_root, 100);
+  assert(!std::filesystem::exists(leaked.staging_path));
+
+  auto outside_staging = root / "outside" / ".keep.pagebroker-tx-unsafe";
+  std::filesystem::create_directories(outside_staging);
+  std::filesystem::create_directories(root / "staging-unsafe" / "tx");
+  std::ofstream(root / "staging-unsafe" / "tx" /
+                ".checkpoint-tx-unsafe")
+      << outside_staging.string() << '\n';
+  pagebroker::TransactionManager safe_cleanup(
+      root / "staging-unsafe", root / "scratch-unsafe", checkpoint_root, 100);
+  assert(std::filesystem::exists(outside_staging));
 
   auto server_root = root / "server";
   auto server_source = server_root / "source";
@@ -290,7 +334,8 @@ int main() {
   assert(server_pid >= 0);
   if (server_pid == 0)
     _exit(pagebroker::serve(server_socket, server_root / "staging",
-                            server_root / "scratch", 1 << 20));
+                            server_root / "scratch",
+                            server_root / "checkpoints", 1 << 20));
   for (int i = 0; i < 500 && !std::filesystem::exists(server_socket); ++i)
     usleep(10000);
   assert(std::filesystem::exists(server_socket));
@@ -433,7 +478,7 @@ int main() {
   close(provider);
 
   int control = connect_server();
-  std::string commit = "\x08\x03";
+  std::string commit = "\x08\x04";
   append_string(commit, 2, "tx-sidecar");
   assert(send(control, commit.data(), commit.size(), 0) ==
          static_cast<ssize_t>(commit.size()));
