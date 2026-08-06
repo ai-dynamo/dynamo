@@ -12,6 +12,11 @@ import (
 	"github.com/go-logr/logr"
 )
 
+const (
+	testSrc = "/snapshot-binaries"
+	testDst = "/tmp/snapshot-binaries"
+)
+
 // fakeMountHandle implements MountHandle for tests.
 type fakeMountHandle struct {
 	dst        string
@@ -53,7 +58,7 @@ const testPID = 42
 
 func newMounter(t *testing.T, m *mockMounter) *NSMounter {
 	t.Helper()
-	nsm, err := newWithMounter(agentBinDir, SnapshotBinDir, m, logr.Discard())
+	nsm, err := newWithMounter(testSrc, testDst, m, logr.Discard())
 	if err != nil {
 		t.Fatalf("newWithMounter: %v", err)
 	}
@@ -68,7 +73,7 @@ func TestMount_MountsAgentBundle(t *testing.T) {
 	}
 
 	want := []mountCall{
-		{pid: testPID, src: agentBinDir, dst: SnapshotBinDir, opts: MountOptions{ReadOnly: true}},
+		{pid: testPID, src: testSrc, dst: testDst, opts: MountOptions{ReadOnly: true}},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d mount calls, want %d", len(m.calls), len(want))
@@ -78,36 +83,36 @@ func TestMount_MountsAgentBundle(t *testing.T) {
 	}
 }
 
-func TestMount_BinPath(t *testing.T) {
+func TestMount_Path(t *testing.T) {
 	m := &mockMounter{}
-	handle, err := newMounter(t, m).Mount(context.Background(), testPID)
+	mp, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	got, err := handle.BinPath("nsrestore")
+	got, err := mp.Path("nsrestore")
 	if err != nil {
-		t.Fatalf("BinPath: unexpected error: %v", err)
+		t.Fatalf("Path: unexpected error: %v", err)
 	}
-	want := filepath.Join(SnapshotBinDir, "nsrestore")
+	want := filepath.Join(testDst, "nsrestore")
 	if got != want {
-		t.Errorf("BinPath: got %q, want %q", got, want)
+		t.Errorf("Path: got %q, want %q", got, want)
 	}
 }
 
-func TestMount_CleanupUnmounts(t *testing.T) {
+func TestMount_Unmounts(t *testing.T) {
 	m := &mockMounter{}
-	handle, err := newMounter(t, m).Mount(context.Background(), testPID)
+	mp, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := handle.Cleanup(context.Background()); err != nil {
-		t.Fatalf("unexpected cleanup error: %v", err)
+	if err := mp.Unmount(context.Background()); err != nil {
+		t.Fatalf("unexpected unmount error: %v", err)
 	}
 
-	if len(m.unmountLog) != 1 || m.unmountLog[0] != SnapshotBinDir {
-		t.Errorf("expected unmount of %q, got %v", SnapshotBinDir, m.unmountLog)
+	if len(m.unmountLog) != 1 || m.unmountLog[0] != testDst {
+		t.Errorf("expected unmount of %q, got %v", testDst, m.unmountLog)
 	}
 }
 
@@ -124,18 +129,18 @@ func TestMount_Fails(t *testing.T) {
 	}
 }
 
-func TestBinPath_RejectsInvalidNames(t *testing.T) {
+func TestPath_RejectsInvalidNames(t *testing.T) {
 	m := &mockMounter{}
-	handle, err := newMounter(t, m).Mount(context.Background(), testPID)
+	mp, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	invalid := []string{"", ".", "..", "foo/bar", "../../etc/passwd"}
 	for _, name := range invalid {
-		_, err := handle.BinPath(name)
+		_, err := mp.Path(name)
 		if err == nil {
-			t.Errorf("BinPath(%q): expected error, got nil", name)
+			t.Errorf("Path(%q): expected error, got nil", name)
 		}
 	}
 }

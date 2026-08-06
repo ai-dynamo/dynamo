@@ -19,6 +19,7 @@ import (
 const (
 	binaryName        = "ns-bind-mount"
 	defaultBinaryPath = "/usr/local/sbin/" + binaryName
+	nsMntNsPathFmt    = "/proc/%d/ns/mnt"
 
 	// nsFdChildNum is the fd number that the ns/mnt file descriptor will have
 	// inside the child process. Go's exec package maps ExtraFiles[i] to fd
@@ -109,7 +110,6 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 		cmd.ExtraFiles = []*os.File{h.nsFd}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			h.log.Error(err, "failed to unmount from namespace", "dst", h.dst, "output", strings.TrimSpace(string(out)))
 			h.unmountErr = fmt.Errorf("ns-bind-mount umount-fd %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
 			return
 		}
@@ -126,9 +126,10 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
 	// Pin the namespace fd before calling the helper so mount and cleanup
 	// provably act on the same namespace regardless of PID reuse.
-	nsFd, err := os.Open(fmt.Sprintf("/proc/%d/ns/mnt", pid))
+	nsFdPath := fmt.Sprintf(nsMntNsPathFmt, pid)
+	nsFd, err := os.Open(nsFdPath)
 	if err != nil {
-		return nil, fmt.Errorf("open /proc/%d/ns/mnt: %w", pid, err)
+		return nil, fmt.Errorf("open %s: %w", nsFdPath, err)
 	}
 
 	args := []string{"mount-fd", strconv.Itoa(nsFdChildNum), src, dst}
