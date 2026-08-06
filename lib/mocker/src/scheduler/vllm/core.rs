@@ -23,6 +23,7 @@ use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::kv_manager::{DestinationReservation, G1Acquire, OffloadDependency};
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::coordinator::SwapInTerminal;
+#[cfg(test)]
 use crate::replay::TraceCollector;
 use crate::replay::offline::evidence::{
     EnginePressureState, PressureKind, canonical_evidence_capture_active, record_pressure,
@@ -1145,23 +1146,22 @@ impl VllmCore {
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.try_execute_pass(collector, now_ms)
-            .expect("vLLM scheduler pass failed")
+        let pass = self
+            .try_execute_pass(now_ms)
+            .expect("vLLM scheduler pass failed");
+        crate::scheduler::record_test_pass(collector, &pass, now_ms);
+        pass
     }
 
-    pub(crate) fn try_execute_pass(
-        &mut self,
-        collector: &mut TraceCollector,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.execute_pass_internal(Some(collector), now_ms, None)
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        self.execute_pass_internal(now_ms, None)
     }
 
     pub(crate) fn try_execute_hidden_pass(
         &mut self,
         now_ms: f64,
     ) -> anyhow::Result<EnginePassResult> {
-        self.execute_pass_internal(None, now_ms, None)
+        self.execute_pass_internal(now_ms, None)
     }
 
     /// Drive the offload engine forward to `now_ms` and promote any
@@ -1436,7 +1436,6 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> anyhow::Result<EnginePassResult> {
@@ -1475,13 +1474,6 @@ impl VllmCore {
                 ScheduleOutcome::Scheduled { admission, .. } => {
                     if let Some(admission) = admission {
                         record_pressure_readmission(admission.uuid, now_ms);
-                        if let Some(collector) = collector.as_deref_mut() {
-                            collector.on_admit(
-                                admission.uuid,
-                                now_ms,
-                                admission.reused_input_tokens,
-                            );
-                        }
                         if let Some(admission_tx) = admission_tx {
                             let _ = admission_tx.send(admission.clone());
                         }
@@ -1608,13 +1600,6 @@ impl VllmCore {
                 } => {
                     if let Some(admission) = admission {
                         record_pressure_readmission(admission.uuid, now_ms);
-                        if let Some(collector) = collector.as_deref_mut() {
-                            collector.on_admit(
-                                admission.uuid,
-                                now_ms,
-                                admission.reused_input_tokens,
-                            );
-                        }
                         if let Some(admission_tx) = admission_tx {
                             let _ = admission_tx.send(admission.clone());
                         }
@@ -1633,8 +1618,7 @@ impl VllmCore {
         let prefill_time =
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args)?;
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let (decode_time, mut output_signals, accept_length) =
-            self.emit_ready_tokens(collector, decode_start_ms)?;
+        let (decode_time, mut output_signals, accept_length) = self.emit_ready_tokens()?;
         // Emit the terminal signals for the requests the gate rejected above
         // (see the gate comment for why this can't be done inline).
         for uuid in rejected_uuids {
@@ -2196,8 +2180,6 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     fn emit_ready_tokens(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
-        decode_start_ms: f64,
     ) -> anyhow::Result<(Duration, Vec<OutputSignal>, AcceptLengthSample)> {
         let mut ready = Vec::with_capacity(self.state.running.len());
         let mut already_complete = Vec::new();
@@ -2253,20 +2235,20 @@ impl VllmCore {
 
         if self.speculative_sampler.is_some() {
             if output_signals.is_empty() {
-                return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+                return self.emit_speculative_ready_tokens(ready);
             }
 
             self.state.compact_running();
             let (decode_time, mut speculative_signals, accept_length) =
-                self.emit_speculative_ready_tokens(ready, collector, decode_start_ms)?;
+                self.emit_speculative_ready_tokens(ready)?;
             output_signals.append(&mut speculative_signals);
             return Ok((decode_time, output_signals, accept_length));
         }
 
         // For prefill workers, the first decode token is produced as part of
         // the prefill forward pass — no separate decode iteration needed.
-        let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
-            (Duration::ZERO, decode_start_ms)
+        let decode_time = if self.args.worker_type == WorkerType::Prefill {
+            Duration::ZERO
         } else {
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
             let active_kv_tokens = total_length;
@@ -2277,8 +2259,7 @@ impl VllmCore {
                 context_length,
                 total_kv_tokens,
             )?;
-            let dt = scale_decode_time(decode_ms, &self.args);
-            (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
+            scale_decode_time(decode_ms, &self.args)
         };
 
         let mut running_changed = !output_signals.is_empty();
@@ -2388,9 +2369,6 @@ impl VllmCore {
                 self.complete_source(uuid, deferred_deref);
                 running_changed = true;
             }
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_token(uuid, decode_end_ms);
-            }
             output_signals.push(output_signal);
             accept_length.record_forward(1);
         }
@@ -2411,8 +2389,6 @@ impl VllmCore {
     fn emit_speculative_ready_tokens(
         &mut self,
         mut ready: Vec<Uuid>,
-        collector: Option<&mut TraceCollector>,
-        decode_start_ms: f64,
     ) -> anyhow::Result<(Duration, Vec<OutputSignal>, AcceptLengthSample)> {
         let max_burst = if self.args.worker_type == WorkerType::Prefill {
             1
@@ -2502,8 +2478,8 @@ impl VllmCore {
             .filter_map(|uuid| self.state.requests.get(uuid))
             .map(|request| request.sequence.len())
             .sum::<usize>();
-        let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
-            (Duration::ZERO, decode_start_ms)
+        let decode_time = if self.args.worker_type == WorkerType::Prefill {
+            Duration::ZERO
         } else {
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
             let active_kv_tokens = total_length;
@@ -2514,8 +2490,7 @@ impl VllmCore {
                 context_length,
                 total_kv_tokens,
             )?;
-            let duration = scale_decode_time(decode_ms, &self.args);
-            (duration, decode_start_ms + duration.as_secs_f64() * 1000.0)
+            scale_decode_time(decode_ms, &self.args)
         };
 
         let sampled_bursts = {
@@ -2661,12 +2636,6 @@ impl VllmCore {
         }
 
         self.kv_manager.release_decode_reservation(reservation);
-
-        if let Some(collector) = collector {
-            for signal in &output_signals {
-                collector.on_token(signal.uuid, decode_end_ms);
-            }
-        }
 
         if running_changed {
             self.state.compact_running();

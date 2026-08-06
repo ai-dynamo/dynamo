@@ -15,6 +15,7 @@ use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional
 use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
+#[cfg(test)]
 use crate::replay::TraceCollector;
 use crate::replay::offline::evidence::record_pressure_readmission;
 
@@ -603,16 +604,15 @@ impl SglangCore {
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.try_execute_pass(collector, now_ms)
-            .expect("SGLang scheduler pass failed")
+        let pass = self
+            .try_execute_pass(now_ms)
+            .expect("SGLang scheduler pass failed");
+        crate::scheduler::record_test_pass(collector, &pass, now_ms);
+        pass
     }
 
-    pub(crate) fn try_execute_pass(
-        &mut self,
-        collector: &mut TraceCollector,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.try_execute_pass_internal(Some(collector), now_ms)
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(now_ms)
     }
 
     #[cfg(test)]
@@ -625,22 +625,17 @@ impl SglangCore {
         &mut self,
         now_ms: f64,
     ) -> anyhow::Result<EnginePassResult> {
-        self.try_execute_pass_internal(None, now_ms)
+        self.try_execute_pass_internal(now_ms)
     }
 
     #[cfg(test)]
-    pub(super) fn execute_pass_internal(
-        &mut self,
-        collector: Option<&mut TraceCollector>,
-        now_ms: f64,
-    ) -> EnginePassResult {
-        self.try_execute_pass_internal(collector, now_ms)
+    pub(super) fn execute_pass_internal(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_pass_internal(now_ms)
             .expect("SGLang scheduler pass failed")
     }
 
     pub(super) fn try_execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
     ) -> anyhow::Result<EnginePassResult> {
         let mut admissions = self.promote_prebuilt_ready();
@@ -668,9 +663,6 @@ impl SglangCore {
         admissions.append(&mut admit.admissions);
         for admission in &admissions {
             record_pressure_readmission(admission.uuid, now_ms);
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
-            }
         }
 
         // Capture per-request prefill FPM data before dispersing can_run.
@@ -711,14 +703,6 @@ impl SglangCore {
 
         for request in decode.completed_requests.drain(..) {
             self.complete_source(request);
-        }
-
-        if let Some(collector) = collector {
-            for signal in &decode.output_signals {
-                if signal.token_id.is_some() {
-                    collector.on_token(signal.uuid, decode.end_ms);
-                }
-            }
         }
 
         for req in decode.requests.drain(..).rev() {

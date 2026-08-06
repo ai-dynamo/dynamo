@@ -70,6 +70,11 @@ impl ReplayWorkerCore {
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> anyhow::Result<EnginePassResult> {
-        self.core.try_execute_pass(collector, now_ms)
+        let pass = self.core.try_execute_pass(now_ms)?;
+        for admission in &pass.admissions {
+            collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
+        }
+        collector.on_output_signals(&pass.output_signals, pass.end_ms);
+        Ok(pass)
     }
 }

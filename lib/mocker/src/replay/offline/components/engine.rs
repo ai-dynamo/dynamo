@@ -601,14 +601,14 @@ where
         rank_id: usize,
         boundary: PassBoundary,
         mut executed: EnginePassResult,
-        align_collector: Option<&mut TraceCollector>,
+        collector: Option<&mut TraceCollector>,
         effects: &mut EngineEffects<Observation::Batch>,
     ) {
         if let Some(fpm) = executed.fpm.as_mut() {
             fpm.wall_time_secs = boundary.wall_time_secs();
         }
-        if let Some(collector) = align_collector {
-            collector.align_pass_token_times(&executed.output_signals, boundary.end_ms);
+        if let Some(collector) = collector {
+            collector.on_output_signals(&executed.output_signals, boundary.end_ms);
         }
 
         let admitted_requests = !executed.admissions.is_empty();
@@ -720,11 +720,11 @@ where
                     dp_rank,
                     || match self.pass_mode {
                         EnginePassMode::Visible => {
-                            let Some(collector) = collector.as_deref_mut() else {
+                            let Some(_) = collector.as_deref_mut() else {
                                 bail!("offline replay visible engine pass requires a collector");
                             };
                             Self::required_worker_mut(&mut self.workers, rank_id)
-                                .try_execute_pass(collector, now_ms)
+                                .try_execute_pass(now_ms)
                         }
                         EnginePassMode::Hidden => {
                             Self::required_worker_mut(&mut self.workers, rank_id)
@@ -733,7 +733,7 @@ where
                     },
                 )?;
                 let group_end_ms = executed.end_ms.max(now_ms);
-                let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                let pass_collector = if self.pass_mode == EnginePassMode::Visible {
                     Some(
                         collector
                             .as_deref_mut()
@@ -752,7 +752,7 @@ where
                         completion_capacity: 1,
                     },
                     executed,
-                    align_collector,
+                    pass_collector,
                     &mut effects,
                 );
                 group_end_ms
@@ -774,13 +774,13 @@ where
                         dp_rank,
                         || match self.pass_mode {
                             EnginePassMode::Visible => {
-                                let Some(collector) = collector.as_deref_mut() else {
+                                let Some(_) = collector.as_deref_mut() else {
                                     bail!(
                                         "offline replay visible engine pass requires a collector"
                                     );
                                 };
                                 Self::required_worker_mut(&mut self.workers, rank_id)
-                                    .try_execute_pass(collector, now_ms)
+                                    .try_execute_pass(now_ms)
                             }
                             EnginePassMode::Hidden => {
                                 Self::required_worker_mut(&mut self.workers, rank_id)
@@ -831,7 +831,7 @@ where
                         continue;
                     };
 
-                    let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                    let pass_collector = if self.pass_mode == EnginePassMode::Visible {
                         Some(
                             collector
                                 .as_deref_mut()
@@ -846,7 +846,7 @@ where
                         rank_id,
                         boundary,
                         executed,
-                        align_collector,
+                        pass_collector,
                         &mut effects,
                     );
                 }

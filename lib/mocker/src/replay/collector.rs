@@ -1127,34 +1127,17 @@ impl TraceCollector {
         }
     }
 
-    /// Move the tokens emitted by one scheduler pass to a shared completion
-    /// boundary. Scheduler cores record their rank-local end time while the
-    /// pass is formed; attention-DP replay then aligns every rank in the group
-    /// to the slowest rank before the pass becomes externally visible.
-    pub(crate) fn align_pass_token_times(
+    /// Record tokens emitted by one scheduler pass at its externally visible
+    /// completion boundary.
+    pub(crate) fn on_output_signals(
         &mut self,
         output_signals: &[OutputSignal],
         completion_time_ms: f64,
     ) {
-        let mut emitted_by_request = FxHashMap::default();
         for signal in output_signals {
             if signal.token_id.is_some() {
-                *emitted_by_request.entry(signal.uuid).or_insert(0usize) += 1;
+                self.on_token(signal.uuid, completion_time_ms);
             }
-        }
-
-        for (uuid, emitted) in emitted_by_request {
-            let Some(stats) = self.requests.get_mut(&uuid) else {
-                continue;
-            };
-            let TokenTimeline::Recording(times) = &mut stats.token_timeline else {
-                continue;
-            };
-            let start = times
-                .len()
-                .checked_sub(emitted)
-                .expect("scheduler emitted more output signals than collector tokens");
-            times[start..].fill(completion_time_ms);
         }
     }
 

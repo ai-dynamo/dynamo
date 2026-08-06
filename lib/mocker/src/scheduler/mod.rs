@@ -192,6 +192,18 @@ pub(crate) struct EnginePassResult {
     pub(crate) accept_length_decode_forwards: usize,
 }
 
+#[cfg(test)]
+pub(crate) fn record_test_pass(
+    collector: &mut crate::replay::TraceCollector,
+    pass: &EnginePassResult,
+    start_ms: f64,
+) {
+    for admission in &pass.admissions {
+        collector.on_admit(admission.uuid, start_ms, admission.reused_input_tokens);
+    }
+    collector.on_output_signals(&pass.output_signals, pass.end_ms);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterEventVisibility {
     /// Expose buffered KV events when the pass starts, before the modeled sleep.
@@ -302,14 +314,10 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn try_execute_pass(
-        &mut self,
-        collector: &mut crate::replay::TraceCollector,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
         match self {
-            Self::Vllm(core) => core.try_execute_pass(collector, now_ms),
-            Self::Sglang(core) => core.try_execute_pass(collector, now_ms),
+            Self::Vllm(core) => core.try_execute_pass(now_ms),
+            Self::Sglang(core) => core.try_execute_pass(now_ms),
         }
     }
 

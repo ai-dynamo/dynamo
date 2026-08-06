@@ -9,7 +9,6 @@ use crate::common::handoff::{
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use crate::replay::TraceCollector;
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
     SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -432,12 +431,8 @@ impl OfflineWorkerState {
             .expect("offline worker completed more requests than it owned");
     }
 
-    pub(crate) fn try_execute_pass(
-        &mut self,
-        collector: &mut TraceCollector,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.core.try_execute_pass(collector, now_ms)
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        self.core.try_execute_pass(now_ms)
     }
 
     #[cfg(test)]
