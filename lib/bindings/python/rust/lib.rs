@@ -584,6 +584,19 @@ fn register_model<'p>(
             card.runtime_config = rc;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
+            // Images/videos are gated by their HTTP handlers; tensor models
+            // are served over KServe gRPC and realtime over WebSocket, where
+            // no admission gate runs today.
+            if (is_tensor_based || is_realtime)
+                && rejection_frontend_request_concurrency_limit.is_some()
+            {
+                tracing::warn!(
+                    model_name = %model_name,
+                    "rejection_frontend_request_concurrency_limit is not \
+                     enforced for tensor/realtime models; the frontend \
+                     admission gate only runs on HTTP inference surfaces"
+                );
+            }
             card.rejection_frontend_request_concurrency_limit =
                 rejection_frontend_request_concurrency_limit;
 

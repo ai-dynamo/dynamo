@@ -417,7 +417,9 @@ in KServe gRPC mode and produce a startup warning.
 
 <ParamField path="--rejection-frontend-request-concurrency-limit" type="integer" default="null">
   Maximum concurrent frontend-admitted HTTP inference requests, enforced separately for each served
-  model. Acts as the per-model default; a worker can override it for its model with the worker-side
+  model. The unit of enforcement is one HTTP request: a batch completions request or a request with
+  `n > 1` consumes a single slot regardless of how many generations it fans out to. Acts as the
+  per-model default; a worker can override it for its model with the worker-side
   `--rejection-frontend-request-concurrency-limit` flag (carried on its registration / MDC via
   `register_llm`). Disabled when unset.
 

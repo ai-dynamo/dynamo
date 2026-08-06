@@ -298,14 +298,31 @@ fn update_model_metrics(
             if let Err(err) = metrics.update_metrics_from_mdc(&card) {
                 tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
             }
+            let card_limit = card
+                .rejection_frontend_request_concurrency_limit
+                .filter(|limit| *limit > 0);
             for served_name in std::iter::once(card.display_name).chain(card.aliases) {
-                if let Some(limit) = manager.request_concurrency_limit_override(&served_name) {
-                    tracing::info!(
-                        gate = admission_gate::REQUEST_CONCURRENCY,
-                        model = %served_name,
-                        limit,
-                        "frontend admission gate enabled for model"
-                    );
+                if let Some(effective) = manager.request_concurrency_limit_override(&served_name) {
+                    match card_limit {
+                        // Differing worker-set advertisements resolve to the
+                        // minimum; surface the disagreement instead of hiding
+                        // it behind the effective value.
+                        Some(own) if own != effective => tracing::warn!(
+                            gate = admission_gate::REQUEST_CONCURRENCY,
+                            model = %served_name,
+                            card_limit = own,
+                            effective_limit = effective,
+                            "worker sets advertise differing per-model \
+                             concurrency overrides; enforcing the minimum"
+                        ),
+                        _ => tracing::info!(
+                            gate = admission_gate::REQUEST_CONCURRENCY,
+                            model = %served_name,
+                            card_limit = ?card_limit,
+                            effective_limit = effective,
+                            "frontend admission gate enabled for model"
+                        ),
+                    }
                 }
             }
         }
