@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dynamo-backed implementation of the Spica replay-runner contract.
+"""Dynamo-backed implementation of the Sweeper replay-runner contract.
 
-This is a compatibility composition over the current Dynamo replay API.  Spica
+This is a compatibility composition over the current Dynamo replay API.  Sweeper
 passes only a serializable ``ReplaySpec``; this module resolves Dynamo runtime
 hooks and translates the neutral spec to the existing replay entry points.
 """
@@ -16,8 +16,8 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.spica.adapter import JSONValue, RuntimeHookSpec
-from aisimulate.spica.replay import (
+from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
+from aisimulate.sweeper.replay import (
     HookCapability,
     ReplayReport,
     ReplaySpec,

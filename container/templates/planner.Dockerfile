@@ -88,7 +88,7 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/comp
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation.py /workspace/components/src/dynamo/replay/tests/test_simulation.py
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation_integration.py /workspace/components/src/dynamo/replay/tests/test_simulation_integration.py
-COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_simulation_adapter.py /workspace/components/src/dynamo/router/tests/test_router_simulation_adapter.py
+COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_sweep_config_provider.py /workspace/components/src/dynamo/router/tests/test_router_sweep_config_provider.py
 COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
 RUN chmod 775 \
     /workspace/components/src/dynamo/replay \

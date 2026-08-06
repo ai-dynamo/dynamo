@@ -10,7 +10,7 @@ import math
 import pytest
 
 pytest.importorskip(
-    "aisimulate.spica",
+    "aisimulate.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 

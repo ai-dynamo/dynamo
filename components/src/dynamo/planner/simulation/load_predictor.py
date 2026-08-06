@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner load-predictor pre-sweep used by the Spica simulation adapter."""
+"""Planner load-predictor pre-sweep used by the Sweeper sweep configuration provider."""
 
 from __future__ import annotations
 

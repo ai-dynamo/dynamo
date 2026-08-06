@@ -3,7 +3,7 @@
 # Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
 
-"""Tests for the transitional Dynamo Spica replay runner."""
+"""Tests for the transitional Dynamo Sweeper replay runner."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 pytest.importorskip(
-    "aisimulate.spica",
+    "aisimulate.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import examples.aisimulate.spica.tools.run_sweep as run_sweep_cli
-from aisimulate.spica.adapter import AdapterReplaySpec, RuntimeHookSpec
-from aisimulate.spica.replay import BackendDeploymentSpec, ReplaySpec
+import examples.aisimulate.sweeper.tools.run_sweep as run_sweep_cli
+from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
+from aisimulate.sweeper.replay import BackendDeploymentSpec, ReplaySpec
 from dynamo.replay import simulation
 
 pytestmark = [
@@ -294,11 +294,15 @@ def test_dynamo_sweep_cli_formats_adapter_validation_errors(
         "  num_request_ratio: 3\n"
     )
 
-    def reject_adapter(*args, **kwargs):
-        del args, kwargs
-        raise caught.value
+    class RejectingSweeper:
+        def __init__(self, **kwargs):
+            del kwargs
 
-    monkeypatch.setattr(run_sweep_cli, "run_smart_search", reject_adapter)
+        def run(self, config):
+            del config
+            raise caught.value
+
+    monkeypatch.setattr(run_sweep_cli, "Sweeper", RejectingSweeper)
     monkeypatch.setattr(
         sys,
         "argv",

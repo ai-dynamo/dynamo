@@ -13,9 +13,9 @@ subtitle: Backend-neutral simulation and configuration-search tools
 AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
 simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
-## Spica
+## Sweeper
 
-[Spica](spica-experimental/overview.md) searches backend deployment settings against an injected replay runner.
+[Sweeper](sweeper-experimental/overview.md) searches backend deployment settings against an injected replay runner.
 Its core owns backend search, candidate orchestration, scoring, and the versioned `ReplaySpec`
 contract.
 

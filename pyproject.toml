@@ -89,9 +89,9 @@ vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
-[project.entry-points."aisimulate.adapters"]
-"dynamo.planner" = "dynamo.planner.simulation:create_adapter"
-"dynamo.router" = "dynamo.router.simulation:create_adapter"
+[project.entry-points."aisimulate.sweep_config_providers"]
+"dynamo.planner" = "dynamo.planner.simulation:create_provider"
+"dynamo.router" = "dynamo.router.simulation:create_provider"
 
 [dependency-groups]
 docs = [

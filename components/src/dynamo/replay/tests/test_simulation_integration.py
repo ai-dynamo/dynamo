@@ -3,7 +3,7 @@
 # Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
 
-"""Real Replay integration coverage for the Spica adapter/runner boundary."""
+"""Real Replay integration coverage for the Sweeper adapter/runner boundary."""
 
 from __future__ import annotations
 
@@ -12,36 +12,41 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.spica",
+    "aisimulate.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.spica.adapter import CandidateContext, SweepContext
-from aisimulate.spica.config import OptimizationTarget, SmartSearchConfig
-from aisimulate.spica.deploy import build_backend_deployment
-from aisimulate.spica.kv_estimate import resolve_backend_version
-from aisimulate.spica.replay import ReplaySpec
-from aisimulate.spica.sample import unroll_sample
-from aisimulate.spica.score import objective_value
-from aisimulate.spica.search_space import enumerate_branches
-from dynamo.planner.simulation import create_adapter
+from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
+from aisimulate.sweeper.deploy import build_backend_deployment
+from aisimulate.sweeper.kv_estimate import resolve_backend_version
+from aisimulate.sweeper.provider import CandidateContext, SweepContext
+from aisimulate.sweeper.replay import ReplaySpec
+from aisimulate.sweeper.sample import unroll_sample
+from aisimulate.sweeper.sampler import Suggestion
+from aisimulate.sweeper.score import objective_value
+from aisimulate.sweeper.search import Sweeper
+from aisimulate.sweeper.search_space import enumerate_branches
+from dynamo.planner.simulation import create_provider
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.planner,
-    pytest.mark.pre_merge,
-    pytest.mark.timeout(300),
     pytest.mark.filterwarnings("ignore:invalid escape sequence.*:SyntaxWarning"),
     pytest.mark.filterwarnings("ignore:invalid escape sequence.*:DeprecationWarning"),
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
-_TRACE = str(_REPO_ROOT / "aisimulate/tests/spica/data/mooncake_tiny.jsonl")
+_TRACE = str(_REPO_ROOT / "aisimulate/tests/sweeper/data/mooncake_tiny.jsonl")
 
 
-def _config(*, scaling_policy: str) -> SmartSearchConfig:
+def _config(
+    *,
+    scaling_policy: str,
+    candidates_per_round: int = 1,
+    parallel_evals: int = 1,
+) -> SmartSearchConfig:
     # Replay consumes model metadata and the AIC performance database; it does
     # not load model weights or require a GPU. This model/backend pair is kept
     # because it has complete coverage in the GB200 performance database.
@@ -65,12 +70,51 @@ def _config(*, scaling_policy: str) -> SmartSearchConfig:
         },
         # Slow the trace enough for load_180_5 to execute a Planner tick.
         workload={"trace_path": _TRACE, "arrival_speedup_ratio": 0.5},
-        sweep={"max_rounds": 1, "candidates_per_round": 1, "parallel_evals": 1},
+        sweep={
+            "max_rounds": 1,
+            "candidates_per_round": candidates_per_round,
+            "parallel_evals": parallel_evals,
+            "max_eval_seconds": 240,
+        },
         goal={
             "target": "goodput_per_gpu",
             "sla": {"ttft_ms": 8000.0, "itl_ms": 200.0},
         },
     )
+
+
+class _TwoCandidateSampler:
+    """Choose two deterministic valid candidates without depending on Vizier."""
+
+    def __init__(self, branch, study_id, objectives=None):
+        del study_id, objectives
+        self.branch = branch
+
+    def suggest(self, count):
+        assert count == 2
+        suggestions = []
+        for index in range(count):
+            selection = {
+                name: values[min(index, len(values) - 1)]
+                for name, values in self.branch.knob_choices.items()
+            }
+            selection["deployment_mode"] = self.branch.deployment_mode
+            suggestions.append(
+                Suggestion(
+                    selection=selection,
+                    parallel_config=self.branch.parallel_configs[
+                        min(index, len(self.branch.parallel_configs) - 1)
+                    ],
+                    handle=index,
+                )
+            )
+        return suggestions
+
+    def observe(self, suggestion, metrics):
+        del suggestion, metrics
+
+    def observe_infeasible(self, suggestion, reason):
+        pytest.fail(f"unexpected infeasible suggestion {suggestion}: {reason}")
 
 
 def _run_one(policy: str):
@@ -99,7 +143,7 @@ def _run_one(policy: str):
         backend_version=backend_version,
     )
 
-    adapter = create_adapter()
+    adapter = create_provider()
     adapter_plan = adapter.generate_search_space(
         config.adapters["dynamo.planner"].search_space,
         SweepContext(
@@ -137,6 +181,8 @@ def _run_one(policy: str):
         runner.close()
 
 
+@pytest.mark.pre_merge
+@pytest.mark.timeout(300)
 def test_real_planner_bridge_preserves_goodput_and_gpu_hours() -> None:
     report, adapter_spec = _run_one("load_180_5")
 
@@ -154,6 +200,8 @@ def test_real_planner_bridge_preserves_goodput_and_gpu_hours() -> None:
     ) == pytest.approx(expected)
 
 
+@pytest.mark.pre_merge
+@pytest.mark.timeout(300)
 def test_real_static_path_preserves_goodput() -> None:
     report, adapter_spec = _run_one("disabled")
 
@@ -161,3 +209,26 @@ def test_real_static_path_preserves_goodput() -> None:
     assert report.metrics["goodput_output_throughput_tok_s"] > 0.0
     assert report.metrics["gpu_hours"] > 0.0
     assert "planner_total_ticks" not in report.metrics
+
+
+@pytest.mark.post_merge
+@pytest.mark.timeout(300)
+def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
+    config = _config(
+        scaling_policy="disabled",
+        candidates_per_round=2,
+        parallel_evals=2,
+    )
+
+    candidates = Sweeper(
+        runner_factory=DynamoReplayRunnerFactory(),
+        providers={"dynamo.planner": create_provider()},
+        sampler_factory=_TwoCandidateSampler,
+        show_progress=False,
+    ).run(config)
+
+    assert len(candidates) == 2
+    assert all(
+        candidate.metrics["output_throughput_tok_s"] > 0.0 for candidate in candidates
+    )
+    assert all(candidate.metrics["gpu_hours"] > 0.0 for candidate in candidates)

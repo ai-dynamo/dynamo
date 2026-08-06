@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner composite search presets used by the Spica adapter."""
+"""Planner composite search presets used by the Sweeper adapter."""
 
 from __future__ import annotations
 

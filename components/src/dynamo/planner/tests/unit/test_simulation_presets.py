@@ -3,12 +3,12 @@
 # Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
 
-"""Unit tests for Planner simulation presets moved out of Spica core."""
+"""Unit tests for Planner simulation presets moved out of Sweeper core."""
 
 import pytest
 
 pytest.importorskip(
-    "aisimulate.spica",
+    "aisimulate.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
