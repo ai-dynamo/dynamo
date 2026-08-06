@@ -31,13 +31,13 @@ agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, bloc
 **512**, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA
 knee: the highest value holding P50 TTFT < 5 s and P50 output >= 50 tok/s/user.
 
-The agentic trace is symlinked into `perf/traces/`. Reported numbers use its **first
-1,500 requests**, which keeps a run to roughly an hour while preserving the KV-hit rate.
-Traces are Git LFS objects, so fetch them before staging:
+The agentic trace is symlinked into `perf/traces/` and stored in Git LFS. Fetch it, then
+take the first 1,500 requests — enough to hold the KV-hit rate at about an hour per run:
 
 ```bash
 git lfs install
 git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
+head -1500 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl > mooncake_1500.jsonl
 ```
 
 > [!NOTE]
@@ -56,12 +56,9 @@ See the deployment instructions in the recipe [README](../README.md).
 
 ### 2. Stage the trace on the PVC
 
-Build the 1,500-request prefix and copy it onto the `model-cache` PVC via a helper pod
-that mounts it:
+Copy `mooncake_1500.jsonl` onto the `model-cache` PVC via a helper pod that mounts it:
 
 ```bash
-head -1500 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl > mooncake_1500.jsonl
-
 kubectl run pvc-helper -n ${NAMESPACE} --image=busybox:1.36 --restart=Never \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
   --command -- sleep 3600
