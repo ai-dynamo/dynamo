@@ -157,6 +157,18 @@ impl VllmClient {
             .map(tonic::Response::into_inner)
             .map_err(|status| status_to_dynamo("GenerateStream", status))
     }
+
+    pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .get_kv_event_sources(pb::GetKvEventSourcesRequest {})
+            .await
+            .map(tonic::Response::into_inner)
+            .map(|response| response.sources)
+            .map_err(|status| status_to_dynamo("GetKvEventSources", status))
+    }
 }
 
 pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
