@@ -78,8 +78,7 @@ assume you're starting a fresh package in your own repo.
 
 The reference example is the **sample engine** at
 [`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
-— a complete, runnable implementation under 120 lines. Read it
-alongside this guide.
+— a complete, runnable implementation. Read it alongside this guide.
 
 **Where to look for what:**
 
@@ -1036,9 +1035,9 @@ impl MyBackend {
 ```
 
 `WorkerConfig::default()` sets `model_input` to `ModelInput::Tokens`,
-which is the only mode `Worker` currently supports — the framework
-validates this at startup. Engines needing raw text or tensor inputs
-aren't supported yet.
+which is the input mode supported by the `LLMEngine` trait. Use
+`RawEngine` and `Worker::new_raw` for engines that accept raw text or
+tensor inputs.
 
 If your engine branches on the disaggregation role inside `generate`
 (prefill vs decode), keep the same `DisaggregationMode` on your engine
