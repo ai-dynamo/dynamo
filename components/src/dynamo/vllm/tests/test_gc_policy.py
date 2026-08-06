@@ -111,6 +111,78 @@ def test_worker_extension_methods(monkeypatch):
         gc.unfreeze()
 
 
+def _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds):
+    """The bar for both completion paths: a worker that ran the policy must
+    be indistinguishable from one that never did."""
+    assert gc.get_threshold() == thresholds
+    assert gc.isenabled()
+    assert gc_policy._started is False
+    thread = gc_policy._freeze_thread
+    assert thread is None or not thread.is_alive()
+
+    class Node:
+        pass
+
+    node = Node()
+    node.self_ref = node
+    ref = weakref.ref(node)
+    del node
+    gc.collect()
+    assert ref() is None, "cyclic garbage must be reclaimable again"
+
+
+def test_worker_lifecycle_normal_completion_restores_gc(monkeypatch):
+    """Normal completion path: the launcher's collective_rpc reaches
+    ``FpmGcWorkerExtension.fpm_gc_stop`` in each worker; afterwards the
+    worker must be GC-equivalent to one that never benchmarked, including
+    reclamation of cycles frozen while the policy was active."""
+    monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "3600")
+    thresholds = gc.get_threshold()
+    gc_policy = _fresh_module(monkeypatch, "freeze")
+    ext = gc_policy.FpmGcWorkerExtension()
+    try:
+        assert ext.fpm_gc_start() is True
+        assert gc.get_threshold()[2] == 1 << 30
+
+        class Node:
+            pass
+
+        node = Node()
+        node.self_ref = node
+        ref = weakref.ref(node)
+        del node
+        # A periodic tick freezes the uncollected cycle: with auto gen2
+        # disabled it is now unreachable garbage that only stop() reclaims.
+        with gc_policy._lock:
+            gc.freeze()
+        gc.collect()
+        assert ref() is not None, "policy must pin the frozen cycle"
+
+        ext.fpm_gc_stop()
+        assert ref() is None, "stop must reclaim cycles frozen by ticks"
+    finally:
+        gc_policy.stop_gc_policy()
+    _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds)
+
+
+def test_worker_lifecycle_after_abort_restores_gc(monkeypatch):
+    """Abort path: ``_bench_abort`` still writes rank artifacts, so the
+    launcher's benchmark wait completes and issues the same
+    ``fpm_gc_stop``; the worker-side contract is identical to normal
+    completion even when the stop races a mid-flight maintenance call."""
+    monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "3600")
+    thresholds = gc.get_threshold()
+    gc_policy = _fresh_module(monkeypatch, "freeze")
+    ext = gc_policy.FpmGcWorkerExtension()
+    try:
+        assert ext.fpm_gc_start() is True
+        gc_policy.gc_maintain()  # abort may interrupt an untimed window
+        ext.fpm_gc_stop()
+    finally:
+        gc_policy.stop_gc_policy()
+    _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds)
+
+
 def test_invalid_interval_falls_back(monkeypatch):
     monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "not-a-number")
     gc_policy = _fresh_module(monkeypatch, None)
