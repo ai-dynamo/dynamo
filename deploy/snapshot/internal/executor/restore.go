@@ -69,9 +69,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	// Phase 2: Mount agent binaries into the placeholder's namespace so nsrestore is reachable.
 	injectStart := time.Now()
-	mp, err := mounter.Mount(ctx, snap.PlaceholderPID)
+	mp, nsRestorePath, err := mountBundle(ctx, mounter, snap.PlaceholderPID)
 	if err != nil {
-		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return 0, err
 	}
 	injectDuration := time.Since(injectStart)
 	defer func() {
@@ -81,10 +81,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}()
 
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
-	nsRestorePath, err := mp.Path("nsrestore")
-	if err != nil {
-		return 0, fmt.Errorf("resolve nsrestore path: %w", err)
-	}
 	result, err := execNSRestore(ctx, log, req, snap, nsRestorePath)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
@@ -108,13 +104,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		)
 	}
 
-	// Validate restored process from the host side
 	validationStart := time.Now()
-	procRoot := filepath.Join(snap.TargetRoot, "proc")
-	if err := snapshotruntime.ValidateProcessState(procRoot, result.RestoredPID); err != nil {
-		restoreLogPath := filepath.Join(snap.TargetRoot, "var", "criu-work", criu.RestoreLogFilename)
-		logging.LogProcessDiagnostics(procRoot, result.RestoredPID, restoreLogPath, log)
-		return 0, fmt.Errorf("restored process failed post-restore validation: %w", err)
+	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
+		return 0, err
 	}
 
 	log.Info("=== External restore completed ===",
@@ -125,6 +117,29 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	)
 
 	return snap.PlaceholderPID, nil
+}
+
+func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPoint, string, error) {
+	mp, err := mounter.Mount(ctx, pid)
+	if err != nil {
+		return nil, "", fmt.Errorf("mount agent bundle into placeholder: %w", err)
+	}
+	nsRestorePath, err := mp.Path("nsrestore")
+	if err != nil {
+		mp.Unmount(ctx)
+		return nil, "", fmt.Errorf("resolve nsrestore path: %w", err)
+	}
+	return mp, nsRestorePath, nil
+}
+
+func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger) error {
+	procRoot := filepath.Join(targetRoot, "proc")
+	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
+		restoreLogPath := filepath.Join(targetRoot, "var", "criu-work", criu.RestoreLogFilename)
+		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
+		return fmt.Errorf("restored process failed post-restore validation: %w", err)
+	}
+	return nil
 }
 
 func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
