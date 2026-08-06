@@ -17,9 +17,6 @@ import types
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
-from sglang.srt.function_call.function_call_parser import FunctionCallParser
-from sglang.srt.function_call.json_array_parser import JsonArrayParser
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -27,6 +24,9 @@ from _tool_guidance_parity import (
     parity_tool,
     tool_choice_value,
 )
+from sglang.srt.function_call.function_call_parser import FunctionCallParser
+from sglang.srt.function_call.json_array_parser import JsonArrayParser
+from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module

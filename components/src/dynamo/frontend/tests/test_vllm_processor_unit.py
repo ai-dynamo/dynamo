@@ -1212,9 +1212,7 @@ class TestToolCallGuidedDecoding:
             {
                 **TOOL_REQUEST,
                 "tool_choice": "required",
-                "structured_outputs": {
-                    "grammar": 'root ::= "not_a_tool_call"'
-                },
+                "structured_outputs": {"grammar": 'root ::= "not_a_tool_call"'},
             },
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
