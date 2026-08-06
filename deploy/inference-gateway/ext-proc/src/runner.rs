@@ -118,26 +118,27 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 
 /// Run the stock EPP until it exits.
 pub async fn run() -> Result<()> {
-    run_inner(None).await
+    init_tracing();
+    run_inner(EppMode::from_env()?, None).await
 }
 
 /// Run the standalone EPP around a caller-built selection service.
 pub async fn run_with_selection_service(service: SelectionService) -> Result<()> {
-    run_inner(Some(service)).await
+    init_tracing();
+    run_inner(EppMode::Standalone, Some(service)).await
 }
 
-async fn run_inner(selection_service: Option<SelectionService>) -> Result<()> {
-    tracing_subscriber::fmt()
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
+}
 
-    let standalone = matches!(EppMode::from_env()?, EppMode::Standalone);
-    if selection_service.is_some() && !standalone {
-        anyhow::bail!("a custom selection service requires DYN_EPP_MODE=standalone");
-    }
+async fn run_inner(mode: EppMode, selection_service: Option<SelectionService>) -> Result<()> {
+    let standalone = matches!(mode, EppMode::Standalone);
 
     let config = Config::from_env();
 

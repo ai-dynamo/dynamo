@@ -132,7 +132,7 @@ let service = SelectionServiceBuilder::new(kv_router_config)
 dynamo_ext_proc::run_with_selection_service(service).await?;
 ```
 
-The runner uses the stock TLS, health, metrics, discovery, and readiness bootstrap. It requires `DYN_EPP_MODE=standalone` and takes ownership of the service so its workers, peer membership, and background tasks share the EPP lifecycle. The standard EPP binary calls the same runner without a prebuilt service.
+The runner uses the stock TLS, health, metrics, discovery, and readiness bootstrap. Supplying a prebuilt service selects standalone mode and transfers ownership of the service so its workers, peer membership, and background tasks share the EPP lifecycle. The standard EPP binary calls the same runner without a prebuilt service.
 
 ## Policy Contract
 
