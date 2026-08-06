@@ -124,9 +124,14 @@ RUN apt-get update -y \
 # --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
 # image lacks the SELinux policy store that some compute nodes expect; without
 # this flag, dnf fails with "ValueError: SELinux policy is not managed".
-RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
+RUN --mount=type=cache,id=dnf-${TARGETARCH},target=/var/cache/dnf,sharing=locked \
     dnf install -y --setopt=tsflags=nocontexts almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
+    # manylinux aarch64 provides the split RDMA development headers via rdma-core-devel.
+    RDMA_SPLIT_DEVEL_PACKAGES="" && \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        RDMA_SPLIT_DEVEL_PACKAGES="libibverbs-devel libibumad-devel librdmacm-devel"; \
+    fi && \
     dnf install -y --setopt=tsflags=nocontexts \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
         autoconf \
@@ -152,18 +157,16 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         protobuf-compiler \
         # RDMA/InfiniBand support (required for UCX build with --with-verbs)
         libibverbs \
-        libibverbs-devel \
         rdma-core \
         rdma-core-devel \
         libibumad \
-        libibumad-devel \
-        librdmacm-devel \
         numactl-devel \
         # Libfabric support
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
-        zlib-devel
+        zlib-devel \
+        ${RDMA_SPLIT_DEVEL_PACKAGES}
 
 # Default comes from context.yaml; keep it in sync with upstream NIXL's
 # contrib/Dockerfile.manylinux. NIXL v1.0.x needs newer hwloc than RHEL8 ships.
