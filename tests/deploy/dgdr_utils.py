@@ -742,7 +742,7 @@ async def run_lifecycle(
     result = await manager.wait_for_phase(
         name,
         "Deployed",
-        manager.config.profiling_timeout + manager.config.deploy_timeout,
+        manager.config.deploy_timeout,
     )
     dgd_name = result.get("status", {}).get("dgdName")
     if not dgd_name:
