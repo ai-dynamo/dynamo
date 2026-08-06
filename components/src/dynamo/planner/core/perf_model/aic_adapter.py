@@ -140,6 +140,7 @@ class PlannerEnginePerfModel:
                 limits=limits,
                 options=options,
                 attention_dp_size=self._attention_dp_size() or 1,
+                max_correction_factor=self._config.aic_max_correction_factor,
             )
             diagnostics = self._engine_diagnostics()
             logger.info(
@@ -306,6 +307,7 @@ class PlannerEnginePerfModel:
             self._config.max_num_fpm_samples,
             self._config.load_min_observations,
             self._config.fpm_sample_bucket_size,
+            self._config.aic_max_correction_factor,
             aic_key,
         )
 

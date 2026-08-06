@@ -177,6 +177,26 @@ def test_max_num_fpm_samples_field():
     assert config.max_num_fpm_samples == 100
 
 
+def test_aic_max_correction_factor_default_is_disabled():
+    config = PlannerConfig(namespace="test-ns")
+    assert config.aic_max_correction_factor is None
+
+
+@pytest.mark.parametrize("factor", [1.0, 2.5])
+def test_aic_max_correction_factor_accepts_finite_values_at_least_one(factor):
+    config = PlannerConfig(namespace="test-ns", aic_max_correction_factor=factor)
+    assert config.aic_max_correction_factor == factor
+
+
+@pytest.mark.parametrize(
+    "factor",
+    [0.0, 0.99, float("inf"), float("-inf"), float("nan")],
+)
+def test_aic_max_correction_factor_rejects_invalid_values(factor):
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", aic_max_correction_factor=factor)
+
+
 def test_speculative_nextn_default_and_positive_value():
     config = PlannerConfig(namespace="test-ns")
     assert config.speculative_nextn == 0

@@ -33,8 +33,13 @@ class _FakeForwardPassModel:
     def __init__(
         self,
         estimate: Callable[[list[dict[str, Any]]], Optional[float]],
+        *,
+        source: str = "fallback_regression",
+        max_correction_factor: Optional[float] = None,
     ) -> None:
         self._estimate = estimate
+        self._source = source
+        self._max_correction_factor = max_correction_factor
         self.estimate_calls: list[list[dict[str, Any]]] = []
         self.tuned_iterations: list[list[dict[str, Any]]] = []
 
@@ -49,10 +54,13 @@ class _FakeForwardPassModel:
 
     def diagnostics(self) -> dict[str, Any]:
         return {
-            "source": "fallback_regression",
+            "source": self._source,
             "readiness": "ready",
             "retained_observations": len(self.tuned_iterations),
         }
+
+    def get_max_correction_factor(self) -> Optional[float]:
+        return self._max_correction_factor
 
 
 def _model(
@@ -124,6 +132,314 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
     assert _FakeAicFacade.last_config is config
     assert _FakeAicFacade.last_options is options
     assert model.diagnostics()["readiness"] == "ready"
+
+
+def test_best_available_builds_never_tuned_native_baseline_only_when_cap_enabled(
+    monkeypatch,
+):
+    corrected = _FakeForwardPassModel(lambda _metrics: 80.0, source="aic")
+    native = _FakeForwardPassModel(lambda _metrics: 10.0, source="aic")
+
+    class _FakeAicFacade:
+        best_available_calls = 0
+        from_native_calls = 0
+
+        @classmethod
+        def best_available(cls, _config, _options):
+            cls.best_available_calls += 1
+            return corrected
+
+        @classmethod
+        def from_native(cls, _config, _options):
+            cls.from_native_calls += 1
+            return native
+
+    monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
+    model = AicCoreEnginePerfModel.best_available(
+        aic_config={"schema_version": 1},
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        options={
+            "max_observations": 8,
+            "min_observations": 2,
+            "bucket_count": 4,
+            "max_num_tokens": 128,
+            "max_batch_size": 16,
+            "max_kv_tokens": 10_000,
+        },
+        attention_dp_size=1,
+        max_correction_factor=2.0,
+    )
+    outlier = ForwardPassMetrics(
+        wall_time=1.0,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=1,
+            sum_decode_kv_tokens=100,
+        ),
+    )
+    model.tune_with_fpms([[outlier]])
+    native_tuning_calls = len(native.estimate_calls)
+    estimate_s = model.get_scheduled_decode_itl([outlier])
+
+    assert corrected.tuned_iterations[0][0]["wall_time"] == pytest.approx(0.02)
+    assert estimate_s == pytest.approx(0.08)
+    assert len(native.estimate_calls) == native_tuning_calls
+    assert _FakeAicFacade.best_available_calls == 1
+    assert _FakeAicFacade.from_native_calls == 1
+    assert model.diagnostics()["planner_correction_cap"] == {
+        "configured_max_factor": 2.0,
+        "enabled": True,
+        "scope": "aic_tuning_input",
+        "observed_aic_max_factor": None,
+        "stored_aic_corrections_capped": True,
+    }
+
+
+def test_best_available_does_not_build_native_baseline_for_regression_fallback(
+    monkeypatch,
+):
+    class _FallbackWithoutCorrectionGetter:
+        def estimate_forward_pass_time_ms(self, _metrics):
+            return 80.0
+
+        def tune_with_fpms(self, _iterations):
+            return None
+
+        def diagnostics(self):
+            return {
+                "source": "fallback_regression",
+                "readiness": "ready",
+                "retained_observations": 0,
+            }
+
+    fallback = _FallbackWithoutCorrectionGetter()
+
+    class _FakeAicFacade:
+        @classmethod
+        def best_available(cls, _config, _options):
+            return fallback
+
+        @classmethod
+        def from_native(cls, _config, _options):
+            raise AssertionError("regression fallback must not build a native baseline")
+
+    monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
+    model = AicCoreEnginePerfModel.best_available(
+        aic_config={"schema_version": 1},
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        options={
+            "max_observations": 8,
+            "min_observations": 2,
+            "bucket_count": 4,
+            "max_num_tokens": 128,
+            "max_batch_size": 16,
+            "max_kv_tokens": 10_000,
+        },
+        attention_dp_size=1,
+        max_correction_factor=2.0,
+    )
+
+    assert model.diagnostics()["planner_correction_cap"]["enabled"] is False
+
+
+def test_native_correction_cap_fails_closed_when_baseline_construction_fails(
+    monkeypatch,
+):
+    corrected = _FakeForwardPassModel(lambda _metrics: 80.0, source="aic")
+
+    class _FakeAicFacade:
+        @classmethod
+        def best_available(cls, _config, _options):
+            return corrected
+
+        @classmethod
+        def from_native(cls, _config, _options):
+            raise RuntimeError("native baseline unavailable")
+
+    monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
+
+    with pytest.raises(RuntimeError, match="native baseline unavailable"):
+        AicCoreEnginePerfModel.best_available(
+            aic_config={"schema_version": 1},
+            worker_type="decode",
+            limits=EnginePerfLimits(128, 16, 10_000),
+            options={
+                "max_observations": 8,
+                "min_observations": 2,
+                "bucket_count": 4,
+                "max_num_tokens": 128,
+                "max_batch_size": 16,
+                "max_kv_tokens": 10_000,
+            },
+            attention_dp_size=1,
+            max_correction_factor=2.0,
+        )
+
+
+def test_native_correction_cap_is_absolute_across_repeated_outliers():
+    corrected = _FakeForwardPassModel(lambda _metrics: 10.0)
+    native = _FakeForwardPassModel(lambda _metrics: 10.0)
+    model = AicCoreEnginePerfModel(
+        model=corrected,
+        uncorrected_native_model=native,
+        max_correction_factor=2.0,
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        attention_dp_size=1,
+        max_observations=8,
+    )
+    for wall_time in (0.02, 0.04, 0.08):
+        model.tune_with_fpms(
+            [
+                [
+                    ForwardPassMetrics(
+                        wall_time=wall_time,
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=1,
+                            sum_decode_kv_tokens=100,
+                        ),
+                    )
+                ]
+            ]
+        )
+
+    tuned_wall_times = [
+        iteration[0]["wall_time"] for iteration in corrected.tuned_iterations
+    ]
+    assert tuned_wall_times == pytest.approx([0.02, 0.02, 0.02])
+
+
+def test_native_correction_cap_preserves_attention_dp_max_wall_semantics():
+    corrected = _FakeForwardPassModel(lambda _metrics: 10.0)
+    model = AicCoreEnginePerfModel(
+        model=corrected,
+        uncorrected_native_model=_FakeForwardPassModel(lambda _metrics: 10.0),
+        max_correction_factor=2.0,
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        attention_dp_size=2,
+        max_observations=8,
+    )
+
+    model.tune_with_fpms(
+        [
+            [
+                ForwardPassMetrics(
+                    dp_rank=0,
+                    wall_time=0.01,
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_decode_requests=1,
+                        sum_decode_kv_tokens=100,
+                    ),
+                ),
+                ForwardPassMetrics(
+                    dp_rank=1,
+                    wall_time=1.0,
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_decode_requests=1,
+                        sum_decode_kv_tokens=100,
+                    ),
+                ),
+            ]
+        ]
+    )
+
+    tuned = corrected.tuned_iterations[0]
+    assert [metrics["wall_time"] for metrics in tuned] == pytest.approx([0.01, 0.02])
+
+
+def test_native_correction_cap_does_not_clamp_downward_correction():
+    corrected = _FakeForwardPassModel(lambda _metrics: 10.0)
+    model = AicCoreEnginePerfModel(
+        model=corrected,
+        uncorrected_native_model=_FakeForwardPassModel(lambda _metrics: 10.0),
+        max_correction_factor=2.0,
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        attention_dp_size=1,
+        max_observations=8,
+    )
+
+    model.tune_with_fpms(
+        [
+            [
+                ForwardPassMetrics(
+                    wall_time=0.005,
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_decode_requests=1,
+                        sum_decode_kv_tokens=100,
+                    ),
+                )
+            ]
+        ]
+    )
+
+    assert corrected.tuned_iterations[0][0]["wall_time"] == pytest.approx(0.005)
+
+
+def test_native_correction_cap_disabled_preserves_corrected_estimate():
+    corrected = _FakeForwardPassModel(lambda _metrics: 80.0)
+    model = AicCoreEnginePerfModel(
+        model=corrected,
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        attention_dp_size=1,
+        max_observations=8,
+    )
+
+    observation = ForwardPassMetrics(
+        wall_time=1.0,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=1,
+            sum_decode_kv_tokens=100,
+        ),
+    )
+    model.tune_with_fpms([[observation]])
+    estimate_s = model.get_scheduled_decode_itl([observation])
+
+    assert corrected.tuned_iterations[0][0]["wall_time"] == 1.0
+    assert estimate_s == pytest.approx(0.08)
+
+
+def test_native_correction_cap_fails_closed_when_baseline_estimate_is_unavailable():
+    model = AicCoreEnginePerfModel(
+        model=_FakeForwardPassModel(lambda _metrics: 80.0),
+        uncorrected_native_model=_FakeForwardPassModel(lambda _metrics: None),
+        max_correction_factor=2.0,
+        worker_type="decode",
+        limits=EnginePerfLimits(128, 16, 10_000),
+        attention_dp_size=1,
+        max_observations=8,
+    )
+
+    with pytest.raises(ValueError, match="native AIC.*unavailable"):
+        model.tune_with_fpms(
+            [
+                [
+                    ForwardPassMetrics(
+                        wall_time=1.0,
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=1,
+                            sum_decode_kv_tokens=100,
+                        ),
+                    )
+                ]
+            ]
+        )
+
+
+@pytest.mark.parametrize("factor", [0.0, 0.5, float("inf"), float("nan")])
+def test_native_correction_cap_rejects_invalid_values(factor):
+    with pytest.raises(ValueError, match="must be finite and >= 1.0"):
+        AicCoreEnginePerfModel(
+            model=_FakeForwardPassModel(lambda _metrics: 10.0),
+            max_correction_factor=factor,
+            worker_type="decode",
+            limits=EnginePerfLimits(128, 16, 10_000),
+            attention_dp_size=1,
+            max_observations=8,
+        )
 
 
 def test_queued_prefill_uses_full_chunks_plus_tail():

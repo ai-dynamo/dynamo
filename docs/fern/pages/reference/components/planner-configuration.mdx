@@ -205,6 +205,10 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Maximum retained ForwardPassMetrics observations for online tuning and regression fallback.
 </ParamField>
 
+<ParamField path="aic_max_correction_factor" type="number | null" default="null">
+  Absolute upper bound on native AIC online correction. When set, the Planner caps each tuning observation at this factor times an identical never-tuned native estimate, which bounds AIC's stored correction factors. The value must be finite and greater than or equal to `1.0`. The bound does not clamp observations below the native baseline and does not affect regression fallback. `null` preserves the AIC wheel's unbounded correction behavior. Enabling the bound maintains a second native model and runs one native estimate per tuned FPM iteration. The second model adds memory and can add one-time latency to the first capped Planner tuning tick; it does not run on the inference engine thread.
+</ParamField>
+
 <ParamField path="fpm_sample_bucket_size" type="integer" default="16">
   Number of buckets for observation retirement. Must be a perfect square.
 </ParamField>
@@ -597,6 +601,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 
 - `ttft_ms` must be greater than 0.
 - `report_interval_hours` must be a positive finite number or `null`.
+- `aic_max_correction_factor` must be `null` or a finite number greater than or equal to `1.0`.
 - `fpm_sample_bucket_size` must be a perfect square.
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.

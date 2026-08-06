@@ -194,6 +194,8 @@ class AicCoreEnginePerfModel:
         limits: EnginePerfLimits,
         attention_dp_size: int,
         max_observations: int,
+        uncorrected_native_model: Optional[Any] = None,
+        max_correction_factor: Optional[float] = None,
     ) -> None:
         if worker_type not in ("prefill", "decode", "aggregated"):
             raise ValueError(f"invalid worker_type {worker_type!r}")
@@ -201,7 +203,18 @@ class AicCoreEnginePerfModel:
             raise ValueError(
                 f"attention_dp_size must be positive, got {attention_dp_size}"
             )
+        if max_correction_factor is not None and (
+            not math.isfinite(max_correction_factor) or max_correction_factor < 1.0
+        ):
+            raise ValueError(
+                "max_correction_factor must be finite and >= 1.0, "
+                f"got {max_correction_factor}"
+            )
+        if uncorrected_native_model is not None and max_correction_factor is None:
+            raise ValueError("uncorrected_native_model requires max_correction_factor")
         self._model = model
+        self._uncorrected_native_model = uncorrected_native_model
+        self._max_correction_factor = max_correction_factor
         self._worker_type = worker_type
         self._limits = limits
         self._attention_dp_size = attention_dp_size
@@ -216,28 +229,70 @@ class AicCoreEnginePerfModel:
         limits: EnginePerfLimits,
         options: dict[str, int],
         attention_dp_size: int,
+        max_correction_factor: Optional[float] = None,
     ) -> AicCoreEnginePerfModel:
         if aic_config is None:
             model = AicForwardPassPerfModel.from_regression(options)
         else:
             model = AicForwardPassPerfModel.best_available(aic_config, options)
+
+        # The AIC wheel exposes corrected estimates and aggregate correction
+        # diagnostics, but it cannot cap or return the matching region's raw
+        # native estimate. When a cap is requested and native AIC is available,
+        # keep a second, never-tuned native model as the absolute tuning
+        # baseline. A cap relative to the already-corrected estimate would
+        # compound across repeated outliers (for example 2x -> 4x -> 8x).
+        uncorrected_native_model = None
+        if max_correction_factor is not None and aic_config is not None:
+            diagnostics = model.diagnostics()
+            if diagnostics.get("source") == "aic":
+                uncorrected_native_model = AicForwardPassPerfModel.from_native(
+                    aic_config, options
+                )
         return cls(
             model=model,
             worker_type=worker_type,
             limits=limits,
             attention_dp_size=attention_dp_size,
             max_observations=options["max_observations"],
+            uncorrected_native_model=uncorrected_native_model,
+            max_correction_factor=max_correction_factor,
         )
 
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
             self._validate_metrics_by_rank(metrics_by_rank)
-        self._model.tune_with_fpms(
-            [
-                [_fpm_to_aic_dict(metrics) for metrics in metrics_by_rank]
-                for metrics_by_rank in iterations
-            ]
-        )
+        payload_iterations = [
+            [_fpm_to_aic_dict(metrics) for metrics in metrics_by_rank]
+            for metrics_by_rank in iterations
+        ]
+        if self._uncorrected_native_model is not None:
+            max_correction_factor = self._max_correction_factor
+            if max_correction_factor is None:
+                raise RuntimeError(
+                    "native AIC correction baseline is missing its configured cap"
+                )
+            for payload in payload_iterations:
+                native_ms = self._estimate_forward_pass_ms(
+                    self._uncorrected_native_model,
+                    payload,
+                    label="uncorrected native AIC forward-pass estimate",
+                )
+                if native_ms is None:
+                    raise ValueError(
+                        "uncorrected native AIC forward-pass estimate is unavailable"
+                    )
+                if native_ms < 0.0:
+                    raise ValueError(
+                        "uncorrected native AIC forward-pass estimate must be "
+                        f"non-negative, got {native_ms}"
+                    )
+                max_wall_time_s = native_ms * max_correction_factor / 1000.0
+                for metrics in payload:
+                    wall_time = metrics["wall_time"]
+                    if wall_time > max_wall_time_s:
+                        metrics["wall_time"] = max_wall_time_s
+        self._model.tune_with_fpms(payload_iterations)
         self._load_averages.observe_iterations(iterations)
 
     def diagnostics(self) -> dict[str, Any]:
@@ -247,6 +302,19 @@ class AicCoreEnginePerfModel:
                 "aiconfigurator-core diagnostics must be a mapping, "
                 f"got {type(diagnostics).__name__}"
             )
+        diagnostics = dict(diagnostics)
+        observed_aic_max_factor = None
+        if str(diagnostics.get("source", "")).startswith("aic"):
+            observed_aic_max_factor = self._model.get_max_correction_factor()
+        diagnostics["planner_correction_cap"] = {
+            "configured_max_factor": self._max_correction_factor,
+            "enabled": self._uncorrected_native_model is not None,
+            "scope": "aic_tuning_input",
+            "observed_aic_max_factor": observed_aic_max_factor,
+            "stored_aic_corrections_capped": (
+                self._uncorrected_native_model is not None
+            ),
+        }
         return diagnostics
 
     def get_queued_prefill_time(
@@ -616,19 +684,30 @@ class AicCoreEnginePerfModel:
     def _estimate_forward_pass_seconds(
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        estimate_ms = self._model.estimate_forward_pass_time_ms(
-            [_fpm_to_aic_dict(metrics) for metrics in metrics_by_rank]
+        payload = [_fpm_to_aic_dict(metrics) for metrics in metrics_by_rank]
+        estimate_ms = self._estimate_forward_pass_ms(
+            self._model,
+            payload,
+            label="AIC forward-pass estimate",
         )
         if estimate_ms is None:
             return None
-        if not math.isfinite(estimate_ms):
-            raise ValueError(
-                f"AIC forward-pass estimate must be finite, got {estimate_ms}"
-            )
         return _checked_duration_seconds(
             max(0.0, estimate_ms) / 1000.0,
             "AIC forward-pass estimate",
         )
+
+    @staticmethod
+    def _estimate_forward_pass_ms(
+        model: Any,
+        payload: list[dict[str, Any]],
+        *,
+        label: str,
+    ) -> Optional[float]:
+        estimate_ms = model.estimate_forward_pass_time_ms(payload)
+        if estimate_ms is not None and not math.isfinite(estimate_ms):
+            raise ValueError(f"{label} must be finite, got {estimate_ms}")
+        return estimate_ms
 
 
 def _fpm_to_aic_dict(metrics: ForwardPassMetrics) -> dict[str, Any]:

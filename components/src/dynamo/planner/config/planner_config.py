@@ -562,6 +562,19 @@ class PlannerConfig(BaseModel):
         ),
     )
     max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
+    aic_max_correction_factor: Optional[float] = Field(
+        default=SLAPlannerDefaults.aic_max_correction_factor,
+        ge=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Optional absolute upper bound on native AIC online correction. "
+            "When set, tuning observations are capped at this factor times an "
+            "identical never-tuned native estimate, which bounds AIC's stored "
+            "correction factors. Values below the native estimate are not "
+            "clamped. None preserves the AIC wheel's default unbounded "
+            "correction behavior. Regression fallback is unaffected."
+        ),
+    )
     fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
     load_scaling_down_sensitivity: int = (
         SLAPlannerDefaults.load_scaling_down_sensitivity

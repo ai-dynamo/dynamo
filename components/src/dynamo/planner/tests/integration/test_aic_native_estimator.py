@@ -33,7 +33,7 @@ def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
-def _config() -> PlannerConfig:
+def _config(*, max_correction_factor: float | None = None) -> PlannerConfig:
     pick = PickedParallelConfig()
     return PlannerConfig.model_construct(
         aic_perf_model=AICPerfModelSpec.model_construct(
@@ -46,6 +46,7 @@ def _config() -> PlannerConfig:
         ),
         max_num_fpm_samples=16,
         load_min_observations=5,
+        aic_max_correction_factor=max_correction_factor,
         fpm_sample_bucket_size=16,
         ttft_ms=500.0,
         itl_ms=50.0,
@@ -166,3 +167,51 @@ def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
         add_next_request=False,
     )
     assert itl_s == pytest.approx(0.01, rel=1e-6)
+
+
+def test_native_aic_correction_cap_stays_absolute_after_repeated_outliers() -> None:
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(max_correction_factor=2.0),
+        capabilities=_capabilities(),
+    )
+    query = ForwardPassMetrics(
+        worker_id="decode-0",
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=2,
+            sum_decode_kv_tokens=16_773,
+        ),
+    )
+    native_itl_s = model.estimate_scheduled_decode_itl(
+        [query],
+        add_next_request=False,
+    )
+    assert native_itl_s is not None and native_itl_s > 0.0
+
+    for counter_id in range(1, 13):
+        model.add_observations(
+            {
+                ("decode-0", 0): ForwardPassMetrics(
+                    worker_id="decode-0",
+                    counter_id=counter_id,
+                    wall_time=1.2,
+                    scheduled_requests=query.scheduled_requests,
+                )
+            }
+        )
+
+    corrected_itl_s = model.estimate_scheduled_decode_itl(
+        [query],
+        add_next_request=False,
+    )
+    diagnostics = model._engine_diagnostics()
+
+    assert diagnostics["source"] == "aic_with_correction"
+    correction_cap = diagnostics["planner_correction_cap"]
+    assert correction_cap["configured_max_factor"] == 2.0
+    assert correction_cap["enabled"] is True
+    assert correction_cap["scope"] == "aic_tuning_input"
+    assert correction_cap["observed_aic_max_factor"] == pytest.approx(2.0)
+    assert correction_cap["stored_aic_corrections_capped"] is True
+    assert diagnostics["retained_observations"] == 12
+    assert corrected_itl_s == pytest.approx(2.0 * native_itl_s, rel=1e-6)

@@ -178,6 +178,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `enable_load_scaling` | `false` | Enable load-based scaling |
 | `load_adjustment_interval_seconds` | `5` | Seconds between FPM tuning updates and load-based scaling decisions |
 | `max_num_fpm_samples` | `64` | Maximum retained FPM observations for online tuning or regression |
+| `aic_max_correction_factor` | `null` | Optional absolute upper bound on native AIC correction factors, enforced by clipping tuning observations against a never-tuned native estimate; `null` preserves unbounded AIC correction |
 | `fpm_sample_bucket_size` | `16` | Number of buckets for observation retirement (must be perfect square) |
 | `load_scaling_down_sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
 | `load_min_observations` | `5` | Minimum observations before regression activates |

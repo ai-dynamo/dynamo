@@ -235,6 +235,20 @@ def test_planner_metadata_identifies_custom_plugins_without_secrets():
     )
 
 
+def test_replay_metadata_tracks_aic_correction_cap_as_decision_config():
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._benchmark_granularity = 8
+    adapter._bootstrap_metadata = {"status": "not_required"}
+    adapter._capture_details = False
+
+    adapter._config = PlannerConfig(mode="agg", aic_max_correction_factor=None)
+    disabled_digest = adapter._planner_metadata()["planner_config_digest"]
+    adapter._config = PlannerConfig(mode="agg", aic_max_correction_factor=2.0)
+    capped_digest = adapter._planner_metadata()["planner_config_digest"]
+
+    assert capped_digest != disabled_digest
+
+
 def test_build_tick_input_maps_replay_accept_length():
     # The Rust simulation drains the per-tick traffic window into
     # ``result["traffic"]``; a need_traffic_metrics tick maps it onto

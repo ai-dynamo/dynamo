@@ -372,6 +372,10 @@ service.
   Maximum retained ForwardPassMetrics observations for online tuning and regression fallback.
 </ParamField>
 
+<ParamField path="aic_max_correction_factor" type="number | null" default="null">
+  Absolute upper bound on native AIC online correction. When set, the Planner caps each tuning observation at this factor times an identical never-tuned native estimate, which bounds AIC's stored correction factors. The value must be finite and greater than or equal to `1.0`. The bound does not clamp observations below the native baseline and does not affect regression fallback. `null` preserves the AIC wheel's unbounded correction behavior. Enabling the bound maintains a second native model and runs one native estimate per tuned FPM iteration. The second model adds memory and can add one-time latency to the first capped Planner tuning tick; it does not run on the inference engine thread.
+</ParamField>
+
 <ParamField path="fpm_sample_bucket_size" type="integer" default="16">
   Number of buckets for observation retirement. Must be a perfect square.
 </ParamField>

@@ -128,6 +128,7 @@ spec:
 |-------|------|---------|-------------|
 | `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the perf model at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
+| `aic_max_correction_factor` | float or null | `null` | Absolute upper bound on native AIC online correction. Set a finite value greater than or equal to `1.0`; `null` preserves unbounded AIC correction. The Planner bounds each tuning observation against an identical never-tuned native estimate, so the bound applies only to native AIC and does not clamp downward corrections. Enabling it maintains a second native model and runs one native estimate per tuned FPM iteration. The second model adds memory and can add one-time latency to the first capped Planner tuning tick; it does not run on the inference engine thread. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |

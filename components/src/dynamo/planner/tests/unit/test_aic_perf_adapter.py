@@ -106,6 +106,7 @@ def _config(
     dp: int = 1,
     min_observations: int = 5,
     speculative_nextn: int = 0,
+    max_correction_factor: float | None = None,
 ) -> PlannerConfig:
     pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
@@ -118,6 +119,7 @@ def _config(
         ),
         max_num_fpm_samples=16,
         load_min_observations=min_observations,
+        aic_max_correction_factor=max_correction_factor,
         fpm_sample_bucket_size=16,
         ttft_ms=500.0,
         itl_ms=50.0,
@@ -195,6 +197,46 @@ def test_aic_diagnostics_gate_sufficient_data(fake_engine_factory):
 
     fake._diagnostics["readiness"] = "ready"
     assert model.has_sufficient_data()
+
+
+def test_aic_correction_cap_is_forwarded_to_engine_factory(fake_engine_factory):
+    fake = _FakeEngineModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+        }
+    )
+    _install_fake_engine(fake_engine_factory, fake)
+
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(max_correction_factor=2.0),
+        capabilities=_caps(),
+    )
+
+    assert fake_engine_factory.last_kwargs is not None
+    assert fake_engine_factory.last_kwargs["max_correction_factor"] == 2.0
+    assert 2.0 in model._model_key()
+
+
+def test_aic_correction_cap_fails_closed_when_native_baseline_init_fails(
+    monkeypatch,
+):
+    class _FailingEngineFactory:
+        @classmethod
+        def best_available(cls, **_kwargs):
+            raise RuntimeError("native correction baseline unavailable")
+
+    monkeypatch.setattr(aic_adapter, "AicCoreEnginePerfModel", _FailingEngineFactory)
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(max_correction_factor=2.0),
+        capabilities=_caps(),
+    )
+
+    assert model._engine_model is None
+    assert not model.has_sufficient_data()
 
 
 def test_missing_capability_fields_use_engine_query_defaults(fake_engine_factory):

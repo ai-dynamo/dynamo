@@ -85,6 +85,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         5  # also controls live FPM tuning frequency for throughput scaling
     )
     max_num_fpm_samples = 64  # max retained FPM observations for tuning/fallback
+    # Optional absolute upper bound on native AIC online correction factors,
+    # enforced on tuning inputs. None keeps the AIC wheel's unbounded behavior.
+    aic_max_correction_factor = None
     fpm_sample_bucket_size = (
         16  # must be a perfect square; total buckets across input axes
     )
