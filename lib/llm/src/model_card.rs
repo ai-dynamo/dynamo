@@ -934,6 +934,17 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 
+    /// Per-model frontend admission override: maximum concurrent
+    /// frontend-admitted requests for this model. When set, it takes
+    /// precedence over the frontend's global
+    /// `--rejection-frontend-request-concurrency-limit` for this model.
+    /// Registration validates >= 1. The value participates in `mdcsum` as
+    /// static WorkerSet identity; all workers in one namespace/role WorkerSet
+    /// must advertise the same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub rejection_frontend_request_concurrency_limit: Option<u64>,
+
     /// Optional authoritative KV-indexer compatibility and isolation material.
     ///
     /// A present dimension replaces its component-derived default. Entry labels are deliberately
@@ -1132,6 +1143,16 @@ impl ModelDeploymentCard {
                     // along with this effort, we should reorganize where RouterConfig
                     // should be defined.
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
+                }
+
+                // A concurrency override is part of the static WorkerSet
+                // identity. Workers targeting the same namespace/role must
+                // agree on it; changing it requires a new namespace or a full
+                // drain before replacements register. Omit the field when
+                // unset to preserve pre-field checksums.
+                if let Some(limit) = self.rejection_frontend_request_concurrency_limit {
+                    bytes_to_hash.extend(b"rejection_frontend_request_concurrency_limit\0");
+                    bytes_to_hash.extend(limit.to_be_bytes());
                 }
 
                 if let Some(identity) = self.indexer_identity.as_ref() {
@@ -1722,6 +1743,7 @@ impl ModelDeploymentCard {
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
+            rejection_frontend_request_concurrency_limit: None,
             indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
@@ -3113,6 +3135,30 @@ mod worker_type_tests {
         assert_ne!(
             encode_dnf, encode_single_alt,
             "adding an OR alternative must change mdcsum"
+        );
+    }
+
+    /// The frontend concurrency override is static WorkerSet identity. A
+    /// changed value must produce a different checksum so workers cannot join
+    /// an existing namespace/role WorkerSet with conflicting admission policy.
+    #[test]
+    fn mdcsum_covers_frontend_concurrency_override() {
+        fn hash(limit: Option<u64>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.rejection_frontend_request_concurrency_limit = limit;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None);
+        let capped_at_one = hash(Some(1));
+        let capped_at_two = hash(Some(2));
+        assert_ne!(
+            baseline, capped_at_one,
+            "adding the limit must change WorkerSet identity"
+        );
+        assert_ne!(
+            capped_at_one, capped_at_two,
+            "changing the limit must change WorkerSet identity"
         );
     }
 

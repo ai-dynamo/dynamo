@@ -130,6 +130,15 @@ def test_worker_config_accepts_media_configuration():
     )
 
 
+def test_worker_config_defers_request_concurrency_override_validation_to_run():
+    """Worker.run owns validation; the binding only carries the value."""
+    for limit in (0, 17):
+        backend.WorkerConfig(
+            namespace="dynamo",
+            rejection_frontend_request_concurrency_limit=limit,
+        )
+
+
 def test_worker_config_accepts_disaggregation_mode():
     """The Rust binding must accept a DisaggregationMode kwarg so the
     Python shim can plumb the field through. Each variant must construct."""
@@ -159,6 +168,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.dyn_reasoning_parser = "kimi_k25"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
+    runtime_cfg.rejection_frontend_request_concurrency_limit = 17
     runtime_cfg.dyn_enable_structural_tag = True
     runtime_cfg.dyn_structural_tag_scope = "always"
     runtime_cfg.dyn_structural_tag_schema = "strict"
@@ -173,6 +183,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     assert config.reasoning_parser == "kimi_k25"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
+    assert config.rejection_frontend_request_concurrency_limit == 17
     assert config.structural_tag_mode == "on"
     assert config.structural_tag_scope == "always"
     assert config.structural_tag_schema == "strict"

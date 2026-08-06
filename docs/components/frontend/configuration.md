@@ -130,9 +130,14 @@ is no longer possible.
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted HTTP inference requests, enforced separately for each served model |
+| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted HTTP inference requests, enforced separately for each served model. Acts as the per-model default; a worker can override it for its model with the worker-side `--rejection-frontend-request-concurrency-limit` flag (carried on its registration / MDC via `register_llm`) |
 | `--rejection-frontend-runtime-task-limit` | `DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT` | disabled | Max alive tasks on the frontend runtime (frontend-local self-protection, not per-model) |
 | `--rejection-frontend-request-plane-connection-limit` | `DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT` | disabled | Sampled process-wide in-flight request-plane request/stream threshold. Rejection is best-effort: concurrent arrivals can exceed the configured value before their outbound streams update the gauge. This is an outbound transport-pressure proxy, not a physical TCP connection count (frontend-instance-local, not per-model) |
+
+The worker-side per-model override is static deployment/WorkerSet identity and
+participates in the MDC checksum. All workers in the same namespace and role
+must advertise the same value. To change it, deploy the replacement under a
+new namespace or fully drain the old WorkerSet before registering replacements.
 
 ## Model Discovery
 
