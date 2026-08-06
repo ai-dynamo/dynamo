@@ -31,7 +31,7 @@ impl VllmClient {
         &self,
         request: pb::GenerateRequest,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
-        let mut client = pb::generate_client::GenerateClient::new(self.pool.next_channel())
+        let mut client = pb::inference_client::InferenceClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
         client
