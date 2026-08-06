@@ -76,6 +76,37 @@ def test_extract_completion_returns_none_when_logprobs_absent():
     assert extract_from_completion_output(output, 0) == (None, None)
 
 
+class _ExplodingTokenIds:
+    """Stands in for `token_ids` and fails the test if anything reads it.
+
+    Non-empty, so it survives the `or []` fallback and would reach the copy;
+    iterating it, which is what copying does, raises instead.
+    """
+
+    def __len__(self) -> int:
+        return 2
+
+    def __iter__(self):
+        raise AssertionError("token_ids copied though no logprobs were requested")
+
+
+def test_extract_completion_skips_token_ids_when_logprobs_empty():
+    """When no logprobs were requested, return without ever reading `token_ids`.
+
+    TRT-LLM leaves `logprobs` at its `[]` default whenever the client did not ask
+    for logprobs. That is falsy but not None, so the early return has to test
+    truthiness for this case to fire at all.
+
+    Asserting only the return value would not catch a regression, because the
+    older `is None` check returned `(None, None)` too -- it just copied
+    `token_ids` on the way. `token_ids` holds every token the request has emitted
+    so far, so that copy grows as the request runs and is then thrown away.
+    Hence a `token_ids` that raises if anything touches it.
+    """
+    output = SimpleNamespace(token_ids=_ExplodingTokenIds(), logprobs=[])
+    assert extract_from_completion_output(output, 1) == (None, None)
+
+
 def test_extract_completion_returns_none_past_end_of_tokens():
     output = SimpleNamespace(
         token_ids=[7, 8], logprobs=[{7: _logprob(-0.7)}, {8: _logprob(-0.8)}]

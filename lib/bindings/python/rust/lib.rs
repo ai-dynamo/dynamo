@@ -24,7 +24,6 @@ use tokio::sync::Mutex;
 use tracing::Instrument;
 
 use dynamo_runtime::config;
-use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -156,12 +155,9 @@ fn create_request_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-        eprintln!(
-            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
-        );
-    } else if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
+    // OTLP export no longer requires a pre-existing runtime
+    // so init unconditionally at import
+    if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
     }
 
@@ -1055,14 +1051,6 @@ impl DistributedRuntime {
                 Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
-
-        // Initialize logging in context where tokio runtime is available
-        // otel exporter requires it
-        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-            runtime.secondary().block_on(async {
-                rs::logging::init();
-            });
-        }
 
         let nats_enabled = request_plane.is_nats()
             || matches!(

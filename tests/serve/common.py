@@ -6,6 +6,8 @@
 import dataclasses
 import logging
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -271,6 +273,41 @@ def _prepare_deployment(
     )
 
 
+# EngineConfig.env key naming a whitespace-separated list of pip packages to
+# install into the runtime container before the server launches. Some runtime
+# images intentionally omit certain media-decoder libraries; the few serve tests
+# that exercise a decode path install the decoder here at test time so coverage
+# is retained without the shipped image carrying it. No-op when the key is unset.
+TEST_ONLY_PIP_ENV_KEY = "DYN_TEST_ONLY_PIP_INSTALL"
+
+# Session-level guard so the same package set is installed at most once even
+# though every parametrized deployment (and each retry) calls the installer.
+_test_only_pip_done: set[str] = set()
+
+
+def _install_test_only_packages(config: EngineConfig) -> None:
+    """Install any test-only pip packages a config requested via its env.
+
+    Runs inside the same runtime container/interpreter the server subprocess
+    inherits, so the worker can import the freshly installed module.
+    """
+    spec = config.env.get(TEST_ONLY_PIP_ENV_KEY, "").strip()
+    if not spec or spec in _test_only_pip_done:
+        return
+    packages = spec.split()
+    logging.getLogger(__name__).info(
+        "Installing test-only package(s) into runtime container: %s",
+        " ".join(packages),
+    )
+    # --break-system-packages: runtime images use an externally-managed system
+    # python (PEP 668); this is the ephemeral test container, not a shipped image.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", *packages],
+        check=True,
+    )
+    _test_only_pip_done.add(spec)
+
+
 def _bind_payload_to_ports(
     payload: BasePayload,
     *,
@@ -372,6 +409,10 @@ def run_serve_deployment(
     # Before anything is launched, so a misclassification costs seconds rather
     # than a full engine startup.
     _assert_topology_marker(config, request)
+
+    # Install any decoder a codec-stripped image needs for this test, before the
+    # server launches, so the worker can import it. No-op unless the config opts in.
+    _install_test_only_packages(config)
 
     prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
     config = prep.config

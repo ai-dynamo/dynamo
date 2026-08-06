@@ -82,7 +82,7 @@ func (r *groveRestartProgressResolver) Resolve(
 		// Any component represented by a PodCliqueScalingGroup must use the
 		// PCSG readiness path. Read failures conservatively keep the component
 		// in progress; authoritative readiness returns the error separately.
-		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+		if component.UsesPCSG() {
 			isReady, reason, _, _, _ = dynamo.CheckPCSGReady(
 				ctx,
 				r.reader,

@@ -103,6 +103,24 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	}
 }
 
+// singleTargetContainer returns the one capture-target container from the work order. The CRD
+// enforces exactly one (PodReference.Containers MinItems=1/MaxItems=1) and the runtime dumps a
+// single container this phase; the count is asserted here so a violated invariant becomes a
+// terminal InvalidTargetContainer status rather than an out-of-bounds panic in the node agent.
+func singleTargetContainer(content *nvidiacomv1alpha1.PodSnapshotContent) (string, error) {
+	containers := content.Spec.Source.PodRef.Containers
+	if len(containers) != 1 {
+		return "", fmt.Errorf("source podRef must reference exactly one container, got %d", len(containers))
+	}
+	// The CRD's per-item DNS-1123 validation rejects an empty name, but a work order that bypassed
+	// admission could still carry one. Fail terminally instead of resolving "" to no container and
+	// hanging in the not-ready wait below.
+	if strings.TrimSpace(containers[0]) == "" {
+		return "", errors.New("source podRef container name must not be empty")
+	}
+	return containers[0], nil
+}
+
 // reconcileSourcePod is the single capture path. It is driven by source-pod informer events for pods
 // the gate promoted with CaptureEligibleLabel. It selects the oldest active work order for
 // the pod and drives the unstick + dump. Capture parameters come from the source pod, which is the
@@ -167,23 +185,23 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return err
 	}
 
-	containerName, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
+	containerName, err := singleTargetContainer(content)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "MissingTargetContainer", err)
+		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer", err)
 	}
-	if !isContainerReady(pod, containerName[0]) {
-		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName[0])
+	if !isContainerReady(pod, containerName) {
+		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
 		return nil
 	}
 
-	containerID := containerIDForName(pod, containerName[0])
+	containerID := containerIDForName(pod, containerName)
 	if containerID == "" {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved",
-			fmt.Errorf("could not resolve container %q ID", containerName[0]))
+			fmt.Errorf("could not resolve container %q ID", containerName))
 	}
 	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName[0], err))
+		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
 	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
 	if err != nil {
@@ -210,7 +228,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName[0], containerID, containerPID, id, loc, leaseKey, id)
+	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, loc, leaseKey, id)
 	return nil
 }
 
