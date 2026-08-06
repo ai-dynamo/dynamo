@@ -438,7 +438,7 @@ await register_model(
 - **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
   runtime image ships no software video decoder. This needs a GPU with a video
   decode engine and a container granted the `video` driver capability — see
-  [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+  [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
 - **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibility with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.

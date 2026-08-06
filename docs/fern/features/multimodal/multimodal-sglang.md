@@ -35,7 +35,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 >
 > NVDEC requires a GPU with a video decode engine and a container granted the
 > `video` driver capability — see
-> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
 > `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
