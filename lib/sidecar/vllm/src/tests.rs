@@ -39,6 +39,19 @@ struct FakeVllm {
     headers_pending: Arc<AtomicBool>,
     release_headers: Arc<Notify>,
     server_stream_dropped: Arc<AtomicBool>,
+    control_calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    paused: Arc<AtomicBool>,
+    sleeping: Arc<AtomicBool>,
+    weight_version: Arc<Mutex<String>>,
+}
+
+impl FakeVllm {
+    async fn record_control(&self, name: &str, body: serde_json::Value) {
+        self.control_calls
+            .lock()
+            .await
+            .push((name.to_string(), body));
+    }
 }
 
 struct DropSignal(Arc<AtomicBool>);
@@ -200,6 +213,142 @@ impl pb::control_server::Control for FakeVllm {
             sources: Vec::new(),
         }))
     }
+
+    async fn pause_generation(
+        &self,
+        request: Request<pb::PauseGenerationRequest>,
+    ) -> Result<Response<pb::PauseGenerationResponse>, Status> {
+        let request = request.into_inner();
+        self.paused.store(true, Ordering::SeqCst);
+        self.record_control(
+            "pause_generation",
+            json!({"mode": request.mode, "clear_cache": request.clear_cache}),
+        )
+        .await;
+        Ok(Response::new(pb::PauseGenerationResponse {}))
+    }
+
+    async fn resume_generation(
+        &self,
+        _request: Request<pb::ResumeGenerationRequest>,
+    ) -> Result<Response<pb::ResumeGenerationResponse>, Status> {
+        self.paused.store(false, Ordering::SeqCst);
+        self.record_control("resume_generation", json!({})).await;
+        Ok(Response::new(pb::ResumeGenerationResponse {}))
+    }
+
+    async fn is_paused(
+        &self,
+        _request: Request<pb::IsPausedRequest>,
+    ) -> Result<Response<pb::IsPausedResponse>, Status> {
+        Ok(Response::new(pb::IsPausedResponse {
+            paused: self.paused.load(Ordering::SeqCst),
+        }))
+    }
+
+    async fn sleep(
+        &self,
+        request: Request<pb::SleepRequest>,
+    ) -> Result<Response<pb::SleepResponse>, Status> {
+        let request = request.into_inner();
+        self.sleeping.store(true, Ordering::SeqCst);
+        self.record_control(
+            "sleep",
+            json!({"level": request.level, "mode": request.mode}),
+        )
+        .await;
+        Ok(Response::new(pb::SleepResponse {}))
+    }
+
+    async fn wake_up(
+        &self,
+        request: Request<pb::WakeUpRequest>,
+    ) -> Result<Response<pb::WakeUpResponse>, Status> {
+        self.sleeping.store(false, Ordering::SeqCst);
+        self.record_control("wake_up", json!({"tags": request.into_inner().tags}))
+            .await;
+        Ok(Response::new(pb::WakeUpResponse {}))
+    }
+
+    async fn is_sleeping(
+        &self,
+        _request: Request<pb::IsSleepingRequest>,
+    ) -> Result<Response<pb::IsSleepingResponse>, Status> {
+        Ok(Response::new(pb::IsSleepingResponse {
+            sleeping: self.sleeping.load(Ordering::SeqCst),
+        }))
+    }
+
+    async fn init_weight_transfer_engine(
+        &self,
+        request: Request<pb::InitWeightTransferEngineRequest>,
+    ) -> Result<Response<pb::InitWeightTransferEngineResponse>, Status> {
+        let body = serde_json::from_slice(&request.into_inner().init_info_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.record_control("init_weight_transfer_engine", body)
+            .await;
+        Ok(Response::new(pb::InitWeightTransferEngineResponse {}))
+    }
+
+    async fn start_weight_update(
+        &self,
+        _request: Request<pb::StartWeightUpdateRequest>,
+    ) -> Result<Response<pb::StartWeightUpdateResponse>, Status> {
+        self.record_control("start_weight_update", json!({})).await;
+        Ok(Response::new(pb::StartWeightUpdateResponse {}))
+    }
+
+    async fn start_draft_weight_update(
+        &self,
+        _request: Request<pb::StartDraftWeightUpdateRequest>,
+    ) -> Result<Response<pb::StartDraftWeightUpdateResponse>, Status> {
+        self.record_control("start_draft_weight_update", json!({}))
+            .await;
+        Ok(Response::new(pb::StartDraftWeightUpdateResponse {}))
+    }
+
+    async fn update_weights(
+        &self,
+        request: Request<pb::UpdateWeightsRequest>,
+    ) -> Result<Response<pb::UpdateWeightsResponse>, Status> {
+        let body = serde_json::from_slice(&request.into_inner().update_info_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.record_control("update_weights", body).await;
+        Ok(Response::new(pb::UpdateWeightsResponse {}))
+    }
+
+    async fn finish_weight_update(
+        &self,
+        request: Request<pb::FinishWeightUpdateRequest>,
+    ) -> Result<Response<pb::FinishWeightUpdateResponse>, Status> {
+        let version = request.into_inner().weight_version;
+        if let Some(version) = &version {
+            self.weight_version.lock().await.clone_from(version);
+        }
+        self.record_control("finish_weight_update", json!({"weight_version": version}))
+            .await;
+        Ok(Response::new(pb::FinishWeightUpdateResponse {}))
+    }
+
+    async fn update_weight_version(
+        &self,
+        request: Request<pb::UpdateWeightVersionRequest>,
+    ) -> Result<Response<pb::UpdateWeightVersionResponse>, Status> {
+        let version = request.into_inner().weight_version;
+        self.weight_version.lock().await.clone_from(&version);
+        self.record_control("update_weight_version", json!({"new_version": version}))
+            .await;
+        Ok(Response::new(pb::UpdateWeightVersionResponse {}))
+    }
+
+    async fn get_weight_version(
+        &self,
+        _request: Request<pb::GetWeightVersionRequest>,
+    ) -> Result<Response<pb::GetWeightVersionResponse>, Status> {
+        Ok(Response::new(pb::GetWeightVersionResponse {
+            weight_version: self.weight_version.lock().await.clone(),
+        }))
+    }
 }
 
 fn model_info() -> pb::ModelInfo {
@@ -233,6 +382,12 @@ fn server_info() -> pb::ServerInfo {
         max_running_requests: 128,
         max_batched_tokens: 2048,
         supports_explicit_data_parallel_rank: false,
+        rl_capabilities: Some(pb::RlCapabilities {
+            weight_transfer_enabled: true,
+            weight_transfer_backend: "nccl".to_string(),
+            sleep_mode_enabled: true,
+            draft_weight_updates_enabled: true,
+        }),
     }
 }
 
@@ -508,6 +663,7 @@ async fn engine_from_args(
         "5".to_string(),
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
+        "--enable-rl".to_string(),
     ];
     tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
@@ -535,6 +691,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let (engine, worker) = engine_from_args(&server.endpoint).await;
     assert_eq!(worker.model_name, "model-source");
     assert_eq!(worker.served_model_name.as_deref(), Some("served-model"));
+    assert!(worker.enable_rl);
     assert!(worker.reasoning_parser.is_none());
     assert!(worker.tool_call_parser.is_none());
     let config = engine.start(0).await.expect("start");
@@ -595,6 +752,93 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
+    );
+}
+
+#[tokio::test]
+async fn rl_engine_routes_preserve_lifecycle_payloads_and_version() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    engine.start(0).await.expect("start");
+
+    assert!(
+        engine
+            .supported_controls()
+            .await
+            .unwrap()
+            .contains(&"pause_generation".to_string())
+    );
+    assert!(
+        engine
+            .supported_updates()
+            .await
+            .unwrap()
+            .contains(&"update_weights".to_string())
+    );
+    assert_eq!(
+        engine
+            .engine_control(
+                "pause_generation".to_string(),
+                json!({"mode": "keep", "clear_cache": false}),
+            )
+            .await
+            .unwrap(),
+        json!({"status": "paused"})
+    );
+    engine
+        .engine_update(
+            "init_weight_transfer_engine".to_string(),
+            json!({"init_info": {"master_addr": "trainer", "master_port": 1234}}),
+        )
+        .await
+        .unwrap();
+    engine
+        .engine_update("start_weight_update".to_string(), json!({}))
+        .await
+        .unwrap();
+    engine
+        .engine_update(
+            "update_weights".to_string(),
+            json!({"update_info": {"names": ["layer.weight"], "shape": [4, 8]}}),
+        )
+        .await
+        .unwrap();
+    engine
+        .engine_update(
+            "finish_weight_update".to_string(),
+            json!({"weight_version": "step-42"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .engine_control("get_weight_version".to_string(), json!({}))
+            .await
+            .unwrap(),
+        json!({"weight_version": "step-42"})
+    );
+
+    assert_eq!(
+        *server.service.control_calls.lock().await,
+        vec![
+            (
+                "pause_generation".to_string(),
+                json!({"mode": pb::PauseMode::Keep as i32, "clear_cache": false}),
+            ),
+            (
+                "init_weight_transfer_engine".to_string(),
+                json!({"master_addr": "trainer", "master_port": 1234}),
+            ),
+            ("start_weight_update".to_string(), json!({})),
+            (
+                "update_weights".to_string(),
+                json!({"names": ["layer.weight"], "shape": [4, 8]}),
+            ),
+            (
+                "finish_weight_update".to_string(),
+                json!({"weight_version": "step-42"}),
+            ),
+        ]
     );
 }
 

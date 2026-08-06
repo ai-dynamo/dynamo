@@ -275,6 +275,7 @@ impl MockerBackend {
             custom_jinja_template: args.common.custom_jinja_template,
             disaggregation_mode,
             route_to_encoder: args.common.route_to_encoder,
+            enable_rl: args.common.enable_rl,
             model_name: args.model_path,
             served_model_name: Some(args.model_name),
             tool_call_parser,

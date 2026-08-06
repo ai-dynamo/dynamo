@@ -67,7 +67,17 @@ impl DiscoveredModel {
                 self.identity, observed.identity
             )));
         }
+        if self.server.rl_capabilities != observed.server.rl_capabilities {
+            return Err(client::protocol_error(format!(
+                "RL capabilities changed between bootstrap and startup: expected {:?}, observed {:?}",
+                self.server.rl_capabilities, observed.server.rl_capabilities
+            )));
+        }
         Ok(())
+    }
+
+    pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
+        self.server.rl_capabilities.as_ref()
     }
 
     pub(crate) fn engine_config(&self) -> EngineConfig {

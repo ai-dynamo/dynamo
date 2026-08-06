@@ -111,6 +111,7 @@ impl TrtllmSidecarEngine {
             enable_kv_routing: false,
             disaggregation_mode: DisaggregationMode::Aggregated,
             route_to_encoder: false,
+            enable_rl: args.sidecar.common.enable_rl,
             ..Default::default()
         };
         Ok((engine, config))

@@ -187,6 +187,8 @@ pub struct WorkerConfig {
     /// roles -- setting it on `Decode` or `Encode` is rejected at
     /// `Worker::run` validation time with `BackendError::InvalidArgument`.
     pub route_to_encoder: bool,
+    /// Publish the worker's engine routes through an auxiliary RL discovery endpoint.
+    pub enable_rl: bool,
     /// Optional frontend media decoding and fetch policy advertised on the
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
@@ -231,6 +233,7 @@ impl Default for WorkerConfig {
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
+            enable_rl: false,
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
@@ -982,7 +985,22 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
-        tokio::select! {
+        let rl_endpoint = if self.config.enable_rl {
+            match crate::rl::serve_endpoint(&endpoint).await {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    self.orchestrator_steps(&endpoint).await;
+                    return Err(err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("RL endpoint setup: {error}"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        let serve_result = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -993,23 +1011,31 @@ impl Worker {
                         tracing::info!(
                             "Endpoint completed gracefully; running shutdown orchestration"
                         );
+                        Ok(())
                     }
                     // Serve errored; cleanup_once in run() is the safety net.
                     Err(e) => {
-                        return Err(err(
+                        Err(err(
                             ErrorType::Backend(BackendError::Unknown),
                             format!("serve: {e}"),
-                        ));
+                        ))
                     }
                 }
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
+                Ok(())
             }
+        };
+
+        if let Some(rl_endpoint) = rl_endpoint
+            && let Err(error) = rl_endpoint.shutdown().await
+        {
+            tracing::warn!(%error, "RL discovery endpoint shutdown failed");
         }
 
         self.orchestrator_steps(&endpoint).await;
-        Ok(())
+        serve_result
     }
 
     /// Engine-facing shutdown sequence: grace period sleep → drain loop on
@@ -1287,8 +1313,12 @@ fn engine_control_policy(control: &str) -> EngineControlPolicy {
         // Pause controls make the engine unsafe for new requests, so remove
         // the endpoint before they mutate engine state. Resume controls make
         // the engine serving-safe again, so advertise it only after success.
-        "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
-        "wake_up" | "resume_memory_occupation" => EngineControlPolicy::RegisterAfter,
+        "pause_generation" | "sleep" | "release_memory_occupation" => {
+            EngineControlPolicy::UnregisterBefore
+        }
+        "resume_generation" | "wake_up" | "resume_memory_occupation" => {
+            EngineControlPolicy::RegisterAfter
+        }
         _ => EngineControlPolicy::Direct,
     }
 }
@@ -1826,11 +1856,19 @@ mod tests {
             EngineControlPolicy::UnregisterBefore
         );
         assert_eq!(
+            engine_control_policy("pause_generation"),
+            EngineControlPolicy::UnregisterBefore
+        );
+        assert_eq!(
             engine_control_policy("release_memory_occupation"),
             EngineControlPolicy::UnregisterBefore
         );
         assert_eq!(
             engine_control_policy("wake_up"),
+            EngineControlPolicy::RegisterAfter
+        );
+        assert_eq!(
+            engine_control_policy("resume_generation"),
             EngineControlPolicy::RegisterAfter
         );
         assert_eq!(
