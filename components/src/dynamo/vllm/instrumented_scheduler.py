@@ -4044,6 +4044,19 @@ class InstrumentedScheduler(AsyncScheduler):
                 f"benchmark_id={point.benchmark_id}: "
                 f"explicit benchmark point failed: {reason}"
             )
+        if EAGER_WARMUP_REASON in point.sample_reasons:
+            # Warmup replicas are best-effort scaffolding on EVERY failure
+            # path, not just shape validation: fake-prefix allocation,
+            # injection shortfall, and validation failures all land here,
+            # and a single skipped-point entry flips the published artifact
+            # to unusable/invalid (both gates require skipped_points == 0).
+            logger.warning(
+                "Discarding failed eager-shape warmup replica instead of "
+                "recording a skipped point: reason=%s point=%s",
+                reason,
+                point,
+            )
+            return
         self._bench_skipped_points.append(
             SkippedBenchmarkPoint(point=point, reason=reason)
         )
