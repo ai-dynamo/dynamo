@@ -3,7 +3,7 @@
 
 //go:build linux
 
-package nsmountinjector
+package nsmount
 
 import (
 	"context"

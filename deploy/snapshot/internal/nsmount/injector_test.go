@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package nsmountinjector
+package nsmount
 
 import (
 	"context"
@@ -51,18 +51,18 @@ func (m *mockMounter) Mount(_ context.Context, pid int, src, dst string, opts Mo
 
 const testPID = 42
 
-func newInjector(t *testing.T, m *mockMounter) *NSMountInjector {
+func newMounter(t *testing.T, m *mockMounter) *NSMounter {
 	t.Helper()
-	inj, err := newWithMounter(Config{}, m, logr.Discard())
+	nsm, err := newWithMounter(agentBinDir, SnapshotBinDir, m, logr.Discard())
 	if err != nil {
 		t.Fatalf("newWithMounter: %v", err)
 	}
-	return inj
+	return nsm
 }
 
-func TestInject_MountsAgentBundle(t *testing.T) {
+func TestMount_MountsAgentBundle(t *testing.T) {
 	m := &mockMounter{}
-	_, err := newInjector(t, m).Inject(context.Background(), testPID)
+	_, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,9 +78,9 @@ func TestInject_MountsAgentBundle(t *testing.T) {
 	}
 }
 
-func TestInject_BinPath(t *testing.T) {
+func TestMount_BinPath(t *testing.T) {
 	m := &mockMounter{}
-	handle, err := newInjector(t, m).Inject(context.Background(), testPID)
+	handle, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,9 +95,9 @@ func TestInject_BinPath(t *testing.T) {
 	}
 }
 
-func TestInject_CleanupUnmounts(t *testing.T) {
+func TestMount_CleanupUnmounts(t *testing.T) {
 	m := &mockMounter{}
-	handle, err := newInjector(t, m).Inject(context.Background(), testPID)
+	handle, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,11 +111,11 @@ func TestInject_CleanupUnmounts(t *testing.T) {
 	}
 }
 
-func TestInject_MountFails(t *testing.T) {
+func TestMount_Fails(t *testing.T) {
 	mountErr := errors.New("mount failed")
 	m := &mockMounter{results: []error{mountErr}}
 
-	_, err := newInjector(t, m).Inject(context.Background(), testPID)
+	_, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if !errors.Is(err, mountErr) {
 		t.Fatalf("got %v, want %v", err, mountErr)
 	}
@@ -126,7 +126,7 @@ func TestInject_MountFails(t *testing.T) {
 
 func TestBinPath_RejectsInvalidNames(t *testing.T) {
 	m := &mockMounter{}
-	handle, err := newInjector(t, m).Inject(context.Background(), testPID)
+	handle, err := newMounter(t, m).Mount(context.Background(), testPID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,50 +137,5 @@ func TestBinPath_RejectsInvalidNames(t *testing.T) {
 		if err == nil {
 			t.Errorf("BinPath(%q): expected error, got nil", name)
 		}
-	}
-}
-
-func TestConfig_Validate(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     Config
-		wantErr bool
-	}{
-		{"valid", Config{SourceDir: "/snapshot-binaries", DestinationDir: "/tmp/snapshot-binaries"}, false},
-		{"valid subdir", Config{SourceDir: "/snapshot-binaries/sub", DestinationDir: "/tmp/snapshot-binaries"}, false},
-		{"missing source", Config{DestinationDir: "/tmp/snapshot-binaries"}, true},
-		{"missing destination", Config{SourceDir: "/snapshot-binaries"}, true},
-		{"both empty", Config{}, true},
-		{"bad source prefix", Config{SourceDir: "/other", DestinationDir: "/tmp/snapshot-binaries"}, true},
-		{"bad dest prefix", Config{SourceDir: "/snapshot-binaries", DestinationDir: "/other"}, true},
-		{"source prefix overlap", Config{SourceDir: "/snapshot-binaries-extra", DestinationDir: "/tmp/snapshot-binaries"}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.cfg.Validate()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestConfig_WithDefaults(t *testing.T) {
-	got := Config{}.WithDefaults()
-	if got.SourceDir != agentBinDir {
-		t.Errorf("SourceDir: got %q, want %q", got.SourceDir, agentBinDir)
-	}
-	if got.DestinationDir != SnapshotBinDir {
-		t.Errorf("DestinationDir: got %q, want %q", got.DestinationDir, SnapshotBinDir)
-	}
-}
-
-func TestConfig_WithDefaults_PreservesExplicitValues(t *testing.T) {
-	cfg := Config{SourceDir: "/snapshot-binaries/custom", DestinationDir: "/tmp/snapshot-binaries/custom"}.WithDefaults()
-	if cfg.SourceDir != "/snapshot-binaries/custom" {
-		t.Errorf("SourceDir overwritten: got %q", cfg.SourceDir)
-	}
-	if cfg.DestinationDir != "/tmp/snapshot-binaries/custom" {
-		t.Errorf("DestinationDir overwritten: got %q", cfg.DestinationDir)
 	}
 }

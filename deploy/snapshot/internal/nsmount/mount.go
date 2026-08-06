@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package nsmountinjector
+package nsmount
 
 import (
 	"context"
@@ -76,12 +76,9 @@ func newExecMounter(path string, log logr.Logger) (*execMounter, error) {
 }
 
 // mountHandle is the concrete MountHandle returned by execMounter.Mount.
-// It holds an open /proc/<pid>/ns/mnt fd captured before the mount helper runs
-// so that Unmount can re-enter the correct namespace even after the target
-// process has exited and its PID been recycled by the kernel.
 type mountHandle struct {
 	binaryPath string
-	nsFd       *os.File // /proc/<pid>/ns/mnt opened before Mount runs
+	nsFd       *os.File // /proc/<pid>/ns/mnt pinned before the subprocess runs; held so Unmount re-enters the same namespace without relying on the PID
 	dst        string
 	createdDst bool // true if the mount helper created dst; controls rmdir on cleanup
 	log        logr.Logger
@@ -93,7 +90,11 @@ func (h *mountHandle) TargetPath() string { return h.dst }
 
 func (h *mountHandle) Unmount(_ context.Context) error {
 	h.once.Do(func() {
-		defer h.nsFd.Close()
+		defer func() {
+			if err := h.nsFd.Close(); err != nil {
+				h.log.Error(err, "close ns fd", "dst", h.dst)
+			}
+		}()
 		// Fresh context with a hard timeout. The parent context is intentionally
 		// not forwarded: cleanup must complete even if the caller's context is
 		// already cancelled.

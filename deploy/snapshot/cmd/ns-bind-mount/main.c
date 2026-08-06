@@ -66,12 +66,12 @@ struct mount_attr {
  * cause arbitrary host paths to be mounted into (or unmounted from) a foreign
  * namespace.
  *
- * These values mirror the Go constants in internal/nsmountinjector/injector.go:
+ * These values mirror the Go constants in internal/nsmount/injector.go:
  *   agentBinDir    = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
  *   SnapshotBinDir = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
  * Keep them in sync when either changes. */
-#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = nsmountinjector.agentBinDir */
-#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = nsmountinjector.SnapshotBinDir */
+#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = nsmount.agentBinDir */
+#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = nsmount.SnapshotBinDir */
 
 /* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
 static int
@@ -266,6 +266,8 @@ do_umount_fd(int argc, char* argv[])
       fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
       return 1;
     }
+    /* Already gone (CRIU removed it during namespace restore).
+     * Fall through so we clean up the directory if we created it. */
   }
 
   /* Only remove the directory if the mount subcommand created it. */
