@@ -38,9 +38,9 @@ type MountOptions struct {
 	ReadOnly bool // mount with MS_RDONLY
 }
 
-// MountHandle represents an active mount inside a foreign namespace.
+// mountRef represents an active mount inside a foreign namespace.
 // The owner must call Unmount when the mount is no longer needed.
-type MountHandle interface {
+type mountRef interface {
 	// Unmount detaches the mount from the target namespace.
 	// Idempotent — safe to call multiple times.
 	Unmount(ctx context.Context) error
@@ -53,7 +53,7 @@ type MountHandle interface {
 // It exists so tests can substitute the ns-bind-mount subprocess; production
 // callers get an execMounter via New and never name this type.
 type mounter interface {
-	Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error)
+	Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (mountRef, error)
 }
 
 // execMounter implements mounter by invoking the ns-bind-mount C helper as a
@@ -76,8 +76,8 @@ func newExecMounter(path string, log logr.Logger) (*execMounter, error) {
 	return &execMounter{binaryPath: path, log: log}, nil
 }
 
-// mountHandle is the concrete MountHandle returned by execMounter.Mount.
-type mountHandle struct {
+// execMountRef is the concrete mountRef returned by execMounter.Mount.
+type execMountRef struct {
 	binaryPath string
 	nsFd       *os.File // /proc/<pid>/ns/mnt pinned before the subprocess runs; held so Unmount re-enters the same namespace without relying on the PID
 	dst        string
@@ -87,9 +87,9 @@ type mountHandle struct {
 	unmountErr error
 }
 
-func (h *mountHandle) TargetPath() string { return h.dst }
+func (h *execMountRef) TargetPath() string { return h.dst }
 
-func (h *mountHandle) Unmount(_ context.Context) error {
+func (h *execMountRef) Unmount(_ context.Context) error {
 	h.once.Do(func() {
 		defer func() {
 			if err := h.nsFd.Close(); err != nil {
@@ -123,7 +123,7 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 // so the namespace is pinned against PID reuse, then passes the fd to the
 // mount-fd subcommand via ExtraFiles. The fd is retained in the returned handle
 // so Unmount can re-enter the namespace without relying on the PID.
-func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
+func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (mountRef, error) {
 	// Pin the namespace fd before calling the helper so mount and cleanup
 	// provably act on the same namespace regardless of PID reuse.
 	nsFdPath := fmt.Sprintf(nsMntNsPathFmt, pid)
@@ -152,7 +152,7 @@ func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 
 	createdDst := strings.Contains(stdout.String(), "created_dst=1")
 
-	return &mountHandle{
+	return &execMountRef{
 		binaryPath: m.binaryPath,
 		nsFd:       nsFd,
 		dst:        dst,

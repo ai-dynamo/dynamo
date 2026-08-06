@@ -62,20 +62,20 @@ func newWithMounter(src, dst string, m mounter, log logr.Logger) (*NSMounter, er
 func (nsm *NSMounter) Mount(ctx context.Context, pid int) (MountPoint, error) {
 	nsm.log.Info("mounting agent bundle into placeholder namespace", "pid", pid, "src", nsm.src, "dst", nsm.dst)
 
-	handle, err := nsm.mounter.Mount(ctx, pid, nsm.src, nsm.dst, MountOptions{ReadOnly: true})
+	ref, err := nsm.mounter.Mount(ctx, pid, nsm.src, nsm.dst, MountOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
 
-	nsm.log.Info("agent bundle mounted", "pid", pid, "dst", handle.TargetPath())
-	return &mountPoint{mount: handle}, nil
+	nsm.log.Info("agent bundle mounted", "pid", pid, "dst", ref.TargetPath())
+	return &mountPoint{mount: ref}, nil
 }
 
-// mountPoint wraps a MountHandle to expose the MountPoint surface:
+// mountPoint wraps a mountRef to expose the MountPoint surface:
 // Path resolves binary names relative to the mounted directory,
 // and Unmount delegates to the underlying mount's Unmount.
 type mountPoint struct {
-	mount MountHandle
+	mount mountRef
 }
 
 // Path returns the in-namespace absolute path to the named binary.

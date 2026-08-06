@@ -17,15 +17,15 @@ const (
 	testDst = "/tmp/snapshot-binaries"
 )
 
-// fakeMountHandle implements MountHandle for tests.
-type fakeMountHandle struct {
+// fakemountRef implements mountRef for tests.
+type fakemountRef struct {
 	dst        string
 	unmountLog *[]string
 }
 
-func (h *fakeMountHandle) TargetPath() string { return h.dst }
+func (h *fakemountRef) TargetPath() string { return h.dst }
 
-func (h *fakeMountHandle) Unmount(_ context.Context) error {
+func (h *fakemountRef) Unmount(_ context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
 }
@@ -45,13 +45,13 @@ type mockMounter struct {
 	unmountLog []string
 }
 
-func (m *mockMounter) Mount(_ context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
+func (m *mockMounter) Mount(_ context.Context, pid int, src, dst string, opts MountOptions) (mountRef, error) {
 	i := len(m.calls)
 	m.calls = append(m.calls, mountCall{pid: pid, src: src, dst: dst, opts: opts})
 	if i < len(m.results) && m.results[i] != nil {
 		return nil, m.results[i]
 	}
-	return &fakeMountHandle{dst: dst, unmountLog: &m.unmountLog}, nil
+	return &fakemountRef{dst: dst, unmountLog: &m.unmountLog}, nil
 }
 
 const testPID = 42
