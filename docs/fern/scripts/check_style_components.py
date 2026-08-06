@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Guard the CSS template literals in the *Styles.tsx components.
+
+Each style component holds its CSS in a template literal:
+
+    const LANDING_CSS = `
+    ... ~50KB of CSS, comments included ...
+    `;
+
+A single raw backtick or `${` anywhere in that body closes or interpolates the
+literal and breaks the build. It is easy to introduce by hand -- a CSS comment
+quoting a class name as `node--k8s` is enough -- and nothing else catches it:
+fern check does not parse TSX, and the CSS-level checks only read main.css.
+sync_site_css.py already applies this rule to main.css before mirroring it;
+this applies the same rule to the components that hold CSS directly.
+
+Usage: python3 check_style_components.py [files...]
+With no arguments, checks every docs/fern/components/*Styles.tsx.
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]  # docs/fern
+REPO = ROOT.parents[1]  # repo root, for readable paths
+LITERAL = re.compile(r"const\s+(\w+)\s*=\s*`(.*?)`;", re.DOTALL)
+
+
+def check(path: Path) -> list[str]:
+    text = path.read_text()
+    problems: list[str] = []
+    matches = list(LITERAL.finditer(text))
+    if not matches:
+        return problems
+
+    for match in matches:
+        name, body = match.group(1), match.group(2)
+        start_line = text[: match.start(2)].count("\n") + 1
+        for offence, label in (("`", "raw backtick"), ("${", "interpolation")):
+            index = body.find(offence)
+            if index == -1:
+                continue
+            line = start_line + body[:index].count("\n")
+            snippet = body.splitlines()[body[:index].count("\n")].strip()[:72]
+            problems.append(
+                f"{path.relative_to(REPO)}:{line}: {label} inside {name}\n"
+                f"      {snippet}\n"
+                f"      A {label} ends the template literal and breaks the build."
+            )
+    return problems
+
+
+def main() -> int:
+    args = [Path(a) for a in sys.argv[1:]]
+    targets = args or sorted((ROOT / "components").glob("*Styles.tsx"))
+    targets = [t for t in targets if t.suffix == ".tsx" and t.exists()]
+
+    problems: list[str] = []
+    for target in targets:
+        problems.extend(check(target))
+
+    if problems:
+        print("template literal defects found:\n", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+
+    print(f"checked {len(targets)} style component(s): literals intact")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

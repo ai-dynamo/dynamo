@@ -16,6 +16,7 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CHAT_TEMPLATE="qwen2-vl"
 PROVIDED_CHAT_TEMPLATE=""
+FRONTEND_DECODING=false
 
 # --single-gpu: Packs all workers (encode, prefill, decode) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -42,6 +43,10 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -49,6 +54,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --served-model-name <served_model_name> Specify the served model name to use (default: empty)"
             echo "  --chat-template <template> Specify the SGLang chat template to use (default: $CHAT_TEMPLATE)"
             echo "  --single-gpu         Pack all workers on 1 GPU (for small models, e.g. 2B)"
+            echo "  --frontend-decoding  Decode images in the Rust frontend and transfer pixels to the encode worker"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -112,6 +118,10 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     ENCODE_EXTRA_ARGS=""
     PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024 $GPU_MEM_ARGS"
     DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024 $GPU_MEM_ARGS"
+fi
+
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --frontend-decoding"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all

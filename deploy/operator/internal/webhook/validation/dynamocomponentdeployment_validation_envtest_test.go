@@ -518,6 +518,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
+					PodSpec: &corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "gms-loader", Image: "loader:latest",
+					}}},
+				},
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 					Enabled:               true,
 					Mode:                  nvidiacomv1alpha1.GMSModeIntraPod,
@@ -664,6 +670,25 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 			}),
 			wantWebhookErrs: []string{"spec.experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1"},
+		},
+		{
+			name: "GMS extra client container reference must resolve",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
+		},
+		{
+			name: "GMS extra client container update reports one indexed cause",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
 		},
 		{
 			name: "GMS accepts GPU requests when limits are unset",

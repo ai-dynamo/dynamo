@@ -35,7 +35,7 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 
 Three settings are required, and none is on by default:
 
-1. On every worker, enable KV event publishing with `--kv-events-config` — `--router-mode kv` on the frontend does not enable it (see [KV Routing Requirements](overview.md#kv-routing-requirements)).
+1. On every worker, enable KV event publishing with `--kv-events-config` — `--router-mode kv` on the frontend does not enable it (see [KV-Aware Routing](overview.md#feature-support-matrix)).
 2. On every worker, set `"self_describing_kv_events": true` inside `kv_connector_extra_config`.
 3. On the frontend, select event-driven KV routing with `--router-mode kv`.
 
