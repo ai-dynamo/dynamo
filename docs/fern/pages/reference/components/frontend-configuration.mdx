@@ -421,7 +421,9 @@ upgrade, when an HTTP 503 admission response is no longer possible.
 The worker-side per-model override is static deployment/WorkerSet identity and participates in the
 MDC checksum. All workers in the same namespace and role must advertise the same value. To change
 it, deploy the replacement under a new namespace or fully drain the old WorkerSet before
-registering replacements.
+registering replacements. Upgrade all frontends before enabling the worker flag: a frontend that
+predates this field ignores it (no enforcement) and computes a different worker-set checksum than
+upgraded frontends.
 
 <ParamField path="--rejection-frontend-runtime-task-limit" type="integer" default="null">
   Maximum alive tasks on the frontend runtime (frontend-local self-protection, not per-model).
