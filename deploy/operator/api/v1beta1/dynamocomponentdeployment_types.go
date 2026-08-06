@@ -133,8 +133,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// minAvailable maps to Grove PodClique minAvailable for single-node and
-	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
+	// minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
+	// components rendered as a scaling group (multi-node, inter-pod GMS, or
+	// `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove
+	// PodClique minAvailable for all other single-node components.
 	// This field determines 1) the minimum number of replicas guaranteed to be
 	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
 	// termination.
@@ -325,6 +327,19 @@ func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
 	return s.Experimental != nil &&
 		s.Experimental.GPUMemoryService != nil &&
 		s.Experimental.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsGroveScalingGroupForced reports whether the ScalingGroup layout is explicitly requested.
+func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
+	return s.Experimental != nil &&
+		s.Experimental.Grove != nil &&
+		s.Experimental.Grove.ForceScalingGroup
+}
+
+// UsesPCSG reports whether Grove renders this component as a
+// PodCliqueScalingGroup rather than a standalone PodClique.
+func (s *DynamoComponentDeploymentSharedSpec) UsesPCSG() bool {
+	return s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
 }
 
 // IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.

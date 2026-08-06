@@ -71,12 +71,6 @@ shared synthetic knobs threaded into the replay (`ReplayEvaluator._synthetic_kwa
 
 ## `kv_load_ratio` (candidate-relative concurrency)
 
-> [!WARNING]
-> `kv_load_ratio` requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. The default `dynamo-planner` image currently retains AI Configurator
-> 0.9, so this workload mode fails fast before search starts in that image. Use a trace workload
-> or fixed `concurrency` with the default image.
-
 Spica resolves a KV-load trial after the backend, parallel shape, replicas, and batching
 knobs have been selected. For every active role, it asks AI Configurator for the **per-rank** KV token
 capacity using that candidate's `max_num_batched_tokens`, `max_num_seqs`, memory fraction,
