@@ -18,10 +18,15 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
+
+// Mounter mounts the agent binary bundle into a placeholder container's mount namespace.
+type Mounter interface {
+	Mount(ctx context.Context, pid int) (nsmount.MountPoint, error)
+}
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
@@ -45,7 +50,7 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, injector nsmountinjector.Injector) (int, error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounter Mounter) (int, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -64,19 +69,19 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	// Phase 2: Mount agent binaries into the placeholder's namespace so nsrestore is reachable.
 	injectStart := time.Now()
-	handle, err := injector.Inject(ctx, snap.PlaceholderPID)
+	mp, err := mounter.Mount(ctx, snap.PlaceholderPID)
 	if err != nil {
 		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	injectDuration := time.Since(injectStart)
 	defer func() {
-		if cleanupErr := handle.Cleanup(ctx); cleanupErr != nil {
+		if cleanupErr := mp.Unmount(ctx); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
 		}
 	}()
 
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
-	nsRestorePath, err := handle.BinPath("nsrestore")
+	nsRestorePath, err := mp.Path("nsrestore")
 	if err != nil {
 		return 0, fmt.Errorf("resolve nsrestore path: %w", err)
 	}

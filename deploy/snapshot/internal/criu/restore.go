@@ -12,7 +12,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -20,6 +19,10 @@ import (
 const RestoreLogFilename = "restore.log"
 
 const (
+	// bundleDir is the mount point where the agent injects its binary bundle into
+	// the placeholder namespace. This must match the dst passed to nsmount.New in
+	// the agent's controller.
+	bundleDir        = "/tmp/snapshot-binaries"
 	netNsPath        = "/proc/1/ns/net"
 	placeholderFDDir = "/proc/1/fd"
 )
@@ -78,7 +81,7 @@ func ExecuteRestore(
 	c := criulib.MakeCriu()
 	// criu is always sourced from the injected binary bundle — never from the
 	// checkpoint-time BinaryPath, which refers to the agent filesystem.
-	criuBin := filepath.Join(nsmountinjector.SnapshotBinDir, "criu")
+	criuBin := filepath.Join(bundleDir, "criu")
 	if _, err := os.Stat(criuBin); err != nil {
 		cleanup()
 		return 0, nil, fmt.Errorf("criu binary not found at %s (injected from agent): %w", criuBin, err)
@@ -207,7 +210,7 @@ func rewriteCRIULibDir(criuOpts *criurpc.CriuOpts, workDir string, log logr.Logg
 		return nil
 	}
 	overridePath := filepath.Join(workDir, "criu-restore.conf")
-	conf := overrideLibDir(string(data), filepath.Join(nsmountinjector.SnapshotBinDir, "criu-plugins"))
+	conf := overrideLibDir(string(data), filepath.Join(bundleDir, "criu-plugins"))
 	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
 		return fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
 	}

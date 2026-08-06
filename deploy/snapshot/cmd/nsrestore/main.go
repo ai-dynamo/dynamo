@@ -12,8 +12,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
 )
+
+// bundleDir is the mount point where the agent injects its binary bundle into
+// this namespace. Must match the dst passed to nsmount.New in the agent's controller.
+const bundleDir = "/tmp/snapshot-binaries"
 
 // useInjectedBundle points every binary and library lookup at the agent bundle
 // mounted into this namespace. The placeholder ships no restore tooling, so
@@ -25,17 +28,17 @@ import (
 // reachable through an exec.Cmd we control. Both inherit this environment.
 // nsrestore itself is a static binary, so LD_LIBRARY_PATH does not affect it.
 func useInjectedBundle() error {
-	libDir := filepath.Join(nsmountinjector.SnapshotBinDir, "lib")
+	libDir := filepath.Join(bundleDir, "lib")
 	if existing := os.Getenv("LD_LIBRARY_PATH"); existing != "" {
 		libDir += ":" + existing
 	}
 	if err := os.Setenv("LD_LIBRARY_PATH", libDir); err != nil {
 		return err
 	}
-	if err := os.Setenv("PATH", nsmountinjector.SnapshotBinDir+":"+os.Getenv("PATH")); err != nil {
+	if err := os.Setenv("PATH", bundleDir+":"+os.Getenv("PATH")); err != nil {
 		return err
 	}
-	cuda.CUDACheckpointHelperBinary = filepath.Join(nsmountinjector.SnapshotBinDir, "cuda-checkpoint-helper")
+	cuda.CUDACheckpointHelperBinary = filepath.Join(bundleDir, "cuda-checkpoint-helper")
 	return nil
 }
 

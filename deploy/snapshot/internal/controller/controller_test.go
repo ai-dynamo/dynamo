@@ -18,7 +18,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -57,26 +58,29 @@ func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr st
 }
 func (r *fakeRuntime) Close() error { return nil }
 
-// noopInjector is a no-op injection.Injector used in tests that do not exercise
+// noopInjector is a no-op Mounter used in tests that do not exercise
 // the injection path. It prevents a nil-pointer panic if runRestore is ever
 // reached by a test that was previously relying on Phase 1 failing first.
 type noopInjector struct{}
 
-func (noopInjector) Inject(_ context.Context, _ int) (nsmountinjector.Handle, error) {
-	return noopInjectionHandle{}, nil
+func (noopInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
 }
 
-type noopInjectionHandle struct{}
+type noopMountPoint struct{}
 
-func (noopInjectionHandle) BinPath(name string) (string, error) { return "/noop/" + name, nil }
-func (noopInjectionHandle) Cleanup(_ context.Context) error      { return nil }
+func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
+func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
 
-// errorInjector always returns the wrapped error from Inject.
+// errorInjector always returns the wrapped error from Mount.
 type errorInjector struct{ err error }
 
-func (e errorInjector) Inject(_ context.Context, _ int) (nsmountinjector.Handle, error) {
+func (e errorInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
 	return nil, e.err
 }
+
+var _ executor.Mounter = noopInjector{}
+var _ executor.Mounter = errorInjector{}
 
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by the restore path will fail on
