@@ -979,6 +979,7 @@ class SglangStreamingPostProcessor:
         # incomplete byte-fallback sequence.
         self._decode_context_ids = list((prompt_token_ids or [])[-5:])
         self._pending_decode_ids: list[int] = []
+        self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
         # chunks).  However, the base detector processes at most one event
@@ -1015,6 +1016,12 @@ class SglangStreamingPostProcessor:
             token_ids,
             skip_special_tokens=self._skip_special_tokens,
         )
+
+    def _with_initial_role(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_emitted_role:
+            delta["role"] = "assistant"
+            self._has_emitted_role = True
+        return delta
 
     def _incremental_decode(
         self, new_token_ids: list[int], *, flush: bool = False
@@ -1112,14 +1119,14 @@ class SglangStreamingPostProcessor:
             if delta_text:
                 return {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
+                    "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
             elif finish_reason:
                 return {
                     "index": 0,
-                    "delta": {},
+                    "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
@@ -1162,7 +1169,7 @@ class SglangStreamingPostProcessor:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
-        delta: dict[str, Any] = {"role": "assistant"}
+        delta: dict[str, Any] = {}
         has_content = False
 
         if content_text:
@@ -1336,7 +1343,7 @@ class SglangStreamingPostProcessor:
         if has_content or effective_finish:
             return {
                 "index": 0,
-                "delta": delta if has_content else {},
+                "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
                 "logprobs": None,
             }

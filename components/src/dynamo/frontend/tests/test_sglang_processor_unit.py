@@ -2949,6 +2949,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         choice = post.process_output({"token_ids": [], "finish_reason": "stop"})
         assert choice is not None
         assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {}
 
     def test_stop_reason_not_emitted_on_choice(self, tokenizer):
         """Backend stop_reason is not part of the OpenAI choice shape."""
@@ -3127,6 +3128,36 @@ class TestFastPlainTextPath:  # FRONTEND.6 — fast path that skips parser when 
         assert choice["index"] == 0
         assert choice["logprobs"] is None
 
+    def test_fast_path_emits_role_only_once(self, tokenizer):
+        """Only the first emitted content delta includes the assistant role."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+        token_ids = tokenizer.encode("Hello world again", add_special_tokens=False)
+        assert len(token_ids) >= 2
+
+        first = post.process_output({"token_ids": token_ids[:1], "finish_reason": None})
+        second = post.process_output(
+            {"token_ids": token_ids[1:], "finish_reason": None}
+        )
+
+        assert first is not None
+        assert first["delta"]["role"] == "assistant"
+        assert second is not None
+        assert "role" not in second["delta"]
+
+    def test_finish_only_output_emits_initial_role(self, tokenizer):
+        """An immediate finish still emits the stream's initial role."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        choice = post.process_output({"token_ids": [], "finish_reason": "stop"})
+
+        assert choice is not None
+        assert choice["delta"] == {"role": "assistant"}
+        assert choice["finish_reason"] == "stop"
+
 
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: reasoning parsing
@@ -3149,6 +3180,7 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
 
         reasoning = ""
         content = ""
+        roles = []
         for i in range(0, len(token_ids), 5):
             batch = token_ids[i : i + 5]
             is_last = i + 5 >= len(token_ids)
@@ -3157,11 +3189,14 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             )
             if choice:
                 delta = choice.get("delta", {})
+                if "role" in delta:
+                    roles.append(delta["role"])
                 reasoning += delta.get("reasoning_content", "")
                 content += delta.get("content", "")
 
         assert "think about this" in reasoning
         assert "42" in content
+        assert roles == ["assistant"]
 
     @pytest.mark.parametrize(
         ("parser_name", "reasoning_output", "expected_reasoning"),
