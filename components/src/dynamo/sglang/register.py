@@ -29,6 +29,7 @@ from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
+    kv_event_block_size,
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
@@ -150,6 +151,16 @@ async def _register_model_with_runtime_config(
         if (serves_lora_load and lora_enabled)
         else None
     )
+    kv_cache_block_size = kv_event_block_size(server_args)
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    if dcp_size > 1:
+        logging.info(
+            "Using DCP-aware SGLang paged KV-event block size %d "
+            "(page_size=%d, dcp_size=%d)",
+            kv_cache_block_size,
+            server_args.page_size,
+            dcp_size,
+        )
 
     aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
     try:
@@ -159,7 +170,7 @@ async def _register_model_with_runtime_config(
             endpoint,
             _register_model_source_path(engine, server_args),
             server_args.served_model_name,
-            kv_cache_block_size=server_args.page_size,
+            kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
             media_decoder=media_decoder,
