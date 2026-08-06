@@ -15,7 +15,7 @@ from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -118,7 +118,8 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     routing: dict[str, Any] = {}
     priority = agent_hints.get("priority")
     if _is_i32(priority):
-        routing["priority_jump"] = float(max(priority, 0))
+        priority_value = cast(int, priority)
+        routing["priority_jump"] = float(max(priority_value, 0))
     else:
         latency_sensitivity = _finite_float(agent_hints.get("latency_sensitivity"))
         if latency_sensitivity is not None:
