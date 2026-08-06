@@ -17,6 +17,7 @@ use crate::protocols::{
 
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::engine::DataStream;
+use dynamo_runtime::error::DynamoError;
 
 fn is_harmony_parser(parser: &str) -> bool {
     parser == "harmony"
@@ -42,8 +43,8 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     /// Map of incremental response choices, keyed by index.
     choices: HashMap<u32, DeltaChoice>,
-    /// Optional error message if an error occurs during aggregation.
-    error: Option<String>,
+    /// Optional structured error if an error occurs during aggregation.
+    error: Option<DynamoError>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
@@ -213,15 +214,15 @@ impl DeltaAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation is successful.
-    /// * `Err(String)` if an error occurs during processing.
+    /// * `Err(DynamoError)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let mut aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 // Attempt to unwrap the delta, capturing any errors.
-                let delta = match delta.ok() {
+                let delta = match delta.ok_typed() {
                     Ok(delta) => delta,
                     Err(error) => {
                         aggregator.error = Some(error);
@@ -523,11 +524,11 @@ pub trait ChatCompletionAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
+    /// * `Err(DynamoError)` if an error occurs.
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String>;
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError>;
 
     /// Converts an SSE stream into a [`NvCreateChatCompletionResponse`].
     ///
@@ -536,25 +537,25 @@ pub trait ChatCompletionAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
+    /// * `Err(DynamoError)` if an error occurs.
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String>;
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError>;
 }
 
 impl ChatCompletionAggregator for NvCreateChatCompletionResponse {
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         DeltaAggregator::apply(stream, parsing_options).await
     }
 
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(stream);
         NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
@@ -1825,5 +1826,42 @@ mod tests {
             "content key must be serialized as null when absent"
         );
         assert!(json.get("reasoning_content").is_some());
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_error_after_partial_output() {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        let partial = create_test_delta(
+            0,
+            "partial",
+            Some(dynamo_protocols::types::Role::Assistant),
+            None,
+            None,
+            None,
+        );
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid sampling parameter")
+            .build();
+        let stream = stream::iter(vec![
+            partial,
+            Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            },
+        ]);
+
+        let error = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid sampling parameter");
     }
 }

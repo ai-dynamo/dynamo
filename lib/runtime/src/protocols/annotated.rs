@@ -89,6 +89,24 @@ impl<R> Annotated<R> {
         Ok(self)
     }
 
+    /// Convert an error event into a structured [`DynamoError`].
+    ///
+    /// Unary response aggregators should use this instead of [`Self::ok`] so
+    /// the HTTP boundary can distinguish invalid client input from internal
+    /// failures without inspecting error strings.
+    pub fn ok_typed(self) -> Result<Self, DynamoError> {
+        if self.is_error() {
+            return Err(self.error.unwrap_or_else(|| {
+                DynamoError::msg(
+                    self.comment
+                        .unwrap_or_else(|| vec!["unknown error".to_string()])
+                        .join(", "),
+                )
+            }));
+        }
+        Ok(self)
+    }
+
     pub fn is_ok(&self) -> bool {
         self.event.as_deref() != Some("error")
     }
@@ -252,6 +270,24 @@ mod tests {
         let result = annotated.ok();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_ok_typed_preserves_error_type() {
+        use crate::error::{BackendError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let annotated = Annotated::<String>::from_err(error);
+
+        let error = annotated.ok_typed().unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid request");
     }
 
     #[test]

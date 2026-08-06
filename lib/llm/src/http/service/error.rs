@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 
 use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use thiserror::Error;
 
 /// Overload / admission-control rejection status. Reads
@@ -30,6 +31,100 @@ pub(crate) fn overload_status_code() -> StatusCode {
 pub struct HttpError {
     pub code: u16,
     pub message: String,
+}
+
+/// Protocol-neutral result of classifying an error at the HTTP boundary.
+/// OpenAI and Anthropic render this classification in their own envelopes.
+pub(crate) enum HttpErrorClassification<'a> {
+    /// Admission-control rejection with structured details available to the
+    /// OpenAI response renderer.
+    QueueRejection(&'a dynamo_kv_router::scheduling::QueueRejection),
+    /// A client-visible status and safe message.
+    Client {
+        status: StatusCode,
+        message: &'a str,
+    },
+    /// A server-side or cancellation category whose details must be sanitized.
+    Sanitized(SanitizedError),
+    /// An otherwise-unclassified internal error. Protocol renderers may use
+    /// their endpoint-specific safe fallback text.
+    Internal,
+}
+
+/// Construct a typed invalid-argument error for validation performed at an
+/// HTTP protocol adapter boundary.
+pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .build()
+}
+
+/// Classify an error once, independently of the public protocol envelope.
+///
+/// Typed invalid arguments are the only backend messages exposed by default.
+/// Explicit [`HttpError`] 4xx statuses retain their messages. All other
+/// failures are mapped to a sanitized category.
+pub(crate) fn classify_http_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> HttpErrorClassification<'a> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(rejection) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+        {
+            return HttpErrorClassification::QueueRejection(rejection);
+        }
+        current = error.source();
+    }
+
+    if super::metrics::request_was_rejected(err) {
+        return HttpErrorClassification::Sanitized(SanitizedError::Overloaded);
+    }
+    if super::metrics::request_was_unavailable(err) {
+        return HttpErrorClassification::Sanitized(SanitizedError::Unavailable);
+    }
+
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>()
+            && matches!(
+                dynamo_error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return HttpErrorClassification::Client {
+                status: StatusCode::BAD_REQUEST,
+                message: dynamo_error.message(),
+            };
+        }
+        current = error.source();
+    }
+
+    if super::metrics::request_was_cancelled(err) {
+        return HttpErrorClassification::Sanitized(SanitizedError::Cancelled);
+    }
+
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(http_error) = error.downcast_ref::<HttpError>() {
+            if http_error.code == 499 {
+                return HttpErrorClassification::Sanitized(SanitizedError::Cancelled);
+            }
+            if let Ok(status) = StatusCode::from_u16(http_error.code)
+                && status.is_client_error()
+            {
+                return HttpErrorClassification::Client {
+                    status,
+                    message: &http_error.message,
+                };
+            }
+            return HttpErrorClassification::Sanitized(SanitizedError::Internal);
+        }
+        current = error.source();
+    }
+
+    HttpErrorClassification::Internal
 }
 
 /// Canonical sanitized error responses returned at the HTTP boundary.
