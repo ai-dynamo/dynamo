@@ -117,7 +117,8 @@ repos:
       language: system
       # Scan the whole components/ tree, not just the staged files: Fern
       # bundles them together and reports whichever it reaches first.
-      files: ^docs/fern/(components/|scripts/check_component_imports\.py$)
+      # fern.config.json is in scope so a CLI bump trips the matcher-drift check.
+      files: ^docs/fern/(components/|fern\.config\.json$|scripts/check_component_imports\.py$)
       pass_filenames: false
     - id: check-component-imports-selftest
       name: Self-test the component specifier matcher

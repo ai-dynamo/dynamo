@@ -37,17 +37,20 @@ failing component rotated between RecipeStyles, ReferenceStyles and
 TerminalDemo depending on which one Fern reached first, and none of the three
 had an actual npm dependency. Document the specifier in prose instead.
 
-The regex and allowlist below mirror the Fern CLI's own implementation
-(cli.cjs, the helper behind "Failed to bundle third-party imports"); keep them
-in sync when the pinned CLI in fern.config.json moves.
+The regex and allowlist below mirror the Fern CLI's own implementation (cli.cjs,
+the helper behind "Failed to bundle third-party imports"). That copy can drift,
+so a full scan also fails when fern.config.json is bumped past PORTED_FROM --
+re-read the bundler in the new CLI, reconcile the two constants, then move
+PORTED_FROM.
 
 Usage: python3 check_component_imports.py [files...]
-With no arguments, checks every source file under docs/fern/components.
-Run with --test to self-test the matcher.
+With no arguments, checks every source file under docs/fern/components and
+verifies the Fern pin. Run with --test to self-test the matcher.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -55,6 +58,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]  # docs/fern
 REPO = ROOT.parents[1]  # repo root, for readable paths
 COMPONENTS = ROOT / "components"
+
+# The Fern CLI release SPECIFIER and ALLOWLIST below were read out of. Nothing
+# makes the CLI keep that shape, so a bump that widens the allowlist -- or
+# replaces the text scan with a real parser that skips comments -- would leave
+# this check silently over- or under-reporting. Under-reporting is the costly
+# direction: it breaks the docs publish exactly the way this script exists to
+# prevent. Fail on the bump instead, while someone is already looking at Fern.
+PORTED_FROM = "5.80.2"
 
 # Fern only scans these extensions.
 SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
@@ -89,14 +100,39 @@ def third_party(contents: str) -> list[tuple[int, str]]:
     found: list[tuple[int, str]] = []
     seen: set[str] = set()
     for match in SPECIFIER.finditer(contents):
-        specifier = match.group(1) or match.group(2) or match.group(3)
-        if specifier is None or is_relative(specifier):
+        group = next((i for i in (1, 2, 3) if match.group(i) is not None), None)
+        if group is None:
+            continue
+        specifier = match.group(group)
+        if is_relative(specifier):
             continue
         if package_root(specifier) in ALLOWLIST or specifier in seen:
             continue
         seen.add(specifier)
-        found.append((contents[: match.start()].count("\n") + 1, specifier))
+        # Anchor on the specifier, not on match.start(): the first alternation
+        # opens with (?:^|[^\w.]), which consumes the preceding newline for a
+        # statement at column 0 and would report the line above.
+        found.append((contents[: match.start(group)].count("\n") + 1, specifier))
     return found
+
+
+def check_pin_drift() -> list[str]:
+    """Report when fern.config.json has moved past the ported-from release."""
+    config_path = ROOT / "fern.config.json"
+    try:
+        pinned = json.loads(config_path.read_text()).get("version", "")
+    except (OSError, ValueError) as exc:
+        return [
+            f"{display(config_path)}: could not read the pinned Fern version: {exc}"
+        ]
+    if pinned == PORTED_FROM:
+        return []
+    return [
+        f"{display(config_path)}: pins Fern {pinned}, but this check's matcher was"
+        f" ported from {PORTED_FROM}.\n"
+        f"      Re-read the third-party-import bundler in {pinned}, reconcile"
+        f" SPECIFIER and ALLOWLIST, then update PORTED_FROM."
+    ]
 
 
 def display(path: Path) -> str:
@@ -120,29 +156,50 @@ def check(path: Path) -> list[str]:
 
 
 def selftest() -> int:
-    cases: list[tuple[str, bool]] = [
-        ('import { useState } from "react";', False),
-        ('import ReactDOM from "react-dom/client";', False),
-        ('import { useMDXComponents } from "@mdx-js/react";', False),
-        ('import { CURRENT_TAG } from "./releases.data";', False),
-        ('import { X } from "../shared/x";', False),
+    # (source, should_flag, expected line number or None to skip the check)
+    cases: list[tuple[str, bool, int | None]] = [
+        ('import { useState } from "react";', False, None),
+        ('import ReactDOM from "react-dom/client";', False, None),
+        ('import { useMDXComponents } from "@mdx-js/react";', False, None),
+        ('import { CURRENT_TAG } from "./releases.data";', False, None),
+        ('import { X } from "../shared/x";', False, None),
         # The regression this script exists for: an example inside a comment.
-        (' *   import { RecipeStyles } from "@/components/RecipeStyles";', True),
-        ('So instead of `import "asciinema-player"` we load it from a CDN.', True),
-        ('export { Foo } from "@/components/Foo";', True),
-        ('const mod = await import("chart.js");', True),
-        ('const lodash = require("lodash");', True),
+        (' *   import { RecipeStyles } from "@/components/RecipeStyles";', True, 1),
+        ('So instead of `import "asciinema-player"` we load it from a CDN.', True, 1),
+        ('export { Foo } from "@/components/Foo";', True, 1),
+        ('const mod = await import("chart.js");', True, 1),
+        ('const lodash = require("lodash");', True, 1),
+        # A statement at column 0 must report its own line, not the one above:
+        # the leading (?:^|[^\w.]) alternation eats the previous newline.
+        ('header\nimport { X } from "@/components/X";\n', True, 2),
+        ('a\nb\nexport { Y } from "@/components/Y";\n', True, 3),
         # Prose that merely contains the word must not trip the matcher.
-        ('* fails with "Failed to bundle third-party imports" at publish.', False),
-        ("* Every page must pull in the named export from `@/components/Foo`.", False),
+        (
+            '* fails with "Failed to bundle third-party imports" at publish.',
+            False,
+            None,
+        ),
+        (
+            "* Every page must pull in the named export from `@/components/Foo`.",
+            False,
+            None,
+        ),
     ]
     failures = 0
-    for source, should_flag in cases:
-        flagged = bool(third_party(source))
-        if flagged != should_flag:
+    for source, should_flag, expected_line in cases:
+        hits = third_party(source)
+        if bool(hits) != should_flag:
             failures += 1
-            verb = "flagged" if flagged else "missed"
+            verb = "flagged" if hits else "missed"
             print(f"selftest: {verb} unexpectedly: {source!r}", file=sys.stderr)
+            continue
+        if expected_line is not None and hits[0][0] != expected_line:
+            failures += 1
+            print(
+                f"selftest: reported line {hits[0][0]}, expected {expected_line}:"
+                f" {source!r}",
+                file=sys.stderr,
+            )
     if failures:
         print(f"{failures} selftest case(s) failed", file=sys.stderr)
         return 1
@@ -178,6 +235,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Only on a full scan: an explicit file list is a targeted call, and the pin
+    # is a property of the tree rather than of any one component.
+    if not args:
+        drift = check_pin_drift()
+        if drift:
+            print("Fern CLI pin has moved past this check:\n", file=sys.stderr)
+            for problem in drift:
+                print(f"  - {problem}", file=sys.stderr)
+            return 1
 
     print(f"checked {len(targets)} component source(s): no unbundleable specifiers")
     return 0
