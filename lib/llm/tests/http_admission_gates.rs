@@ -56,9 +56,15 @@ impl
         let (request, context) = request.transfer(());
         let ctx = context.context();
 
-        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
+        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens.
+        // The Anthropic conversion maps its max_tokens to
+        // max_completion_tokens, so honor either field as the delay knob.
         #[allow(deprecated)]
-        let delay_ms = request.inner.max_tokens.unwrap_or(0) as u64;
+        let delay_ms = request
+            .inner
+            .max_completion_tokens
+            .or(request.inner.max_tokens)
+            .unwrap_or(0) as u64;
         let mut generator = request.response_generator(ctx.id().to_string());
 
         let stream = stream! {
@@ -226,6 +232,15 @@ async fn post_count_tokens(port: u16) -> reqwest::Response {
             "model": "fast",
             "messages": [{"role": "user", "content": "hello"}]
         }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_messages(port: u16, body: &serde_json::Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/messages"))
+        .json(body)
         .send()
         .await
         .unwrap()
@@ -473,6 +488,67 @@ async fn test_concurrency_gate_alias_shares_primary_mdc_override() {
 
     assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
     wait_for_inflight(&metrics, PRIMARY, 0).await;
+}
+
+#[tokio::test]
+async fn test_concurrency_gate_rejects_anthropic_messages() {
+    // The Anthropic Messages surface enforces the per-model concurrency gate
+    // for both unary and streaming requests, rejecting with the Anthropic
+    // error envelope rather than the OpenAI error shape.
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(Some(1), None, None).expect("valid admission gate config"),
+    )
+    .await;
+    let metrics = svc.state.metrics_clone();
+    let port = svc.port;
+
+    for streaming in [false, true] {
+        let holder = tokio::spawn(async move {
+            post_messages(
+                port,
+                &serde_json::json!({
+                    "model": "slow",
+                    "max_tokens": 300,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }),
+            )
+            .await
+        });
+        wait_for_inflight(&metrics, "slow", 1).await;
+
+        let rejected = post_messages(
+            port,
+            &serde_json::json!({
+                "model": "slow",
+                "max_tokens": 1,
+                "stream": streaming,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = rejected.json().await.unwrap();
+        assert_eq!(body["type"], "error", "Anthropic envelope expected: {body}");
+        assert_eq!(
+            body["error"]["type"], "overloaded_error",
+            "Anthropic overload classification expected: {body}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("frontend-global"),
+            "rejection should identify the limit source: {body}"
+        );
+
+        assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        wait_for_inflight(&metrics, "slow", 0).await;
+    }
+
+    assert_eq!(
+        metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "slow"),
+        2
+    );
 }
 
 #[tokio::test]

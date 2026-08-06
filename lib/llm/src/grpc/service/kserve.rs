@@ -263,6 +263,22 @@ impl KserveServiceConfigBuilder {
     pub fn build(self) -> Result<KserveService, anyhow::Error> {
         let config: KserveServiceConfig = self.build_internal()?;
 
+        // Admission gates are HTTP-only. Env-configured gate limits reach
+        // this builder on every KServe path (including the Python
+        // kserve_grpc binding, which never runs the grpc entrypoint's
+        // warning), so surface the no-op here.
+        let env_gates = AdmissionGateConfig::default();
+        if env_gates.request_concurrency_limit().is_some()
+            || env_gates.runtime_task_limit().is_some()
+            || env_gates.request_plane_connection_limit().is_some()
+        {
+            tracing::warn!(
+                "frontend admission gates are HTTP-only and are ignored in \
+                 KServe gRPC mode (including per-model overrides carried on \
+                 worker cards)"
+            );
+        }
+
         // Create HTTP service with only non-inference endpoints (metrics, health, models list)
         // This provides the metrics endpoint and shared metrics object
         let http_service = http_service::HttpService::builder()

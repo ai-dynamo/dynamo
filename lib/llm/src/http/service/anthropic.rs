@@ -131,6 +131,32 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
         );
     }
 
+    // The frontend-local admission gates (runtime-task / request-plane
+    // pressure) reject from middleware with a flat OpenAI-style body; reshape
+    // those into the Anthropic envelope. Handler-produced 503s are already
+    // Anthropic-shaped (top-level `"type": "error"`) and pass through.
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        let (parts, body) = response.into_parts();
+        let body_bytes = axum::body::to_bytes(body, get_body_limit())
+            .await
+            .unwrap_or_default();
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(value) if value.get("type").and_then(|t| t.as_str()) != Some("error") => {
+                let message = value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| String::from_utf8_lossy(&body_bytes).to_string());
+                return anthropic_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "overloaded_error",
+                    &message,
+                );
+            }
+            _ => return Response::from_parts(parts, Body::from(body_bytes)),
+        }
+    }
+
     response
 }
 
@@ -366,20 +392,24 @@ async fn anthropic_messages(
         ),
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::AnthropicMessages,
         streaming,
         request.id(),
     );
 
     // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge (labeled by `model` here)
-    // so concurrent arrivals cannot slip past the limit.
-    if let Some(message) = super::admission::evaluate_model_concurrency_gate(&state, &model, &model)
+    // the guard above increments the inflight gauge (labeled by
+    // `metric_model`, like every other gated surface) so concurrent arrivals
+    // cannot slip past the limit.
+    if let Some(message) =
+        super::admission::evaluate_model_concurrency_gate(&state, &model, &metric_model)
     {
         inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
         return Err(anthropic_error(
