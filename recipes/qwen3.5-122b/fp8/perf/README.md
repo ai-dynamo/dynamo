@@ -28,8 +28,17 @@ The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake
 `aiperf --custom-dataset-type mooncake_trace`. Each JSONL line describes one request
 (`input_length`, `output_length`, `hash_ids`; no `timestamp` for no-schedule replay). The
 agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, block size
-**512**, replayed **no-schedule** (timestamps zeroed) at fixed **concurrency 8**
-(closed-loop). The 15% subset is ~3,541 requests.
+**512**, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA
+knee: the highest value holding P50 TTFT < 5 s and P50 output >= 50 tok/s/user.
+
+Reported numbers use the first 1,500 requests of the 15% agentic trace shipped with the
+Kimi-K2.6 recipe. The trace is stored in Git LFS — fetch it, then take the prefix:
+
+```bash
+git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+head -1500 recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  > mooncake_1500.jsonl
+```
 
 ## Workflow
 
@@ -70,10 +79,10 @@ Metrics land in `profile_export_aiperf.{csv,json}`: `Output Token Throughput`,
 `Output Token Throughput Per User`. KV-cache hit rate is on the frontend `/metrics`
 (`dynamo_component_router_kv_hit_rate_{sum,count}`).
 
-> For representative **aggregated** numbers, force MTP to the SpeedBench-measured
-> acceptance length via the `speculative-config-synthetic` ConfigMap key in the agg deploy
-> (ship the real `speculative-config` key, benchmark with the synthetic one). The
-> disaggregated profile runs without MTP.
+> Benchmark aggregated with the shipped `speculative-config` key. Real MTP measures an
+> acceptance length of ~3.2 on this trace, above the 2.937 that the
+> `speculative-config-synthetic` key forces, so the override is not needed here — use it
+> only on traces where acceptance collapses. The disaggregated profile runs without MTP.
 
 ## Running a concurrency sweep
 
@@ -96,8 +105,8 @@ errored, and unfinished requests before reporting aggregate throughput.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ENDPOINT` | per profile — see the table above | |
-| `CONCURRENCY` | `8` (agentic SLA operating point) | Single value; reset server state between values |
-| `TRACE_FILE` | `/model-cache/traces/mooncake_trace.jsonl` | 15% agentic trace = 3,541 requests |
+| `CONCURRENCY` | sweep to the SLA knee | Single value per run; restart server pods between values |
+| `TRACE_FILE` | `/model-cache/traces/mooncake_trace.jsonl` | 1,500-request agentic trace |
 | `TARGET_MODEL` | `Qwen/Qwen3.5-122B-A10B` | Must match `--served-model-name` |
 
 ## Artifacts
