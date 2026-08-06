@@ -1608,3 +1608,44 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
     cancel_token.cancel();
     task.await.unwrap().unwrap();
 }
+
+/// The `/reset_prefix_cache` admin route must be registered and reachable.
+///
+/// The admin API is enabled by default, so the route is mounted. Without a
+/// `DistributedRuntime` wired into the service the handler cannot reach workers,
+/// but it must still respond `200 OK` with a clear "runtime not available"
+/// message rather than a `404` — proving the route is wired up rather than
+/// silently missing (the original bug in #6291 was a `404` on this control).
+#[tokio::test]
+async fn test_reset_prefix_cache_route_is_registered() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/reset_prefix_cache"))
+        .send()
+        .await
+        .expect("POST /reset_prefix_cache");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "POST /reset_prefix_cache should be routed under the admin API (on by default); got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("Distributed runtime not available"),
+        "without a runtime the handler should report it clearly instead of 404ing; got: {text}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
