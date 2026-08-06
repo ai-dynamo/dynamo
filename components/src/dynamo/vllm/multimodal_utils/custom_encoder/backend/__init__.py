@@ -4,6 +4,7 @@
 """Author-facing custom encoder backend contract."""
 
 from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
+    ArtifactT,
     ItemT,
     Preprocessed,
     RawT,
@@ -11,6 +12,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
 )
 
 __all__ = [
+    "ArtifactT",
     "ItemT",
     "Preprocessed",
     "RawT",

@@ -4,9 +4,9 @@
 """Unit tests for the custom encoder async driver.
 
 Pin the glue contract: build / forward / close run on one actor thread; encode
-returns one tensor per raw; the preprocess barrier fails a request atomically
-(no GPU work) if any image's preprocess fails; load fails fast on a build error or
-a missing/invalid hardcoded image_token_id and reaps its thread.
+returns one opaque artifact per raw; the preprocess barrier fails a request
+atomically (no GPU work) if any image's preprocess fails; load fails fast on a
+build error and reaps its thread.
 """
 
 import threading
@@ -102,12 +102,11 @@ async def test_build_and_forward_share_one_non_main_thread():
         enc.shutdown()
 
 
-async def test_load_resolves_placeholder_and_passes_model_id():
+async def test_load_passes_model_id():
     be = _FakeBackend()
     enc = AsyncVisionEncoder(be)
     enc.load("my-model")
     try:
-        assert enc.get_image_placeholder_token_id() == 151655
         assert be.model_id == "my-model"
     finally:
         enc.shutdown()
@@ -170,15 +169,23 @@ def test_load_fails_fast_on_build_error_and_reaps_threads():
     assert enc._pool is None
 
 
-def test_load_fails_fast_on_missing_image_token_id():
-    class _NoTokenId(_FakeBackend):
-        image_token_id = None  # author forgot to hardcode it
+async def test_encode_preserves_opaque_artifacts():
+    class _ArtifactBackend(VisionEncoderBackend):
+        def build(self, model_id):
+            pass
 
-    enc = AsyncVisionEncoder(_NoTokenId())
-    with pytest.raises(ValueError, match="image_token_id"):
-        enc.load("m")
-    assert enc._batcher is None
-    assert enc._pool is None
+        def forward_batch(self, items, target_bucket=None):
+            return [{"source": item} for item in items]
+
+    enc = AsyncVisionEncoder(_ArtifactBackend())
+    enc.load("m")
+    try:
+        assert await enc.encode(["first", "second"]) == [
+            {"source": "first"},
+            {"source": "second"},
+        ]
+    finally:
+        enc.shutdown()
 
 
 def test_shutdown_before_load_is_safe():

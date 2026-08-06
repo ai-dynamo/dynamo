@@ -2454,10 +2454,10 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
+    fn test_multi_worker_trace_kv_router_delays_cached_visibility_until_pass_completion() {
         let policy = RouterQueuePolicy::Fcfs;
         let mut args = queueing_router_args(policy);
-        // Preserve this snapshot's historical KVBM event-visibility semantics.
+        // Exercise the shared scheduler's KVBM event capture path.
         args.g1_backend = Some(G1Backend::Kvbm);
         let mut runtime = AggRuntime::new(
             &args,
@@ -2517,7 +2517,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1]
         );
-        assert!(initial_router.indexer.total_cached_blocks > 0);
+        assert_eq!(initial_router.indexer.total_cached_blocks, 0);
 
         assert!(runtime.advance_one_timestamp().unwrap());
         let queued = runtime.debug_snapshot();
@@ -2528,15 +2528,13 @@ mod tests {
         assert_eq!(queued_router.pending.len(), 1);
         assert_eq!(queued_router.pending[0].uuid, Uuid::from_u128(33));
 
-        let cached_workers = queued_router.pending[0]
-            .overlap_blocks_by_worker
-            .iter()
-            .filter(|(_, overlap)| *overlap > 0)
-            .map(|(worker_idx, _)| *worker_idx)
-            .collect::<Vec<_>>();
-        assert_eq!(cached_workers.len(), 1);
-        let cached_worker = cached_workers[0];
-
+        assert!(
+            queued_router.pending[0]
+                .overlap_blocks_by_worker
+                .iter()
+                .all(|(_, overlap)| *overlap == 0),
+            "a mid-pass arrival must not observe KV blocks before pass completion"
+        );
         while !runtime
             .stats
             .assigned_worker_by_uuid
@@ -2547,9 +2545,15 @@ mod tests {
 
         let dispatched = runtime.debug_snapshot();
         assert!(dispatched.router_pending_request_ids.is_empty());
-        assert_eq!(
-            runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(33)],
-            cached_worker
+        assert!(
+            dispatched
+                .router
+                .as_ref()
+                .unwrap()
+                .indexer
+                .total_cached_blocks
+                > 0,
+            "completed passes must publish their KV blocks"
         );
     }
 

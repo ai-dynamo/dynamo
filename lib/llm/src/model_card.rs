@@ -1245,6 +1245,15 @@ impl ModelDeploymentCard {
                         .context("failed to disable tokenizer.json truncation")?;
                 }
 
+                // Padding belongs to the batching layer, not individual online requests.
+                if hf.get_padding().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a padding config; disabling it for online \
+                         tokenization"
+                    );
+                    hf.with_padding(None);
+                }
+
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)

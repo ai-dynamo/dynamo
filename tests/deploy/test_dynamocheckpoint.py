@@ -95,7 +95,7 @@ class CheckpointBackendConfig:
 CHECKPOINT_BACKENDS = {
     "vllm": CheckpointBackendConfig(
         name="vllm",
-        manifest=("examples", "backends", "vllm", "deploy", "v1beta1", "agg.yaml"),
+        manifest=("examples", "backends", "vllm", "deploy", "agg.yaml"),
         decode_component="VllmDecodeWorker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -116,7 +116,6 @@ CHECKPOINT_BACKENDS = {
             "backends",
             "sglang",
             "deploy",
-            "v1beta1",
             "agg.yaml",
         ),
         decode_component="decode",
@@ -143,7 +142,6 @@ CHECKPOINT_BACKENDS = {
             "backends",
             "trtllm",
             "deploy",
-            "v1beta1",
             "agg.yaml",
         ),
         decode_component="TRTLLMWorker",
