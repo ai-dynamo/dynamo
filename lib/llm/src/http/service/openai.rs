@@ -33,8 +33,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    error::{HttpError, HttpErrorClassification, classify_http_error, invalid_argument},
+    disconnect::{
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_rendered_errors,
+    },
+    error::{HttpError, HttpProblem, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -91,8 +94,6 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{SanitizedError, overload_status_code};
-
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
 ) -> anyhow::Result<axum::Router> {
@@ -122,6 +123,9 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    /// Preserve canonical classification for metrics without putting it on the wire.
+    #[serde(skip)]
+    classification: Option<ErrorType>,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -135,25 +139,13 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
     }
 }
 
-/// Classify error for metrics based on status code and message
-fn classify_error_for_metrics(code: StatusCode, _message: &str) -> ErrorType {
-    match code {
-        StatusCode::BAD_REQUEST => ErrorType::Validation, // 400
-        StatusCode::NOT_FOUND => ErrorType::NotFound,     // 404
-        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
-        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable, // 503
-        StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
-        _ if code.as_u16() == 529 => ErrorType::Overload, // 529
-        _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
-        _ if code.is_client_error() => ErrorType::Validation, // other 4xx
-        _ => ErrorType::Internal,                         // everything else
-    }
-}
-
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
-    classify_error_for_metrics(response.0, &response.1.message)
+    response
+        .1
+        .classification
+        .clone()
+        .unwrap_or_else(|| HttpProblem::metric_type_for_status(response.0))
 }
 
 fn responses_error_code(status: StatusCode) -> &'static str {
@@ -165,10 +157,6 @@ fn responses_error_code(status: StatusCode) -> &'static str {
 }
 
 impl ErrorMessage {
-    pub(super) fn message(&self) -> &str {
-        &self.message
-    }
-
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
         let code = StatusCode::NOT_FOUND;
@@ -180,6 +168,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
     }
@@ -212,6 +201,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
     }
@@ -229,6 +219,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
     }
@@ -248,6 +239,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
     }
@@ -271,32 +263,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
-            }),
-        )
-    }
-
-    /// Build a sanitized error response from a [`SanitizedError`] variant.
-    /// The status, public message, and protocol error_type all come from
-    /// the variant — call sites do not pass any of them as literals.
-    /// Server-side `details` are logged alongside the canonical category;
-    /// the client only ever sees the variant's public message.
-    pub fn sanitized_with_details(
-        err: SanitizedError,
-        details: impl std::fmt::Display,
-    ) -> ErrorResponse {
-        let status = err.status();
-        if err.log_as_error() {
-            tracing::error!(status = %status, "{err}: {details}");
-        } else {
-            tracing::debug!(status = %status, "{err}: {details}");
-        }
-        (
-            status,
-            Json(ErrorMessage {
-                message: err.to_string(),
-                error_type: map_error_code_to_error_type(status),
-                code: status.as_u16(),
-                details: None,
+                classification: None,
             }),
         )
     }
@@ -315,6 +282,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
     }
@@ -329,84 +297,39 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
     }
 
-    /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
-    /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
-    /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
-    /// with the details of the error.
+    pub(super) fn from_problem(problem: HttpProblem) -> ErrorResponse {
+        let status = problem.status();
+        let classification = problem.metric_type();
+        if status.is_server_error() {
+            tracing::error!(status = %status, "{}", problem.diagnostic());
+        } else if status.as_u16() == 499 {
+            tracing::debug!(status = %status, "{}", problem.diagnostic());
+        }
+        (
+            status,
+            Json(ErrorMessage {
+                message: problem.message().to_string(),
+                error_type: map_error_code_to_error_type(status),
+                code: status.as_u16(),
+                details: problem.details(),
+                classification: Some(classification),
+            }),
+        )
+    }
+
+    /// Convert an engine error into an OpenAI error envelope.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        match classify_http_error(err.as_ref()) {
-            HttpErrorClassification::QueueRejection(rejection) => {
-                let code = overload_status_code();
-                (
-                    code,
-                    Json(ErrorMessage {
-                        message: rejection.to_string(),
-                        error_type: map_error_code_to_error_type(code),
-                        code: code.as_u16(),
-                        details: serde_json::to_value(rejection).ok().map(Box::new),
-                    }),
-                )
-            }
-            HttpErrorClassification::Client { status, message } => (
-                status,
-                Json(ErrorMessage {
-                    message: message.to_string(),
-                    error_type: map_error_code_to_error_type(status),
-                    code: status.as_u16(),
-                    details: None,
-                }),
-            ),
-            HttpErrorClassification::Sanitized(error) => {
-                ErrorMessage::sanitized_with_details(error, format!("{err:#}"))
-            }
-            HttpErrorClassification::Internal => {
-                ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"))
-            }
-        }
+        Self::from_problem(HttpProblem::from_error(err.as_ref(), alt_msg))
     }
 
-    /// Implementers should only be able to throw 400-499 errors.
+    /// Implementers may explicitly return safe 4xx errors.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
-        // 499 is part of the 4xx range but its body can carry cancellation
-        // context (queue paths, context IDs) — sanitize separately.
-        if err.code == 499 {
-            return ErrorMessage::sanitized_with_details(SanitizedError::Cancelled, err.message);
-        }
-        // Backend-supplied messages are only forwarded for the documented 4xx
-        // range; for 5xx or codes outside the HTTP space the message may
-        // contain internal paths/details and is kept server-side only.
-        if err.code < 400 || err.code >= 500 {
-            return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
-        }
-        match StatusCode::from_u16(err.code) {
-            Ok(code) => (
-                code,
-                Json(ErrorMessage {
-                    message: err.message,
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
-                    details: None,
-                }),
-            ),
-            Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
-        }
-    }
-}
-
-impl From<HttpError> for ErrorMessage {
-    fn from(err: HttpError) -> Self {
-        ErrorMessage {
-            message: err.message,
-            error_type: map_error_code_to_error_type(
-                StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            ),
-            code: err.code,
-            details: None,
-        }
+        Self::from_problem(HttpProblem::from_error(&err, "Internal server error"))
     }
 }
 
@@ -429,6 +352,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                classification: None,
             }),
         )
             .into_response()
@@ -760,14 +684,12 @@ async fn completions_single(
         // immediately available typed validation failures a bounded chance to
         // become an HTTP 4xx first.
         let stream = match pre_commit_error_peek_timeout() {
-            Some(dur) => {
-                check_for_backend_error(stream, Some(dur))
-                    .await
-                    .map_err(|err_response| {
-                        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                        err_response
-                    })?
-            }
+            Some(dur) => check_for_backend_error(stream, Some(dur))
+                .await
+                .map_err(|problem| {
+                    inflight_guard.mark_error(problem.metric_type());
+                    ErrorMessage::from_problem(problem)
+                })?,
             None => Box::pin(stream) as std::pin::Pin<Box<dyn futures::Stream<Item = _> + Send>>,
         };
 
@@ -1051,9 +973,9 @@ async fn completions_batch(
         let merged_stream = match pre_commit_error_peek_timeout() {
             Some(dur) => check_for_backend_error(merged_stream, Some(dur))
                 .await
-                .map_err(|err_response| {
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
+                .map_err(|problem| {
+                    inflight_guard.mark_error(problem.metric_type());
+                    ErrorMessage::from_problem(problem)
                 })?,
             None => {
                 Box::pin(merged_stream) as std::pin::Pin<Box<dyn futures::Stream<Item = _> + Send>>
@@ -1424,6 +1346,7 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            classification: None,
         }),
     )
 }
@@ -1452,6 +1375,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            classification: None,
         }),
     )
 }
@@ -1505,128 +1429,6 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     changed.then_some(out)
 }
 
-/// Checks if an Annotated event represents a backend error and extracts error information.
-/// Returns Some((message, status_code)) if it's an error, None otherwise.
-pub(super) fn extract_backend_error_if_present<T: serde::Serialize>(
-    event: &Annotated<T>,
-) -> Option<(String, StatusCode)> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
-    }
-
-    // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
-    if let Some(event_type) = &event.event
-        && event_type == "error"
-    {
-        use dynamo_runtime::error::{BackendError, ErrorType};
-
-        // Classify only this event's error, not its causes. An inner invalid
-        // argument must not override an outer unavailable or internal error.
-        let invalid_argument = event.error.as_ref().filter(|error| {
-            matches!(
-                error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
-        });
-
-        // Extract error string: prefer DynamoError field, fallback to legacy comment.
-        // Use message() instead of to_string() for DynamoError to avoid prefixing
-        // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
-        let error_str = if let Some(ref dynamo_err) = event.error {
-            let mut parts = Vec::new();
-            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
-            while let Some(e) = current {
-                if let Some(de) = e.downcast_ref::<dynamo_runtime::error::DynamoError>() {
-                    parts.push(de.message().to_string());
-                } else {
-                    parts.push(e.to_string());
-                }
-                current = e.source();
-            }
-            parts.join(", ")
-        } else {
-            event
-                .comment
-                .as_ref()
-                .map(|c| c.join(", "))
-                .unwrap_or_else(|| "Unknown error".to_string())
-        };
-
-        // Parse the status-bearing node's own message. The diagnostic string
-        // above includes its causes and therefore is not necessarily JSON.
-        let status_message = event
-            .error
-            .as_ref()
-            .map(|error| error.message())
-            .unwrap_or(&error_str);
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
-            // Preserve explicit HTTP-like statuses (for example 415); Python
-            // 4xx exceptions share the Backend(InvalidArgument) category.
-            let code = match error_payload.code {
-                Some(code) => {
-                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
-                }
-                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
-                None => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            let message = error_payload
-                .message
-                .unwrap_or_else(|| status_message.to_string());
-            return Some((message, code));
-        }
-
-        if let Some(invalid_argument) = invalid_argument {
-            return Some((
-                invalid_argument.message().to_string(),
-                StatusCode::BAD_REQUEST,
-            ));
-        }
-
-        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
-    }
-
-    // Check if the data payload itself contains an error structure with code >= 400
-    if let Some(data) = &event.data
-        && let Ok(json_value) = serde_json::to_value(data)
-        && let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone())
-        && let Some(code_num) = error_payload.code
-        && code_num >= 400
-    {
-        let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let message = error_payload
-            .message
-            .unwrap_or_else(|| json_value.to_string());
-        return Some((message, code));
-    }
-
-    // Check if comment contains error information (without event: error)
-    if let Some(comments) = &event.comment
-        && !comments.is_empty()
-    {
-        let comment_str = comments.join(", ");
-
-        // Try to parse comment as error JSON with code >= 400
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str)
-            && let Some(code_num) = error_payload.code
-            && code_num >= 400
-        {
-            let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(comment_str);
-            return Some((message, code));
-        }
-
-        // Comments present with no data AND no event type indicates error
-        // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
-        if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
-        }
-    }
-
-    None
-}
-
 /// Returns true for events that only carry an annotation tag (e.g. the
 /// `request_id` frame prepended to every stream): no data, no error, and
 /// an `event` field that is *not* the `"error"` marker. Annotations may
@@ -1658,12 +1460,12 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 /// non-annotation event arrives, return the buffered annotations chained with
 /// the remaining stream so downstream sees the original ordering.
 ///
-/// Returns `Err(ErrorResponse)` if the first non-annotation event is a backend
+/// Returns `Err(HttpProblem)` if the first non-annotation event is a backend
 /// error, `Ok(stream)` otherwise.
 pub(super) async fn check_for_backend_error<T>(
     stream: impl futures::Stream<Item = Annotated<T>> + Send + 'static,
     timeout: Option<std::time::Duration>,
-) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ErrorResponse>
+) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, HttpProblem>
 where
     T: serde::Serialize + Send + 'static,
 {
@@ -1697,8 +1499,8 @@ where
             continue;
         }
 
-        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(backend_error_response(error_msg, status_code));
+        if let Some(problem) = HttpProblem::from_annotated(&event) {
+            return Err(problem);
         }
 
         // First non-annotation, non-error event — hand back for downstream
@@ -1708,29 +1510,10 @@ where
     }
 }
 
-/// Convert an `(error_msg, status_code)` pair from `extract_backend_error_if_present`
-/// into the wire `ErrorResponse` used by streaming pre-commit checks.
-fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorResponse {
-    match SanitizedError::for_backend_status(status_code) {
-        Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
-        // 4xx (non-499): protocol contract — forward backend message as-is.
-        None => (
-            status_code,
-            Json(ErrorMessage {
-                message: error_msg,
-                error_type: map_error_code_to_error_type(status_code),
-                code: status_code.as_u16(),
-                details: None,
-            }),
-        ),
-    }
-}
-
 /// Read the pre-commit peek window from the environment.
 ///
 /// `Some(dur)` — poll for that duration before committing SSE.
-/// `None` — the peek is disabled entirely (default; matches pre-fix behavior
-/// where all backend errors surface as SSE frames post-HTTP-200).
+/// `None` — the peek is explicitly disabled with a value of `0`.
 ///
 /// Read live per streaming request. Reading `std::env::var` is a hashmap
 /// lookup — sub-microsecond, negligible next to the peek window
@@ -1739,12 +1522,14 @@ fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorRe
 // FIXME: unify env-var initialization with the rest of `env_llm::*` once that
 // module gets a standard reader.
 pub(super) fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
+    const DEFAULT_MS: u64 = 500;
     match std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MS)
     {
-        Some(0) | None => None,
-        Some(ms) => Some(std::time::Duration::from_millis(ms)),
+        0 => None,
+        ms => Some(std::time::Duration::from_millis(ms)),
     }
 }
 
@@ -2101,18 +1886,12 @@ async fn chat_completions(
         let stream = match pre_commit_error_peek_timeout() {
             Some(dur) => check_for_backend_error(stream, Some(dur))
                 .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
+                .map_err(|problem| {
+                    inflight_guard.mark_error(problem.metric_type());
+                    ErrorMessage::from_problem(problem)
                 })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately (pre-fix
-            // behavior). Backend errors will surface as SSE error frames via
-            // monitor_for_disconnects.
-            None => Box::pin(stream)
-                as std::pin::Pin<
-                    Box<dyn futures::Stream<Item = _> + Send>,
-                >,
+            // Explicit `0` skips the peek and commits HTTP 200 immediately.
+            None => Box::pin(stream) as std::pin::Pin<Box<dyn futures::Stream<Item = _> + Send>>,
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -2609,16 +2388,14 @@ async fn responses(
         let engine_stream = match pre_commit_error_peek_timeout() {
             Some(dur) => check_for_backend_error(engine_stream, Some(dur))
                 .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
+                .map_err(|problem| {
+                    inflight_guard.mark_error(problem.metric_type());
+                    ErrorMessage::from_problem(problem)
                 })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately.
-            None => Box::pin(engine_stream)
-                as std::pin::Pin<
-                    Box<dyn futures::Stream<Item = _> + Send>,
-                >,
+            // Explicit `0` skips the peek and commits HTTP 200 immediately.
+            None => {
+                Box::pin(engine_stream) as std::pin::Pin<Box<dyn futures::Stream<Item = _> + Send>>
+            }
         };
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
@@ -2641,9 +2418,6 @@ async fn responses(
                 yield event.map_err(axum::Error::new);
             }
 
-            // Track whether the backend sent an error event during the stream.
-            let mut backend_error = None;
-
             while let Some(annotated_chunk) = engine_stream.next().await {
                 process_chat_response_and_observe_metrics(
                     &annotated_chunk,
@@ -2651,13 +2425,21 @@ async fn responses(
                     &mut http_queue_guard,
                 );
 
-                if let Some((message, status)) = extract_backend_error_if_present(&annotated_chunk) {
-                    let response = backend_error_response(message, status);
-                    backend_error.get_or_insert_with(|| ErrorObject {
-                        code: responses_error_code(response.0).to_string(),
-                        message: response.1.message.clone(),
-                    });
-                    continue;
+                if let Some(problem) = HttpProblem::from_annotated(&annotated_chunk) {
+                    converter.append_error_events(
+                        ErrorObject {
+                            code: responses_error_code(problem.status()).to_string(),
+                            message: problem.message().to_string(),
+                        },
+                        &mut events,
+                    );
+                    for event in events.drain(..) {
+                        yield event.map_err(axum::Error::new);
+                    }
+                    // response.failed is terminal. Return the classification to
+                    // the monitor for metrics without waiting for backend EOF.
+                    yield Err(axum::Error::new(problem));
+                    return;
                 }
 
                 let Some(stream_resp) = annotated_chunk.data else {
@@ -2670,11 +2452,7 @@ async fn responses(
                 }
             }
 
-            if let Some(error) = backend_error {
-                converter.append_error_events(error, &mut events);
-            } else {
-                converter.append_end_events(&mut events);
-            }
+            converter.append_end_events(&mut events);
             for event in events.drain(..) {
                 yield event.map_err(axum::Error::new);
             }
@@ -2682,7 +2460,12 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let stream = monitor_for_disconnects_with_rendered_errors(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
@@ -3303,6 +3086,7 @@ async fn images_edits(
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
                 details: None,
+                classification: None,
             }),
         ));
     }
@@ -4092,14 +3876,14 @@ mod tests {
 
     #[test]
     fn test_resource_exhausted_error_response_from_anyhow() {
-        use dynamo_runtime::error::{DynamoError, ErrorType};
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
         use dynamo_runtime::pipeline::error::PipelineError;
 
         let cause = PipelineError::ServiceOverloaded(
             "All workers are busy, please retry later".to_string(),
         );
         let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
+            .error_type(DynamoErrorType::ResourceExhausted)
             .message("All workers are busy, please retry later")
             .cause(cause)
             .build()
@@ -4109,6 +3893,10 @@ mod tests {
         assert_eq!(response.1.code, 529);
         assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(response.1.message, "Service temporarily overloaded");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
         assert!(
             !response.1.message.contains("All workers are busy"),
             "client response must not include the underlying engine message"
@@ -4243,8 +4031,7 @@ mod tests {
     #[test]
     fn test_cancelled_error_metrics_classification() {
         // HTTP 499 should be classified as Cancelled for metrics
-        let error_type =
-            classify_error_for_metrics(StatusCode::from_u16(499).unwrap(), "cancelled request");
+        let error_type = HttpProblem::metric_type_for_status(StatusCode::from_u16(499).unwrap());
         assert_eq!(
             error_type,
             ErrorType::Cancelled,
@@ -4959,16 +4746,11 @@ mod tests {
 
         // Should return an error
         assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        if let Err(problem) = result {
+            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
             // Backend-supplied 5xx text must not be forwarded to the client.
-            assert_eq!(error_response.1.message, "Internal server error");
-            assert!(
-                !error_response
-                    .1
-                    .message
-                    .contains("Backend service unavailable")
-            );
+            assert_eq!(problem.message(), "Internal server error");
+            assert!(!problem.message().contains("Backend service unavailable"));
         }
     }
 
@@ -4997,14 +4779,16 @@ mod tests {
 
             let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
 
-            let error_response = match result {
-                Err(error_response) => error_response,
+            let problem = match result {
+                Err(problem) => problem,
                 Ok(_) => panic!("typed invalid argument must fail"),
             };
-            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-            assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
-            assert_eq!(error_response.1.error_type, "Bad Request");
-            assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
+            assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                problem.kind(),
+                crate::http::service::error::HttpProblemKind::Validation
+            );
+            assert_eq!(problem.message(), "unsupported JSON schema keyword");
         }
     }
 
@@ -5026,19 +4810,15 @@ mod tests {
             ),
         };
 
-        let error_response =
-            match check_for_backend_error(stream::iter(vec![error_event]), None).await {
-                Ok(_) => panic!("typed completion error must fail"),
-                Err(error_response) => error_response,
-            };
+        let problem = match check_for_backend_error(stream::iter(vec![error_event]), None).await {
+            Ok(_) => panic!("typed completion error must fail"),
+            Err(problem) => problem,
+        };
 
-        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
-        assert_eq!(error_response.1.error_type, "Bad Request");
+        assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
         assert!(
-            error_response
-                .1
-                .message
+            problem
+                .message()
                 .contains("does not currently support logprobs >= 1")
         );
     }
@@ -5064,13 +4844,12 @@ mod tests {
 
         // Should return an error with correct status code extracted from JSON
         assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        if let Err(problem) = result {
+            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
             // 500 backend JSON messages are sanitized to a static client
             // message; the raw payload is only logged server-side.
-            assert_eq!(error_response.1.message, "Internal server error");
-            assert_eq!(error_response.1.code, 500);
-            assert!(!error_response.1.message.contains("prompt > max_seq_len"));
+            assert_eq!(problem.message(), "Internal server error");
+            assert!(!problem.message().contains("prompt > max_seq_len"));
         }
     }
 
@@ -5096,12 +4875,11 @@ mod tests {
         let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.code, 500);
-            assert_eq!(error_response.1.message, "Internal server error");
-            assert!(!error_response.1.message.contains("/srv/model.py"));
-            assert!(!error_response.1.message.contains("panic"));
+        if let Err(problem) = result {
+            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(problem.message(), "Internal server error");
+            assert!(!problem.message().contains("/srv/model.py"));
+            assert!(!problem.message().contains("panic"));
         }
     }
 
@@ -5125,12 +4903,11 @@ mod tests {
         let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(error_response.1.code, 503);
-            assert_eq!(error_response.1.message, "Internal server error");
-            assert!(!error_response.1.message.contains("engine pool"));
-            assert!(!error_response.1.message.contains("/srv/engine.py"));
+        if let Err(problem) = result {
+            assert_eq!(problem.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(problem.message(), "Internal server error");
+            assert!(!problem.message().contains("engine pool"));
+            assert!(!problem.message().contains("/srv/engine.py"));
         }
     }
 
@@ -5155,12 +4932,11 @@ mod tests {
         let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0.as_u16(), 499);
-            assert_eq!(error_response.1.code, 499);
-            assert_eq!(error_response.1.message, "Request cancelled");
-            assert!(!error_response.1.message.contains("abc-123"));
-            assert!(!error_response.1.message.contains("/srv/queue.py"));
+        if let Err(problem) = result {
+            assert_eq!(problem.status().as_u16(), 499);
+            assert_eq!(problem.message(), "Request cancelled");
+            assert!(!problem.message().contains("abc-123"));
+            assert!(!problem.message().contains("/srv/queue.py"));
         }
     }
 
@@ -5195,10 +4971,9 @@ mod tests {
             result.is_err(),
             "annotation followed by an error event must still be detected as an error"
         );
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-            assert_eq!(error_response.1.code, 400);
-            assert_eq!(error_response.1.message, "bad input from client");
+        if let Err(problem) = result {
+            assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(problem.message(), "bad input from client");
         }
     }
 
@@ -5328,64 +5103,13 @@ mod tests {
 
         // Should return an error based on is_backend_error_event logic
         assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        if let Err(problem) = result {
+            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
             // Backend comment text falls under the 5xx default — must be
             // sanitized so it cannot leak internals to the client.
-            assert_eq!(error_response.1.message, "Internal server error");
-            assert!(!error_response.1.message.contains("Connection timeout"));
+            assert_eq!(problem.message(), "Internal server error");
+            assert!(!problem.message().contains("Connection timeout"));
         }
-    }
-
-    #[test]
-    fn test_classify_error_for_metrics_validation() {
-        let error_type =
-            classify_error_for_metrics(StatusCode::BAD_REQUEST, "Validation: Invalid parameter");
-        assert_eq!(error_type, ErrorType::Validation);
-
-        let error_type = classify_error_for_metrics(StatusCode::BAD_REQUEST, "Some other error");
-        assert_eq!(error_type, ErrorType::Validation);
-    }
-
-    #[test]
-    fn test_classify_error_for_metrics_status_codes() {
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::NOT_FOUND, "Model not found"),
-            ErrorType::NotFound
-        );
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::NOT_IMPLEMENTED, "Feature not supported"),
-            ErrorType::NotImplemented
-        );
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
-            ErrorType::Overload
-        );
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Unavailable"),
-            ErrorType::Unavailable
-        );
-        assert_eq!(
-            classify_error_for_metrics(overload_status_code(), "Overloaded"),
-            ErrorType::Overload
-        );
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::INTERNAL_SERVER_ERROR, "Panic"),
-            ErrorType::Internal
-        );
-    }
-
-    #[test]
-    fn test_classify_error_for_metrics_client_errors() {
-        // Other 4xx errors should be classified as validation
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::UNAUTHORIZED, "Unauthorized"),
-            ErrorType::Validation
-        );
-        assert_eq!(
-            classify_error_for_metrics(StatusCode::FORBIDDEN, "Forbidden"),
-            ErrorType::Validation
-        );
     }
 
     #[test]

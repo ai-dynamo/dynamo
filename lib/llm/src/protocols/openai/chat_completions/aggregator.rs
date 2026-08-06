@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashMap};
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
@@ -43,8 +43,6 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     /// Map of incremental response choices, keyed by index.
     choices: HashMap<u32, DeltaChoice>,
-    /// Optional structured error if an error occurs during aggregation.
-    error: Option<DynamoError>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
@@ -200,7 +198,6 @@ impl DeltaAggregator {
             usage: None,
             system_fingerprint: None,
             choices: HashMap::new(),
-            error: None,
             service_tier: None,
             nvext: None,
         }
@@ -220,19 +217,9 @@ impl DeltaAggregator {
         parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let mut aggregator = stream
-            .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
-                // Attempt to unwrap the delta, capturing any errors.
-                let delta = match delta.ok_typed() {
-                    Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
-                        return aggregator;
-                    }
-                };
-
-                if aggregator.error.is_none()
-                    && let Some(delta) = delta.data
-                {
+            .map(Annotated::into_data)
+            .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
+                if let Some(delta) = delta {
                     aggregator.id = delta.inner.id;
                     aggregator.model = delta.inner.model;
                     aggregator.created = delta.inner.created;
@@ -340,14 +327,9 @@ impl DeltaAggregator {
                         }
                     }
                 }
-                aggregator
+                Ok(aggregator)
             })
-            .await;
-
-        // Return early if an error was encountered.
-        if let Some(error) = aggregator.error {
-            return Err(error);
-        }
+            .await?;
 
         // #8640: finalize the per-index tool-call chunk accumulator into the
         // choice's `tool_calls` vector. Chunks missing id or name across the

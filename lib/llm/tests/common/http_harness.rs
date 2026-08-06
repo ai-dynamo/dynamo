@@ -68,6 +68,16 @@ impl HarnessService {
         Self::start_with_engines(engine, completion_engine).await
     }
 
+    pub async fn start_with_pending_annotated_scripts(
+        chat_scripts: impl IntoIterator<Item = AnnotatedScript>,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new_pending_after_annotated(
+            chat_scripts,
+        ));
+        let completion_engine = Arc::new(ScriptedCompletionEngine::new([]));
+        Self::start_with_engines(engine, completion_engine).await
+    }
+
     pub async fn start_with_gated_tail(script: Script, split_at: usize) -> (Self, ScriptGate) {
         let (engine, gate) = ScriptedChatEngine::with_gated_tail(script, split_at);
         let completion_engine = Arc::new(ScriptedCompletionEngine::new([]));

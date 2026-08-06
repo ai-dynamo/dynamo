@@ -24,6 +24,7 @@ pub type CompletionScript = Vec<Annotated<NvCreateCompletionResponse>>;
 
 enum QueuedScript {
     Immediate(AnnotatedScript),
+    PendingAfter(AnnotatedScript),
     Gated {
         chunks: AnnotatedScript,
         split_at: usize,
@@ -67,6 +68,18 @@ impl ScriptedChatEngine {
     pub fn new_annotated(scripts: impl IntoIterator<Item = AnnotatedScript>) -> Self {
         Self {
             scripts: Mutex::new(scripts.into_iter().map(QueuedScript::Immediate).collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn new_pending_after_annotated(scripts: impl IntoIterator<Item = AnnotatedScript>) -> Self {
+        Self {
+            scripts: Mutex::new(
+                scripts
+                    .into_iter()
+                    .map(QueuedScript::PendingAfter)
+                    .collect(),
+            ),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -129,6 +142,12 @@ impl
                     for chunk in chunks {
                         yield chunk;
                     }
+                }
+                QueuedScript::PendingAfter(chunks) => {
+                    for chunk in chunks {
+                        yield chunk;
+                    }
+                    std::future::pending::<()>().await;
                 }
                 QueuedScript::Gated {
                     chunks,

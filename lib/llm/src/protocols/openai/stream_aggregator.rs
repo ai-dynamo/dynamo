@@ -28,8 +28,7 @@ where
     let mut response: Option<T> = None;
 
     while let Some(delta) = stream.next().await {
-        let delta = delta.ok_typed()?;
-        if let Some(data) = delta.data {
+        if let Some(data) = delta.into_data()? {
             match response.as_mut() {
                 Some(existing) => existing.merge(data),
                 None => response = Some(data),
@@ -38,14 +37,4 @@ where
     }
 
     Ok(response.unwrap_or_else(T::empty))
-}
-
-/// Backwards-compatible name for callers that adopted typed aggregation before
-/// it became the default.
-pub async fn aggregate_typed_stream<T, S>(stream: S) -> Result<T, DynamoError>
-where
-    T: StreamAggregable,
-    S: Stream<Item = Annotated<T>>,
-{
-    aggregate_stream(stream).await
 }

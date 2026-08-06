@@ -3,6 +3,8 @@
 
 //! HTTP regressions for validation failures shared by the frontend protocols.
 
+use std::time::Duration;
+
 use dynamo_llm::protocols::{
     Annotated,
     openai::{
@@ -30,9 +32,10 @@ mod scripted_chat_engine;
 use http_harness::{HarnessService, MODEL, load_agent_fixture, parse_json_sse};
 use scripted_chat_engine::{AnnotatedScript, CompletionScript};
 
-const BASE_ENV: [(&str, Option<&str>); 2] = [
+const BASE_ENV: [(&str, Option<&str>); 3] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+    (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
 ];
 
 fn backend_error<T>(error_type: ErrorType, message: &str) -> Annotated<T> {
@@ -78,12 +81,7 @@ async fn assert_anthropic_400(response: reqwest::Response, message: &str) {
 #[tokio::test]
 #[serial]
 async fn completions_backend_validation_is_400_for_unary_and_streaming() {
-    let env = [
-        BASE_ENV[0],
-        BASE_ENV[1],
-        (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, Some("500")),
-    ];
-    temp_env::async_with_vars(env, async {
+    temp_env::async_with_vars(BASE_ENV, async {
         let max_tokens_message = "max_tokens must be less than 2147483647";
         let logprobs_message = "Dynamo's SGLang backend does not currently support logprobs >= 1";
         let scripts: Vec<CompletionScript> = [
@@ -278,8 +276,40 @@ async fn unary_and_late_stream_errors_keep_classification_and_envelopes() {
                 ErrorType::Backend(BackendError::Unknown),
                 "secret /srv/anthropic.py",
             ),
+            partial_then_error(&partial, invalid, "invalid late chat input"),
+            partial_then_error(
+                &partial,
+                ErrorType::Backend(BackendError::Unknown),
+                "secret /srv/chat.py",
+            ),
         ];
-        let svc = HarnessService::start_with_scripts(scripts, []).await;
+        let partial_completion: NvCreateCompletionResponse = serde_json::from_value(json!({
+            "id": "cmpl-partial",
+            "object": "text_completion",
+            "created": 0,
+            "model": MODEL,
+            "choices": [{
+                "text": "partial",
+                "index": 0,
+                "logprobs": null,
+                "finish_reason": null
+            }]
+        }))
+        .unwrap();
+        let completion_scripts = vec![
+            vec![
+                Annotated::from_data(partial_completion.clone()),
+                backend_error(invalid, "invalid late completion input"),
+            ],
+            vec![
+                Annotated::from_data(partial_completion),
+                backend_error(
+                    ErrorType::Backend(BackendError::Unknown),
+                    "secret /srv/completion.py",
+                ),
+            ],
+        ];
+        let svc = HarnessService::start_with_scripts(scripts, completion_scripts).await;
 
         let response = svc
             .client
@@ -358,6 +388,141 @@ async fn unary_and_late_stream_errors_keep_classification_and_envelopes() {
             assert_eq!(error.data["error"]["type"], error_type);
             assert_eq!(error.data["error"]["message"], expected_message);
         }
+
+        for (endpoint, client_message) in [
+            ("chat/completions", "invalid late chat input"),
+            ("completions", "invalid late completion input"),
+        ] {
+            for (code, error_type, expected_message) in [
+                (400, "invalid_request_error", client_message.to_string()),
+                (
+                    500,
+                    "internal_server_error",
+                    "Internal server error".to_string(),
+                ),
+            ] {
+                let body = if endpoint == "chat/completions" {
+                    json!({
+                        "model": MODEL,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": true
+                    })
+                } else {
+                    json!({"model": MODEL, "prompt": "ping", "stream": true})
+                };
+                let response = svc
+                    .client
+                    .post(format!("{}/v1/{endpoint}", svc.base_url))
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let events = parse_json_sse(&response.text().await.unwrap())
+                    .await
+                    .unwrap();
+                let error = events
+                    .iter()
+                    .find_map(|event| event.data.get("error"))
+                    .expect("missing OpenAI inline error event");
+                assert_eq!(error["code"], code);
+                assert_eq!(error["type"], error_type);
+                assert_eq!(error["message"], expected_message);
+            }
+        }
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn native_stream_errors_are_terminal_and_recorded_as_failures() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let partial = load_agent_fixture("text.sse").await.unwrap()[0].clone();
+        let invalid = ErrorType::Backend(BackendError::InvalidArgument);
+        let svc = HarnessService::start_with_pending_annotated_scripts([
+            partial_then_error(&partial, invalid, "terminal Responses validation"),
+            partial_then_error(&partial, invalid, "terminal Anthropic validation"),
+        ])
+        .await;
+
+        let response = svc
+            .client
+            .post(format!("{}/v1/responses", svc.base_url))
+            .json(&json!({"model": MODEL, "input": "ping", "stream": true}))
+            .send()
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(1), response.text())
+            .await
+            .expect("Responses stream waited for backend EOF")
+            .unwrap();
+        let events = parse_json_sse(&body).await.unwrap();
+        let failed = events
+            .iter()
+            .find(|event| event.event == "response.failed")
+            .expect("missing terminal response.failed event");
+        assert_eq!(
+            failed.data["response"]["error"]["message"],
+            "terminal Responses validation"
+        );
+
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(1), response.text())
+            .await
+            .expect("Anthropic stream waited for backend EOF")
+            .unwrap();
+        let events = parse_json_sse(&body).await.unwrap();
+        let error = events
+            .iter()
+            .find(|event| event.event == "error")
+            .expect("missing terminal Anthropic error event");
+        assert_eq!(
+            error.data["error"]["message"],
+            "terminal Anthropic validation"
+        );
+
+        let metrics = svc
+            .client
+            .get(format!("{}/metrics", svc.base_url))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        for endpoint in ["responses", "anthropic_messages"] {
+            let line = metrics
+                .lines()
+                .find(|line| {
+                    line.starts_with("dynamo_frontend_requests_total{")
+                        && line.contains(&format!("endpoint=\"{endpoint}\""))
+                        && line.contains("request_type=\"stream\"")
+                        && line.contains("status=\"error\"")
+                        && line.contains("error_type=\"validation\"")
+                })
+                .unwrap_or_else(|| panic!("missing validation failure metric for {endpoint}"));
+            assert!(line.ends_with(" 1"), "unexpected request metric: {line}");
+        }
+        assert!(
+            metrics.lines().any(|line| {
+                line == format!("dynamo_frontend_inflight_requests{{model=\"{MODEL}\"}} 0")
+            }),
+            "inflight gauge did not return to zero"
+        );
 
         svc.shutdown().await;
     })
