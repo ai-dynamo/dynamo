@@ -2271,15 +2271,16 @@ impl OpenAIPreprocessor {
                             tokens_out = tokens;
                         }
                         TokenInput::Batch(token_batches) => {
-                            if token_batches.len() == 1 {
-                                token_count = Some(token_batches[0].len());
-                                tokens_out = token_batches[0].clone();
-                            } else {
+                            let batch_size = token_batches.len();
+                            let Ok([tokens]): Result<[Vec<TokenIdType>; 1], _> =
+                                token_batches.try_into()
+                            else {
                                 bail!(
-                                    "Batch token input not supported for more than one token in requests (got {})",
-                                    token_batches.len()
+                                    "Batch token input requires exactly one token vector in requests (got {batch_size})"
                                 );
-                            }
+                            };
+                            token_count = Some(tokens.len());
+                            tokens_out = tokens;
                         }
                     }
                 }

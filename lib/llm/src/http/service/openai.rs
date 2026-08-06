@@ -1012,7 +1012,8 @@ async fn completions_batch(
     batch_size: usize,
     n: u8,
 ) -> Result<Response, ErrorResponse> {
-    use crate::protocols::openai::completions::extract_single_prompt;
+    use crate::protocols::openai::completions::into_single_prompts;
+    use dynamo_protocols::types::Prompt;
     use futures::stream::{self, StreamExt};
 
     let request_id = request.id().to_string();
@@ -1052,14 +1053,16 @@ async fn completions_batch(
     // prepare to process any annotations
     let annotations = request.annotations();
 
+    // Keep the request template payload-free so each clone does not copy the entire batch.
+    let batch_prompt = std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new()));
+    let single_prompts = into_single_prompts(batch_prompt);
+    debug_assert_eq!(single_prompts.len(), batch_size);
+
     // Generate streams for each prompt in the batch
-    let mut all_streams = Vec::new();
+    let mut all_streams = Vec::with_capacity(batch_size);
     let mut first_ctx = None;
 
-    for prompt_idx in 0..batch_size {
-        // Extract single prompt at this index
-        let single_prompt = extract_single_prompt(&request.inner.prompt, prompt_idx);
-
+    for (prompt_idx, single_prompt) in single_prompts.into_iter().enumerate() {
         // Create a new request with this single prompt
         let mut single_request = request.content().clone();
         single_request.inner.prompt = single_prompt;

@@ -124,6 +124,21 @@ pub fn extract_single_prompt(
     }
 }
 
+pub(crate) fn into_single_prompts(
+    prompt: dynamo_protocols::types::Prompt,
+) -> Vec<dynamo_protocols::types::Prompt> {
+    use dynamo_protocols::types::Prompt;
+
+    match prompt {
+        Prompt::String(prompt) => vec![Prompt::String(prompt)],
+        Prompt::IntegerArray(prompt) => vec![Prompt::IntegerArray(prompt)],
+        Prompt::StringArray(prompts) => prompts.into_iter().map(Prompt::String).collect(),
+        Prompt::ArrayOfIntegerArray(prompts) => {
+            prompts.into_iter().map(Prompt::IntegerArray).collect()
+        }
+    }
+}
+
 impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
@@ -502,6 +517,29 @@ mod tests {
     use crate::protocols::common::OutputOptionsProvider;
     use base64::Engine;
     use serde_json::json;
+
+    #[test]
+    fn test_into_single_prompts_preserves_batch_order() {
+        use dynamo_protocols::types::Prompt;
+
+        assert_eq!(
+            into_single_prompts(Prompt::StringArray(vec![
+                "first".to_string(),
+                "second".to_string(),
+            ])),
+            vec![
+                Prompt::String("first".to_string()),
+                Prompt::String("second".to_string()),
+            ]
+        );
+        assert_eq!(
+            into_single_prompts(Prompt::ArrayOfIntegerArray(vec![vec![1, 2], vec![3, 4],])),
+            vec![
+                Prompt::IntegerArray(vec![1, 2]),
+                Prompt::IntegerArray(vec![3, 4]),
+            ]
+        );
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {
