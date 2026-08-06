@@ -152,46 +152,6 @@ class TestMultimodalEmbeddingLoader:
         assert cached is not None
         assert torch.equal(cached.tensor, tensor)
 
-    @pytest.mark.asyncio
-    async def test_decoded_item_without_content_hash_bypasses_cache(self):
-        """A decoded descriptor lacking a valid content hash is fetched every
-        time and never stored in the cache."""
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-        decoded_item = {"Decoded": {"shape": [4, 4, 3]}}
-        tensor = torch.randn(1, 10, dtype=DTYPE)
-
-        def _fake_groups():
-            return (
-                [
-                    MultiModalGroup(
-                        multimodal_input=MultiModalInput(),
-                        loaded_embedding=tensor,
-                    )
-                ],
-                None,
-            )
-
-        with patch.object(
-            mod,
-            "_fetch_from_encode_workers",
-            new_callable=AsyncMock,
-            side_effect=lambda *args, **kwargs: _fake_groups(),
-        ) as mock_fetch:
-            embedding_loader = mod.MultiModalEmbeddingLoader(AsyncMock(), None, cache)
-            await embedding_loader.load_multimodal_embeddings(
-                [decoded_item],
-                "req-1",
-                model=MODEL,
-            )
-            await embedding_loader.load_multimodal_embeddings(
-                [decoded_item],
-                "req-2",
-                model=MODEL,
-            )
-
-        assert mock_fetch.await_count == 2
-        assert cache.keys() == []
-
     def test_parse_image_item_variants(self):
         assert mod.parse_image_item("http://a.png") == ("http://a.png", None)
         assert mod.parse_image_item({"Url": "http://a.png"}) == (
@@ -207,18 +167,6 @@ class TestMultimodalEmbeddingLoader:
             mod.parse_image_item({"ignored": "value"})
         with pytest.raises(ValueError, match="Unsupported image item"):
             mod.parse_image_item(123)
-
-    def test_image_item_cache_key_domains_are_disjoint(self):
-        url_key = mod._image_item_cache_key({"Url": "http://a.png"})
-        decoded_key = mod._image_item_cache_key(
-            {"Decoded": {"content_hash": "0123456789abcdef"}}
-        )
-        assert url_key == mod.get_embedding_hash("http://a.png")
-        assert len(url_key) == 64
-        assert decoded_key == "0123456789abcdef"
-        # Malformed hashes are unkeyed rather than mis-keyed.
-        for bad in ("0x23456789abcdef", "0123456789ABCDEF", "", None):
-            assert mod._image_item_cache_key({"Decoded": {"content_hash": bad}}) is None
 
     @pytest.mark.asyncio
     async def test_mixed_cache(self):

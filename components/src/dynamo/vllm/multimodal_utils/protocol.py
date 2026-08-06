@@ -170,10 +170,7 @@ class MultiModalRequest(BaseModel):
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None
-    # Frontend-decoded image descriptor ({"shape": ..., "dtype": ...,
-    # "content_hash": ..., NIXL metadata}) forwarded verbatim so the encode
-    # worker can read the decoded RGB pixels via NIXL. Exactly one of
-    # image_url / image_decoded is set for an image group.
+    # Frontend-decoded RGB descriptor, mutually exclusive with image_url.
     image_decoded: Optional[dict[str, Any]] = None
 
 
