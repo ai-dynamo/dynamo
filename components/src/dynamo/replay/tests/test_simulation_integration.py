@@ -26,8 +26,9 @@ from aisimulate.sweeper.sampler import Suggestion
 from aisimulate.sweeper.score import objective_value
 from aisimulate.sweeper.search import Sweeper
 from aisimulate.sweeper.search_space import enumerate_branches
-from dynamo.planner.simulation import create_provider
+from dynamo.planner.simulation import create_provider as create_planner_provider
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
+from dynamo.router.simulation import create_provider as create_router_provider
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -46,10 +47,31 @@ def _config(
     scaling_policy: str,
     candidates_per_round: int = 1,
     parallel_evals: int = 1,
+    include_router: bool = False,
 ) -> SmartSearchConfig:
     # Replay consumes model metadata and the AIC performance database; it does
     # not load model weights or require a GPU. This model/backend pair is kept
     # because it has complete coverage in the GB200 performance database.
+    adapters = {
+        "dynamo.planner": {
+            "search_space": {
+                "scaling_policy": [scaling_policy],
+                "fpm_sampling": ["default"],
+                "load_sensitivity": ["default"],
+                "load_predictor_candidates": ["constant_last"],
+            }
+        }
+    }
+    if include_router:
+        adapters["dynamo.router"] = {
+            "search_space": {
+                "mode": ["kv_router"],
+                "overlap_score_credit": [0.5],
+                "prefill_load_scale": [1.0],
+                "temperature": [0.2],
+            }
+        }
+
     return SmartSearchConfig(
         search_space={
             "model_name": "meta-llama/Meta-Llama-3.1-8B",
@@ -58,16 +80,7 @@ def _config(
             "deployment_mode": ["agg"],
             "gpu_budget": 256,
         },
-        adapters={
-            "dynamo.planner": {
-                "search_space": {
-                    "scaling_policy": [scaling_policy],
-                    "fpm_sampling": ["default"],
-                    "load_sensitivity": ["default"],
-                    "load_predictor_candidates": ["constant_last"],
-                }
-            }
-        },
+        adapters=adapters,
         # Slow the trace enough for load_180_5 to execute a Planner tick.
         workload={"trace_path": _TRACE, "arrival_speedup_ratio": 0.5},
         sweep={
@@ -143,7 +156,7 @@ def _run_one(policy: str):
         backend_version=backend_version,
     )
 
-    adapter = create_provider()
+    adapter = create_planner_provider()
     adapter_plan = adapter.generate_search_space(
         config.adapters["dynamo.planner"].search_space,
         SweepContext(
@@ -215,14 +228,18 @@ def test_real_static_path_preserves_goodput() -> None:
 @pytest.mark.timeout(300)
 def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
     config = _config(
-        scaling_policy="disabled",
+        scaling_policy="load_180_5",
         candidates_per_round=2,
         parallel_evals=2,
+        include_router=True,
     )
 
     candidates = Sweeper(
         runner_factory=DynamoReplayRunnerFactory(),
-        providers={"dynamo.planner": create_provider()},
+        providers={
+            "dynamo.planner": create_planner_provider(),
+            "dynamo.router": create_router_provider(),
+        },
         sampler_factory=_TwoCandidateSampler,
         show_progress=False,
     ).run(config)
@@ -232,3 +249,10 @@ def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
         candidate.metrics["output_throughput_tok_s"] > 0.0 for candidate in candidates
     )
     assert all(candidate.metrics["gpu_hours"] > 0.0 for candidate in candidates)
+    assert all(
+        candidate.metrics["planner_total_ticks"] >= 1 for candidate in candidates
+    )
+    assert all(
+        candidate.config["adapters"]["dynamo.router"]["mode"] == "kv_router"
+        for candidate in candidates
+    )

@@ -36,6 +36,15 @@ from .search_space import BranchSpace
 
 _CONSTANT_PARAM = "_sweeper_constant"
 _METRIC = "objective"
+_SWEEPER_VIZIER_ALGO_ENV = "AISIMULATE_SWEEPER_VIZIER_ALGO"
+_LEGACY_SPICA_VIZIER_ALGO_ENV = "SPICA_VIZIER_ALGO"
+
+
+def _vizier_algorithm() -> str:
+    """Resolve the experimental Vizier override with legacy compatibility."""
+    if _SWEEPER_VIZIER_ALGO_ENV in os.environ:
+        return os.environ[_SWEEPER_VIZIER_ALGO_ENV]
+    return os.environ.get(_LEGACY_SPICA_VIZIER_ALGO_ENV, "DEFAULT")
 
 
 @dataclass
@@ -204,9 +213,9 @@ class VizierBranchSampler:
             )
         study_config = vz.StudyConfig.from_problem(problem)
         # EXPERIMENT (env-gated; default DEFAULT = GP-bandit). The multi-objective GP suggest
-        # can spin/hang at low observation counts; SPICA_VIZIER_ALGO=RANDOM_SEARCH bypasses the
-        # GP (instant suggest, uniform exploration) to cover the curve ends without that stall.
-        study_config.algorithm = os.environ.get("SPICA_VIZIER_ALGO", "DEFAULT")
+        # can spin/hang at low observation counts; RANDOM_SEARCH bypasses the GP (instant
+        # suggest, uniform exploration) to cover the curve ends without that stall.
+        study_config.algorithm = _vizier_algorithm()
         self._study = clients.Study.from_study_config(
             study_config, owner="sweeper", study_id=study_id
         )

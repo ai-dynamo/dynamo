@@ -19,6 +19,7 @@ from aisimulate.sweeper.sampler import (
     Suggestion,
     _decoder_for,
     _index_decoder,
+    _vizier_algorithm,
     make_branch_sampler,
 )
 from aisimulate.sweeper.search_space import BranchSpace
@@ -34,6 +35,21 @@ pytestmark = [
         "ignore:This function is deprecated.*call randint.*:DeprecationWarning"
     ),
 ]
+
+
+def test_vizier_algorithm_defaults_and_preserves_legacy_override(monkeypatch):
+    monkeypatch.delenv("AISIMULATE_SWEEPER_VIZIER_ALGO", raising=False)
+    monkeypatch.delenv("SPICA_VIZIER_ALGO", raising=False)
+    assert _vizier_algorithm() == "DEFAULT"
+
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    assert _vizier_algorithm() == "RANDOM_SEARCH"
+
+
+def test_vizier_algorithm_prefers_sweeper_override(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "LEGACY")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
+    assert _vizier_algorithm() == "RANDOM_SEARCH"
 
 
 def test_decoder_for_categorical_strings_returns_str():
@@ -147,7 +163,7 @@ def test_adapter_dict_choice_decodes_via_index():
 
 
 def test_arbitrary_json_choices_decode_via_index(monkeypatch):
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     choices = [True, None, ["nested"], {"mode": "structured"}, "literal", 1.5]
     pc = ReplicaParallelConfig(
         ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=1
@@ -174,7 +190,7 @@ def test_arbitrary_json_choices_decode_via_index(monkeypatch):
 
 
 def test_parallel_suggestions_project_to_valid_configs(monkeypatch):
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     branch = _branch()
     sampler = make_branch_sampler(branch, study_id="test_structured_parallel")
 
@@ -192,7 +208,7 @@ def test_parallel_suggestions_project_to_valid_configs(monkeypatch):
 
 
 def test_parallel_search_exposes_ordered_size_and_mode_dimensions(monkeypatch):
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     tep4 = ReplicaParallelConfig(
         ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=4
     )
@@ -221,7 +237,7 @@ def test_parallel_search_exposes_ordered_size_and_mode_dimensions(monkeypatch):
 
 
 def test_single_parallel_config_is_pinned(monkeypatch):
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     pinned = ReplicaParallelConfig(
         ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=8
     )
@@ -245,7 +261,7 @@ def test_single_parallel_config_is_pinned(monkeypatch):
 
 
 def test_fully_pinned_study_uses_only_internal_constant(monkeypatch):
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     pinned = ReplicaParallelConfig(
         ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=8
     )
@@ -266,7 +282,7 @@ def test_fully_pinned_study_uses_only_internal_constant(monkeypatch):
 
 
 def test_projection_is_written_to_trial_metadata(monkeypatch):
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     sampler = make_branch_sampler(_branch(), study_id="test_structured_metadata")
     suggestion = sampler.suggest(count=1)[0]
 
@@ -313,7 +329,7 @@ def test_pareto_study_sweeps_kv_load_and_returns_front(monkeypatch):
     # A multi-objective study: a continuous KV-load ratio + two maximized metrics.
     # Verifies the >=2-metric study builds, observe carries both, and optimal_trials() returns
     # a non-empty Pareto set whose trials carry both objectives.
-    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    monkeypatch.setenv("AISIMULATE_SWEEPER_VIZIER_ALGO", "RANDOM_SEARCH")
     branch = _branch_with_kv_load()
     sampler = make_branch_sampler(
         branch,

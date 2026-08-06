@@ -94,6 +94,13 @@ sweeper = Sweeper(
 Sweeper loads only names present under `adapters`. See [Sweep Configuration
 Providers](sweep-config-provider.md) for the complete ABI.
 
+## Sampler Algorithm Override
+
+The experimental `AISIMULATE_SWEEPER_VIZIER_ALGO` environment variable overrides the Vizier
+algorithm. For example, set it to `RANDOM_SEARCH` to bypass the default GP-bandit designer.
+`SPICA_VIZIER_ALGO` remains a deprecated fallback during migration; when both are set, the
+AI Simulate variable takes precedence.
+
 ## Removed KVBM Fields
 
 Sweeper rejects the old KVBM block-count, transfer-bandwidth, offload-batch-size, and cache-hit
