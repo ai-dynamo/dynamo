@@ -1821,9 +1821,13 @@ mod core_behavior {
 mod router_events {
     use super::*;
 
-    #[test]
-    fn test_vllm_pass_visibility_is_pass_start() {
-        let mut core = VllmCore::new_with_kv_capture(router_args(), ROUTER_TEST_WORKER_ID);
+    #[rstest]
+    #[case::vllm(EngineType::Vllm)]
+    #[case::trtllm(EngineType::Trtllm)]
+    fn test_shared_vllm_core_pass_visibility_is_pass_end(#[case] engine_type: EngineType) {
+        let mut args = router_args();
+        args.engine_type = engine_type;
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
@@ -1837,10 +1841,7 @@ mod router_events {
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
 
-        assert_eq!(
-            pass.router_event_visibility,
-            RouterEventVisibility::PassStart
-        );
+        assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
         assert!(!pass.kv_events.is_empty());
         assert!(
             pass.kv_events

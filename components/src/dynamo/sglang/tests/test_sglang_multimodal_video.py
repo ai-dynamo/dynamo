@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 import pytest
 import torch
 
@@ -142,3 +143,46 @@ async def test_build_mm_items_routes_video_to_video_data():
         mm_item["second_per_grid_ts"], torch.tensor([0.5], dtype=torch.float32)
     )
     assert mm_item["video_timestamps"] == [[0.25, 0.75]]
+
+
+async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
+    """The metadata shim gives pre-decoded ndarray frames a valid metadata dict.
+
+    SGLang's ``preprocess_video`` returns ``(frames, None)`` for a pre-decoded
+    ndarray, and transformers >= 5.12 strict-rejects the resulting
+    ``video_metadata=[None]``. ``_install_nvdec_video_metadata_shim`` wraps it so
+    the ndarray carries a valid dict instead (validated end-to-end on gpu-ts
+    against the real ``MMEncoder._encode``: before FAIL -> after PASS).
+    """
+    es = pytest.importorskip("sglang.srt.disaggregation.encode_server")
+    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+        _NVDEC_SHIM_FPS,
+        _install_nvdec_video_metadata_shim,
+    )
+
+    saved = es.preprocess_video
+    try:
+        _install_nvdec_video_metadata_shim()
+        assert getattr(es.preprocess_video, "_dynamo_nvdec_shim", False)
+
+        # Idempotent: a second install must not double-wrap.
+        wrapped = es.preprocess_video
+        _install_nvdec_video_metadata_shim()
+        assert es.preprocess_video is wrapped
+
+        frames = np.zeros((5, 8, 8, 3), dtype=np.uint8)
+        video, meta = await es.preprocess_video(frames)
+        assert video is frames
+        assert meta == {
+            "fps": _NVDEC_SHIM_FPS,
+            "duration": 5 / _NVDEC_SHIM_FPS,
+            "total_num_frames": 5,
+            "frames_indices": [0, 1, 2, 3, 4],
+            "video_backend": "nvdec",
+        }
+
+        # Non-ndarray inputs keep None metadata (the shim only touches pixels).
+        _, meta_none = await es.preprocess_video("not-an-array")
+        assert meta_none is None
+    finally:
+        es.preprocess_video = saved

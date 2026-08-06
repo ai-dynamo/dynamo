@@ -17,7 +17,8 @@
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
 //!   - Standalone router: not created (frontend-only)
 //!
-//! - [`RouterRequestMetrics`]: Per-request aggregate histograms (TTFT, ITL, tokens, KV hit rate).
+//! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (TTFT, ITL,
+//!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
 //!   Populated by `KvPushRouter::generate()` and its `RequestGuard` as it observes
@@ -57,9 +58,12 @@ fn router_metric(suffix: &str) -> String {
     format!("{}{}", router_request::METRIC_PREFIX, suffix)
 }
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
+use prometheus::{
+    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+};
 
 use crate::http::service::metrics::generate_log_buckets;
+use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -716,7 +720,7 @@ impl RoutingOverheadMetrics {
                     routing_overhead::SHARED_CACHE_ERRORS_TOTAL
                 );
                 prometheus::IntCounter::with_opts(
-                    Opts::new(name, "Total shared cache query errors")
+                    Opts::new(name, "Total shared cache failures")
                         .const_label(labels::ROUTER_ID, &router_id),
                 )
                 .expect("shared_cache_errors_total")
@@ -828,6 +832,8 @@ pub struct RouterRequestMetrics {
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
+    pub non_max_overlap_selections_total: IntCounterVec,
+    pub overlap_blocks_lost: HistogramVec,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -944,6 +950,25 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
                     )
                     .expect("failed to create router_shared_cache_beyond_blocks");
+                let non_max_overlap_selections_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
+                        "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_non_max_overlap_selections_total");
+                let overlap_blocks_lost = metrics
+                    .create_histogramvec(
+                        &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
+                        "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
+                    )
+                    .expect("failed to create router_overlap_blocks_lost");
+                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -954,9 +979,22 @@ impl RouterRequestMetrics {
                     kv_transfer_estimated_latency_seconds,
                     shared_cache_hit_rate,
                     shared_cache_beyond_blocks,
+                    non_max_overlap_selections_total,
+                    overlap_blocks_lost,
                 })
             })
             .clone()
+    }
+
+    /// Record a selection that sacrificed KV cache overlap.
+    pub fn observe_non_max_overlap_selection(&self, worker_type: &str, overlap_blocks_lost: f64) {
+        debug_assert!(overlap_blocks_lost > 0.0);
+        self.non_max_overlap_selections_total
+            .with_label_values(&[worker_type])
+            .inc();
+        self.overlap_blocks_lost
+            .with_label_values(&[worker_type])
+            .observe(overlap_blocks_lost);
     }
 }
 
