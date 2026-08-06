@@ -25,7 +25,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.multimodal,
-    pytest.mark.gpu_1,  # sglang tests run on GPU-enabled workers
+    pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
     pytest.mark.skipif(Modality is None, reason="SGLang Modality is required"),
