@@ -20,6 +20,7 @@ use dynamo_llm::{
         service_v2::HttpService,
     },
     model_card::ModelDeploymentCard,
+    types::openai::completions::OpenAICompletionsStreamingEngine,
 };
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
@@ -218,6 +219,92 @@ impl
             };
         };
         Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for InvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield invalid_argument_frame();
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// Engine that yields a normal chunk before the `Backend(InvalidArgument)`
+/// frame — modeling a backend that raises after its first decode step.
+struct LateInvalidArgumentEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for LateInvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::from_data(completion_chunk("partial"));
+            yield invalid_argument_frame();
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+const INVALID_ARGUMENT_MESSAGE: &str =
+    "Dynamo's SGLang backend does not currently support logprobs >= 1";
+
+fn invalid_argument_frame() -> Annotated<NvCreateCompletionResponse> {
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+    Annotated {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: None,
+        error: Some(
+            DynamoError::builder()
+                .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                .message(INVALID_ARGUMENT_MESSAGE)
+                .build(),
+        ),
+    }
+}
+
+fn completion_chunk(text: &str) -> NvCreateCompletionResponse {
+    NvCreateCompletionResponse {
+        inner: dynamo_protocols::types::CreateCompletionResponse {
+            id: "cmpl-test".to_string(),
+            choices: vec![dynamo_protocols::types::Choice {
+                text: text.to_string(),
+                index: 0,
+                logprobs: None,
+                finish_reason: None,
+            }],
+            created: 0,
+            model: "test".to_string(),
+            system_fingerprint: None,
+            object: "text_completion".to_string(),
+            usage: None,
+        },
+        nvext: None,
     }
 }
 
@@ -1467,6 +1554,97 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
         text.contains("Received multimodal data but multimodal processing is not enabled"),
         "expected typed backend error message forwarded to client; got: {text}"
     );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+async fn serve_completions_model(
+    name: &str,
+    engine: OpenAICompletionsStreamingEngine,
+) -> (
+    u16,
+    CancellationToken,
+    tokio::task::JoinHandle<Result<(), Error>>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only(name);
+    manager
+        .add_completions_model(name, card.mdcsum(), engine)
+        .unwrap();
+
+    (port, cancel_token, task)
+}
+
+async fn post_completion(
+    port: u16,
+    model: &str,
+    prompt: &serde_json::Value,
+) -> (StatusCode, String) {
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/completions"))
+        .json(&serde_json::json!({ "model": model, "prompt": prompt }))
+        .send()
+        .await
+        .expect("POST /v1/completions");
+    let status = response.status();
+    (status, response.text().await.unwrap_or_default())
+}
+
+/// Single and array prompts take different handlers (`completions_single` vs
+/// `completions_batch`), so both shapes are asserted.
+async fn assert_completions_surface_invalid_argument(model: &str, port: u16) {
+    for prompt in [
+        serde_json::json!("hi"),
+        serde_json::json!(["hi", "bye", "ciao"]),
+    ] {
+        let (status, body) = post_completion(port, model, &prompt).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "prompt {prompt}: typed Backend(InvalidArgument) must reach the client as 400; got {status}, body: {body}"
+        );
+        assert!(
+            body.contains(INVALID_ARGUMENT_MESSAGE),
+            "prompt {prompt}: expected the backend message forwarded to the client; got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_completions_surface_backend_invalid_argument() {
+    let (port, cancel_token, task) =
+        serve_completions_model("invalid-arg-model", Arc::new(InvalidArgumentEngine {})).await;
+
+    assert_completions_surface_invalid_argument("invalid-arg-model", port).await;
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_completions_surface_backend_invalid_argument_after_first_chunk() {
+    let (port, cancel_token, task) = serve_completions_model(
+        "late-invalid-arg-model",
+        Arc::new(LateInvalidArgumentEngine {}),
+    )
+    .await;
+
+    assert_completions_surface_invalid_argument("late-invalid-arg-model", port).await;
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

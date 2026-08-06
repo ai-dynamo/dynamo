@@ -53,6 +53,7 @@ use crate::protocols::common::extensions::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -849,17 +850,6 @@ async fn completions_single(
 
         Ok(sse_stream.into_response())
     } else {
-        // Preserve typed backend errors before the completions aggregator turns
-        // them into strings. In particular, Python ValueError/TypeError arrives
-        // as Backend(InvalidArgument) and must remain an HTTP 400.
-        let stream = check_for_backend_error(stream, None)
-            .await
-            .map_err(|error_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                error_response
-            })?;
-
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
@@ -871,19 +861,10 @@ async fn completions_single(
             );
         });
 
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+        let response = aggregate_completion_response(stream, parsing_options, &request_id)
             .await
-            .map_err(|e| {
-                tracing::error!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id,
-                    e
-                );
-                let err_response = ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold completions stream for {request_id}"
-                ));
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                err_response
+            .inspect_err(|error_response| {
+                inflight_guard.mark_error(extract_error_type_from_response(error_response));
             })?;
 
         inflight_guard.mark_ok();
@@ -976,26 +957,40 @@ fn aggregate_batch_completion_usage(
     }
 }
 
-type BoxedCompletionResponseStream =
-    std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>;
-
-/// Check each prompt stream before merging a non-streaming completion batch.
+/// Fold a non-streaming completion stream into a single response.
 ///
-/// `select_all` cannot safely provide this check after merging because a normal
-/// event from one prompt may arrive before a typed backend error from another.
-/// Poll all streams concurrently so batch startup is not serialized.
-async fn check_completion_batch_streams<S>(
-    streams: Vec<S>,
-) -> Result<Vec<BoxedCompletionResponseStream>, ErrorResponse>
-where
-    S: futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send + 'static,
-{
-    futures::future::try_join_all(
-        streams
-            .into_iter()
-            .map(|stream| check_for_backend_error(stream, None)),
-    )
-    .await
+/// The aggregator reduces a backend error to a string, so the typed error is
+/// captured from the raw events and returned with its own status. Every event
+/// is inspected, so a backend that fails after its first chunk is covered too.
+async fn aggregate_completion_response(
+    stream: impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>>,
+    parsing_options: ParsingOptions,
+    request_id: &str,
+) -> Result<NvCreateCompletionResponse, ErrorResponse> {
+    let backend_error = Arc::new(std::sync::OnceLock::new());
+    let first_error = backend_error.clone();
+    let stream = stream.inspect(move |response| {
+        if let Some(error) = extract_backend_error_if_present(response) {
+            // Keep the first error; it is the one that ended generation.
+            let _ = first_error.set(error);
+        }
+    });
+
+    let aggregated =
+        NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options).await;
+
+    if let Some((message, status)) = backend_error.get() {
+        let error_response = backend_error_response(message.clone(), *status);
+        tracing::warn!(request_id, ?error_response, "Backend error detected");
+        return Err(error_response);
+    }
+
+    aggregated.map_err(|e| {
+        tracing::error!(request_id, "Failed to fold completions stream: {e:?}");
+        ErrorMessage::internal_server_error(&format!(
+            "Failed to fold completions stream for {request_id}"
+        ))
+    })
 }
 
 /// Handle batch prompt completions (multiple prompts with n choices each)
@@ -1100,23 +1095,6 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    let all_streams: Vec<BoxedCompletionResponseStream> = if streaming {
-        all_streams
-            .into_iter()
-            .map(|stream| Box::pin(stream) as BoxedCompletionResponseStream)
-            .collect()
-    } else {
-        check_completion_batch_streams(all_streams)
-            .await
-            .map_err(|error_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                error_response
-            })?
-    };
-
-    // Merge all streams after every non-streaming prompt has passed its own
-    // backend-error preflight.
     let merged_stream = stream::select_all(all_streams);
     let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
@@ -1189,19 +1167,10 @@ async fn completions_batch(
             );
         });
 
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+        let response = aggregate_completion_response(stream, parsing_options, &request_id)
             .await
-            .map_err(|e| {
-                tracing::error!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id,
-                    e
-                );
-                let err_response = ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold completions stream for {request_id}"
-                ));
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                err_response
+            .inspect_err(|error_response| {
+                inflight_guard.mark_error(extract_error_type_from_response(error_response));
             })?;
 
         inflight_guard.mark_ok();
@@ -5126,82 +5095,6 @@ mod tests {
             assert_eq!(error_response.1.error_type, "Bad Request");
             assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
-    }
-
-    #[tokio::test]
-    async fn test_completion_backend_invalid_argument_surfaces_as_400() {
-        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
-        use futures::stream;
-
-        let error_event = Annotated::<NvCreateCompletionResponse> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: None,
-            error: Some(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
-                    .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
-                    .build(),
-            ),
-        };
-
-        let error_response =
-            match check_for_backend_error(stream::iter(vec![error_event]), None).await {
-                Ok(_) => panic!("typed completion error must fail"),
-                Err(error_response) => error_response,
-            };
-
-        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
-        assert_eq!(error_response.1.error_type, "Bad Request");
-        assert!(
-            error_response
-                .1
-                .message
-                .contains("does not currently support logprobs >= 1")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_batch_completion_checks_every_stream_for_backend_errors() {
-        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
-        use futures::stream;
-
-        let normal_event = Annotated::<NvCreateCompletionResponse> {
-            data: Some(make_completion_chunk("ok", None, None)),
-            id: None,
-            event: None,
-            comment: None,
-            error: None,
-        };
-        let error_event = Annotated::<NvCreateCompletionResponse> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: None,
-            error: Some(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
-                    .message("invalid second prompt")
-                    .build(),
-            ),
-        };
-
-        let result = check_completion_batch_streams(vec![
-            stream::iter(vec![normal_event]),
-            stream::iter(vec![error_event]),
-        ])
-        .await;
-
-        let error_response = match result {
-            Ok(_) => panic!("an error in any batch prompt must fail the request"),
-            Err(error_response) => error_response,
-        };
-        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
-        assert_eq!(error_response.1.error_type, "Bad Request");
-        assert_eq!(error_response.1.message, "invalid second prompt");
     }
 
     #[tokio::test]
