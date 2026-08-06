@@ -7,7 +7,11 @@ import os
 
 import pytest
 
-from tests.serve.common import WORKSPACE_DIR, run_serve_deployment
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    run_serve_deployment,
+    topology_dependent_reason,
+)
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import images_payload_default
@@ -40,8 +44,15 @@ def _params_without_model_mark(configs):
 
     The sample diffusion engine registers name-only (no Hugging Face model),
     so a ``model`` marker would make ``predownload_models`` try to fetch
-    ``sample-diffusion-model`` from the Hub and fail."""
-    return [pytest.param(name, marks=list(cfg.marks)) for name, cfg in configs.items()]
+    ``sample-diffusion-model`` from the Hub and fail. The
+    ``topology_dependent`` derivation still applies."""
+    params = []
+    for name, cfg in configs.items():
+        marks = list(cfg.marks)
+        if topology_dependent_reason(cfg) is not None:
+            marks.append(pytest.mark.topology_dependent)
+        params.append(pytest.param(name, marks=marks))
+    return params
 
 
 @pytest.fixture(params=_params_without_model_mark(sample_diffusion_configs))

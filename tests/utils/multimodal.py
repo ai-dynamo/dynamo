@@ -198,6 +198,12 @@ class UuidPassthroughChatPayload(ChatPayload):
         payload.expected_log = []
         return payload
 
+    def declares_log_assertions(self) -> bool:
+        # expected_log stays empty until body_for_iteration reaches the final
+        # iteration, so the base implementation would report False at collection
+        # time and leave the embedding-cache config unmarked.
+        return bool(self._uuid_final_expected_log) or bool(self.expected_log)
+
     def _build_uuid_body(
         self,
         request_index: int,
