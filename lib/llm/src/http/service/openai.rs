@@ -2859,6 +2859,17 @@ pub fn validate_response_unsupported_fields(
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
+    if request
+        .nvext
+        .as_ref()
+        .is_some_and(|nvext| nvext.custom_encoder_data.is_some())
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "`nvext.custom_encoder_data` is supported only by the Chat Completions API.",
+        ));
+    }
+
     if let Some(field) = request
         .nvext
         .as_ref()
@@ -4396,6 +4407,26 @@ mod tests {
             result.is_none(),
             "store should be supported for audit opt-in"
         );
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_custom_encoder_data() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            serde_json::from_value(serde_json::json!({
+                "custom_encoder_data": {
+                    "version": 1,
+                    "items": [{
+                        "modality": "image",
+                        "placement": {"message_index": 0, "content_index": 0},
+                        "payload": {"kind": "tensor_ref", "uri": "s3://bucket/tensor"}
+                    }]
+                }
+            }))
+            .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_some());
     }
 
     #[tokio::test]

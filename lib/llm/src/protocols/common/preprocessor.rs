@@ -12,7 +12,7 @@ use dynamo_kv_router::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::extensions::{AgentContext, RouterParams};
+use super::extensions::{AgentContext, CustomEncoderModality, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
@@ -154,6 +154,11 @@ pub enum MultimodalData {
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
+    /// Opaque input interpreted by a configured custom encoder.
+    CustomEncoderData {
+        modality: CustomEncoderModality,
+        payload: serde_json::Value,
+    },
 }
 
 // multimodal map containing {mm_part_type: [data...]}
@@ -511,6 +516,22 @@ mod tests {
         assert_eq!(guided["require_reasoning"], true);
         let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
         assert!(back.require_reasoning);
+    }
+
+    #[test]
+    fn custom_encoder_multimodal_data_round_trips() {
+        let value = serde_json::json!({
+            "CustomEncoderData": {
+                "modality": "image",
+                "payload": {
+                    "kind": "tensor_ref",
+                    "uri": "s3://bucket/tensor.safetensors"
+                }
+            }
+        });
+
+        let data: MultimodalData = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(data).unwrap(), value);
     }
 
     /// Canary payloads carry only engine-relevant fields. All other required

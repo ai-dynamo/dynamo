@@ -205,6 +205,19 @@ pub struct NvCreateTensorRequest {
     pub nvext: Option<NvExt>,
 }
 
+impl NvCreateTensorRequest {
+    pub fn validate_custom_encoder_data(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.nvext
+                .as_ref()
+                .and_then(|nvext| nvext.custom_encoder_data.as_ref())
+                .is_none(),
+            "nvext.custom_encoder_data is supported only by the Chat Completions API"
+        );
+        Ok(())
+    }
+}
+
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse`.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
@@ -267,6 +280,38 @@ impl AnnotationsProvider for NvCreateTensorRequest {
 pub struct DeltaAggregator {
     response: Option<NvCreateTensorResponse>,
     error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_encoder_data_is_rejected_for_tensor_requests() {
+        let request: NvCreateTensorRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "tensors": [],
+            "nvext": {
+                "custom_encoder_data": {
+                    "version": 1,
+                    "items": [{
+                        "modality": "image",
+                        "placement": {"message_index": 0, "content_index": 0},
+                        "payload": {"kind": "tensor_ref"}
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(
+            request
+                .validate_custom_encoder_data()
+                .unwrap_err()
+                .to_string()
+                .contains("Chat Completions API")
+        );
+    }
 }
 
 impl NvCreateTensorResponse {

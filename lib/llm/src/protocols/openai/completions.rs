@@ -467,6 +467,13 @@ impl ValidateRequest for NvCreateCompletionRequest {
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
+        anyhow::ensure!(
+            self.nvext
+                .as_ref()
+                .and_then(|nvext| nvext.custom_encoder_data.as_ref())
+                .is_none(),
+            "nvext.custom_encoder_data is supported only by the Chat Completions API"
+        );
         // none for stream
         // none for stream_options
         validate::validate_logprobs(self.inner.logprobs)?;
@@ -556,6 +563,30 @@ mod tests {
             .extract_output_options()
             .expect("Failed to extract output options");
         assert_eq!(output_options.prompt_logprobs, Some(3));
+    }
+
+    #[test]
+    fn test_custom_encoder_data_rejected_for_text_and_token_completions() {
+        for prompt in [json!("Hello"), json!([1, 2, 3])] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "prompt": prompt,
+                "nvext": {
+                    "custom_encoder_data": {
+                        "version": 1,
+                        "items": [{
+                            "modality": "image",
+                            "placement": {"message_index": 0, "content_index": 0},
+                            "payload": {"kind": "tensor_ref", "uri": "s3://bucket/input"}
+                        }]
+                    }
+                }
+            }))
+            .unwrap();
+
+            let error = ValidateRequest::validate(&request).unwrap_err();
+            assert!(error.to_string().contains("Chat Completions API"));
+        }
     }
 
     #[test]

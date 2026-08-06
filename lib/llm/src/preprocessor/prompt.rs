@@ -29,6 +29,51 @@ use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
 
+fn chat_messages_for_rendering(request: &NvCreateChatCompletionRequest) -> serde_json::Value {
+    let mut messages = serde_json::to_value(&request.inner.messages).unwrap();
+    let Some(custom_data) = request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.custom_encoder_data.as_ref())
+    else {
+        return messages;
+    };
+
+    // Request validation reports placement errors. Keep this rendering helper
+    // total for callers that inspect messages before validation.
+    if custom_data
+        .validate_chat_messages(&request.inner.messages)
+        .is_err()
+    {
+        return messages;
+    }
+
+    let messages_array = messages
+        .as_array_mut()
+        .expect("chat messages must serialize as an array");
+    let mut inserted_per_message = std::collections::HashMap::<usize, usize>::new();
+    for (ordinal, item) in custom_data.items_in_prompt_order().into_iter().enumerate() {
+        let placement = item.placement;
+        let inserted = inserted_per_message
+            .entry(placement.message_index)
+            .or_default();
+        let content = messages_array[placement.message_index]["content"]
+            .as_array_mut()
+            .expect("custom encoder placement must reference array-form user content");
+        content.insert(
+            placement.content_index + *inserted,
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("dynamo://custom-encoder/{ordinal}")
+                }
+            }),
+        );
+        *inserted += 1;
+    }
+    messages
+}
+
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
 /// [`OAIChatLikeRequest`] so `dynamo_renderer` stays free of the media module;
 /// the multimodal preprocessing path bounds on `OAIChatLikeRequest + MediaRequestExt`.
@@ -42,7 +87,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let messages_json = chat_messages_for_rendering(self);
         Value::from_serialize(&messages_json)
     }
 
@@ -280,5 +325,52 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
             "prompt_formatter should not have type HfChatTemplate*"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_encoder_placeholders_exist_only_in_rendered_messages() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test/model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "text", "text": "after"}
+                ]
+            }],
+            "nvext": {
+                "custom_encoder_data": {
+                    "version": 1,
+                    "items": [
+                        {
+                            "modality": "image",
+                            "placement": {"message_index": 0, "content_index": 2},
+                            "payload": {"id": "second"}
+                        },
+                        {
+                            "modality": "image",
+                            "placement": {"message_index": 0, "content_index": 1},
+                            "payload": {"id": "first"}
+                        }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let rendered = chat_messages_for_rendering(&request);
+        let parts = rendered[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "before");
+        assert_eq!(parts[1]["image_url"]["url"], "dynamo://custom-encoder/0");
+        assert_eq!(parts[2]["text"], "after");
+        assert_eq!(parts[3]["image_url"]["url"], "dynamo://custom-encoder/1");
+
+        let original = serde_json::to_value(&request.inner.messages).unwrap();
+        assert_eq!(original[0]["content"].as_array().unwrap().len(), 2);
     }
 }
