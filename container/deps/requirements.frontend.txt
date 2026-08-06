@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Required by experimental KV router --router-prefill-load-model=aic.
-aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@0ee4eacf9079eff65cbe45cbbbd9cab1d98c06e3#subdirectory=aic-core
+aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@c80c1875e1e623dc89bbe150d9d763a3a8d232df#subdirectory=aic-core
 
 # tritonclient<=2.62.0 requires grpcio<1.68 and protobuf<6.0dev; pin here so the
 # resolver picks compatible versions when installed alongside runtime deps.

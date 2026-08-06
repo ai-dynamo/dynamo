@@ -196,7 +196,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
     The DRA `DeviceClass` to request GPUs from.
   </ParamField>
   <ParamField path="extraClientContainers" type="[]string">
-    Additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under the checkpoint job's `gmsClientContainers` instead. In each rendered pod, only matching container names are wired; absent names are ignored. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+    Additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under the checkpoint job's `gmsClientContainers` instead. Every name must match a container in the enclosing component's `podTemplate.spec.containers`. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
   </ParamField>
   <ParamField path="extraClientPods" type="[]GMSClientPodSpec">
     Additional GMS client pods for inter-pod GMS. Reserved for future use and rejected until inter-pod client orchestration is wired.
