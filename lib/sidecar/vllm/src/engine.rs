@@ -271,16 +271,39 @@ impl LLMEngine for VllmSidecarEngine {
                                 }
                             }
                             Ok(None) => {}
+                            Err(error) if request_cancelled => {
+                                tracing::warn!(
+                                    %error,
+                                    "vLLM response conversion failed after request cancellation"
+                                );
+                                yield Ok(cancelled(&state));
+                                break;
+                            }
                             Err(error) => {
                                 yield Err(error);
                                 break;
                             }
                         }
                     }
+                    Ok(None) if request_cancelled => {
+                        tracing::warn!(
+                            "vLLM GenerateStream ended before transfer completion after request cancellation"
+                        );
+                        yield Ok(cancelled(&state));
+                        break;
+                    }
                     Ok(None) => {
                         yield Err(client::protocol_error(
                             "GenerateStream ended before a terminal response",
                         ));
+                        break;
+                    }
+                    Err(status) if request_cancelled => {
+                        tracing::warn!(
+                            %status,
+                            "vLLM GenerateStream failed before transfer completion after request cancellation"
+                        );
+                        yield Ok(cancelled(&state));
                         break;
                     }
                     Err(status) => {
