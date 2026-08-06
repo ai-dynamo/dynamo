@@ -56,9 +56,15 @@ impl
         let (request, context) = request.transfer(());
         let ctx = context.context();
 
-        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
+        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens.
+        // The Anthropic conversion maps its max_tokens to
+        // max_completion_tokens, so honor either field as the delay knob.
         #[allow(deprecated)]
-        let delay_ms = request.inner.max_tokens.unwrap_or(0) as u64;
+        let delay_ms = request
+            .inner
+            .max_completion_tokens
+            .or(request.inner.max_tokens)
+            .unwrap_or(0) as u64;
         let mut generator = request.response_generator(ctx.id().to_string());
 
         let stream = stream! {
@@ -146,6 +152,7 @@ async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
+        .enable_anthropic_endpoints(true)
         .admission_gate_config(config)
         .build()
         .unwrap();
@@ -213,6 +220,27 @@ async fn post_image(port: u16, model: &str) -> reqwest::Response {
             "model": model,
             "prompt": "draw a small square"
         }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_count_tokens(port: u16) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/messages/count_tokens"))
+        .json(&serde_json::json!({
+            "model": "fast",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_messages(port: u16, body: &serde_json::Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/messages"))
+        .json(body)
         .send()
         .await
         .unwrap()
@@ -463,6 +491,67 @@ async fn test_concurrency_gate_alias_shares_primary_mdc_override() {
 }
 
 #[tokio::test]
+async fn test_concurrency_gate_rejects_anthropic_messages() {
+    // The Anthropic Messages surface enforces the per-model concurrency gate
+    // for both unary and streaming requests, rejecting with the Anthropic
+    // error envelope rather than the OpenAI error shape.
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(Some(1), None, None).expect("valid admission gate config"),
+    )
+    .await;
+    let metrics = svc.state.metrics_clone();
+    let port = svc.port;
+
+    for streaming in [false, true] {
+        let holder = tokio::spawn(async move {
+            post_messages(
+                port,
+                &serde_json::json!({
+                    "model": "slow",
+                    "max_tokens": 300,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }),
+            )
+            .await
+        });
+        wait_for_inflight(&metrics, "slow", 1).await;
+
+        let rejected = post_messages(
+            port,
+            &serde_json::json!({
+                "model": "slow",
+                "max_tokens": 1,
+                "stream": streaming,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = rejected.json().await.unwrap();
+        assert_eq!(body["type"], "error", "Anthropic envelope expected: {body}");
+        assert_eq!(
+            body["error"]["type"], "overloaded_error",
+            "Anthropic overload classification expected: {body}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("frontend-global"),
+            "rejection should identify the limit source: {body}"
+        );
+
+        assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        wait_for_inflight(&metrics, "slow", 0).await;
+    }
+
+    assert_eq!(
+        metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "slow"),
+        2
+    );
+}
+
+#[tokio::test]
 async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
     // A live tokio runtime always has far more than one alive task, so
     // limit=1 rejects every inference request.
@@ -482,6 +571,44 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
             .metrics_clone()
             .get_admission_rejection_count(admission_gate::RUNTIME_TASK, ""),
         1
+    );
+
+    // count_tokens does not open a request-plane stream, but it is still an
+    // inference route and remains subject to the runtime-task pressure gate.
+    let count_tokens = post_count_tokens(svc.port).await;
+    assert_eq!(count_tokens.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Anthropic routes get the Anthropic error envelope even for
+    // middleware-level (frontend-local) gate rejections.
+    let ct_body: serde_json::Value = count_tokens.json().await.unwrap();
+    assert_eq!(
+        ct_body["type"], "error",
+        "Anthropic envelope expected on count_tokens rejection: {ct_body}"
+    );
+    assert_eq!(
+        ct_body["error"]["type"], "overloaded_error",
+        "Anthropic overload classification expected: {ct_body}"
+    );
+    let messages = post_messages(
+        svc.port,
+        &serde_json::json!({
+            "model": "fast",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        }),
+    )
+    .await;
+    assert_eq!(messages.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let msg_body: serde_json::Value = messages.json().await.unwrap();
+    assert_eq!(
+        msg_body["type"], "error",
+        "Anthropic envelope expected on /v1/messages rejection: {msg_body}"
+    );
+    assert_eq!(msg_body["error"]["type"], "overloaded_error");
+    assert_eq!(
+        svc.state
+            .metrics_clone()
+            .get_admission_rejection_count(admission_gate::RUNTIME_TASK, ""),
+        3
     );
 
     // System routes bypass the inference admission middleware.
@@ -535,6 +662,37 @@ async fn test_request_plane_gate_rejects_at_observed_threshold() {
     drop(pressure);
     let ok = post_chat(svc.port, &chat_request("fast", 1)).await;
     assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_request_plane_gate_skips_local_count_tokens() {
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, None, Some(1)).expect("valid admission gate config"),
+    )
+    .await;
+    let _pressure = RequestPlanePressureGuard::new();
+
+    // This route estimates tokens locally and never opens a request-plane
+    // stream, so request-plane pressure must not reject it.
+    let count_tokens = post_count_tokens(svc.port).await;
+    assert_eq!(count_tokens.status(), StatusCode::OK);
+    assert_eq!(
+        svc.state
+            .metrics_clone()
+            .get_admission_rejection_count(admission_gate::REQUEST_PLANE_CONNECTION, ""),
+        0
+    );
+
+    // A route that dispatches to a worker is still rejected by the same gate.
+    let chat = post_chat(svc.port, &chat_request("fast", 1)).await;
+    assert_eq!(chat.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        svc.state
+            .metrics_clone()
+            .get_admission_rejection_count(admission_gate::REQUEST_PLANE_CONNECTION, ""),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

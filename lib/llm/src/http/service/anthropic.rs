@@ -366,15 +366,32 @@ async fn anthropic_messages(
         ),
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::AnthropicMessages,
         streaming,
         request.id(),
     );
+
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge (labeled by
+    // `metric_model`, like every other gated surface) so concurrent arrivals
+    // cannot slip past the limit.
+    if let Some(message) =
+        super::admission::evaluate_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+        return Err(anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+            &message,
+        ));
+    }
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
@@ -543,6 +560,19 @@ async fn anthropic_messages(
         let stream_with_check = super::openai::check_for_backend_error(engine_stream, None)
             .await
             .map_err(|(status, _json_err)| {
+                // Classify the request counter by the backend status instead
+                // of letting the guard drop with the default Internal label.
+                inflight_guard.mark_error(if status == StatusCode::SERVICE_UNAVAILABLE {
+                    super::metrics::ErrorType::Unavailable
+                } else if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
+                    super::metrics::ErrorType::Overload
+                } else if status.as_u16() == 499 {
+                    super::metrics::ErrorType::Cancelled
+                } else if status.is_client_error() {
+                    super::metrics::ErrorType::Validation
+                } else {
+                    super::metrics::ErrorType::Internal
+                });
                 // check_for_backend_error has already sanitized the body and
                 // logged the backend detail; preserve its status when
                 // re-wrapping in Anthropic format. Status classification is
@@ -935,6 +965,12 @@ fn find_invalid_argument_in_chain<'a>(
 
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
+/// Frontend-local admission rejections (shaped by the gate middleware, which
+/// runs before this module's route middleware) as the Anthropic envelope.
+pub(crate) fn overloaded_error_response(message: &str) -> Response {
+    anthropic_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded_error", message)
+}
+
 fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
     let mapped_type = match status.as_u16() {
         400 => "invalid_request_error",

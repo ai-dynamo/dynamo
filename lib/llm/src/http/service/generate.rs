@@ -285,9 +285,15 @@ async fn handler_generate(
     let model = match &request.model {
         Some(model) => model.clone(),
         None => {
-            let models = state
+            // Aliases mirror their primary's WorkerSet under a separate model
+            // name; canonicalize and deduplicate so a single primary with
+            // aliases still counts as one model for the no-model default.
+            let models: std::collections::BTreeSet<String> = state
                 .manager()
-                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY);
+                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+                .into_iter()
+                .map(|model| state.manager().resolve_canonical_name(&model))
+                .collect();
             match models.len() {
                 1 => models.into_iter().next().unwrap(),
                 0 => {
@@ -308,6 +314,13 @@ async fn handler_generate(
             }
         }
     };
+
+    // Resolve alias -> primary before readiness, engine lookup, metrics, and
+    // admission (matching the OpenAI and Anthropic handlers). Without this an
+    // alias-named request gets its own inflight gauge and its own concurrency
+    // budget, so traffic split across a primary and its aliases could exceed
+    // the configured per-model limit.
+    let model = state.manager().resolve_canonical_name(&model);
 
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return response.into_response();
@@ -401,12 +414,23 @@ async fn generate_dispatch(
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
 ) -> Response {
+    let metric_model = state.manager().metric_model_for(&model).to_string();
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        state.manager().metric_model_for(&model),
+        &metric_model,
         super::metrics::Endpoint::Generate,
         false,
         &request_id,
     );
+    if let Some(message) =
+        super::admission::evaluate_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(ErrorType::Unavailable);
+        return generate_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            message,
+        );
+    }
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -1129,6 +1153,158 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn generate_dispatch_enforces_model_concurrency_gate() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+        let service = HttpService::builder()
+            .admission_gate_config(
+                crate::frontend_config::AdmissionGateConfig::new(Some(1), None, None)
+                    .expect("valid admission gate config"),
+            )
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("test-model", "0", engine.clone())
+            .expect("register generate model");
+
+        let metrics = state.metrics_clone();
+        let mut holder = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::Generate,
+            false,
+            "holder",
+        );
+        let response = generate_dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-over-limit".to_string(),
+            "test-model".to_string(),
+            state,
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read admission response");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse admission response");
+        assert_eq!(body["error"]["type"], "service_unavailable");
+        assert!(body["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("rejection-frontend-request-concurrency-limit")
+        }));
+        assert_eq!(
+            metrics.get_admission_rejection_count(
+                dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                "test-model",
+            ),
+            1
+        );
+        holder.mark_ok();
+    }
+
+    #[tokio::test]
+    async fn generate_handler_canonicalizes_alias_for_admission() {
+        // An alias-named request must share its primary's inflight gauge and
+        // concurrency budget instead of receiving its own.
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+        let service = HttpService::builder()
+            .admission_gate_config(
+                crate::frontend_config::AdmissionGateConfig::new(Some(1), None, None)
+                    .expect("valid admission gate config"),
+            )
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("test-model", "0", engine)
+            .expect("register generate model");
+        assert!(state.manager().register_alias("test-alias", "test-model"));
+
+        let metrics = state.metrics_clone();
+        let mut holder = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::Generate,
+            false,
+            "holder",
+        );
+
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-alias",
+            "token_ids": [1, 2],
+            "sampling_params": {},
+        }))
+        .expect("deserialize request");
+        let response =
+            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            metrics.get_admission_rejection_count(
+                dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                "test-model",
+            ),
+            1,
+            "rejection must be attributed to the canonical primary, not the alias"
+        );
+        assert_eq!(
+            metrics.get_admission_rejection_count(
+                dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                "test-alias",
+            ),
+            0
+        );
+        holder.mark_ok();
+    }
+
+    #[tokio::test]
+    async fn generate_handler_no_model_dedups_alias_mirrors() {
+        // Production alias registration mirrors the primary's WorkerSet under
+        // the alias name; a single primary with one alias must still count as
+        // one model for the omitted-`model` default path.
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("gen-primary", "0", engine)
+            .expect("register generate model");
+        let namespace = "__local_generate_gen-primary";
+        let worker_set = state
+            .manager()
+            .get_model("gen-primary")
+            .and_then(|model| model.get_worker_set(namespace))
+            .expect("primary generate WorkerSet should be registered");
+        assert!(state.manager().register_alias("gen-alias", "gen-primary"));
+        assert!(
+            state
+                .manager()
+                .add_worker_set_arc("gen-alias", namespace, worker_set)
+        );
+
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {},
+        }))
+        .expect("deserialize request");
+        let response =
+            handler_generate(State(state.clone()), HeaderMap::new(), Json(request)).await;
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "one primary plus its alias mirror must not count as multiple models"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]
