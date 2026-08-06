@@ -36,6 +36,16 @@ impl DiscoveredModel {
                 server.api_version
             )));
         }
+        if server
+            .parallelism
+            .as_ref()
+            .is_some_and(|parallelism| parallelism.data_parallel_size > 1)
+            && !server.supports_explicit_data_parallel_rank
+        {
+            return Err(client::protocol_error(
+                "vLLM reports data parallelism greater than one but does not advertise explicit data-parallel rank routing",
+            ));
+        }
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -71,6 +81,7 @@ impl DiscoveredModel {
     }
 
     pub(crate) fn engine_config(&self) -> EngineConfig {
+        let parallelism = self.server.parallelism.as_ref();
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
@@ -82,6 +93,10 @@ impl DiscoveredModel {
                 total_kv_blocks: nonzero(self.server.total_kv_blocks),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
+                data_parallel_size: parallelism
+                    .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
+                data_parallel_start_rank: parallelism
+                    .map(|parallelism| parallelism.data_parallel_rank),
                 ..Default::default()
             }),
         }

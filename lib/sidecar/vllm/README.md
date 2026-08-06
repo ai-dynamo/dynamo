@@ -25,13 +25,13 @@ It is a standalone Rust executable.
 - Token and text requests through Dynamo preprocessing
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
+- Data-parallel rank routing and KV-event source discovery
 
-The initial protocol does not support multimodal input, LoRA, KV-aware data
-parallel routing, encode workers, beam search, or `n > 1`.
+The protocol does not support multimodal input, LoRA, encode workers, beam search, or `n > 1`.
 
 ## Run
 
-Start vLLM with its released gRPC listener:
+Start a vLLM build with the split Inference and Control services and explicit data-parallel-rank capability used by the vendored protocol:
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
@@ -51,9 +51,9 @@ dynamo-vllm-sidecar \
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
 
-The sidecar discovers `model_id`, the served name, context length, KV capacity, and scheduler limits through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-Data-parallel registration is omitted because Control reports global topology, not the rank range hosted by the connected frontend.
+Control reports the global data-parallel size, the rank hosted by the connected frontend, and whether explicit rank routing is supported. Dynamo forwards the selected rank on each generation request and uses discovered KV-event sources for KV-aware routing. Startup fails for data-parallel deployments when the server does not advertise explicit rank routing.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 

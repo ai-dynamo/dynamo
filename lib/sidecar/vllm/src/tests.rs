@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
     PreprocessedRequest, SamplingOptions, StopConditions,
@@ -214,7 +215,18 @@ impl pb::control_server::Control for FakeVllm {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         Ok(Response::new(pb::GetKvEventSourcesResponse {
-            sources: Vec::new(),
+            sources: vec![pb::KvEventSource {
+                transport: "zmq".to_string(),
+                endpoint: "tcp://127.0.0.1:20081".to_string(),
+                topic: String::new(),
+                replay_endpoint: String::new(),
+                data_parallel_rank: Some(2),
+                encoding: "msgpack".to_string(),
+                schema_version: 1,
+                buffer_steps: 0,
+                hwm: 0,
+                max_queue_size: 0,
+            }],
         }))
     }
 }
@@ -249,7 +261,7 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
-        supports_explicit_data_parallel_rank: false,
+        supports_explicit_data_parallel_rank: true,
     }
 }
 
@@ -488,8 +500,13 @@ fn request() -> PreprocessedRequest {
             prompt_logprobs: Some(1),
             ..Default::default()
         })
-        .mdc_sum(Some("cache-salt".to_string()))
+        .mdc_sum(Some("model-checksum".to_string()))
+        .routing(Some(RoutingHints {
+            cache_namespace: Some("cache-salt".to_string()),
+            ..Default::default()
+        }))
         .extra_args(Some(json!({
+            "nvext": {"cache_salt": "cache-salt"},
             "bypass_prefix_cache": true,
             "kv_transfer_params": {
                 "connector_data": {"values": [1, true, null]}
@@ -619,10 +636,24 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.total_kv_blocks, Some(4096));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
-    assert_eq!(registration.data_parallel_size, None);
-    assert_eq!(registration.data_parallel_start_rank, None);
+    assert_eq!(registration.data_parallel_size, Some(4));
+    assert_eq!(registration.data_parallel_start_rank, Some(2));
 
-    let outputs = collect(&engine, request()).await;
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].dp_rank(), 2);
+    assert!(matches!(
+        &sources[0],
+        dynamo_backend_common::KvEventSource::Zmq { topic, .. } if topic.is_empty()
+    ));
+
+    let mut routed_request = serde_json::to_value(request()).expect("serialize request");
+    routed_request["routing"] = json!({"dp_rank": 2, "cache_salt": "cache-salt"});
+    let outputs = collect(
+        &engine,
+        serde_json::from_value(routed_request).expect("deserialize routed request"),
+    )
+    .await;
     assert_eq!(outputs.len(), 1);
     let terminal = &outputs[0];
     assert_eq!(terminal.token_ids, [42]);
@@ -638,6 +669,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let sent = requests.first().expect("recorded request");
     assert_eq!(sent.model, "served-model");
     assert_eq!(sent.priority, 0);
+    assert_eq!(sent.data_parallel_rank, Some(2));
     let sampling = sent.sampling.as_ref().unwrap();
     assert_eq!(
         (sampling.top_k, sampling.top_p, sampling.min_p),
@@ -664,7 +696,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert!(stopping.ignore_eos);
     let kv = sent.kv.as_ref().unwrap();
     assert!(kv.bypass_prefix_cache);
-    assert_eq!(kv.cache_salt, "cache-salt");
+    assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
     assert_eq!(
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
@@ -970,11 +1002,14 @@ async fn unsupported_features_fail_before_rpc_submission() {
     multimodal.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
     requests.push(multimodal);
 
-    for routing in [json!({"lora_name": "adapter"}), json!({"dp_rank": 1})] {
-        let mut value = serde_json::to_value(request()).expect("serialize request");
-        value["routing"] = routing;
-        requests.push(serde_json::from_value(value).expect("deserialize request"));
-    }
+    let mut lora_request = serde_json::to_value(request()).expect("serialize request");
+    lora_request["routing"] = json!({"lora_name": "adapter"});
+    requests.push(serde_json::from_value(lora_request).expect("deserialize request"));
+
+    let mut mismatched_cache_salt = request();
+    mismatched_cache_salt.extra_args.as_mut().unwrap()["nvext"]["cache_salt"] =
+        json!("different-cache-salt");
+    requests.push(mismatched_cache_salt);
 
     for unsupported in requests {
         let context = dynamo_backend_common::testing::mock_context();

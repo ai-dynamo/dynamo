@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, GenerateContext, LLMEngine, LLMEngineOutput,
+    DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
@@ -121,13 +121,14 @@ impl VllmSidecarEngine {
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
             model_name: model.source.clone(),
             served_model_name: Some(model.served_name.clone()),
+            // gRPC cannot yet preserve the parser request semantics.
             tool_call_parser: None,
             reasoning_parser: None,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: false,
+            enable_kv_routing: true,
             disaggregation_mode: mode,
             route_to_encoder: false,
             ..Default::default()
@@ -258,6 +259,7 @@ impl LLMEngine for VllmSidecarEngine {
                             Ok(Some(output)) => {
                                 first_token_observed |= response_has_token;
                                 if request_cancelled && transfer_completed {
+                                    // Dropping this stream aborts only this request.
                                     if first_token_observed {
                                         ctx.notify_first_token();
                                     }
@@ -319,6 +321,66 @@ impl LLMEngine for VllmSidecarEngine {
         self.cancel.cancel();
         Ok(())
     }
+
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        let client = self
+            .client
+            .get()
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
+        client
+            .kv_event_sources()
+            .await?
+            .into_iter()
+            .filter(|source| source.transport == "zmq")
+            .map(|source| {
+                let dp_rank = source.data_parallel_rank.ok_or_else(|| {
+                    client::protocol_error(
+                        "GetKvEventSources returned a ZMQ source without data_parallel_rank",
+                    )
+                })?;
+                if source.endpoint.trim().is_empty() {
+                    return Err(client::protocol_error(
+                        "GetKvEventSources returned a ZMQ source without an endpoint",
+                    ));
+                }
+                Ok(KvEventSource::Zmq {
+                    endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint)?,
+                    topic: source.topic,
+                    dp_rank,
+                })
+            })
+            .collect()
+    }
+}
+
+fn zmq_connect_endpoint(
+    endpoint: &str,
+    grpc_endpoint: &GrpcEndpoint,
+) -> Result<String, DynamoError> {
+    let port = endpoint
+        .strip_prefix("tcp://*:")
+        .or_else(|| endpoint.strip_prefix("tcp://0.0.0.0:"))
+        .or_else(|| endpoint.strip_prefix("tcp://[::]:"));
+    let Some(port) = port else {
+        return Ok(endpoint.to_string());
+    };
+
+    let grpc_url = url::Url::parse(grpc_endpoint.as_str()).map_err(|error| {
+        client::protocol_error(format!(
+            "validated vLLM gRPC endpoint could not be parsed while resolving KV-event source: {error}"
+        ))
+    })?;
+    let host = match grpc_url.host() {
+        Some(url::Host::Domain(host)) => host.to_string(),
+        Some(url::Host::Ipv4(host)) => host.to_string(),
+        Some(url::Host::Ipv6(host)) => format!("[{host}]"),
+        None => {
+            return Err(client::protocol_error(
+                "validated vLLM gRPC endpoint has no host while resolving KV-event source",
+            ));
+        }
+    };
+    Ok(format!("tcp://{host}:{port}"))
 }
 
 fn bootstrap_discover(
