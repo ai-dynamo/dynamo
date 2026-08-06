@@ -28,7 +28,7 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 2. 对于 ≥100 行的变更或新功能，请先[创建 issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml)
 3. 创建分支：`git checkout -b yourname/fix-router-timeout`
 4. 修改代码，运行 `pre-commit run`
-5. 使用 DCO sign-off 提交：`git commit -s -m "fix: description"`
+5. 使用 DCO sign-off 提交：`git commit -s -m "fix: description"`；对于需要自动触发受信任 CI 的 fork PR，还需为每个提交添加 GitHub 显示为 `Verified` 的加密签名
 6. 打开一个面向 `main` 的 PR
 
 ---
@@ -221,7 +221,7 @@ pre-commit install
 
 4. **处理 Code Rabbit Review** — 回复自动化 Code Rabbit 建议，包括 nitpick。
 
-5. **触发 CI 测试** — 对于外部贡献者，维护者必须评论 `/ok to test COMMIT-ID` 才能运行完整 CI 套件，其中 `COMMIT-ID` 是你最新提交的短 SHA。请求人工审阅前，请修复所有失败的测试。
+5. **触发 CI 测试** — 对于外部贡献者，维护者必须评论 `/ok to test COMMIT-ID` 才能运行完整 CI 套件，其中 `COMMIT-ID` 是你最新提交的短 SHA。对于使用自动批准流程的 fork PR，每个 PR 提交还必须包含 GitHub 显示为 `Verified` 的加密签名。`git commit -s` 只会添加 DCO sign-off，不会添加加密签名。请求人工审阅前，请修复所有失败的测试。
 
 6. **请求审阅** — 将批准你 issue 的人员添加为 reviewer。根据修改的文件，查看 [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) 了解必需 approver。
 
@@ -398,6 +398,12 @@ git commit -s -m "fix: your descriptive message"
 - 你的 `user.name` 和 `user.email` 必须在 git 中配置
 
 **DCO 检查失败？** 请参阅我们的 [DCO 故障排除指南](https://github.com/ai-dynamo/dynamo/blob/main/DCO.md)，按步骤修复。
+
+### Fork PR 的自动 CI 签名
+
+对于使用自动受信任 CI 批准流程的 fork PR，GitHub 必须将 PR 中的每个提交显示为 `Verified`。DCO sign-off 不会添加加密签名。请按照 [GitHub 提交签名说明](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) 配置签名，并在创建、修订或 rebase 提交时使用该配置。
+
+在 PR 的 **Commits** 标签页确认每个提交都显示为 `Verified`。如果任何提交未验证，系统不会自动发布 `/ok to test` 评论。
 
 ### 许可证
 
