@@ -548,4 +548,46 @@ mod tests {
             serde_json::json!("Paris")
         );
     }
+
+    // --- Multi-turn opt-in behaviour tests ---
+    //
+    // These guard the boundary between JsonString (default, GPT-OSS / Harmony
+    // path) and JsonObject (GLM-5.2 path).  The normalize function is the
+    // shared primitive; NormalizedArgsRequest calls it only when the model
+    // opts in; other models never call it.
+
+    /// GLM-5.2 (JsonObject mode): historical arguments must be a parsed object
+    /// so the chat template can call .items() on them.
+    #[test]
+    fn glm52_historical_arguments_are_object() {
+        let mut msgs =
+            make_tool_call_messages(r#"{"location": "San Francisco", "unit": "celsius"}"#);
+        normalize_tool_call_arguments(&mut msgs).unwrap();
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_object(),
+            "GLM-5.2 (JsonObject mode): arguments must be a JSON object, got: {args}"
+        );
+        assert_eq!(args["location"], serde_json::json!("San Francisco"));
+    }
+
+    /// GPT-OSS (JsonString mode, default): historical arguments must stay as
+    /// a raw JSON string so the Harmony parser can re-emit a structured call.
+    /// This test models the multi-turn scenario where the first tool call is
+    /// in conversation history and the second must be parsed correctly.
+    #[test]
+    fn gptoss_historical_arguments_remain_string() {
+        // Without normalization (JsonString default), arguments stay as-is.
+        let msgs = make_tool_call_messages(r#"{"location": "San Francisco", "unit": "celsius"}"#);
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_string(),
+            "GPT-OSS (JsonString mode): arguments must remain a JSON string, got: {args}"
+        );
+        // The raw string is preserved for the Harmony template to handle.
+        assert_eq!(
+            args.as_str().unwrap(),
+            r#"{"location": "San Francisco", "unit": "celsius"}"#
+        );
+    }
 }

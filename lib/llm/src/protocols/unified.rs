@@ -463,22 +463,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut messages_json = serde_json::to_value(&self.inner.inner.messages).unwrap();
-        if let Err(e) =
-            crate::preprocessor::prompt::normalize_tool_call_arguments(&mut messages_json)
-        {
-            // Malformed tool_call arguments: do not fabricate {} — log and
-            // leave arguments as the original JSON string so the template
-            // fails explicitly rather than silently using empty args.
-            tracing::error!(
-                error = %e,
-                "tool_call arguments normalization failed; \
-                 template rendering may fail if it calls .items() on a string"
-            );
-            return minijinja::value::Value::from_serialize(
-                serde_json::to_value(&self.inner.inner.messages).unwrap(),
-            );
-        }
+        let messages_json = serde_json::to_value(&self.inner.inner.messages).unwrap();
         minijinja::value::Value::from_serialize(&messages_json)
     }
 
