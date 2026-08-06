@@ -5,7 +5,7 @@ title: Deploy LMCache MP
 subtitle: Run aggregated vLLM serving with KV cache offloaded to a per-node LMCache MP DaemonSet over cross-Pod CUDA IPC.
 ---
 
-This guide deploys Dynamo aggregated vLLM serving on Kubernetes with KV cache offloaded to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. It uses the [`v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml) manifest plus an `LMCacheEngine` CR managed by the LMCache operator.
+This guide deploys Dynamo aggregated vLLM serving on Kubernetes with KV cache offloaded to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. It uses the [`v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/fc626a5f053cdc4112d752be47eb08a303623311/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml) manifest plus an `LMCacheEngine` CR managed by the LMCache operator.
 
 ## Prerequisites
 
@@ -119,7 +119,7 @@ kubectl -n dynamo-lmcache get lmcacheengine lmcache-mp
 </Step>
 <Step title="Deploy the Dynamo worker" id="deploy-the-dynamo-worker">
 
-Edit [`examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml): replace
+Edit [`examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/fc626a5f053cdc4112d752be47eb08a303623311/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml): replace
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` (on both `Frontend` and
 `VllmDecodeWorker`) with your Dynamo vllm-runtime image.
 
