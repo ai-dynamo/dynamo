@@ -10,7 +10,7 @@ use super::super::entrypoints::{
     run_trace_workload_collect,
 };
 use super::super::extensions::kv_events::HandoffDisaggRuntime;
-use super::super::planner_hook::PlannerTickDecision;
+use super::super::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
 use super::*;
 use crate::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
@@ -18,19 +18,22 @@ use crate::common::protocols::{
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
 
-struct CaptureOnceHook {
+struct CaptureOncePolicy {
     at_ms: f64,
-    captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+    captured: Rc<RefCell<Option<ReplayScalingSnapshot>>>,
 }
 
-impl PlannerHook for CaptureOnceHook {
+impl ReplayScalingPolicy for CaptureOncePolicy {
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
         Ok(self.at_ms)
     }
 
-    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
-        *self.captured.borrow_mut() = Some(metrics);
-        Ok(PlannerTickDecision::default())
+    fn on_tick(
+        &mut self,
+        snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        *self.captured.borrow_mut() = Some(snapshot);
+        Ok(ReplayScalingDecision::default())
     }
 }
 
@@ -289,7 +292,7 @@ fn request(
 }
 
 #[test]
-fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
+fn scaling_tick_emits_idle_fpm_for_both_disagg_pools() {
     let mut config = disagg_config();
     config.num_prefill_workers = 1;
     config.num_decode_workers = 1;
@@ -299,7 +302,7 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
     )
     .unwrap();
     let captured = Rc::new(RefCell::new(None));
-    let hook = CaptureOnceHook {
+    let policy = CaptureOncePolicy {
         at_ms: 2_000.0,
         captured: Rc::clone(&captured),
     };
@@ -313,14 +316,14 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
         ReplayRouterMode::RoundRobin,
     )
     .unwrap()
-    .with_planner_hook(Box::new(hook))
+    .with_scaling_policy(Box::new(policy))
     .run()
     .unwrap();
 
     let metrics = captured
         .borrow_mut()
         .take()
-        .expect("planner tick must fire");
+        .expect("scaling tick must fire");
     assert_eq!(metrics.now_ms, 2_000.0);
     for snapshots in [&metrics.prefill_fpm, &metrics.decode_fpm] {
         assert_eq!(snapshots.len(), 1);
@@ -707,6 +710,61 @@ fn test_source_release_waits_for_destination_activation() {
     }
 }
 
+#[test]
+fn same_timestamp_destination_activation_precedes_next_decode_drive() {
+    let config = disagg_config();
+    let uuid = Uuid::from_u128(1);
+    let pending =
+        crate::replay::normalize_trace_requests(vec![request(1, 128, 2, 0.0)], 1.0).unwrap();
+    let (collector, stats) = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        pending,
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap()
+    .with_per_request_records(true)
+    .run()
+    .unwrap();
+
+    let transitions = &stats.transition_log;
+    let reserved = transition_index(transitions, DisaggTransition::DestinationReserved { uuid });
+    let activated = transition_index(transitions, DisaggTransition::DestinationActivated { uuid });
+    let admitted = transition_index(transitions, DisaggTransition::DecodeAdmitted { uuid });
+    let next_quiesced = transitions
+        .iter()
+        .enumerate()
+        .skip(activated + 1)
+        .find_map(|(index, transition)| {
+            (*transition == DisaggTransition::DecodeDriveQuiesced).then_some(index)
+        })
+        .expect("decode coordinator must quiesce after processing activated work");
+    let completed = transition_index(transitions, DisaggTransition::RequestMarkedDone { uuid });
+    assert!(
+        !transitions[reserved + 1..activated].contains(&DisaggTransition::DecodeDriveQuiesced),
+        "same-timestamp activation must be drained before the next decode drive: {transitions:?}"
+    );
+    assert!(reserved < activated);
+    assert!(activated < admitted);
+    assert!(admitted < next_quiesced);
+    assert!(admitted < completed);
+
+    let report = collector.finish();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.per_request.len(), 1);
+    assert_eq!(
+        report.per_request[0].destination_reserved_ms,
+        report.per_request[0].destination_activated_ms,
+        "destination activation must wake the decode coordinator at the same timestamp"
+    );
+    assert_eq!(
+        report.per_request[0].terminal_status,
+        ReplayTerminalStatus::Completed
+    );
+}
+
 #[rstest::rstest]
 #[case(EngineType::Vllm)]
 #[case(EngineType::Sglang)]
@@ -1059,7 +1117,10 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let report = run_trace_with_details(
             &transfer_timing_config(engine_type, KvTransferTimingMode::DestinationMissing, 2),
-            vec![request(1, 64, 1, 0.0), request(2, 64, 2, 1_000.0)],
+            // Two full blocks leave one reusable block after vLLM's required
+            // final-block recompute. A one-block prompt correctly reports
+            // zero reuse and would not exercise this test's source-hit path.
+            vec![request(1, 128, 1, 0.0), request(2, 128, 2, 1_000.0)],
             None,
             ReplayRouterMode::RoundRobin,
         );
@@ -1073,7 +1134,7 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
 
         assert!(measured.reused_input_tokens > 0);
         assert_eq!(measured.decode_reused_input_tokens, Some(0));
-        assert!(transfer_span >= 64.0 && transfer_span - 64.0 < 1.0);
+        assert!(transfer_span >= 128.0 && transfer_span - 128.0 < 1.0);
     }
 }
 
@@ -1185,6 +1246,176 @@ fn test_source_first_handoff_waits_for_decode_scale_up() {
 }
 
 #[test]
+fn source_first_workload_stays_compact_until_prefill_worker_submission() {
+    let mut config = disagg_config();
+    config.num_prefill_workers = 1;
+    let trace = Trace {
+        block_size: 64,
+        sessions: vec![SessionTrace {
+            session_id: "compact-prefill".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 128,
+                max_output_tokens: 4,
+                hash_ids: vec![31, 32],
+                ..Default::default()
+            }],
+        }],
+    };
+    let driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+    let mut runtime = DisaggRuntime::new_workload(
+        &config,
+        Some(router_config()),
+        None,
+        driver,
+        ReplayMode::Trace,
+        ReplayRouterMode::KvRouter,
+    )
+    .unwrap();
+    runtime.apply_scaling(0, config.num_decode_workers).unwrap();
+
+    assert!(runtime.release_ready_arrivals().unwrap());
+    assert!(!runtime.drive_pending_actions().unwrap());
+    let uuid = *runtime.flow.requests.keys().next().unwrap();
+    assert!(
+        runtime
+            .state(uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_none()
+    );
+
+    runtime.apply_scaling(1, config.num_decode_workers).unwrap();
+    assert!(runtime.drive_pending_actions().unwrap());
+
+    assert_eq!(runtime.state(uuid).unwrap().input_length().unwrap(), 128);
+    assert!(
+        runtime
+            .state(uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn destination_first_workload_materializes_for_decode_reservation_then_completes() {
+    let mut config = sglang_disagg_config();
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let trace = Trace {
+        block_size: 64,
+        sessions: vec![SessionTrace {
+            session_id: "destination-first-compact".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 128,
+                max_output_tokens: 4,
+                hash_ids: vec![61, 62],
+                ..Default::default()
+            }],
+        }],
+    };
+    let driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+    let mut runtime = DisaggRuntime::new_workload(
+        &config,
+        Some(router_config()),
+        None,
+        driver,
+        ReplayMode::Trace,
+        ReplayRouterMode::KvRouter,
+    )
+    .unwrap();
+    runtime.apply_scaling(0, 0).unwrap();
+
+    assert!(runtime.release_ready_arrivals().unwrap());
+    assert!(!runtime.drive_pending_actions().unwrap());
+    let uuid = *runtime.flow.requests.keys().next().unwrap();
+    assert_eq!(runtime.state(uuid).unwrap().input_length().unwrap(), 128);
+    assert!(
+        runtime
+            .state(uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_none()
+    );
+
+    runtime.apply_scaling(0, 1).unwrap();
+    assert!(runtime.drive_pending_actions().unwrap());
+    assert!(
+        runtime
+            .state(uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_some(),
+        "SGLang destination-first routing currently materializes before prefill"
+    );
+
+    runtime.apply_scaling(1, 1).unwrap();
+    let (_, stats) = runtime.run().unwrap();
+
+    assert_eq!(stats.request_snapshots[&uuid].phase, DisaggPhase::Done);
+}
+
+#[test]
+fn canceling_worker_waiting_compact_prefill_drops_deferred_prompt() {
+    let mut config = disagg_config();
+    config.num_prefill_workers = 1;
+    let trace = Trace {
+        block_size: 64,
+        sessions: vec![SessionTrace {
+            session_id: "cancel-compact-prefill".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 128,
+                max_output_tokens: 4,
+                hash_ids: vec![71, 72],
+                ..Default::default()
+            }],
+        }],
+    };
+    let driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+    let mut runtime = DisaggRuntime::new_workload(
+        &config,
+        Some(router_config()),
+        None,
+        driver,
+        ReplayMode::Trace,
+        ReplayRouterMode::KvRouter,
+    )
+    .unwrap();
+    runtime.apply_scaling(0, config.num_decode_workers).unwrap();
+
+    assert!(runtime.release_ready_arrivals().unwrap());
+    assert!(!runtime.drive_pending_actions().unwrap());
+    let uuid = *runtime.flow.requests.keys().next().unwrap();
+    assert!(
+        runtime
+            .state(uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_none()
+    );
+
+    let handoff_id = runtime.state(uuid).unwrap().handoff_id;
+    runtime
+        .apply_handoff_fact(uuid, HandoffFact::Canceled { handoff_id })
+        .unwrap();
+    runtime.drain_current_timestamp().unwrap();
+
+    assert_eq!(runtime.state(uuid).unwrap().phase, DisaggPhase::Done);
+    assert!(
+        runtime.state(uuid).unwrap().materialized_tokens().is_err(),
+        "cancellation should release the deferred request payload"
+    );
+}
+
+#[test]
 fn pending_destination_booking_survives_scale_down_until_cleanup() {
     let first = Uuid::from_u128(1);
     let pending = Uuid::from_u128(2);
@@ -1288,6 +1519,76 @@ fn test_apply_scaling_drains_prefill_router_pending_immediately() {
         DisaggPhase::RunningPrefill
     );
     assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
+}
+
+#[test]
+fn prefill_router_pending_workload_keeps_prompt_compact() {
+    let config = scaling_test_disagg_config();
+    let trace = Trace {
+        block_size: 64,
+        sessions: (0..2)
+            .map(|session| SessionTrace {
+                session_id: format!("compact-router-{session}"),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 128,
+                    max_output_tokens: 8,
+                    hash_ids: vec![41 + session, 51 + session],
+                    ..Default::default()
+                }],
+            })
+            .collect(),
+    };
+    let driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+    let mut runtime = DisaggRuntime::new_workload(
+        &config,
+        Some(planner_router_config()),
+        None,
+        driver,
+        ReplayMode::Trace,
+        ReplayRouterMode::KvRouter,
+    )
+    .unwrap();
+
+    runtime.advance_to(0.0).unwrap();
+
+    let queued_uuid = runtime
+        .flow
+        .requests
+        .iter()
+        .find_map(|(uuid, state)| (state.phase == DisaggPhase::QueuedPrefill).then_some(*uuid))
+        .expect("one request should wait in the prefill router");
+    assert!(
+        runtime
+            .state(queued_uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_none()
+    );
+    let queued_router_request = runtime
+        .prefill_placement
+        .debug_snapshot(runtime.now_ms())
+        .pending
+        .into_iter()
+        .find(|pending| pending.uuid == queued_uuid)
+        .expect("queued request should remain in the prefill router");
+    assert_eq!(queued_router_request.expected_output_tokens, Some(1));
+
+    runtime.apply_scaling(2, 1).unwrap();
+
+    assert_eq!(
+        runtime.state(queued_uuid).unwrap().phase,
+        DisaggPhase::RunningPrefill
+    );
+    assert!(
+        runtime
+            .state(queued_uuid)
+            .unwrap()
+            .materialized_tokens()
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

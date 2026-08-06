@@ -9,6 +9,14 @@ SPDX-License-Identifier: Apache-2.0
 - Keep chart-only grants in the manual section of the platform chart's
   `../helm/charts/platform/components/operator/templates/manager-rbac.yaml`.
 
+## Go Code Style
+
+- Put a one-line story comment above every multi-line block of logically
+  connected code.
+- Separate multi-line semantic blocks from surrounding code with one blank
+  line. Do not add trailing blank lines before a closing delimiter or between
+  a block-leading comment and its code.
+
 ## Go Test Style
 
 - Use `t.Log` to tell the test's story, with one heading before each block that

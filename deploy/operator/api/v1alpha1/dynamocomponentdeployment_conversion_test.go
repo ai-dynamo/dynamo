@@ -623,6 +623,48 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 	}
 }
 
+// The grove block has no v1alpha1 representation and must survive the spoke
+// round-trip both alone (whole hub-only block preserved) and alongside
+// alpha-representable fields (sparse preservation merged back).
+func TestDCD_RoundTrip_ExperimentalGrove(t *testing.T) {
+	tests := []struct {
+		name         string
+		experimental *v1beta1.ExperimentalSpec
+	}{
+		{
+			name: "grove.forceScalingGroup only",
+			experimental: &v1beta1.ExperimentalSpec{
+				Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+			},
+		},
+		{
+			name: "grove.forceScalingGroup alongside alpha-representable GMS",
+			experimental: &v1beta1.ExperimentalSpec{
+				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: true},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "exp-grouping", Namespace: "ns"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentName: "exp-grouping",
+						ComponentType: v1beta1.ComponentTypeWorker,
+						Experimental:  tt.experimental.DeepCopy(),
+					},
+				},
+			}
+			got := dcdRoundTripFromV1beta1(t, src)
+			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpha-enums", Namespace: "ns"},

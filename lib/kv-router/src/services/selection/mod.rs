@@ -28,7 +28,7 @@ pub use service::{SelectionService, SelectionServiceBuilder};
 pub use types::{
     ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
     PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,
-    SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionKey, SelectionWorkerConfig,
+    SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionWorkerConfig,
     SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
     WorkerPatchRequest, WorkerRequest,
 };

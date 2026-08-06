@@ -5,21 +5,31 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
 
-use super::input::{MmRoutingInfoRequest, PromptRequest};
+use super::input::{MmRoutingInfoRequest, PromptRequest, TrackingHashInput};
 use super::server::create_router;
 use super::*;
+use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
-    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
+    WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
+use crate::scheduling::selector::WorkerSelector;
+use crate::scheduling::{KvSchedulerError, RoutingEligibility, SchedulingRequest};
+use crate::{TrackingHashContext, TrackingHashScope};
+use tempfile::NamedTempFile;
 
 fn test_config() -> crate::config::KvRouterConfig {
     crate::config::KvRouterConfig {
@@ -32,6 +42,62 @@ fn test_config() -> crate::config::KvRouterConfig {
 fn app() -> Router {
     let service = Arc::new(SelectionService::new_local_for_test(test_config(), 1));
     create_router(Arc::new(AppState { service }))
+}
+
+struct HighestWorkerSelector {
+    calls: Arc<AtomicUsize>,
+    invalid_first: bool,
+}
+
+impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
+        _request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        _block_size: u32,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.invalid_first && call == 0 {
+            return Ok(WorkerSelectionResult {
+                worker: WorkerWithDpRank::from_worker_id(WorkerId::MAX),
+                required_blocks: u64::MAX,
+                effective_overlap_blocks: f64::NAN,
+                cached_tokens: usize::MAX,
+                potential_decode_blocks: usize::MAX,
+            });
+        }
+        let mut selected = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            selected = selected.max(Some(worker));
+        });
+        let worker = selected.ok_or(KvSchedulerError::NoEndpoints)?;
+        Ok(WorkerSelectionResult {
+            worker,
+            required_blocks: u64::MAX,
+            effective_overlap_blocks: f64::NAN,
+            cached_tokens: usize::MAX,
+            potential_decode_blocks: usize::MAX,
+        })
+    }
+}
+
+fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope: TrackingHashScope {
+                    partition: RoutingPartitionRef::new("model", "default"),
+                    block_size: 4,
+                },
+                assume_kv_reuse: true,
+            },
+        )
+        .expect("normalize prompt")
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -108,6 +174,152 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
     post(app, "/workers", &body.to_string()).await
 }
 
+#[derive(Default)]
+struct FactoryRendezvous {
+    arrivals: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl FactoryRendezvous {
+    fn wait_for_peer(&self) {
+        let mut arrivals = self.arrivals.lock().unwrap();
+        *arrivals += 1;
+        if *arrivals == 2 {
+            self.ready.notify_all();
+            return;
+        }
+
+        let (arrivals, _) = self
+            .ready
+            .wait_timeout_while(arrivals, Duration::from_secs(2), |arrivals| *arrivals < 2)
+            .unwrap();
+        assert_eq!(*arrivals, 2, "selector factories did not run concurrently");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_rendezvous = Arc::new(FactoryRendezvous::default());
+    let selector_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&factory_calls);
+    let rendezvous = Arc::clone(&factory_rendezvous);
+    let selections = Arc::clone(&selector_calls);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selector_factory(Box::new(move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            rendezvous.wait_for_peer();
+            Box::new(HighestWorkerSelector {
+                calls: Arc::clone(&selections),
+                invalid_first: false,
+            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
+        }))
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
+
+    let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
+    let other_app = app.clone();
+    let other_registration = tokio::spawn(async move {
+        let body = serde_json::json!({
+            "worker_id": 3,
+            "model_name": "other-model",
+            "endpoint": "http://worker-3:8000",
+            "block_size": 4
+        });
+        post(other_app, "/workers", &body.to_string()).await
+    });
+    assert_eq!(
+        model_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        other_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"custom-selector"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    let reserved = response_json(reserved).await;
+    assert_eq!(reserved["worker_id"], 2);
+    assert_eq!(reserved["effective_prefill_tokens"], 4);
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 1);
+
+    let loads = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads?model_name=model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads).await;
+    let selected = loads[0]["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|load| load["worker_id"] == 2)
+        .unwrap();
+    assert_eq!(selected["active_requests"], 1);
+
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn invalid_custom_selection_does_not_stop_partition() {
+    let selector_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&selector_calls);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selector_factory(Box::new(move || {
+            Box::new(HighestWorkerSelector {
+                calls: Arc::clone(&calls),
+                invalid_first: true,
+            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
+        }))
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let disallowed_pin = r#"{"model_name":"model","token_ids":[1,2,3,4],"pinned_worker":{"worker_id":1,"dp_rank":0},"allowed_worker_ids":[2]}"#;
+    assert_eq!(
+        post(app.clone(), "/select", disallowed_pin).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 0);
+
+    let body = r#"{"model_name":"model","token_ids":[1,2,3,4]}"#;
+    assert_eq!(
+        post(app.clone(), "/select", body).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(post(app, "/select", body).await.status(), StatusCode::OK);
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 2);
+}
+
 #[test]
 fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
     let mm_infos = vec![Some(BlockExtraInfo {
@@ -131,9 +343,7 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
         is_eagle: Some(true),
     };
 
-    let normalized = request
-        .normalize_for_selection(4, false)
-        .expect("normalize prompt");
+    let normalized = normalize_prompt(&request);
     let expected_block_hashes = compute_block_hash_for_seq(
         &[10, 11, 12, 13, 14, 15, 16, 17],
         4,
@@ -164,15 +374,230 @@ fn prompt_request_cache_salt_changes_normalized_hashes() {
     }))
     .expect("deserialize unsalted prompt");
 
-    let salted = salted
-        .normalize_for_selection(4, false)
-        .expect("normalize salted prompt");
-    let unsalted = unsalted
-        .normalize_for_selection(4, false)
-        .expect("normalize unsalted prompt");
+    let salted = normalize_prompt(&salted);
+    let unsalted = normalize_prompt(&unsalted);
 
     assert_ne!(salted.block_hashes, unsalted.block_hashes);
     assert_ne!(salted.sequence_hashes, unsalted.sequence_hashes);
+}
+
+#[test]
+fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x35; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+        "cache_salt": "tenant-a"
+    }))
+    .unwrap();
+
+    let normalized = request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope: TrackingHashScope {
+                    partition: RoutingPartitionRef::new("model", "default"),
+                    block_size: 4,
+                },
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let public_blocks = compute_block_hash_for_seq(
+        &[1, 2, 3, 4, 5, 6, 7, 8],
+        4,
+        BlockHashOptions {
+            cache_namespace: Some("tenant-a"),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(normalized.block_hashes, public_blocks);
+    assert_ne!(
+        normalized.sequence_hashes,
+        compute_seq_hash_for_block(&public_blocks)
+    );
+}
+
+#[test]
+fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8]
+    }))
+    .unwrap();
+    let normalize = || {
+        request
+            .normalize_for_selection(
+                false,
+                TrackingHashInput {
+                    context: &context,
+                    scope: TrackingHashScope {
+                        partition: RoutingPartitionRef::new("model", "default"),
+                        block_size: 4,
+                    },
+                    assume_kv_reuse: false,
+                },
+            )
+            .unwrap()
+    };
+
+    let first = normalize();
+    let second = normalize();
+    let public_blocks =
+        compute_block_hash_for_seq(&[1, 2, 3, 4, 5, 6, 7, 8], 4, BlockHashOptions::default());
+
+    assert_eq!(first.block_hashes, public_blocks);
+    assert_eq!(second.block_hashes, public_blocks);
+    assert_ne!(first.sequence_hashes, second.sequence_hashes);
+}
+
+#[test]
+fn keyed_reservation_hashes_directly_from_tokens() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x47; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+        "cache_salt": "tenant-a"
+    }))
+    .unwrap();
+    let scope = TrackingHashScope {
+        partition: RoutingPartitionRef::new("model", "default"),
+        block_size: 4,
+    };
+
+    let normalized = request
+        .normalize_for_reservation(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let expected = context.compute_sequence_hashes_for_tracking(
+        scope,
+        &[1, 2, 3, 4, 5, 6, 7, 8],
+        BlockHashOptions {
+            cache_namespace: Some("tenant-a"),
+            ..Default::default()
+        },
+        true,
+        None,
+    );
+
+    assert_eq!(normalized.sequence_hashes, expected);
+    assert_eq!(normalized.isl_tokens, 8);
+}
+
+#[test]
+fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x59; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "block_hashes": [11, 29],
+        "sequence_hashes": [-1, 7],
+        "isl_tokens": 8
+    }))
+    .unwrap();
+    let scope = TrackingHashScope {
+        partition: RoutingPartitionRef::new("model", "default"),
+        block_size: 4,
+    };
+
+    let selection = request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let reservation = request
+        .normalize_for_reservation(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        selection.block_hashes,
+        vec![
+            crate::protocols::LocalBlockHash(11),
+            crate::protocols::LocalBlockHash(29)
+        ]
+    );
+    assert_eq!(selection.sequence_hashes, vec![u64::MAX, 7]);
+    assert_eq!(reservation.sequence_hashes, vec![u64::MAX, 7]);
+    assert_eq!(reservation.isl_tokens, 8);
+}
+
+#[test]
+fn randomized_reservation_uses_canonical_complete_block_count() {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let cases = [
+        (Vec::new(), false, 0),
+        (vec![1, 2, 3], false, 0),
+        (vec![1, 2, 3, 4], false, 1),
+        (vec![1, 2, 3, 4], true, 0),
+        (vec![1, 2, 3, 4, 5], true, 1),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8], true, 1),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8, 9], true, 2),
+    ];
+
+    for (token_ids, is_eagle, expected_blocks) in cases {
+        let request: PromptRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": token_ids,
+            "is_eagle": is_eagle
+        }))
+        .unwrap();
+        let normalized = request
+            .normalize_for_reservation(
+                false,
+                TrackingHashInput {
+                    context: &context,
+                    scope: TrackingHashScope {
+                        partition: RoutingPartitionRef::new("model", "default"),
+                        block_size: 4,
+                    },
+                    assume_kv_reuse: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(normalized.sequence_hashes.len(), expected_blocks);
+    }
 }
 
 #[test]
@@ -336,6 +761,9 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(body["overlap"]["dp"]["0"], 0);
     assert!(body.get("cached_tokens").is_none());
     assert!(body.get("effective_overlap_blocks").is_none());
+    assert!(body.get("sequence_hashes").is_none());
+    assert!(body.get("isl_tokens").is_none());
+    assert!(body.get("track_prefill_tokens").is_none());
 
     let loads_response = app
         .oneshot(
@@ -416,6 +844,17 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
+    assert_eq!(body["isl_tokens"], 4);
+    assert_eq!(body["track_prefill_tokens"], true);
+    let block_hashes = compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default());
+    let expected_sequence_hashes: Vec<i64> = compute_seq_hash_for_block(&block_hashes)
+        .iter()
+        .map(|hash| *hash as i64)
+        .collect();
+    assert_eq!(
+        body["sequence_hashes"],
+        serde_json::json!(expected_sequence_hashes)
+    );
 
     let loads_response = app
         .clone()
@@ -449,6 +888,68 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
         .await
         .unwrap();
     assert_eq!(free.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn explicit_replay_preserves_disabled_prefill_tracking() {
+    let source = app();
+    let peer = app();
+    for app in [source.clone(), peer.clone()] {
+        assert_eq!(
+            register_worker(app, None).await.status(),
+            StatusCode::CREATED
+        );
+    }
+
+    let response = post(
+        source.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated","router_config_override":{"track_prefill_tokens":false}}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let selected = response_json(response).await;
+    assert_eq!(selected["track_prefill_tokens"], false);
+
+    let reservation = serde_json::json!({
+        "model_name": "model",
+        "selection_id": "replicated",
+        "worker_id": selected["worker_id"],
+        "dp_rank": selected["dp_rank"],
+        "sequence_hashes": selected["sequence_hashes"],
+        "isl_tokens": selected["isl_tokens"],
+        "effective_prefill_tokens": selected["effective_prefill_tokens"],
+        "track_prefill_tokens": selected["track_prefill_tokens"]
+    });
+    let response = post(peer.clone(), "/reservations", &reservation.to_string()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    for app in [source, peer] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/loads")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loads = response_json(response).await;
+        assert_eq!(loads[0]["loads"][0]["active_requests"], 1);
+        assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
+        assert_eq!(loads[0]["loads"][0]["potential_decode_blocks"], 1);
+
+        let response = post(
+            app,
+            "/potential_loads",
+            r#"{"model_name":"model","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":false}}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let potential = response_json(response).await;
+        assert_eq!(potential[0]["potential_decode_blocks"], 1);
+    }
 }
 
 #[tokio::test]

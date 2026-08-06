@@ -170,11 +170,22 @@ func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
 }
 
 func SetupFailoverCascade(mgr ctrl.Manager) error {
-	if err := NewFailoverCascadeReconciler(
-		mgr.GetClient(),
-		mgr.GetEventRecorderFor("gms-failover-cascade"),
-	).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+	if err := (&failoverCascadeReconciler{
+		Client:   mgr.GetClient(),
+		recorder: mgr.GetEventRecorderFor("gms-failover-cascade"),
+	}).setupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create failover cascade controller: %w", err)
+	}
+	return nil
+}
+
+func SetupGMSPodReplacement(mgr ctrl.Manager, opts SetupOptions) error {
+	if err := (&gmsPodReplacementReconciler{
+		Client:        mgr.GetClient(),
+		config:        opts.Config,
+		runtimeConfig: opts.RuntimeConfig,
+	}).setupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create GMS Pod replacement controller: %w", err)
 	}
 	return nil
 }

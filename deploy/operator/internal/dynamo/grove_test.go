@@ -1532,7 +1532,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 					// Status=False (Status=True is the availability reason).
 					Type:               groveconstants.ConditionTypeMinAvailableBreached,
 					Status:             metav1.ConditionFalse,
-					Reason:             groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas,
+					Reason:             "InsufficientScheduledPodCliqueScalingGroupReplicas",
 					LastTransitionTime: metav1.Now(),
 				}},
 			}),

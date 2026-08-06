@@ -55,10 +55,14 @@ class OmniStageRouter:
         (
             resolved_stage_configs_path,
             self.stage_configs,
+            _omni_lb_policy,
         ) = load_and_resolve_stage_configs(
             config.model,
             stage_configs_path,
             kwargs={},
+            trust_remote_code=getattr(
+                getattr(config, "engine_args", None), "trust_remote_code", False
+            ),
         )
         self.stage_clients: Dict[str, Any] = {}
 

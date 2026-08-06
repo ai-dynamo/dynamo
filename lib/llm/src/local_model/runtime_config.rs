@@ -62,6 +62,7 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 pub enum TokenizerBackend {
     Default,
     Fastokens,
+    Basetenkenizer,
 }
 
 impl TokenizerBackend {
@@ -69,6 +70,7 @@ impl TokenizerBackend {
         match self {
             Self::Default => "default",
             Self::Fastokens => "fastokens",
+            Self::Basetenkenizer => "basetenkenizer",
         }
     }
 
@@ -79,11 +81,12 @@ impl TokenizerBackend {
     pub fn from_env_or_default() -> Self {
         match std::env::var(ENV_TOKENIZER_BACKEND) {
             Ok(v) if v == "fastokens" => Self::Fastokens,
+            Ok(v) if v == "basetenkenizer" => Self::Basetenkenizer,
             Ok(v) if v == "default" || v.is_empty() => Self::Default,
             Ok(v) => {
                 tracing::warn!(
                     value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                    "Unrecognized DYN_TOKENIZER value, expected 'default', 'fastokens', or 'basetenkenizer'; falling back to default"
                 );
                 Self::Default
             }
@@ -99,8 +102,9 @@ impl FromStr for TokenizerBackend {
         match value {
             "default" => Ok(Self::Default),
             "fastokens" => Ok(Self::Fastokens),
+            "basetenkenizer" => Ok(Self::Basetenkenizer),
             _ => Err(format!(
-                "invalid tokenizer backend '{value}' (expected 'default' or 'fastokens')"
+                "invalid tokenizer backend '{value}' (expected 'default', 'fastokens', or 'basetenkenizer')"
             )),
         }
     }
@@ -170,6 +174,12 @@ pub struct ModelRuntimeConfig {
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state (default: true)
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
+
+    /// Whether the running engine is configured to publish KV cache events.
+    ///
+    /// `None` indicates a legacy worker that does not declare this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_publishing_enabled: Option<bool>,
 
     /// Endpoint whose event sources describe this worker's KV state.
     ///
@@ -276,6 +286,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
+            kv_event_publishing_enabled: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
@@ -625,6 +636,27 @@ mod tests {
     }
 
     #[test]
+    fn kv_event_publishing_capability_roundtrips_and_preserves_legacy_unknown() {
+        for enabled in [true, false] {
+            let cfg = ModelRuntimeConfig {
+                kv_event_publishing_enabled: Some(enabled),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.kv_event_publishing_enabled, Some(enabled));
+        }
+
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.kv_event_publishing_enabled, None);
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("kv_event_publishing_enabled")
+        );
+    }
+
+    #[test]
     fn roundtrips_through_serde_json() {
         let cfg = ModelRuntimeConfig {
             stable_routing_id: Some("worker-7".to_string()),
@@ -652,6 +684,14 @@ mod tests {
             assert_eq!(
                 cfg.effective_tokenizer_backend(),
                 TokenizerBackend::Fastokens
+            );
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("basetenkenizer"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
             );
         });
 
@@ -687,18 +727,49 @@ mod tests {
                 TokenizerBackend::Fastokens
             );
         });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Basetenkenizer),
+                ..Default::default()
+            };
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
+            );
+        });
     }
 
     #[test]
     fn tokenizer_backend_roundtrips_through_serde_json() {
-        let cfg = ModelRuntimeConfig {
-            tokenizer_backend: Some(TokenizerBackend::Fastokens),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
-        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+        for backend in [
+            TokenizerBackend::Default,
+            TokenizerBackend::Fastokens,
+            TokenizerBackend::Basetenkenizer,
+        ] {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(backend),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_backend\":\"{}\"", backend.as_str())));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_backend, Some(backend));
+        }
+    }
+
+    #[test]
+    fn tokenizer_backend_string_values_are_strict() {
+        for backend in [
+            TokenizerBackend::Default,
+            TokenizerBackend::Fastokens,
+            TokenizerBackend::Basetenkenizer,
+        ] {
+            assert_eq!(backend.as_str().parse(), Ok(backend));
+        }
+
+        let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
+        assert!(error.contains("basetenkenizer"));
     }
 
     #[test]
