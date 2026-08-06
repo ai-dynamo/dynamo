@@ -25,7 +25,9 @@
 # The scrape interval must stay above the collector's scrape timeout, or the
 # whole scrape config is rejected. Grafana Alloy defaults to a 10s timeout, so
 # the previous hardcoded 5s made every PodMonitor here invalid on a default
-# install: "scrape timeout greater than scrape interval".
+# install: "scrape timeout greater than scrape interval". Endpoints that need a
+# sub-10s interval must therefore set an explicit scrapeTimeout <= interval —
+# one invalid endpoint drops the entire PodMonitor, not just that endpoint.
 {{- $scrapeInterval := .Values.dynamo.metrics.podMonitors.interval | default "30s" }}
 {{- if $podMonitorsEnabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -86,6 +88,7 @@ spec:
   # above never matches those, so scrape them explicitly. On non-failover pods these
   # named ports don't exist, so no extra targets are generated.
   - interval: 5s
+    scrapeTimeout: 5s
     path: /metrics
     port: system-0
     relabelings:
@@ -99,6 +102,7 @@ spec:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
       targetLabel: dynamo_graph_deployment
   - interval: 5s
+    scrapeTimeout: 5s
     path: /metrics
     port: system-1
     relabelings:
@@ -114,6 +118,7 @@ spec:
   # container port "http" (8000). Pods without that named port are dropped by
   # the Prometheus Operator keep rule, so plain workers are unaffected.
   - interval: 5s
+    scrapeTimeout: 5s
     path: /metrics
     port: http
     honorLabels: true
@@ -188,6 +193,7 @@ spec:
   # The EPP container declares "metrics" (9090) alongside its gRPC ports; see
   # EPPDefaults.GetBaseContainer in the operator.
   - interval: 5s
+    scrapeTimeout: 5s
     path: /metrics
     port: metrics
   selector:
