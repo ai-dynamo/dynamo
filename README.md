@@ -222,7 +222,7 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 - **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** — RFCs for major features, tracked as `dep:*` labeled GitHub issues
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — Biweekly calls
 - **[Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – Weekly (Wed 10:30 AM PT) development community meetings
-- **[Discord](https://discord.gg/D92uqZRjCZ)** — Chat with the team and community
+- **[Slack](https://ai-dynamo.org/slack)** — Chat with the team and community
 - **[Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)** — Deep dives from production users
 
 ## Latest News
