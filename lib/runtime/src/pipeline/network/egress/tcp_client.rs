@@ -1087,7 +1087,32 @@ impl HostPool {
                     }
                     Err(e) => {
                         self.connect_notify.notify_waiters();
-                        return Err(e);
+                        // Only an actual socket-connect failure means the peer is
+                        // gone or unreachable, so only this branch is typed
+                        // `CannotConnect` — the same type the post-connect failure
+                        // arms in `send_request` use. `PushRouter::is_inhibited`
+                        // treats that as a fault and quarantines the instance, so
+                        // the other error exits from this function (pool at
+                        // capacity, limiter closed, waiter exhausted its retries)
+                        // must stay untyped: they are local coordination failures
+                        // and would otherwise take a healthy worker out of
+                        // rotation under a cold-start burst.
+                        TCP_ERRORS_TOTAL.inc();
+                        tracing::warn!(
+                            addr = %self.addr,
+                            error = %e,
+                            "TCP connect failed; instance unreachable"
+                        );
+                        let cause = crate::error::DynamoError::from(
+                            e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+                        );
+                        return Err(anyhow::anyhow!(
+                            crate::error::DynamoError::builder()
+                                .error_type(crate::error::ErrorType::CannotConnect)
+                                .message(format!("TCP connect to {} failed", self.addr))
+                                .cause(cause)
+                                .build()
+                        ));
                     }
                 }
             }
@@ -1502,26 +1527,13 @@ impl RequestPlaneClient for TcpRequestClient {
 
         // Get shared connection from pool (Arc, not exclusive borrow).
         //
-        // A connect failure means the worker is gone (ECONNREFUSED) or
-        // unreachable. Type it the same way the post-connect failure arms below
-        // do: `PushRouter::is_inhibited` matches `DynamoError` variants through
-        // `match_error_chain`, and a bare `std::io::Error` matches nothing, so
-        // leaving this untyped means the router never quarantines a dead
-        // instance and keeps dispatching to it until discovery expires it.
-        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+        // Errors are propagated as-is: the pool types a genuine socket-connect
+        // failure as `CannotConnect` at the connect site, and deliberately
+        // leaves its local coordination failures untyped so they cannot
+        // quarantine a healthy worker. Do not wrap here — this boundary cannot
+        // tell the two apart.
+        let conn = self.pool.get_connection(addr).await.inspect_err(|_| {
             self.stats.errors.fetch_add(1, Ordering::Relaxed);
-            TCP_ERRORS_TOTAL.inc();
-            tracing::warn!(%addr, error = %e, "TCP connect failed; instance unreachable");
-            let cause = crate::error::DynamoError::from(
-                e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
-            );
-            anyhow::anyhow!(
-                crate::error::DynamoError::builder()
-                    .error_type(crate::error::ErrorType::CannotConnect)
-                    .message(format!("TCP connect to {addr} failed"))
-                    .cause(cause)
-                    .build()
-            )
         })?;
 
         let result = tokio::time::timeout(
@@ -2893,6 +2905,52 @@ mod tests {
             ),
             "ECONNREFUSED must be typed CannotConnect so the router quarantines the dead \
              worker; got untyped error: {err:?}"
+        );
+    }
+
+    /// Local pool-coordination failures must NOT classify as `CannotConnect`.
+    ///
+    /// `HostPool::get_connection` has four error exits and only one of them —
+    /// the `TcpConnection::connect` branch — says anything about the peer. The
+    /// other three (pool at capacity, connect limiter closed, waiter exhausted
+    /// its retries) are frontend-local. Typing those as `CannotConnect` would
+    /// make `is_inhibited` quarantine a *healthy* worker, and it would do so
+    /// precisely when contention is highest (a cold-start burst), which is
+    /// self-amplifying: contention quarantines workers, and quarantine
+    /// concentrates load on the survivors.
+    ///
+    /// A closed limiter is the deterministic representative of that class — it
+    /// fails before any socket is dialed. The retry-exhaustion exit has the same
+    /// requirement but is only reachable by a CAS-gate loser, so it needs a race
+    /// to construct and is not asserted here.
+    #[tokio::test]
+    async fn pool_coordination_failure_is_not_typed_cannot_connect() {
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_millis(50),
+            pool_size: 2,
+            channel_buffer: 10,
+        };
+        // Address is never dialed: the closed limiter fails the acquire first.
+        let pool = HostPool::new(closed_port().await, &config);
+
+        let limiter = tokio::sync::Semaphore::new(1);
+        limiter.close();
+
+        // `expect_err` needs `T: Debug`; `Arc<TcpConnection>` is not.
+        let err = match pool.get_connection(&limiter).await {
+            Ok(_) => panic!("a closed connect limiter must fail"),
+            Err(e) => e,
+        };
+
+        assert!(
+            !crate::error::match_error_chain(
+                err.as_ref(),
+                &[crate::error::ErrorType::CannotConnect],
+                &[]
+            ),
+            "local pool failure must not be typed CannotConnect — it would quarantine a \
+             healthy worker: {err:?}"
         );
     }
 
