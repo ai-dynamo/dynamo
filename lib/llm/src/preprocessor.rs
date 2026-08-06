@@ -2378,23 +2378,27 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Stamp ISL on the enclosing `http-request` span as soon as it is known,
-        // before any check that can reject the request. Requests that fail during
-        // preprocessing never reach a worker, so no metrics annotation ever comes
-        // back to carry this — without it their log line and OTel span report no
-        // input size at all, which is what makes context-length rejections
-        // indistinguishable from every other preprocessing failure.
-        //
-        // `ResponseMetricCollector::drop` runs later and leaves the field alone
-        // unless it observed a response, so this value survives on the error path
-        // and is overwritten with the identical count on the success path. The
-        // field is declared by `make_inference_request_span`; when this runs
-        // outside that span (non-HTTP entry points) `record` is a no-op.
-        if let Some(count) = token_count {
+        // Validate prompt token count against model's context length
+        if let Some(count) = token_count
+            && let Err(error) = Self::validate_token_count(count, self.context_length)
+        {
+            // This request dies here. It never reaches a worker, so no metrics
+            // annotation comes back and `ResponseMetricCollector` never learns an
+            // ISL for it — leaving the rejection with no recorded input size at
+            // all. Stamp it on the enclosing `http-request` span instead, so the
+            // log line and OTel span report why the request was too big.
+            //
+            // Deliberately only on this error path. On the success path the
+            // response path stamps the identical count (`builder.token_ids`
+            // installs exactly these tokens, and `update_isl` uses their length),
+            // and recording here as well would emit the field twice: the fmt
+            // field formatter appends rather than replaces, producing
+            // `input_tokens=N input_tokens=N`.
+            //
+            // The field is declared by `make_inference_request_span`; outside
+            // that span (non-HTTP entry points) `record` is a no-op.
             tracing::Span::current().record("input_tokens", count as u32);
-
-            // Validate prompt token count against model's context length
-            Self::validate_token_count(count, self.context_length)?;
+            return Err(error);
         }
 
         Ok((tokens_out, annotations))

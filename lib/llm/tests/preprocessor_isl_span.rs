@@ -112,7 +112,11 @@ async fn context_length_rejection_still_records_isl() {
 }
 
 #[tokio::test]
-async fn accepted_request_records_the_same_isl() {
+async fn accepted_request_leaves_isl_to_the_response_path() {
+    // The preprocessor must NOT stamp ISL when the request survives. The
+    // response path records the identical count on drop, and two writes to one
+    // span field are not idempotent: the fmt field formatter appends rather
+    // than replaces, so the log line would read `input_tokens=N input_tokens=N`.
     let mut mdc = ModelDeploymentCard::load_from_disk(
         "tests/data/sample-models/mock-llama-3.1-8b-instruct",
         None,
@@ -132,9 +136,13 @@ async fn accepted_request_records_the_same_isl() {
         .await
         .expect("a short prompt should preprocess cleanly");
 
+    assert!(
+        !preprocessed.token_ids.is_empty(),
+        "fixture should tokenize to something, else this asserts nothing"
+    );
     assert_eq!(
         recorded.get("input_tokens"),
-        Some(preprocessed.token_ids.len() as u64),
-        "the stamped ISL must match the tokens actually produced"
+        None,
+        "accepted requests must be stamped once, by the response path only"
     );
 }
