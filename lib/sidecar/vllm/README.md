@@ -67,6 +67,8 @@ pool. Override them with `--grpc-connect-attempt-timeout-secs`,
 `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
 corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
+Each request owns its response stream but borrows a channel from the shared pool. Aggregate and prefill cancellation drops only that request's stream. Decode cancellation first submits the decode request and retains its stream through the first output token so a NIXL receiver can complete and release the transferred KV; it then drops the stream. vLLM automatically aborts the corresponding engine request while the pooled HTTP/2 connection remains available to other requests. The sidecar does not call the Control `Abort` RPC.
+
 ## Test without vLLM or a GPU
 
 Use the CPU-only `dynamo-vllm-mocker-server` to exercise the same Inference, Control, and health contracts:
