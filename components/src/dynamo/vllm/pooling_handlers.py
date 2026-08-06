@@ -210,7 +210,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         data: list[dict[str, Any]] = []
         prompt_tokens = 0
         for idx, final_output in enumerate(outputs):
-            probs = _pooling_output_to_list(final_output.outputs.data)
+            probs = _classification_output_to_list(final_output.outputs.data)
             predicted_index = (
                 max(range(len(probs)), key=probs.__getitem__) if probs else None
             )
@@ -319,11 +319,19 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
 def _build_pooling_tokenize_params(
     engine_client: Any, tokenization_kwargs: dict[str, Any] | None
 ) -> Any:
+    """Resolve the TokenizeParams applied to pre-tokenized inputs.
+
+    With no caller overrides this returns the renderer's defaults rather than
+    ``None``: upstream vLLM runs every pooling/classify input through
+    ``apply_post_tokenization``, which is also where default truncation to
+    ``max_model_len`` happens. Returning ``None`` here would skip that for
+    token-ID inputs, so an over-long pre-tokenized prompt would reach the engine
+    untruncated instead of being truncated the way native vLLM truncates it.
+    """
+    defaults = engine_client.renderer.default_cmpl_tok_params
     if tokenization_kwargs is None:
-        return None
-    return engine_client.renderer.default_cmpl_tok_params.with_kwargs(
-        **tokenization_kwargs
-    )
+        return defaults
+    return defaults.with_kwargs(**tokenization_kwargs)
 
 
 def _prepare_pooling_prompt(
@@ -453,13 +461,37 @@ def _classify_pooling_input(input_field: Any) -> list[Any]:
     )
 
 
-def _pooling_output_to_list(data: Any) -> list[float]:
-    """Convert sequence-level pooling output to a flat float list."""
+def _classification_output_to_list(data: Any) -> list[float]:
+    """Convert sequence-level classification output to one probability vector.
+
+    ``/classify`` reports a single vector of shape ``[num_classes]``. vLLM's
+    pooling pipeline may wrap it in a singleton batch dim (``[1, num_classes]``),
+    which is unwrapped here. Any other multi-row shape means the model or pooler
+    produced token-level output: flattening it would report ``num_classes`` as
+    ``rows * classes`` and pick an ``argmax`` outside the label range, yielding a
+    200 with a null label instead of a visible failure. Native vLLM rejects
+    classification output with ``ndim != 1``; so does this.
+    """
     if isinstance(data, torch.Tensor):
-        return data.detach().cpu().flatten().tolist()
+        tensor = data.detach().cpu()
+        if tensor.ndim == 2 and tensor.shape[0] == 1:
+            tensor = tensor[0]
+        if tensor.ndim != 1:
+            raise ValueError(
+                "Classification output must be one probability vector of shape "
+                f"[num_classes]; got tensor of shape {tuple(tensor.shape)}. "
+                "This usually means the model or pooler emits token-level output."
+            )
+        return tensor.tolist()
     if isinstance(data, (list, tuple)):
         if data and isinstance(data[0], (list, tuple)):
-            return [float(value) for row in data for value in row]
+            if len(data) != 1:
+                raise ValueError(
+                    "Classification output must be one probability vector of "
+                    f"shape [num_classes]; got {len(data)} rows. This usually "
+                    "means the model or pooler emits token-level output."
+                )
+            return [float(value) for value in data[0]]
         return [float(value) for value in data]
     raise TypeError(
         f"Unsupported PoolingOutput.data type {type(data).__name__}; "
