@@ -227,6 +227,12 @@ impl ModelType {
         if self.contains(Self::Realtime) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Realtime);
         }
+        if self.contains(Self::Classify) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Classify);
+        }
+        if self.contains(Self::Pooling) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Pooling);
+        }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
         // server that uses it.
@@ -368,6 +374,14 @@ mod tests {
     }
 
     #[test]
+    fn classify_endpoint_mapping() {
+        assert_eq!(
+            ModelType::Classify.as_endpoint_types(),
+            vec![EndpointType::Classify]
+        );
+    }
+
+    #[test]
     fn pooling_bit_position() {
         assert_eq!(ModelType::Pooling.bits(), 1 << 10);
     }
@@ -393,6 +407,10 @@ mod tests {
         assert_eq!(
             combined.units(),
             vec![ModelType::Classify, ModelType::Pooling]
+        );
+        assert_eq!(
+            combined.as_endpoint_types(),
+            vec![EndpointType::Classify, EndpointType::Pooling]
         );
     }
 
