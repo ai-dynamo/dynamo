@@ -107,6 +107,16 @@ fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
     }
 }
 
+fn has_live_endpoint_card(
+    cards: &[(EndpointId, ModelDeploymentCard)],
+    namespace: &str,
+    component: &str,
+) -> bool {
+    cards
+        .iter()
+        .any(|(endpoint, _)| endpoint.namespace == namespace && endpoint.component == component)
+}
+
 fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
     match instance {
         DiscoveryInstance::Model {
@@ -161,13 +171,17 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
             .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
-fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
+fn supports_generate_capability(card: &ModelDeploymentCard, capability: &str) -> bool {
     matches!(
-        card.runtime_config
-            .runtime_data
-            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        card.runtime_config.runtime_data.get(capability),
         Some(serde_json::Value::Bool(true))
     )
+}
+
+fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[&str]) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| supports_generate_capability(card, capability))
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -250,9 +264,9 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
-    /// Whether the frontend configured the vLLM-compatible Generate API.
-    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
-    generate_engine_enabled: bool,
+    /// Worker capabilities accepted by the frontend's engine-native Generate routes.
+    /// Keep raw pipelines out of default-off and backend-mismatched paths.
+    generate_engine_capabilities: Vec<&'static str>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -402,7 +416,7 @@ impl ModelWatcher {
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
-            generate_engine_enabled: false,
+            generate_engine_capabilities: Vec::new(),
         }
     }
 
@@ -418,8 +432,15 @@ impl ModelWatcher {
         self.tokenizer_backend = tokenizer_backend;
     }
 
+    pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
+        self.generate_engine_capabilities = capabilities;
+    }
+    /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
-        self.generate_engine_enabled = enabled;
+        self.generate_engine_capabilities = enabled
+            .then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .into_iter()
+            .collect();
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
@@ -1053,11 +1074,13 @@ impl ModelWatcher {
         // state. If discovery is temporarily unavailable, retaining the card
         // lets the next reconciliation pass retry this stale entry instead of
         // losing the key while leaving its WorkerSet behind.
-        let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, namespace_filter)
-            .await
-            .with_context(|| model_name.clone())?;
-
+        let all_cards = self.all_cards().await.with_context(|| model_name.clone())?;
+        let active_instances = all_cards
+            .iter()
+            .filter(|(endpoint_id, card)| {
+                card.name() == model_name && namespace_filter.matches(&endpoint_id.namespace)
+            })
+            .collect::<Vec<_>>();
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
@@ -1119,6 +1142,9 @@ impl ModelWatcher {
                 && worker_set_key(eid, other_card.model_type, other_card.worker_type) == ws_key
         });
 
+        let endpoint_has_instances =
+            has_live_endpoint_card(&all_cards, worker_namespace, worker_component);
+
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
             let removed = self.manager.remove_worker_set(&model_name, &ws_key);
@@ -1137,6 +1163,11 @@ impl ModelWatcher {
                         self.manager.unregister_alias_if_empty(alias, &model_name);
                     }
                 }
+            }
+
+            if !endpoint_has_instances {
+                self.manager
+                    .remove_hicache_caches(worker_namespace, worker_component);
             }
 
             // Activator-state cleanup depends on which component just went away.
@@ -1604,7 +1635,7 @@ impl ModelWatcher {
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
-                self.generate_engine_enabled && supports_vllm_generate(card);
+                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2221,7 +2252,10 @@ fn seed_lora_state_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::Error;
 
     fn test_endpoint_id(name: &str) -> EndpointId {
         EndpointId {
@@ -2232,20 +2266,35 @@ mod tests {
     }
 
     #[test]
-    fn vllm_generate_requires_explicit_worker_capability() {
+    fn endpoint_liveness_considers_all_models() {
+        // This is the discovery snapshot after the last adapter card was removed: its base
+        // model remains on the same worker endpoint, so the endpoint is still live.
+        let cards = vec![(
+            test_endpoint_id("generate"),
+            ModelDeploymentCard::with_name_only("base-model"),
+        )];
+
+        assert!(has_live_endpoint_card(&cards, "ns1", "workers"));
+    }
+
+    #[test]
+    fn generate_requires_enabled_matching_worker_capability() {
+        const OTHER_GENERATE_CAPABILITY: &str = "other_generate";
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.model_type = ModelType::Chat | ModelType::Completions;
-        assert!(!supports_vllm_generate(&card));
-
         card.runtime_config
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
             .unwrap();
-        assert!(supports_vllm_generate(&card));
 
-        card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
-            .unwrap();
-        assert!(!supports_vllm_generate(&card));
+        assert!(supports_enabled_engine_generate(
+            &card,
+            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+        ));
+        assert!(!supports_enabled_engine_generate(&card, &[]));
+        assert!(!supports_enabled_engine_generate(
+            &card,
+            &[OTHER_GENERATE_CAPABILITY]
+        ));
     }
 
     #[test]
@@ -2509,6 +2558,84 @@ mod tests {
         let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
         mm.add_realtime_model("rt-echo", "0", engine).unwrap();
         assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    /// Stand-in engine for registration-only tests; never invoked.
+    struct UncalledEngine;
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreatePoolingRequest>,
+            ManyOut<Annotated<NvCreatePoolingResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreatePoolingRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreatePoolingResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateClassifyRequest>,
+            ManyOut<Annotated<NvCreateClassifyResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreateClassifyRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateClassifyResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    /// Removing one model of a type must not retract the endpoint for the
+    /// models of that type that are still registered: the frontend maps a
+    /// `ModelUpdate::Removed` card onto process-wide endpoint flags, so an
+    /// over-eager removal card would 404 the surviving models' endpoint.
+    #[test]
+    fn removing_one_model_keeps_the_endpoint_for_surviving_models() {
+        let mm = ModelManager::new();
+        mm.add_pooling_model("model-a", "ck-a", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_pooling_model("model-b", "ck-b", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_classify_model("model-a", "ck-a", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_classify_model("model-b", "ck-b", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+
+        let mut card = ModelDeploymentCard::with_name_only("model-a");
+        card.model_type = ModelType::Classify | ModelType::Pooling;
+
+        // Mirrors `handle_delete`, which drops the model from the manager
+        // before computing the removal cards.
+        mm.remove_model("model-a");
+        assert!(
+            removed_model_cards(&mm, &card).is_empty(),
+            "removing model-a must emit no removal card while model-b is still registered"
+        );
+
+        // The last model of each type going away must still retract both.
+        mm.remove_model("model-b");
+        let removed = removed_model_cards(&mm, &card);
+        assert_eq!(removed.len(), 2);
+        assert!(
+            removed
+                .iter()
+                .any(|card| card.model_type == ModelType::Classify)
+        );
+        assert!(
+            removed
+                .iter()
+                .any(|card| card.model_type == ModelType::Pooling)
+        );
     }
 
     #[test]

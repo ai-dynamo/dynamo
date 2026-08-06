@@ -35,6 +35,10 @@ stage_args:
       distributed_executor_backend: "mp"
       enable_prefix_caching: false
       max_num_batched_tokens: 32768
+    # Entry stage: input comes from the request, not from another stage.
+    # Declared explicitly because the stage_args format applies no schema
+    # defaults, and vLLM-Omni reads this field unconditionally.
+    engine_input_source: []
     # Explicit connector mapping for AR -> DiT
     output_connectors:
       to_stage_1: ar_to_dit_nixl

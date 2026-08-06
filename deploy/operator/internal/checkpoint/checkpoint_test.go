@@ -35,7 +35,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -587,7 +586,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 	t.Run("ready checkpoint enables restore standby mode", func(t *testing.T) {
 		podSpec := testPodSpec()
-		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
+		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assertRestoreStandbyMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
@@ -659,13 +658,18 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, InjectCheckpointIntoPodSpecWithStorageConfig(
+		restore, err := ResolvePodSpecRestore(
 			context.Background(),
 			reader,
 			testNamespace,
-			podSpec,
 			info,
 			storageConfig,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, restore)
+		require.NoError(t, InjectResolvedCheckpointIntoPodSpec(
+			podSpec,
+			restore,
 			snapshotprotocol.DefaultSeccompLocalhostProfile,
 		))
 
@@ -743,7 +747,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			reader  client.Reader
 			errMsg  string
 		}{
-			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true, Ready: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
+			{"ready checkpoint without hash", testPodSpec(), &CheckpointInfo{Enabled: true, Ready: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "checkpoint is ready but hash is not set"},
 			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "restore target container"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
@@ -1001,7 +1005,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 			snapshotprotocol.CheckpointIDLabel: "stale",
 		}
 		annotations := map[string]string{
-			snapshotprotocol.CheckpointStatusAnnotation: "stale",
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: "stale",
 		}
 
 		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{
@@ -1016,7 +1020,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 
 		assert.Empty(t, labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Empty(t, labels[snapshotprotocol.RestoreTargetLabel])
-		assert.Empty(t, annotations[snapshotprotocol.CheckpointStatusAnnotation])
+		assert.Empty(t, annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 		assert.Equal(t, consts.KubeLabelValueTrue, annotations[consts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, "worker-checkpoint", annotations[consts.CheckpointNameAnnotation])
 		assert.Equal(t, string(nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint), annotations[consts.CheckpointStartupPolicyAnnotation])

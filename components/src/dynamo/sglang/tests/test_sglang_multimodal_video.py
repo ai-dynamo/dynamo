@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 import pytest
 import torch
 
@@ -24,6 +25,7 @@ from dynamo.sglang.request_handlers.multimodal.worker_handler import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -31,10 +33,10 @@ pytestmark = [
 ]
 
 
-def test_extract_media_urls_supports_video_urls():
+def test_extract_media_inputs_supports_video_urls():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
+    image_items, video_urls = handler._extract_media_inputs(
         {
             "multi_modal_data": {
                 "video_url": [
@@ -45,14 +47,14 @@ def test_extract_media_urls_supports_video_urls():
         }
     )
 
-    assert image_urls == []
+    assert image_items == []
     assert video_urls == ["https://example.com/clip.mp4", "file:///tmp/local.mp4"]
 
 
-def test_extract_media_urls_supports_mixed_image_and_video():
+def test_extract_media_inputs_supports_mixed_image_and_video():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
+    image_items, video_urls = handler._extract_media_inputs(
         {
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
@@ -61,16 +63,16 @@ def test_extract_media_urls_supports_mixed_image_and_video():
         }
     )
 
-    assert image_urls == ["https://example.com/image.png"]
+    assert image_items == [{"Url": "https://example.com/image.png"}]
     assert video_urls == ["https://example.com/clip.mp4"]
 
 
 @pytest.mark.multimodal
-def test_extract_media_urls_rejects_multimodal_cache_uuid():
+def test_extract_media_inputs_rejects_multimodal_cache_uuid():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
     with pytest.raises(ValueError, match="supported only by the vLLM backend"):
-        handler._extract_media_urls(
+        handler._extract_media_inputs(
             {
                 "multi_modal_uuids": {"image_url": ["cached-image"]},
             }
@@ -142,3 +144,46 @@ async def test_build_mm_items_routes_video_to_video_data():
         mm_item["second_per_grid_ts"], torch.tensor([0.5], dtype=torch.float32)
     )
     assert mm_item["video_timestamps"] == [[0.25, 0.75]]
+
+
+async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
+    """The metadata shim gives pre-decoded ndarray frames a valid metadata dict.
+
+    SGLang's ``preprocess_video`` returns ``(frames, None)`` for a pre-decoded
+    ndarray, and transformers >= 5.12 strict-rejects the resulting
+    ``video_metadata=[None]``. ``_install_nvdec_video_metadata_shim`` wraps it so
+    the ndarray carries a valid dict instead (validated end-to-end on gpu-ts
+    against the real ``MMEncoder._encode``: before FAIL -> after PASS).
+    """
+    es = pytest.importorskip("sglang.srt.disaggregation.encode_server")
+    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+        _NVDEC_SHIM_FPS,
+        _install_nvdec_video_metadata_shim,
+    )
+
+    saved = es.preprocess_video
+    try:
+        _install_nvdec_video_metadata_shim()
+        assert getattr(es.preprocess_video, "_dynamo_nvdec_shim", False)
+
+        # Idempotent: a second install must not double-wrap.
+        wrapped = es.preprocess_video
+        _install_nvdec_video_metadata_shim()
+        assert es.preprocess_video is wrapped
+
+        frames = np.zeros((5, 8, 8, 3), dtype=np.uint8)
+        video, meta = await es.preprocess_video(frames)
+        assert video is frames
+        assert meta == {
+            "fps": _NVDEC_SHIM_FPS,
+            "duration": 5 / _NVDEC_SHIM_FPS,
+            "total_num_frames": 5,
+            "frames_indices": [0, 1, 2, 3, 4],
+            "video_backend": "nvdec",
+        }
+
+        # Non-ndarray inputs keep None metadata (the shim only touches pixels).
+        _, meta_none = await es.preprocess_video("not-an-array")
+        assert meta_none is None
+    finally:
+        es.preprocess_video = saved

@@ -854,6 +854,17 @@ async fn completions_single(
 
         Ok(sse_stream.into_response())
     } else {
+        // Preserve typed backend errors before the completions aggregator turns
+        // them into strings. In particular, Python ValueError/TypeError arrives
+        // as Backend(InvalidArgument) and must remain an HTTP 400.
+        let stream = check_for_backend_error(stream, None)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
+
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
@@ -970,6 +981,28 @@ fn aggregate_batch_completion_usage(
     }
 }
 
+type BoxedCompletionResponseStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>;
+
+/// Check each prompt stream before merging a non-streaming completion batch.
+///
+/// `select_all` cannot safely provide this check after merging because a normal
+/// event from one prompt may arrive before a typed backend error from another.
+/// Poll all streams concurrently so batch startup is not serialized.
+async fn check_completion_batch_streams<S>(
+    streams: Vec<S>,
+) -> Result<Vec<BoxedCompletionResponseStream>, ErrorResponse>
+where
+    S: futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send + 'static,
+{
+    futures::future::try_join_all(
+        streams
+            .into_iter()
+            .map(|stream| check_for_backend_error(stream, None)),
+    )
+    .await
+}
+
 /// Handle batch prompt completions (multiple prompts with n choices each)
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
@@ -1072,7 +1105,23 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    // Merge all streams
+    let all_streams: Vec<BoxedCompletionResponseStream> = if streaming {
+        all_streams
+            .into_iter()
+            .map(|stream| Box::pin(stream) as BoxedCompletionResponseStream)
+            .collect()
+    } else {
+        check_completion_batch_streams(all_streams)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?
+    };
+
+    // Merge all streams after every non-streaming prompt has passed its own
+    // backend-error preflight.
     let merged_stream = stream::select_all(all_streams);
     let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
@@ -1356,7 +1405,6 @@ async fn classify(
         warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
-    validate_pooling_cache_salt(request.cache_salt.as_deref())?;
 
     // Resolve alias → primary served name before wrapping the request, so
     // engine routing, metrics, and the response model all use the canonical
@@ -1376,13 +1424,26 @@ async fn classify(
     let model = &request.model;
     let metric_model = state.manager().metric_model_for(model).to_string();
 
-    // Create inflight_guard early to ensure all errors are counted
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &metric_model,
         Endpoint::Classify,
         streaming,
         &request_id,
     );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -1614,14 +1675,6 @@ async fn pooling(
         warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
-    validate_pooling_cache_salt(request.cache_salt.as_deref())?;
-
-    // vLLM currently rejects dimensionality reduction on `/pooling`.
-    if request.dimensions.is_some() {
-        return Err(pooling_or_classify_bad_request(
-            "dimensions is currently not supported".to_string(),
-        ));
-    }
     let response_encoding = request.encoding_format;
     let response_dtype = request.embed_dtype.unwrap_or_default();
     let response_endianness = request.endianness.unwrap_or_default();
@@ -1643,13 +1696,34 @@ async fn pooling(
     let model = &request.model;
     let metric_model = state.manager().metric_model_for(model).to_string();
 
-    // Create inflight_guard early to ensure all errors are counted
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &metric_model,
         Endpoint::Pooling,
         streaming,
         &request_id,
     );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    // vLLM currently rejects dimensionality reduction on `/pooling`.
+    if request.dimensions.is_some() {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(pooling_or_classify_bad_request(
+            "dimensions is currently not supported".to_string(),
+        ));
+    }
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -2088,24 +2162,20 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 ///
 /// Returns `Err(ErrorResponse)` if the first non-annotation event is a backend
 /// error, `Ok(stream)` otherwise.
-pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
-    + Send
-    + Unpin
-    + 'static,
+pub(super) async fn check_for_backend_error<T>(
+    stream: impl futures::Stream<Item = Annotated<T>> + Send + 'static,
     timeout: Option<std::time::Duration>,
-) -> Result<
-    std::pin::Pin<
-        Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-    >,
-    ErrorResponse,
-> {
+) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ErrorResponse>
+where
+    T: serde::Serialize + Send + 'static,
+{
     use futures::stream::StreamExt;
 
+    let mut stream = Box::pin(stream);
     // Single deadline captured at entry so the peek window is bounded in total,
     // not per-iteration.
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
-    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    let mut buffered: Vec<Annotated<T>> = Vec::new();
 
     loop {
         let next = match deadline {
@@ -2209,7 +2279,6 @@ fn push_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
-/// `role` is excluded; backends set it on every delta.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -2220,7 +2289,7 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 content,
                 function_call,
                 tool_calls,
-                role: _,
+                role,
                 refusal,
                 reasoning_content,
             } = &c.delta;
@@ -2236,9 +2305,22 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 && content_empty
                 && function_call.is_none()
                 && tool_calls.is_none()
+                && role.is_none()
                 && refusal.is_none()
                 && reasoning_content.is_none()
         })
+}
+
+/// Preserve the first role delta for each choice and remove parser-generated repeats.
+fn deduplicate_stream_roles(
+    resp: &mut NvCreateChatCompletionStreamResponse,
+    emitted_roles: &mut HashSet<u32>,
+) {
+    for choice in &mut resp.inner.choices {
+        if choice.delta.role.is_some() && !emitted_roles.insert(choice.index) {
+            choice.delta.role = None;
+        }
+    }
 }
 
 /// Completions variant of [`is_empty_stream_response`].
@@ -2340,6 +2422,23 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
+fn apply_chat_completions_request_template(
+    request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
+    template: Option<&RequestTemplate>,
+) {
+    if let Some(template) = template {
+        if request.model.is_empty() {
+            request.model = template.model.clone();
+        }
+        if request.temperature.is_none() {
+            request.temperature = Some(template.temperature);
+        }
+        if request.max_completion_tokens.unwrap_or(0) == 0 {
+            request.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+}
+
 /// OpenAI Chat Completions Request Handler
 ///
 /// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
@@ -2364,17 +2463,7 @@ async fn chat_completions(
     let streaming = request.inner.stream.unwrap_or(false);
 
     // Apply template values first to resolve the model before creating metrics guards
-    if let Some(template) = template {
-        if request.inner.model.is_empty() {
-            request.inner.model = template.model.clone();
-        }
-        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
-            request.inner.temperature = Some(template.temperature);
-        }
-        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
-            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
-        }
-    }
+    apply_chat_completions_request_template(&mut request.inner, template.as_ref());
     // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -2533,8 +2622,10 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
+        let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -2559,6 +2650,10 @@ async fn chat_completions(
                             }
                         }
                     }
+                }
+
+                if let Some(data) = response.data.as_mut() {
+                    deduplicate_stream_roles(data, &mut emitted_roles);
                 }
 
                 // Drop empty chunks from multi-byte token assembly.
@@ -2586,6 +2681,7 @@ async fn chat_completions(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
+                    reasoning_field,
                 );
 
                 // Side-channel events come first, then the regular data event.
@@ -2653,7 +2749,11 @@ async fn chat_completions(
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
-        Ok(Json(response).into_response())
+        Ok(Json(crate::reasoning_field::RoutedReasoning::new(
+            response,
+            state.reasoning_field(),
+        ))
+        .into_response())
     }
 }
 
@@ -4354,6 +4454,29 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_completions_template_preserves_explicit_zero_temperature() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        assert_eq!(request.temperature, Some(0.0));
+        assert_eq!(request.model, "template-model");
+        assert_eq!(request.max_completion_tokens, Some(128));
+
+        request.temperature = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
     fn test_is_json_content_type() {
         assert!(is_json_content_type("application/json"));
         assert!(is_json_content_type("application/json; charset=utf-8"));
@@ -5597,6 +5720,82 @@ mod tests {
             assert_eq!(error_response.1.error_type, "Bad Request");
             assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
+    }
+
+    #[tokio::test]
+    async fn test_completion_backend_invalid_argument_surfaces_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateCompletionResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
+                    .build(),
+            ),
+        };
+
+        let error_response =
+            match check_for_backend_error(stream::iter(vec![error_event]), None).await {
+                Ok(_) => panic!("typed completion error must fail"),
+                Err(error_response) => error_response,
+            };
+
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(error_response.1.error_type, "Bad Request");
+        assert!(
+            error_response
+                .1
+                .message
+                .contains("does not currently support logprobs >= 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_completion_checks_every_stream_for_backend_errors() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let normal_event = Annotated::<NvCreateCompletionResponse> {
+            data: Some(make_completion_chunk("ok", None, None)),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let error_event = Annotated::<NvCreateCompletionResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("invalid second prompt")
+                    .build(),
+            ),
+        };
+
+        let result = check_completion_batch_streams(vec![
+            stream::iter(vec![normal_event]),
+            stream::iter(vec![error_event]),
+        ])
+        .await;
+
+        let error_response = match result {
+            Ok(_) => panic!("an error in any batch prompt must fail the request"),
+            Err(error_response) => error_response,
+        };
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(error_response.1.error_type, "Bad Request");
+        assert_eq!(error_response.1.message, "invalid second prompt");
     }
 
     #[tokio::test]
@@ -6909,9 +7108,9 @@ mod tests {
             "usage present → not empty",
         );
 
-        // Role-only: still empty (backends repeat role on every chunk)
+        // Role-only: not empty; duplicate roles are removed before this predicate.
         assert!(
-            is_empty_stream_response(&make_delta(
+            !is_empty_stream_response(&make_delta(
                 None,
                 None,
                 None,
@@ -6921,7 +7120,7 @@ mod tests {
                 None,
                 None,
             )),
-            "role-only → empty",
+            "role-only → not empty",
         );
 
         // Not empty: has refusal
@@ -6956,6 +7155,69 @@ mod tests {
             )),
             "function_call present → not empty",
         );
+    }
+
+    #[test]
+    fn test_deduplicate_stream_roles_preserves_only_first_role_per_choice() {
+        let mut emitted_roles = HashSet::new();
+        let mut first_choice_zero = make_delta(
+            None,
+            Some("thinking"),
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        let mut first_choice_one = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        first_choice_one.inner.choices[0].index = 1;
+        let mut second_choice_zero = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        let mut second_choice_one = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        second_choice_one.inner.choices[0].index = 1;
+
+        deduplicate_stream_roles(&mut first_choice_zero, &mut emitted_roles);
+        deduplicate_stream_roles(&mut first_choice_one, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second_choice_zero, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second_choice_one, &mut emitted_roles);
+
+        assert_eq!(
+            first_choice_zero.inner.choices[0].delta.role,
+            Some(Role::Assistant)
+        );
+        assert_eq!(
+            first_choice_one.inner.choices[0].delta.role,
+            Some(Role::Assistant)
+        );
+        assert_eq!(second_choice_zero.inner.choices[0].delta.role, None);
+        assert_eq!(second_choice_one.inner.choices[0].delta.role, None);
     }
 
     #[test]

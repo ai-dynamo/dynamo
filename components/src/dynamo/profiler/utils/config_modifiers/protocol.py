@@ -16,22 +16,26 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, Tuple
+import shlex
+from typing import Protocol, Tuple
 from uuid import uuid4
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
+    Component,
     Config,
     Container,
-    PodSpec,
     break_arguments,
-    get_service_name_by_type,
+    get_component_by_name,
+    get_component_name_by_type,
+    get_main_container,
     sanitize_cli_args,
     set_unique_argument_value,
-    setup_worker_service_resources,
+    setup_worker_component_resources,
     update_image,
 )
 from dynamo.profiler.utils.defaults import EngineType
+from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -217,61 +221,44 @@ class BaseConfigModifier:
 
     @classmethod
     def _normalize_model_path(cls, pvc_mount_path: str, pvc_path: str) -> str:
-        mount = (pvc_mount_path or "").rstrip("/")
-        sub = (pvc_path or "").lstrip("/")
-        if not sub:
-            return mount
-        return f"{mount}/{sub}"
+        """Resolve a PVC model-cache path to the mounted container path."""
+        return normalize_model_cache_path(pvc_mount_path, pvc_path)
 
     @classmethod
-    def _ensure_spec_pvc(cls, cfg: Config, pvc_name: str) -> None:
-        pvcs = getattr(cfg.spec, "pvcs", None)
-        if pvcs is None:
-            pvcs = []
-
-        for pvc in pvcs:
-            if isinstance(pvc, dict) and pvc.get("name") == pvc_name:
-                # Ensure create is false (do not create PVC in profiling flows)
-                pvc["create"] = False
-                setattr(cfg.spec, "pvcs", pvcs)
-                return
-
-        pvcs.append({"name": pvc_name, "create": False})
-        setattr(cfg.spec, "pvcs", pvcs)
-
-    @classmethod
-    def _ensure_service_volume_mount(
-        cls, service: Any, pvc_name: str, mount_path: str
+    def _ensure_component_volume_mount(
+        cls, component: Component, pvc_name: str, mount_path: str
     ) -> None:
-        volume_mounts = getattr(service, "volumeMounts", None)
-        if volume_mounts is None:
-            volume_mounts = []
-        if not isinstance(volume_mounts, list):
-            volume_mounts = []
+        """Mount an existing PVC into a v1beta1 component's main container."""
+        pod_spec = component.podTemplate.spec
+        volumes = pod_spec.volumes or []
+        for volume in volumes:
+            if isinstance(volume, dict) and volume.get("name") == pvc_name:
+                volume["persistentVolumeClaim"] = {"claimName": pvc_name}
+                break
+        else:
+            volumes.append(
+                {
+                    "name": pvc_name,
+                    "persistentVolumeClaim": {"claimName": pvc_name},
+                }
+            )
+        pod_spec.volumes = volumes
 
-        for vm in volume_mounts:
-            if isinstance(vm, dict) and vm.get("name") == pvc_name:
-                vm["mountPoint"] = mount_path
-                setattr(service, "volumeMounts", volume_mounts)
+        main_container = get_main_container(component)
+        volume_mounts = main_container.volumeMounts or []
+        for volume_mount in volume_mounts:
+            if isinstance(volume_mount, dict) and volume_mount.get("name") == pvc_name:
+                volume_mount["mountPath"] = mount_path
+                main_container.volumeMounts = volume_mounts
                 return
 
-        volume_mounts.append({"name": pvc_name, "mountPoint": mount_path})
-        setattr(service, "volumeMounts", volume_mounts)
+        volume_mounts.append({"name": pvc_name, "mountPath": mount_path})
+        main_container.volumeMounts = volume_mounts
 
     @staticmethod
-    def _ensure_service_hf_home_env(service: Any, hf_home: str) -> None:
-        eps = getattr(service, "extraPodSpec", None)
-        if eps is None:
-            return
-        mc = getattr(eps, "mainContainer", None)
-        if mc is None:
-            return
-
-        env_list = getattr(mc, "env", None)
-        if env_list is None:
-            env_list = []
-        if not isinstance(env_list, list):
-            env_list = []
+    def _ensure_component_hf_home_env(component: Component, hf_home: str) -> None:
+        main_container = get_main_container(component)
+        env_list = main_container.env or []
 
         env_list[:] = [
             e
@@ -279,7 +266,7 @@ class BaseConfigModifier:
             if not (isinstance(e, dict) and e.get("name") == "HF_HOME")
         ]
         env_list.append({"name": "HF_HOME", "value": hf_home})
-        setattr(mc, "env", env_list)
+        main_container.env = env_list
 
     @classmethod
     def _update_container_args_preserving_shell_form(
@@ -308,9 +295,6 @@ class BaseConfigModifier:
         tokens = update_fn(tokens)
 
         if is_shell_c and is_single_string_args:
-            # Keep as one string for `sh -c`
-            import shlex
-
             container.args = [shlex.join(tokens)]
         else:
             container.args = tokens
@@ -319,28 +303,23 @@ class BaseConfigModifier:
     def _update_frontend_cli(
         cls, cfg: Config, model_name: str, model_path: str
     ) -> None:
-        frontend = cfg.spec.services.get("Frontend")
+        frontend = get_component_by_name(cfg, "Frontend")
         if not frontend:
             return
 
-        if frontend.extraPodSpec is None:
-            frontend.extraPodSpec = PodSpec(mainContainer=Container())
-        if frontend.extraPodSpec.mainContainer is None:
-            frontend.extraPodSpec.mainContainer = Container()
-
-        c = frontend.extraPodSpec.mainContainer
+        main_container = get_main_container(frontend)
 
         # If operator defaults are being used (no command/args), we must provide full CLI.
-        if not c.command and not c.args:
-            c.command = ["python3", "-m", "dynamo.frontend"]
-            c.args = []
+        if not main_container.command and not main_container.args:
+            main_container.command = ["python3", "-m", "dynamo.frontend"]
+            main_container.args = []
 
         def _patch(tokens: list[str]) -> list[str]:
             tokens = set_unique_argument_value(tokens, "--model-name", model_name)
             tokens = set_unique_argument_value(tokens, "--model-path", model_path)
             return tokens
 
-        cls._update_container_args_preserving_shell_form(c, _patch)
+        cls._update_container_args_preserving_shell_form(main_container, _patch)
 
     @classmethod
     def _apply_model_update_to_cfg(
@@ -358,10 +337,8 @@ class BaseConfigModifier:
         - update_model_from_pvc()
         """
 
-        def _patch_service(service: Any) -> None:
-            if not service.extraPodSpec or not service.extraPodSpec.mainContainer:
-                return
-            c = service.extraPodSpec.mainContainer
+        def _patch_component(component: Component) -> None:
+            main_container = get_main_container(component)
 
             def _patch(tokens: list[str]) -> list[str]:
                 tokens = set_unique_argument_value(
@@ -372,27 +349,31 @@ class BaseConfigModifier:
                 )
                 return tokens
 
-            cls._update_container_args_preserving_shell_form(c, _patch)
+            cls._update_container_args_preserving_shell_form(main_container, _patch)
 
         # Update workers (prefill + decode) if present.
-        patched_services: set[str] = set()
-        for sct in (SubComponentType.PREFILL, SubComponentType.DECODE):
+        patched_components: set[str] = set()
+        for sub_component_type in (
+            SubComponentType.PREFILL,
+            SubComponentType.DECODE,
+        ):
             try:
-                svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
-            except Exception:
+                component_name = get_component_name_by_type(
+                    cfg, cls.BACKEND, sub_component_type
+                )
+            except (KeyError, ValueError):
                 continue
-            if svc_name not in cfg.spec.services:
+            component = get_component_by_name(cfg, component_name)
+            if component is None:
                 continue
-            _patch_service(cfg.spec.services[svc_name])
-            patched_services.add(svc_name)
+            _patch_component(component)
+            patched_components.add(component_name)
 
-        # Fallback for agg mode: if no worker was patched via subComponentType
-        # lookup, patch any non-Frontend/Planner worker service.
-        if not patched_services:
-            for name, service in cfg.spec.services.items():
-                if name not in cls._NON_WORKER_SERVICES:
-                    _patch_service(service)
-                    patched_services.add(name)
+        if not patched_components:
+            for component in cfg.spec.components:
+                if component.component_type == "worker":
+                    _patch_component(component)
+                    patched_components.add(component.name)
 
         if patch_frontend:
             cls._update_frontend_cli(cfg, model_name=model_name, model_path=model_path)
@@ -442,8 +423,7 @@ class BaseConfigModifier:
         Update a DGD config to serve `model_name`, with weights located in a mounted PVC.
 
         Common steps across backends:
-        - Add `spec.pvcs`
-        - Add `volumeMounts` for Frontend + prefill + decode (if present)
+        - Add a PVC volume and main-container mount to every component
         - Patch Frontend CLI (`--model-name`, `--model-path`)
         - Delegate worker CLI patching to backend-specific implementation.
         """
@@ -453,11 +433,8 @@ class BaseConfigModifier:
         cfg = Config.model_validate(config)
         model_path = cls._normalize_model_path(pvc_mount_path, pvc_path)
 
-        cls._ensure_spec_pvc(cfg, pvc_name)
-
-        # Mount PVC to all services (Frontend + workers)
-        for svc_name, svc in cfg.spec.services.items():
-            cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+        for component in cfg.spec.components:
+            cls._ensure_component_volume_mount(component, pvc_name, pvc_mount_path)
 
         # Patch workers + frontend with PVC model path.
         cls._apply_model_update_to_cfg(
@@ -539,7 +516,7 @@ class BaseConfigModifier:
         if namespace and hasattr(cfg.metadata, "namespace"):
             cfg.metadata.namespace = namespace
 
-        # Update image for all services
+        # Update image for all components
         config = update_image(cfg.model_dump(), image)
         cfg = Config.model_validate(config)
 
@@ -584,20 +561,20 @@ class BaseConfigModifier:
                     pvc_path=pvc_path,
                 )
             else:
-                cls._ensure_spec_pvc(cfg, pvc_name)
-                for _svc_name, svc in cfg.spec.services.items():
-                    cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
-                    cls._ensure_service_hf_home_env(svc, pvc_mount_path)
+                for component in cfg.spec.components:
+                    cls._ensure_component_volume_mount(
+                        component, pvc_name, pvc_mount_path
+                    )
+                    cls._ensure_component_hf_home_env(component, pvc_mount_path)
                 result = cls.update_model(
                     cfg.model_dump(),
                     model_name=model_name,
                     model_path=effective_model_path,
                 )
         elif pvc_name and pvc_mount_path:
-            cls._ensure_spec_pvc(cfg, pvc_name)
-            for _svc_name, svc in cfg.spec.services.items():
-                cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
-                cls._ensure_service_hf_home_env(svc, pvc_mount_path)
+            for component in cfg.spec.components:
+                cls._ensure_component_volume_mount(component, pvc_name, pvc_mount_path)
+                cls._ensure_component_hf_home_env(component, pvc_mount_path)
             result = cls.update_model(
                 cfg.model_dump(),
                 model_name=model_name,
@@ -611,39 +588,40 @@ class BaseConfigModifier:
 
         return result
 
-    _NON_WORKER_SERVICES = {"Frontend", "Planner"}
-
     @classmethod
-    def _resolve_service_name(
+    def _resolve_component_name(
         cls,
         cfg: Config,
         component_type: SubComponentType,
     ) -> str | None:
-        """Resolve the service name for a given component type, with fallback."""
+        """Resolve a worker component name, with an aggregate-mode fallback."""
         try:
-            return get_service_name_by_type(cfg, cls.BACKEND, component_type)
-        except Exception:
-            # Fallback: find the first worker service (skip Frontend, Planner)
-            for name in cfg.spec.services:
-                if name not in cls._NON_WORKER_SERVICES:
-                    return name
-            return None
+            component_name = get_component_name_by_type(
+                cfg, cls.BACKEND, component_type
+            )
+        except (KeyError, ValueError):
+            component_name = None
+        if component_name and get_component_by_name(cfg, component_name) is not None:
+            return component_name
+        for component in cfg.spec.components:
+            if component.component_type == "worker":
+                return component.name
+        return None
 
     @staticmethod
     def _apply_worker_config(
-        service: Any,
+        component: Component,
         cli_args: list[str],
         replicas: int,
         gpus: int,
         num_gpus_per_node: int | None = None,
     ) -> None:
-        """Apply CLI args, replicas, and GPU resources to a single worker service."""
-        service.replicas = replicas
-        if service.extraPodSpec and service.extraPodSpec.mainContainer:
-            service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
+        """Apply CLI args, replicas, and GPU resources to one worker component."""
+        component.replicas = replicas
+        get_main_container(component).args = sanitize_cli_args(list(cli_args))
 
         # Apply resources after args so multinode sizing can inspect final TP/PP flags.
-        setup_worker_service_resources(service, gpus, num_gpus_per_node)
+        setup_worker_component_resources(component, gpus, num_gpus_per_node)
 
     @classmethod
     def _apply_disagg_workers(
@@ -667,16 +645,19 @@ class BaseConfigModifier:
             ),
             (SubComponentType.DECODE, decode_cli_args, decode_replicas, decode_gpus),
         ]:
-            svc_name = cls._resolve_service_name(cfg, sct)
-            if svc_name is None or svc_name not in cfg.spec.services:
+            component_name = cls._resolve_component_name(cfg, sct)
+            component = (
+                get_component_by_name(cfg, component_name) if component_name else None
+            )
+            if component is None:
                 logger.warning(
-                    "Could not find %s service for backend %s, skipping",
+                    "Could not find %s component for backend %s, skipping",
                     sct.value,
                     cls.BACKEND,
                 )
                 continue
             cls._apply_worker_config(
-                cfg.spec.services[svc_name],
+                component,
                 cli_args,
                 replicas,
                 gpus,
@@ -699,18 +680,15 @@ class BaseConfigModifier:
         naming convention (``prefill`` / ``decode``).  We first try the standard
         DECODE lookup, then fall back to any non-Frontend/Planner service.
         """
-        svc_name = cls._resolve_service_name(cfg, SubComponentType.DECODE)
-        if svc_name is None or svc_name not in cfg.spec.services:
-            # Fallback: find any worker service in the config
-            for name in cfg.spec.services:
-                if name not in cls._NON_WORKER_SERVICES:
-                    svc_name = name
-                    break
-        if svc_name is None or svc_name not in cfg.spec.services:
-            logger.warning("Could not find worker service for agg mode")
+        component_name = cls._resolve_component_name(cfg, SubComponentType.DECODE)
+        component = (
+            get_component_by_name(cfg, component_name) if component_name else None
+        )
+        if component is None:
+            logger.warning("Could not find worker component for agg mode")
             return
         cls._apply_worker_config(
-            cfg.spec.services[svc_name],
+            component,
             agg_cli_args,
             agg_replicas,
             agg_gpus,

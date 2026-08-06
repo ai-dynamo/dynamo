@@ -114,10 +114,12 @@ class TestRapidSupported:
         assert output.exists()
         config = yaml.safe_load(output.read_text())
         assert config
-        spec = config.get("spec", {})
-        pvcs = spec.get("pvcs", [])
         assert any(
-            p.get("name") == "model-cache" for p in pvcs
+            volume.get("persistentVolumeClaim", {}).get("claimName") == "model-cache"
+            for component in config.get("spec", {}).get("components", [])
+            for volume in component.get("podTemplate", {})
+            .get("spec", {})
+            .get("volumes", [])
         ), "PVC should be mounted"
 
     @pytest.mark.pre_merge
@@ -160,21 +162,22 @@ class TestRapidSupported:
         docs = list(yaml.safe_load_all(raw))
         assert len(docs) >= 2, "Planner config should produce multi-doc YAML"
         dgd = docs[-1]
-        assert "Planner" in dgd.get("spec", {}).get(
-            "services", {}
-        ), "Planner service should be added"
-        services = dgd.get("spec", {}).get("services", {})
-        worker_services = {
-            name: svc
-            for name, svc in services.items()
-            if svc.get("componentType") == "worker"
+        components = {
+            component["name"]: component
+            for component in dgd.get("spec", {}).get("components", [])
         }
-        assert worker_services, "Planner DGD should include worker services"
-        for name, service in worker_services.items():
+        assert "Planner" in components, "Planner component should be added"
+        worker_components = {
+            name: component
+            for name, component in components.items()
+            if component.get("type") in {"worker", "prefill", "decode"}
+        }
+        assert worker_components, "Planner DGD should include worker components"
+        for name, component in worker_components.items():
             assert (
-                service.get("scalingAdapter", {}).get("enabled") is True
+                component.get("scalingAdapter", {}).get("enabled") is True
             ), f"Planner worker {name} should enable DGDSA"
-        assert "scalingAdapter" not in services["Planner"]
+        assert "scalingAdapter" not in components["Planner"]
 
 
 class TestRapidUnsupported:
@@ -625,12 +628,23 @@ class TestThoroughMoEGpuBudget:
             candidate = yaml.safe_load(cfg_file.read_text())
             if not candidate or "spec" not in candidate:
                 continue
-            for svc_name, svc in candidate["spec"].get("services", {}).items():
-                if svc_name in ("Frontend", "Planner"):
+            for component in candidate["spec"].get("components", []):
+                if component.get("name") in ("Frontend", "Planner"):
                     continue
-                limits = (svc.get("resources") or {}).get("limits", {})
-                gpu_limit = int(limits.get("gpu", 0))
+                main_container = next(
+                    (
+                        container
+                        for container in component.get("podTemplate", {})
+                        .get("spec", {})
+                        .get("containers", [])
+                        if container.get("name") == "main"
+                    ),
+                    {},
+                )
+                limits = (main_container.get("resources") or {}).get("limits", {})
+                gpu_limit = int(limits.get("nvidia.com/gpu", 0))
                 assert gpu_limit <= num_gpus_per_node, (
-                    f"Candidate {candidate_dir.name} service {svc_name} requests "
+                    f"Candidate {candidate_dir.name} component "
+                    f"{component.get('name')} requests "
                     f"{gpu_limit} GPUs but numGpusPerNode is {num_gpus_per_node}"
                 )

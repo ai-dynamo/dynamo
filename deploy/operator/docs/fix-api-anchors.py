@@ -13,13 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-process api-reference.md to deduplicate anchors between v1alpha1 and v1beta1.
+"""Post-process api-reference.md after crd-ref-docs generation.
 
 crd-ref-docs generates anchors solely from type names, so types that exist in both
 API versions get identical anchors (e.g. #dynamographdeploymentrequest). In standard
 Markdown renderers the first occurrence wins, meaning v1beta1 links resolve to the
 v1alpha1 section. This script prepends "v1beta1 " to the affected headings in the
 v1beta1 section and updates all intra-section links to match the new anchors.
+
+crd-ref-docs also renders links for some external dangerous types that are referenced
+from the CRD but not emitted as sections. Strip those links so the published
+reference does not contain dead anchors.
 """
 import re
 import sys
@@ -60,5 +64,15 @@ for t in duplicate_types:
     # Update markdown links: (#anchor) → (#v1beta1-anchor)
     beta_part = beta_part.replace(f"(#{anchor})", f"(#v1beta1-{anchor})")
 
-open(path, "w").write(alpha_part + beta_part)
+content = alpha_part + beta_part
+
+external_types_without_sections = [
+    "EndpointPickerConfig",
+]
+
+for t in external_types_without_sections:
+    anchor = t.lower()
+    content = content.replace(f"[{t}](#{anchor})", t)
+
+open(path, "w").write(content)
 print(f"✅ Fixed duplicate anchors in {path}")
