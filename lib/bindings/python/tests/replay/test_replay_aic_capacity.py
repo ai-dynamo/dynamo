@@ -5,8 +5,10 @@ import json
 
 import pytest
 
+import dynamo._internal.aic as aic_helpers
 import dynamo.replay.main as replay_main
 from dynamo.mocker import MockEngineArgs
+from dynamo.replay import run_synthetic_trace_replay
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -14,6 +16,36 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def _direct_aic_replay_args() -> MockEngineArgs:
+    return MockEngineArgs.from_json(
+        json.dumps(
+            {
+                "engine_type": "trtllm",
+                "aic_backend": "trtllm",
+                "aic_backend_version": "1.3.0rc10",
+                "aic_system": "gb200",
+                "aic_model_path": "meta-llama/Meta-Llama-3.1-8B",
+                "aic_tp_size": 1,
+                "block_size": 64,
+                "max_num_batched_tokens": 8192,
+                "speedup_ratio": 1000.0,
+            }
+        )
+    )
+
+
+def _run_direct_aic_replay():
+    return run_synthetic_trace_replay(
+        input_tokens=32,
+        output_tokens=1,
+        request_count=1,
+        extra_engine_args=_direct_aic_replay_args(),
+        num_workers=1,
+        replay_mode="offline",
+        replay_concurrency=1,
+    )
 
 
 def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
@@ -126,6 +158,19 @@ def test_resolve_aic_blocks_keeps_per_rank_capacity_for_attention_dp(monkeypatch
     assert _resolve(8) == (1000, 8)
     assert _resolve(1) == (1000, None)
     assert _resolve(None) == (1000, None)
+
+
+def test_direct_replay_preserves_other_capacity_errors(monkeypatch):
+    def invalid_capacity(**_kwargs):
+        raise ValueError("invalid capacity request")
+
+    monkeypatch.setattr(aic_helpers, "estimate_num_gpu_blocks", invalid_capacity)
+
+    with pytest.raises(
+        Exception,
+        match=r"Failed to estimate AIC KV cache capacity.*invalid capacity request",
+    ):
+        _run_direct_aic_replay()
 
 
 def test_invalid_json_num_gpu_blocks_type_is_rejected():

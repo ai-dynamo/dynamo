@@ -50,6 +50,7 @@ areas:
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
+  - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-router/
   - lib/kv-router/src/indexer/
@@ -93,6 +94,7 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
+  - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
@@ -212,6 +214,9 @@ areas:
   - components/src/dynamo/profiler/tests/
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
+  - aisimulate/
+  - examples/aisimulate/
+  - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -351,8 +356,6 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
-  - fern/
-  - fern/components/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
@@ -563,19 +566,27 @@ shared:
   owners:
   - process
   - agents
+- glob: .github/workflows/fern-docs.yml
+  owners:
+  - ops
+  - docs
+- glob: .lycheeignore
+  owners:
+  - ops
+  - docs
 - glob: lib/llm/src/protocols/agents.rs
   owners:
   - frontend
   - agents
-- glob: docs/agents/
+- glob: docs/fern/agents/
   owners:
   - docs
   - agents
-- glob: docs/digest/agentic-inference/
+- glob: docs/fern/digest/agentic-inference/
   owners:
   - docs
   - agents
-- glob: docs/backends/sglang/agents.md
+- glob: docs/fern/backends/sglang/agents.md
   owners:
   - docs
   - agents
@@ -1038,6 +1049,10 @@ shared:
   owners:
   - performance
   - kv-memory
+- glob: lib/mocker/servers/sglang/
+  owners:
+  - performance
+  - backend-sglang
 - glob: lib/mocker/src/replay/planner_handle.rs
   owners:
   - performance

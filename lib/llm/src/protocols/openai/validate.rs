@@ -190,8 +190,10 @@ pub fn validate_response_format(
                 anyhow::bail!("`response_format.json_schema.name` cannot be empty");
             }
 
-            // Validate schema presence
-            if json_schema.schema.is_none() {
+            // Validate schema presence. `schema` is a non-optional
+            // `serde_json::Value`, so an explicit `null` is the only way it
+            // can still arrive empty.
+            if json_schema.schema.is_null() {
                 anyhow::bail!(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
@@ -550,6 +552,15 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        if let Some(parameters) = &tool.function.parameters
+            && !parameters.is_object()
+        {
+            anyhow::bail!(
+                "Function parameters at index {} for \"{}\" must be a JSON Schema object",
+                i,
+                tool.function.name,
+            );
+        }
     }
     Ok(())
 }
@@ -844,6 +855,21 @@ mod tests {
         let args = HashMap::from([("enable_thinking".to_string(), json!(false))]);
         validate_chat_template_args(Some(&args)).unwrap();
         validate_chat_template_args(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_null_json_schema() {
+        let response_format = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test_schema",
+                "schema": null
+            }
+        }))
+        .unwrap();
+
+        let err = validate_response_format(&Some(response_format)).unwrap_err();
+        assert!(err.to_string().contains("schema` is required"));
     }
 
     #[test]

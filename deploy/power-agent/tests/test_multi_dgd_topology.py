@@ -56,8 +56,9 @@ UID_T_PREFILL = "uid-trtllm-prefill"
 UID_T_DECODE = "uid-trtllm-decode"
 UID_S_AGG = "uid-sglang-agg"
 
-# Per-pod NVML cap (watts). The planner's `_apply_power_annotations` would
-# have stamped these as `dynamo.nvidia.com/gpu-power-limit` annotations.
+# Per-pod NVML cap (watts). The operator stamps these as
+# `dynamo.nvidia.com/gpu-power-limit` annotations on worker pods from the
+# DGD-owned podTemplate.
 ANNOTATIONS = {
     UID_V_PREFILL: "450",
     UID_V_DECODE: "425",

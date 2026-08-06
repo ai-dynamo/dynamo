@@ -36,6 +36,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = map[string]string{}
 	}
+	podTemplate.Annotations = DisableCheckpointJobSidecarInjection(podTemplate.Annotations)
 	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.ArtifactVersion)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
@@ -127,6 +128,22 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 		Type:             corev1.SeccompProfileTypeLocalhost,
 		LocalhostProfile: &profile,
 	}
+}
+
+// DisableCheckpointJobSidecarInjection stamps sidecar opt-out annotations on a
+// pod annotation map. Checkpoint Jobs must complete when the target container
+// exits; an injected sidecar that outlives the checkpoint keeps the pod alive,
+// preventing Kubernetes from marking the Job complete.
+//
+// Mutates and returns the passed-in map. Allocates a new map when annotations
+// is nil; callers must use the returned value.
+func DisableCheckpointJobSidecarInjection(annotations map[string]string) map[string]string {
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[linkerdInjectAnnotation] = linkerdInjectDisabled
+	annotations[istioSidecarInjectAnnotation] = istioSidecarInjectDisabled
+	return annotations
 }
 
 // wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the

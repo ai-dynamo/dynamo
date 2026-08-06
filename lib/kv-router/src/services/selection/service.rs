@@ -11,8 +11,9 @@ use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
+use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig};
+use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerSelectorFactory};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -28,6 +29,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
+    worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
 }
 
 impl SelectionServiceBuilder {
@@ -39,6 +41,7 @@ impl SelectionServiceBuilder {
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
+            worker_selector_factory: None,
         }
     }
 
@@ -63,7 +66,20 @@ impl SelectionServiceBuilder {
         self
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn worker_selector_factory(
+        mut self,
+        factory: SelectionWorkerSelectorFactory,
+    ) -> Self {
+        self.worker_selector_factory = Some(factory);
+        self
+    }
+
     pub async fn build(self) -> anyhow::Result<SelectionService> {
+        self.kv_router_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -71,13 +87,22 @@ impl SelectionServiceBuilder {
             &self.replica_sync_peers,
             cancel_token.child_token(),
         )?;
+        if replica_runtime.is_some() {
+            tracing::info!(
+                router_tracking_hash = %tracking_hash.algorithm(),
+                router_tracking_key_id = ?tracking_hash.key_id(),
+                "Selection replica synchronization initialized"
+            );
+        }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
         let core = Arc::new(SelectionCore::new_managed(
             self.kv_router_config,
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
+            self.worker_selector_factory,
             self.selection_cache,
+            tracking_hash,
         ));
 
         if !self.indexer_peers.is_empty() {

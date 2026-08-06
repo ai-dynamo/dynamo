@@ -349,6 +349,7 @@ impl WorkerConfig {
         media_decoder = None,
         media_fetcher = None,
         kv_state_endpoint = None,
+        default_thinking_mode = None,
         rejection_frontend_request_concurrency_limit = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -378,6 +379,7 @@ impl WorkerConfig {
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
         kv_state_endpoint: Option<String>,
+        default_thinking_mode: Option<String>,
         rejection_frontend_request_concurrency_limit: Option<u64>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
@@ -448,6 +450,7 @@ impl WorkerConfig {
                 custom_jinja_template: custom_jinja_template.map(PathBuf::from),
                 tool_call_parser,
                 reasoning_parser,
+                default_thinking_mode,
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
                 enable_kv_routing,

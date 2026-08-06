@@ -510,7 +510,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -639,6 +639,12 @@ func registerControllers(
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
 		if err := controller.SetupFailoverCascade(mgr); err != nil {
+			return err
+		}
+	}
+
+	if runtimeConfig.Gate.Enabled(features.GMSSnapshot) {
+		if err := controller.SetupGMSPodReplacement(mgr, setupOptions); err != nil {
 			return err
 		}
 	}

@@ -6,6 +6,8 @@
 import dataclasses
 import logging
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -270,6 +272,41 @@ def _prepare_deployment(
     )
 
 
+# EngineConfig.env key naming a whitespace-separated list of pip packages to
+# install into the runtime container before the server launches. Some runtime
+# images intentionally omit certain media-decoder libraries; the few serve tests
+# that exercise a decode path install the decoder here at test time so coverage
+# is retained without the shipped image carrying it. No-op when the key is unset.
+TEST_ONLY_PIP_ENV_KEY = "DYN_TEST_ONLY_PIP_INSTALL"
+
+# Session-level guard so the same package set is installed at most once even
+# though every parametrized deployment (and each retry) calls the installer.
+_test_only_pip_done: set[str] = set()
+
+
+def _install_test_only_packages(config: EngineConfig) -> None:
+    """Install any test-only pip packages a config requested via its env.
+
+    Runs inside the same runtime container/interpreter the server subprocess
+    inherits, so the worker can import the freshly installed module.
+    """
+    spec = config.env.get(TEST_ONLY_PIP_ENV_KEY, "").strip()
+    if not spec or spec in _test_only_pip_done:
+        return
+    packages = spec.split()
+    logging.getLogger(__name__).info(
+        "Installing test-only package(s) into runtime container: %s",
+        " ".join(packages),
+    )
+    # --break-system-packages: runtime images use an externally-managed system
+    # python (PEP 668); this is the ephemeral test container, not a shipped image.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", *packages],
+        check=True,
+    )
+    _test_only_pip_done.add(spec)
+
+
 def run_serve_deployment(
     config: EngineConfig,
     request: Any,
@@ -296,6 +333,10 @@ def run_serve_deployment(
     logger.info("Using model: %s", config.model)
     logger.info("Script: %s", config.script_name)
 
+    # Install any decoder a codec-stripped image needs for this test, before the
+    # server launches, so the worker can import it. No-op unless the config opts in.
+    _install_test_only_packages(config)
+
     prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
     config = prep.config
     merged_env = prep.merged_env
@@ -318,10 +359,13 @@ def run_serve_deployment(
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
 
-                # Default behavior: requests go to the frontend port, except metrics which target
-                # worker system ports (mapped from DefaultPort -> per-test ports).
+                # Default behavior: requests go to the frontend port. Metrics
+                # may target either the frontend or worker system ports; map
+                # each DefaultPort placeholder to its per-test allocation.
                 if getattr(payload, "endpoint", "") == "/metrics":
-                    if payload.port == DefaultPort.SYSTEM1.value:
+                    if payload.port == DefaultPort.FRONTEND.value:
+                        payload.port = dynamic_frontend_port
+                    elif payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
                                 "Payload targets SYSTEM_PORT1 but no system ports were provided "
@@ -362,7 +406,10 @@ def run_serve_deployment(
                             mapped_system_ports.append(p)
                     payload.system_ports = mapped_system_ports
 
-                for _ in range(payload.repeat_count):
+                for iteration in range(payload.repeat_count):
+                    # Resolve an iteration-specific body once so validation
+                    # retries resend the same request.
+                    request_body = payload.body_for_iteration(iteration)
                     # Re-issue the request (server stays up) on validation
                     # failure when payload.max_attempts > 1. See tests/README.md
                     # "Flaky Tests" for when this is appropriate. Backoff
@@ -374,7 +421,7 @@ def run_serve_deployment(
                             try:
                                 response = send_request(
                                     url=payload.url(),
-                                    payload=payload.body,
+                                    payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
