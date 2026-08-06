@@ -356,7 +356,7 @@ func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string 
 	return ""
 }
 
-func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *corev1.Pod, podKey, containerName string) (*corev1.Pod, bool) {
+func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *corev1.Pod, podKey, containerName, checkpointID string) (*corev1.Pod, bool) {
 	livePod, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -372,6 +372,9 @@ func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *cor
 		)
 		return nil, false
 	}
+	if w.maybeSkipRestore(pod, livePod, podKey, containerName, checkpointID) {
+		return nil, false
+	}
 	if livePod.DeletionTimestamp != nil ||
 		(livePod.Status.Phase != corev1.PodPending && livePod.Status.Phase != corev1.PodRunning) {
 		w.log.V(1).Info("Skipping restore; pod became ineligible while polling runtime",
@@ -382,6 +385,58 @@ func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *cor
 		return nil, false
 	}
 	return livePod, true
+}
+
+func (w *NodeController) maybeSkipRestore(observedPod, livePod *corev1.Pod, podKey, containerName, checkpointID string) bool {
+	if observedPod.UID == "" || livePod.UID != observedPod.UID {
+		w.log.Info("Skipping restore; pod identity changed while polling runtime",
+			"pod", podKey,
+			"container", containerName,
+			"observed_uid", observedPod.UID,
+			"live_uid", livePod.UID,
+		)
+		return true
+	}
+	if livePod.Spec.NodeName != w.config.NodeName {
+		w.log.Info("Skipping restore; pod is no longer assigned to this node",
+			"pod", podKey,
+			"container", containerName,
+			"node", livePod.Spec.NodeName,
+		)
+		return true
+	}
+	if livePod.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
+		w.log.Info("Skipping restore; pod checkpoint identity changed while polling runtime",
+			"pod", podKey,
+			"container", containerName,
+			"checkpoint_id", checkpointID,
+			"live_checkpoint_id", livePod.Labels[snapshotprotocol.CheckpointIDLabel],
+		)
+		return true
+	}
+	targets, err := snapshotprotocol.TargetContainersFromAnnotations(livePod.Annotations, 1, 0)
+	if err != nil {
+		w.log.Error(err, "Skipping restore; live pod has invalid target-container metadata",
+			"pod", podKey,
+			"container", containerName,
+		)
+		return true
+	}
+	stillTargeted := false
+	for _, target := range targets {
+		if target == containerName {
+			stillTargeted = true
+			break
+		}
+	}
+	if !stillTargeted {
+		w.log.Info("Skipping restore; container is no longer a restore target",
+			"pod", podKey,
+			"container", containerName,
+		)
+		return true
+	}
+	return false
 }
 
 func (w *NodeController) pollForContainerID(
@@ -400,7 +455,7 @@ func (w *NodeController) pollForContainerID(
 		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
 		cancel()
 		if err == nil && containerID != "" {
-			livePod, ok := w.refreshRestorePodForStart(ctx, pod, podKey, containerName)
+			livePod, ok := w.refreshRestorePodForStart(ctx, pod, podKey, containerName, checkpointID)
 			if !ok {
 				return
 			}

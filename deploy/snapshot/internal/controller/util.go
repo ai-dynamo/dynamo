@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -61,18 +63,48 @@ func isContainerReady(pod *corev1.Pod, containerName string) bool {
 	return false
 }
 
-func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, annotations map[string]string) error {
-	patchBytes, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": annotations,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to build annotation patch payload: %w", err)
+func getPatchPodAnnotations(pod *corev1.Pod, annotations map[string]string) ([]byte, error) {
+	if pod.UID == "" {
+		return nil, fmt.Errorf("pod %s/%s has no UID", pod.Namespace, pod.Name)
+	}
+	if pod.Annotations == nil {
+		return nil, fmt.Errorf("pod %s/%s has no annotations map", pod.Namespace, pod.Name)
 	}
 
+	// Test the immutable UID in the same API request as the annotation writes. A
+	// namespace/name Get followed by a merge patch has a TOCTOU window where a
+	// deleted Pod can be replaced by a same-named Pod between the two requests.
+	patch := []map[string]any{{
+		"op":    "test",
+		"path":  "/metadata/uid",
+		"value": string(pod.UID),
+	}}
+	keys := make([]string, 0, len(annotations))
+	for key := range annotations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		patch = append(patch, map[string]any{
+			"op":    "add",
+			"path":  "/metadata/annotations/" + escapeJSONPointerToken(key),
+			"value": annotations[key],
+		})
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build annotation patch payload: %w", err)
+	}
+	return patchBytes, nil
+}
+
+func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, annotations map[string]string) error {
+	patchBytes, err := getPatchPodAnnotations(pod, annotations)
+	if err != nil {
+		return err
+	}
 	_, err = clientset.CoreV1().Pods(pod.Namespace).Patch(
-		ctx, pod.Name, ktypes.MergePatchType, patchBytes, metav1.PatchOptions{},
+		ctx, pod.Name, ktypes.JSONPatchType, patchBytes, metav1.PatchOptions{},
 	)
 	if err != nil {
 		log.Error(err, "Failed to annotate pod",
@@ -81,6 +113,10 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 		)
 	}
 	return err
+}
+
+func escapeJSONPointerToken(value string) string {
+	return strings.NewReplacer("~", "~0", "/", "~1").Replace(value)
 }
 
 // checkpointLeaseName returns the Lease guarding the artifact identified by checkpointID. The
