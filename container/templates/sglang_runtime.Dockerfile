@@ -139,11 +139,29 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 # Install SGLang-specific runtime dependencies without changing the upstream
 # dependency solution. imageio-ffmpeg is installed from source (no bundled
 # binary) for the VP9 video-encode path; see requirements.sglang.txt.
+{% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+{% else %}
+# PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
+# non-NVIDIA device. Drop it from the shared requirements rather than ship an
+# unusable NVIDIA codec wheel in the Intel XPU image. The pattern is anchored
+# to the line start so it cannot match inside another requirement, and the
+# import check fails the build if the package arrives by another route -- a
+# filter that silently stopped matching would otherwise look like success.
+# Whole-RUN branches rather than a conditional inside one RUN, for the reasons
+# documented at the equivalent block in vllm_runtime.Dockerfile.
+RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    grep -v '^PyNvVideoCodec' /tmp/requirements.sglang.txt > /tmp/requirements.sglang.nonvidia.txt && \
+    pip install --break-system-packages --force-reinstall --no-deps \
+        --requirement /tmp/requirements.sglang.nonvidia.txt && \
+    ! python3 -c "import PyNvVideoCodec" 2>/dev/null
+{% endif %}
 
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
