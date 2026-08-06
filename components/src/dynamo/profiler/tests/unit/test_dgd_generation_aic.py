@@ -15,6 +15,7 @@ try:
     from dynamo.profiler.utils.dgd_generation import (
         _build_planner_config,
         _inject_mocker_aic_args,
+        _load_latest_database_version,
         build_aic_interpolation_spec,
         build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
@@ -34,6 +35,39 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
+    def raise_missing_root(_):
+        raise ModuleNotFoundError(name="aiconfigurator_core")
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
+        raise_missing_root,
+    )
+
+    assert _load_latest_database_version() is None
+
+
+@pytest.mark.parametrize(
+    "missing_module",
+    ["aiconfigurator_core.sdk.operations.attention", "unrelated_dependency"],
+)
+def test_aic_import_propagates_internal_or_unrelated_missing_module(
+    monkeypatch, missing_module
+):
+    def raise_missing_dependency(_):
+        raise ModuleNotFoundError(name=missing_module)
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
+        raise_missing_dependency,
+    )
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        _load_latest_database_version()
+
+    assert exc_info.value.name == missing_module
 
 
 def _dgdr(
@@ -396,6 +430,31 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is None
+
+    def test_aic_perf_model_falls_back_when_sdk_is_unavailable(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            None,
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=PickedParallelConfig(tp=1),
+            best_decode_pick=PickedParallelConfig(tp=2),
+            resolved_backend="vllm",
+            system="h200_sxm",
+        )
+
+        assert spec is None
+        assert "aiconfigurator-core is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),
