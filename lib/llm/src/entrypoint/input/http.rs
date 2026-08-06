@@ -11,7 +11,7 @@ use crate::{
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::{
         FrontendRouteExtension,
-        service_v2::{self, HttpService},
+        service_v2::{self, HttpService, HttpServiceConfigBuilder},
     },
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
@@ -127,7 +127,7 @@ pub async fn run_with_frontend_route_extensions(
             http_service
         }
         EngineConfig::InProcessText { engine, model, .. } => {
-            let http_service = http_service_builder.build()?;
+            let http_service = build_in_process_http_service(http_service_builder)?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
@@ -145,7 +145,7 @@ pub async fn run_with_frontend_route_extensions(
             model,
             ..
         } => {
-            let http_service = http_service_builder.build()?;
+            let http_service = build_in_process_http_service(http_service_builder)?;
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
 
@@ -185,6 +185,10 @@ pub async fn run_with_frontend_route_extensions(
 
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
+}
+
+fn build_in_process_http_service(builder: HttpServiceConfigBuilder) -> anyhow::Result<HttpService> {
+    builder.enable_batch_endpoints(true).build()
 }
 
 /// Spawns a task that watches for new models in store,
@@ -300,6 +304,28 @@ fn update_model_metrics(
             tracing::debug!(model_name = card.display_name, "Model removed");
             // Note: Metrics are typically not removed to preserve historical data
             // This matches the behavior in the polling task
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_process_service_mounts_batch_routes() {
+        let service = build_in_process_http_service(HttpService::builder()).unwrap();
+
+        for path in [
+            "/v1/files",
+            "/v1/files/{file_id}/content",
+            "/v1/batches",
+            "/v1/batches/{batch_id}",
+        ] {
+            assert!(
+                service.route_docs().iter().any(|doc| doc.path() == path),
+                "in-process service is missing Batch API route: {path}"
+            );
         }
     }
 }
