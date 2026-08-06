@@ -607,24 +607,11 @@ impl SglangCore {
         let pass = self
             .try_execute_pass(now_ms)
             .expect("SGLang scheduler pass failed");
-        crate::scheduler::record_test_pass(collector, &pass, now_ms);
+        collector.on_scheduler_pass(&pass, now_ms, Some(pass.token_completion_ms));
         pass
     }
 
     pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
-        self.try_execute_pass_internal(now_ms)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.try_execute_hidden_pass(now_ms)
-            .expect("SGLang hidden scheduler pass failed")
-    }
-
-    pub(crate) fn try_execute_hidden_pass(
-        &mut self,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
         self.try_execute_pass_internal(now_ms)
     }
 
@@ -785,6 +772,7 @@ impl SglangCore {
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         Ok(EnginePassResult {
             end_ms: decode.end_ms,
+            token_completion_ms: decode.end_ms,
             completed_requests: decode
                 .output_signals
                 .iter()

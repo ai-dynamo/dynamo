@@ -436,16 +436,9 @@ impl OfflineWorkerState {
     }
 
     #[cfg(test)]
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.try_execute_hidden_pass(now_ms)
-            .expect("offline worker hidden scheduler pass failed")
-    }
-
-    pub(crate) fn try_execute_hidden_pass(
-        &mut self,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.core.try_execute_hidden_pass(now_ms)
+    pub(crate) fn execute_pass_unrecorded(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_pass(now_ms)
+            .expect("offline worker scheduler pass failed")
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -577,7 +570,7 @@ mod tests {
             let mut now_ms = 0.0;
             let mut events = Vec::new();
             while !worker.core.is_empty() {
-                let pass = worker.execute_hidden_pass(now_ms);
+                let pass = worker.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms;
                 worker.mark_completed(pass.completed_requests);
                 events.extend(pass.kv_events);
@@ -706,7 +699,7 @@ mod tests {
             assert_eq!(prefill.in_flight(), 1);
             let mut now_ms = 0.0;
             while !prefill.core.is_empty() {
-                let pass = prefill.execute_hidden_pass(now_ms);
+                let pass = prefill.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms;
                 prefill.mark_completed(pass.completed_requests);
             }
@@ -839,7 +832,7 @@ mod tests {
             assert_eq!(completed_decode.in_flight(), 1);
             let mut now_ms = 0.0;
             while !completed_decode.core.is_empty() {
-                let pass = completed_decode.execute_hidden_pass(now_ms);
+                let pass = completed_decode.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms.max(now_ms + 1.0);
                 completed_decode.mark_completed(pass.completed_requests);
             }
@@ -880,7 +873,7 @@ mod tests {
                     .any(|event| matches!(event.event.data, KvCacheEventData::Stored(_)))
             );
 
-            let pass = decode.execute_hidden_pass(0.0);
+            let pass = decode.execute_pass_unrecorded(0.0);
             assert!(
                 pass.kv_events
                     .iter()

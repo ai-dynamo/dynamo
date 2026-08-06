@@ -45,6 +45,7 @@ struct PassBoundary {
     start_ms: f64,
     end_ms: f64,
     completion_capacity: usize,
+    tokens_visible: bool,
 }
 
 impl PassBoundary {
@@ -608,7 +609,11 @@ where
             fpm.wall_time_secs = boundary.wall_time_secs();
         }
         if let Some(collector) = collector {
-            collector.on_output_signals(&executed.output_signals, boundary.end_ms);
+            collector.on_scheduler_pass(
+                &executed,
+                boundary.start_ms,
+                boundary.tokens_visible.then_some(boundary.end_ms),
+            );
         }
 
         let admitted_requests = !executed.admissions.is_empty();
@@ -675,6 +680,9 @@ where
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
+        if self.pass_mode == EnginePassMode::Visible && collector.is_none() {
+            bail!("offline replay visible engine pass requires a collector");
+        }
         // The serial coordinator may make another component observable at the
         // same virtual timestamp. Match the former full scan by retrying
         // effect-free groups on the next coordinator drive, but not again
@@ -718,30 +726,12 @@ where
                     evidence_pool(self.stage),
                     worker_id,
                     dp_rank,
-                    || match self.pass_mode {
-                        EnginePassMode::Visible => {
-                            let Some(_) = collector.as_deref_mut() else {
-                                bail!("offline replay visible engine pass requires a collector");
-                            };
-                            Self::required_worker_mut(&mut self.workers, rank_id)
-                                .try_execute_pass(now_ms)
-                        }
-                        EnginePassMode::Hidden => {
-                            Self::required_worker_mut(&mut self.workers, rank_id)
-                                .try_execute_hidden_pass(now_ms)
-                        }
+                    || {
+                        Self::required_worker_mut(&mut self.workers, rank_id)
+                            .try_execute_pass(now_ms)
                     },
                 )?;
                 let group_end_ms = executed.end_ms.max(now_ms);
-                let pass_collector = if self.pass_mode == EnginePassMode::Visible {
-                    Some(
-                        collector
-                            .as_deref_mut()
-                            .expect("visible pass collector checked before execution"),
-                    )
-                } else {
-                    None
-                };
                 Self::lower_executed_pass(
                     &mut self.workers,
                     self.stage,
@@ -750,9 +740,10 @@ where
                         start_ms: now_ms,
                         end_ms: group_end_ms,
                         completion_capacity: 1,
+                        tokens_visible: self.pass_mode == EnginePassMode::Visible,
                     },
                     executed,
-                    pass_collector,
+                    collector.as_deref_mut(),
                     &mut effects,
                 );
                 group_end_ms
@@ -772,20 +763,9 @@ where
                         evidence_pool(self.stage),
                         worker_id,
                         dp_rank,
-                        || match self.pass_mode {
-                            EnginePassMode::Visible => {
-                                let Some(_) = collector.as_deref_mut() else {
-                                    bail!(
-                                        "offline replay visible engine pass requires a collector"
-                                    );
-                                };
-                                Self::required_worker_mut(&mut self.workers, rank_id)
-                                    .try_execute_pass(now_ms)
-                            }
-                            EnginePassMode::Hidden => {
-                                Self::required_worker_mut(&mut self.workers, rank_id)
-                                    .try_execute_hidden_pass(now_ms)
-                            }
+                        || {
+                            Self::required_worker_mut(&mut self.workers, rank_id)
+                                .try_execute_pass(now_ms)
                         },
                     )?;
                     executed_by_rank.push(Some(executed));
@@ -800,6 +780,7 @@ where
                     start_ms: now_ms,
                     end_ms: group_end_ms,
                     completion_capacity,
+                    tokens_visible: self.pass_mode == EnginePassMode::Visible,
                 };
 
                 for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
@@ -831,22 +812,13 @@ where
                         continue;
                     };
 
-                    let pass_collector = if self.pass_mode == EnginePassMode::Visible {
-                        Some(
-                            collector
-                                .as_deref_mut()
-                                .expect("visible pass collector checked before execution"),
-                        )
-                    } else {
-                        None
-                    };
                     Self::lower_executed_pass(
                         &mut self.workers,
                         self.stage,
                         rank_id,
                         boundary,
                         executed,
-                        pass_collector,
+                        collector.as_deref_mut(),
                         &mut effects,
                     );
                 }

@@ -771,8 +771,6 @@ where
         mut effects: EngineEffects<Observation::Batch>,
     ) -> anyhow::Result<()> {
         for admission in effects.admissions.drain(..) {
-            self.collector
-                .on_admit(admission.uuid, self.now_ms, admission.reused_input_tokens);
             self.collector.on_pool_admission(
                 admission.uuid,
                 ReplayRequestPool::Agg,

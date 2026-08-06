@@ -329,7 +329,7 @@ pub(super) fn simulate_decode_step_with_sampler(
     let mut accept_length = AcceptLengthSample::default();
 
     for (idx, req) in running.iter_mut().enumerate() {
-        let output_signals_before = output_signals.len();
+        let mut emitted_tokens = 0usize;
         let remaining = req.remaining_output_tokens();
         let burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
             remaining.min(1)
@@ -362,6 +362,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                     config.kv_bytes_per_token,
                 ),
             });
+            emitted_tokens += 1;
 
             if is_complete {
                 completed_indices.push(idx);
@@ -371,7 +372,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             cache_materialized_prefix(req, kv_manager, config);
             req.debug_assert_invariants(config.block_size);
         }
-        accept_length.record_forward(output_signals.len() - output_signals_before);
+        accept_length.record_forward(emitted_tokens);
     }
 
     debug_assert!(reservation.len() <= reserved_pages);

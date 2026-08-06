@@ -136,7 +136,6 @@ impl PagePool {
     }
 
     pub fn free_pages(&mut self, pages: &[KvPageId]) {
-        self.free.reserve_exact(pages.len());
         self.free.extend_from_slice(pages);
     }
 

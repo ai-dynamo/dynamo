@@ -2339,7 +2339,7 @@ mod forward_pass_metrics {
         // Submit and fully drain a request first so the core isn't empty
         // (empty core blocks in receive_requests in live mode, but
         // execute_pass_internal works fine on an empty core).
-        let pass = core.execute_hidden_pass(0.0);
+        let pass = core.execute_pass_internal(0.0);
         let fpm = pass.fpm.expect("FPM should be present even for empty pass");
 
         assert_eq!(fpm.num_prefill_requests, 0);
@@ -2596,7 +2596,7 @@ mod forward_pass_metrics {
         // just verify we always get Some(fpm).
         if !saw_queued_decode {
             // Verify the requests completed or are still running with valid FPM
-            let pass = core.execute_hidden_pass(10.0);
+            let pass = core.execute_pass_internal(10.0);
             assert!(pass.fpm.is_some(), "FPM should always be present");
         }
     }

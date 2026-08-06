@@ -1149,18 +1149,11 @@ impl VllmCore {
         let pass = self
             .try_execute_pass(now_ms)
             .expect("vLLM scheduler pass failed");
-        crate::scheduler::record_test_pass(collector, &pass, now_ms);
+        collector.on_scheduler_pass(&pass, now_ms, Some(pass.token_completion_ms));
         pass
     }
 
     pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
-        self.execute_pass_internal(now_ms, None)
-    }
-
-    pub(crate) fn try_execute_hidden_pass(
-        &mut self,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
         self.execute_pass_internal(now_ms, None)
     }
 
@@ -1635,8 +1628,9 @@ impl VllmCore {
             (accept_length.output_tokens, accept_length.decode_forwards),
             crate::scheduler::accept_length_sample(&output_signals)
         );
+        let token_completion_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
         #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
-        let mut end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
+        let mut end_ms = token_completion_ms;
 
         // Stall-advance for pending offload work: if the pass did no
         // model work but either (a) requests are parked on G2→G1 swap-ins
@@ -1657,6 +1651,7 @@ impl VllmCore {
         self.state.debug_assert_invariants();
         Ok(EnginePassResult {
             end_ms,
+            token_completion_ms,
             completed_requests: requests_before.saturating_sub(self.state.requests.len()),
             output_signals,
             admissions,
@@ -2524,7 +2519,7 @@ impl VllmCore {
             Vec::with_capacity(sampled_bursts.iter().map(|(_, burst)| *burst).sum());
         let mut accept_length = AcceptLengthSample::default();
         for (uuid, burst) in sampled_bursts {
-            let output_signals_before = output_signals.len();
+            let mut emitted_tokens = 0usize;
             let mut completed = false;
             let mut deferred_deref = Vec::new();
             for _ in 0..burst {
@@ -2607,13 +2602,14 @@ impl VllmCore {
                         self.args.kv_bytes_per_token,
                     ),
                 });
+                emitted_tokens += 1;
                 if is_complete {
                     completed = true;
                     deferred_deref = effects.cleanup;
                     break;
                 }
             }
-            accept_length.record_forward(output_signals.len() - output_signals_before);
+            accept_length.record_forward(emitted_tokens);
 
             if completed {
                 self.complete_source(uuid, deferred_deref);

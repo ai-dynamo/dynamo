@@ -179,14 +179,24 @@ impl SglangKvManager {
         kv_event_publishers: KvEventPublishers,
         dp_rank: u32,
     ) -> Self {
+        let page_to_block_hash = if kv_event_publishers.is_empty() {
+            Vec::new()
+        } else {
+            vec![None; total_tokens / page_size]
+        };
         Self {
             cache: RadixCache::new(total_tokens, page_size),
             kv_event_publishers,
             dp_rank,
             next_event_id: 0,
-            page_to_block_hash: vec![None; total_tokens / page_size],
+            page_to_block_hash,
             block_hash_refcounts: FxHashMap::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn page_metadata_len(&self) -> usize {
+        self.page_to_block_hash.len()
     }
 
     pub fn cache(&self) -> &RadixCache {
@@ -794,6 +804,10 @@ impl SglangKvManager {
         if self.kv_event_publishers.is_empty() {
             return 0;
         }
+        if self.page_to_block_hash.is_empty() {
+            self.page_to_block_hash
+                .resize(self.cache.total_tokens() / self.cache.page_size(), None);
+        }
 
         let block_size = self.cache.page_size();
         let complete_len =
@@ -816,7 +830,6 @@ impl SglangKvManager {
         };
 
         let local_hashes = &page_hashes[first_unpublished_page..complete_pages];
-        self.block_hash_refcounts.reserve(local_hashes.len());
         let mut parent_hash = None;
         let mut blocks = Vec::new();
         let mut publishing = false;
@@ -847,7 +860,6 @@ impl SglangKvManager {
             if *refcount == 1 && !publishing {
                 publishing = true;
                 parent_hash = block_parent_hash;
-                blocks.reserve_exact(local_hashes.len() - block_idx);
             }
             if publishing {
                 blocks.push(KvCacheStoredBlockData {
@@ -887,8 +899,7 @@ impl SglangKvManager {
         }
 
         let mut block_hashes = Vec::new();
-        block_hashes.reserve_exact(evicted_pages.len());
-        for &page in evicted_pages {
+        for (page_idx, &page) in evicted_pages.iter().enumerate() {
             let Some(block_hash) = self.page_to_block_hash[page.index()].take() else {
                 continue;
             };
@@ -899,6 +910,9 @@ impl SglangKvManager {
                     *entry.get_mut() -= 1;
                 } else {
                     entry.remove();
+                    if block_hashes.is_empty() {
+                        block_hashes.reserve_exact(evicted_pages.len() - page_idx);
+                    }
                     block_hashes.push(block_hash);
                 }
             }
@@ -990,6 +1004,16 @@ mod tests {
                 _ => None,
             })
             .sum()
+    }
+
+    #[test]
+    fn dense_page_metadata_is_allocated_only_for_kv_events() {
+        let disabled = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
+        assert_eq!(disabled.page_metadata_len(), 0);
+
+        let (_buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+        let enabled = SglangKvManager::new(64, 4, KvEventPublishers::new(Some(sink), None), 0);
+        assert_eq!(enabled.page_metadata_len(), 16);
     }
 
     #[test]
