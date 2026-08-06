@@ -10,6 +10,7 @@ from typing import Optional
 import pytest
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
@@ -379,6 +380,38 @@ sglang_configs = {
             )
         ],
     ),
+    "multimodal_e_pd_fd_qwen": SGLangConfig(
+        # The frontend decodes an inline image, transfers RGB pixels to the
+        # dedicated encode worker, and the encode worker passes PIL input to
+        # SGLang's MMEncoder before handing embeddings to the PD worker.
+        name="multimodal_e_pd_fd_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.3),  # actual nvidia-smi peak
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(180),  # 3x ~57s (local E/PD run)
+            # NIXL stubs outside the container can lack Decoded media transport.
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--single-gpu",
+            "--frontend-decoding",
+            "--multimodal-embedding-cache-capacity-gb",
+            "1",
+        ],
+        timeout=360,
+        env={
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[make_image_payload_b64(["green"], repeat_count=2)],
+    ),
     "multimodal_disagg_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_disagg_qwen",
@@ -550,7 +583,7 @@ sglang_configs = {
         # SGLang's video path decodes with decord; the shipped image omits it as
         # a media-codec carrier, so install it for this test only.
         # See common._install_test_only_packages.
-        env={"DYN_TEST_ONLY_PIP_INSTALL": "decord2"},
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"]},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -688,7 +721,7 @@ sglang_configs = {
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
             # SGLang's video path decodes with decord; the shipped image omits it
             # as a media-codec carrier, so install it for this test only.
-            "DYN_TEST_ONLY_PIP_INSTALL": "decord2",
+            "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"],
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
