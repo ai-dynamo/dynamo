@@ -320,6 +320,14 @@ impl PendingLivePass {
     }
 
     pub(crate) fn suppress_request_outputs(&mut self, request_id: uuid::Uuid) {
+        let removed_output_tokens = self
+            .pass
+            .output_signals
+            .iter()
+            .filter(|signal| {
+                signal.uuid == request_id && !signal.rejected && signal.token_id.is_some()
+            })
+            .count();
         self.pass
             .output_signals
             .retain(|signal| signal.uuid != request_id);
@@ -329,10 +337,18 @@ impl PendingLivePass {
             .iter()
             .filter(|signal| signal.completed)
             .count();
-        let (output_tokens, decode_forwards) =
-            crate::scheduler::accept_length_sample(&self.pass.output_signals);
-        self.pass.accept_length_output_tokens = output_tokens;
-        self.pass.accept_length_decode_forwards = decode_forwards;
+        if removed_output_tokens > 0 {
+            self.pass.accept_length_output_tokens = self
+                .pass
+                .accept_length_output_tokens
+                .checked_sub(removed_output_tokens)
+                .expect("suppressed more output tokens than the pass recorded");
+            self.pass.accept_length_decode_forwards = self
+                .pass
+                .accept_length_decode_forwards
+                .checked_sub(1)
+                .expect("suppressed an unrecorded decode forward");
+        }
     }
 }
 

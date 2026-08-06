@@ -123,9 +123,9 @@ pub(crate) fn build_fpm_snapshot(
     }
 }
 
-/// Return (visible output tokens, request-forwards) for accept-length
-/// accounting. A signal with a token corresponds to one visible token; multiple
-/// token signals with the same UUID in a pass are an MTP/spec-decode burst.
+/// Recompute (visible output tokens, request-forwards) for debug/test
+/// validation. Release builds carry these counters directly from decode.
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
     let visible_tokens = output_signals
         .iter()
@@ -142,6 +142,22 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
         .collect::<std::collections::HashSet<_>>()
         .len();
     (visible_tokens, request_forwards)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcceptLengthSample {
+    pub(crate) output_tokens: usize,
+    pub(crate) decode_forwards: usize,
+}
+
+impl AcceptLengthSample {
+    pub(crate) fn record_forward(&mut self, output_tokens: usize) {
+        if output_tokens == 0 {
+            return;
+        }
+        self.output_tokens += output_tokens;
+        self.decode_forwards += 1;
+    }
 }
 
 pub(crate) use sglang::SglangCore;
@@ -712,6 +728,17 @@ mod tests {
         ];
 
         assert_eq!(accept_length_sample(&signals), (2, 1));
+    }
+
+    #[test]
+    fn accept_length_counters_count_tokens_and_forwards() {
+        let mut sample = AcceptLengthSample::default();
+        sample.record_forward(3);
+        sample.record_forward(0);
+        sample.record_forward(1);
+
+        assert_eq!(sample.output_tokens, 4);
+        assert_eq!(sample.decode_forwards, 2);
     }
 
     #[test]

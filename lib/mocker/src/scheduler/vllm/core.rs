@@ -31,11 +31,11 @@ use crate::replay::offline::evidence::{
 use crate::scheduler::vllm::policy::{self, AdmissionDecision, PolicySequence};
 use crate::scheduler::vllm::request::RequestKvState;
 use crate::scheduler::{
-    ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
+    AcceptLengthSample, ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
     CapturedRouterEventBuffer, DestinationHolds, EnginePassResult, ForwardPassSnapshot,
     MockerMetrics, PendingDestinations, RemovedSource, RouterEventVisibility, SchedulerCommand,
     SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion,
-    SourceHolds, accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
+    SourceHolds, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1633,7 +1633,7 @@ impl VllmCore {
         let prefill_time =
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args)?;
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let (decode_time, mut output_signals) =
+        let (decode_time, mut output_signals, accept_length) =
             self.emit_ready_tokens(collector, decode_start_ms)?;
         // Emit the terminal signals for the requests the gate rejected above
         // (see the gate comment for why this can't be done inline).
@@ -1646,6 +1646,11 @@ impl VllmCore {
                 handoff_delay_ms: None,
             });
         }
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            (accept_length.output_tokens, accept_length.decode_forwards),
+            crate::scheduler::accept_length_sample(&output_signals)
+        );
         #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
         let mut end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
@@ -1665,8 +1670,6 @@ impl VllmCore {
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
-        let (accept_length_output_tokens, accept_length_decode_forwards) =
-            accept_length_sample(&output_signals);
         self.state.debug_assert_invariants();
         Ok(EnginePassResult {
             end_ms,
@@ -1682,8 +1685,8 @@ impl VllmCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
-            accept_length_output_tokens,
-            accept_length_decode_forwards,
+            accept_length_output_tokens: accept_length.output_tokens,
+            accept_length_decode_forwards: accept_length.decode_forwards,
         })
     }
 
@@ -2195,7 +2198,7 @@ impl VllmCore {
         &mut self,
         mut collector: Option<&mut TraceCollector>,
         decode_start_ms: f64,
-    ) -> anyhow::Result<(Duration, Vec<OutputSignal>)> {
+    ) -> anyhow::Result<(Duration, Vec<OutputSignal>, AcceptLengthSample)> {
         let mut ready = Vec::with_capacity(self.state.running.len());
         let mut already_complete = Vec::new();
         let mut total_length = 0usize;
@@ -2241,7 +2244,11 @@ impl VllmCore {
             if !output_signals.is_empty() {
                 self.state.compact_running();
             }
-            return Ok((Duration::ZERO, output_signals));
+            return Ok((
+                Duration::ZERO,
+                output_signals,
+                AcceptLengthSample::default(),
+            ));
         }
 
         if self.speculative_sampler.is_some() {
@@ -2250,10 +2257,10 @@ impl VllmCore {
             }
 
             self.state.compact_running();
-            let (decode_time, mut speculative_signals) =
+            let (decode_time, mut speculative_signals, accept_length) =
                 self.emit_speculative_ready_tokens(ready, collector, decode_start_ms)?;
             output_signals.append(&mut speculative_signals);
-            return Ok((decode_time, output_signals));
+            return Ok((decode_time, output_signals, accept_length));
         }
 
         // For prefill workers, the first decode token is produced as part of
@@ -2275,6 +2282,7 @@ impl VllmCore {
         };
 
         let mut running_changed = !output_signals.is_empty();
+        let mut accept_length = AcceptLengthSample::default();
         for uuid in ready {
             let mut emitted = false;
             let mut emitted_token_id = None;
@@ -2384,19 +2392,20 @@ impl VllmCore {
                 collector.on_token(uuid, decode_end_ms);
             }
             output_signals.push(output_signal);
+            accept_length.record_forward(1);
         }
 
         if output_signals.is_empty() {
             if running_changed {
                 self.state.compact_running();
             }
-            return Ok((Duration::ZERO, output_signals));
+            return Ok((Duration::ZERO, output_signals, accept_length));
         }
 
         if running_changed {
             self.state.compact_running();
         }
-        Ok((decode_time, output_signals))
+        Ok((decode_time, output_signals, accept_length))
     }
 
     fn emit_speculative_ready_tokens(
@@ -2404,7 +2413,7 @@ impl VllmCore {
         mut ready: Vec<Uuid>,
         collector: Option<&mut TraceCollector>,
         decode_start_ms: f64,
-    ) -> anyhow::Result<(Duration, Vec<OutputSignal>)> {
+    ) -> anyhow::Result<(Duration, Vec<OutputSignal>, AcceptLengthSample)> {
         let max_burst = if self.args.worker_type == WorkerType::Prefill {
             1
         } else {
@@ -2415,7 +2424,7 @@ impl VllmCore {
         };
         for uuid in ready.iter().copied() {
             if self.refresh_request_offload_dependency(uuid).is_some() {
-                return Ok((Duration::ZERO, Vec::new()));
+                return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
             }
         }
         let mut running_changed = false;
@@ -2454,7 +2463,7 @@ impl VllmCore {
                             .expect("speculative dependency request must remain active");
                         request.offload_dependency = dependency;
                     }
-                    return Ok((Duration::ZERO, Vec::new()));
+                    return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
                 }
                 G1Acquire::RetryNow { .. } => {
                     panic!("speculative reservation must consume bounded RetryNow internally")
@@ -2466,7 +2475,7 @@ impl VllmCore {
                 if running_changed {
                     self.state.compact_running();
                 }
-                return Ok((Duration::ZERO, Vec::new()));
+                return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
             };
             running_changed = true;
             self.finish_preemption(preempted);
@@ -2484,7 +2493,7 @@ impl VllmCore {
             }
             if ready.is_empty() {
                 self.state.compact_running();
-                return Ok((Duration::ZERO, Vec::new()));
+                return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
             }
         };
 
@@ -2538,7 +2547,9 @@ impl VllmCore {
 
         let mut output_signals =
             Vec::with_capacity(sampled_bursts.iter().map(|(_, burst)| *burst).sum());
+        let mut accept_length = AcceptLengthSample::default();
         for (uuid, burst) in sampled_bursts {
+            let output_signals_before = output_signals.len();
             let mut completed = false;
             let mut deferred_deref = Vec::new();
             for _ in 0..burst {
@@ -2627,6 +2638,7 @@ impl VllmCore {
                     break;
                 }
             }
+            accept_length.record_forward(output_signals.len() - output_signals_before);
 
             if completed {
                 self.complete_source(uuid, deferred_deref);
@@ -2659,7 +2671,7 @@ impl VllmCore {
         if running_changed {
             self.state.compact_running();
         }
-        Ok((decode_time, output_signals))
+        Ok((decode_time, output_signals, accept_length))
     }
 }
 

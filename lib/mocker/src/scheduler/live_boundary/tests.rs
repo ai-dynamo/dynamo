@@ -233,6 +233,7 @@ async fn midpass_cancellation_is_observed_without_controls_and_suppresses_pendin
     assert!(pending.pass.output_signals.is_empty());
     assert_eq!(pending.pass.completed_requests, 0);
     assert_eq!(pending.pass.accept_length_output_tokens, 0);
+    assert_eq!(pending.pass.accept_length_decode_forwards, 0);
 }
 
 #[tokio::test]
@@ -243,6 +244,7 @@ async fn explicit_discard_suppresses_pending_output_after_noop_cancellation() {
     assert!(pending.pass.output_signals.is_empty());
     assert_eq!(pending.pass.completed_requests, 0);
     assert_eq!(pending.pass.accept_length_output_tokens, 0);
+    assert_eq!(pending.pass.accept_length_decode_forwards, 0);
 }
 
 #[tokio::test]

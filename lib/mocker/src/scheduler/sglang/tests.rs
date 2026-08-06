@@ -1583,6 +1583,8 @@ mod core_behavior {
         let mut collector = crate::replay::TraceCollector::default();
         let first = core.execute_pass(&mut collector, 0.0);
         assert_eq!(first.output_signals.len(), 9);
+        assert_eq!(first.accept_length_output_tokens, 9);
+        assert_eq!(first.accept_length_decode_forwards, 3);
         let second = core.execute_pass(&mut collector, first.end_ms);
         let ordered = second
             .output_signals
@@ -1608,6 +1610,8 @@ mod core_behavior {
         assert_eq!(core.running[1].uuid, longer);
         assert_eq!(core.running[1].output_len(), 6);
         assert_eq!(second.fpm.unwrap().num_decode_requests, 3);
+        assert_eq!(second.accept_length_output_tokens, 8);
+        assert_eq!(second.accept_length_decode_forwards, 3);
 
         let third = core.execute_pass(&mut collector, second.end_ms);
         assert_eq!(
@@ -1618,6 +1622,8 @@ mod core_behavior {
                 .collect::<Vec<_>>(),
             vec![long, long, longer, longer],
         );
+        assert_eq!(third.accept_length_output_tokens, 4);
+        assert_eq!(third.accept_length_decode_forwards, 2);
     }
 
     #[test]

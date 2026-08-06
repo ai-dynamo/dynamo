@@ -14,12 +14,14 @@ use crate::replay::offline::evidence::{
 
 use super::config::{SglangConfig, floor_to_block};
 use super::request::SglangRequest;
+use crate::scheduler::AcceptLengthSample;
 
 #[derive(Default)]
 pub(super) struct DecodeResult {
     pub(super) requests: Vec<SglangRequest>,
     pub(super) completed_requests: Vec<SglangRequest>,
     pub(super) output_signals: Vec<OutputSignal>,
+    pub(super) accept_length: AcceptLengthSample,
     pub(super) retracted_any: bool,
     pub(super) end_ms: f64,
 }
@@ -281,6 +283,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
+            ..DecodeResult::default()
         });
     }
 
@@ -317,13 +320,16 @@ pub(super) fn simulate_decode_step_with_sampler(
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
+            ..DecodeResult::default()
         });
     };
 
     output_signals.reserve(running.len());
     let mut completed_indices = Vec::new();
+    let mut accept_length = AcceptLengthSample::default();
 
     for (idx, req) in running.iter_mut().enumerate() {
+        let output_signals_before = output_signals.len();
         let remaining = req.remaining_output_tokens();
         let burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
             remaining.min(1)
@@ -365,6 +371,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             cache_materialized_prefix(req, kv_manager, config);
             req.debug_assert_invariants(config.block_size);
         }
+        accept_length.record_forward(output_signals.len() - output_signals_before);
     }
 
     debug_assert!(reservation.len() <= reserved_pages);
@@ -381,6 +388,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         requests: retracted,
         completed_requests,
         output_signals,
+        accept_length,
         retracted_any,
         end_ms: current_time_ms + total_time.as_secs_f64() * 1000.0,
     })

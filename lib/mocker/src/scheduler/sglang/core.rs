@@ -29,8 +29,8 @@ use crate::scheduler::{
     ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
     DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
     RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
-    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, accept_length_sample,
-    build_fpm_snapshot, capture_router_event_sink,
+    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -792,8 +792,12 @@ impl SglangCore {
             (decode.end_ms - now_ms) / 1000.0,
         );
 
-        let (accept_length_output_tokens, accept_length_decode_forwards) =
-            accept_length_sample(&decode.output_signals);
+        let accept_length = decode.accept_length;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            (accept_length.output_tokens, accept_length.decode_forwards),
+            crate::scheduler::accept_length_sample(&decode.output_signals)
+        );
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         Ok(EnginePassResult {
             end_ms: decode.end_ms,
@@ -814,8 +818,8 @@ impl SglangCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
-            accept_length_output_tokens,
-            accept_length_decode_forwards,
+            accept_length_output_tokens: accept_length.output_tokens,
+            accept_length_decode_forwards: accept_length.decode_forwards,
         })
     }
 
