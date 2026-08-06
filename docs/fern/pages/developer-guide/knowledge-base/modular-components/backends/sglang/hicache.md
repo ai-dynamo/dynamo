@@ -11,8 +11,8 @@ This guide covers running SGLang's Hierarchical Cache (HiCache) with Dynamo, and
 
 SGLang HiCache extends RadixAttention with a multi-tier KV cache that transparently moves pages between GPU HBM, host memory, and an optional external storage backend (e.g. Mooncake). For a full description of HiCache itself — flag reference, storage backends, memory layouts, prefetch policies — see SGLang's own documentation:
 
-- [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html)
-- [SGLang HiCache Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
+- [SGLang HiCache Design](https://docs.sglang.io/docs/advanced_features/hicache_design)
+- [SGLang HiCache Best Practices](https://docs.sglang.io/docs/advanced_features/hicache_best_practices)
 
 What Dynamo adds on top of HiCache:
 
@@ -43,7 +43,7 @@ python -m dynamo.frontend --http-port 8000
 ```
 
 > [!NOTE]
-> The HiCache flags (`--enable-hierarchical-cache`, `--hicache-ratio`, `--hicache-write-policy`, `--hicache-storage-backend`, `--hicache-mem-layout`, etc.) are SGLang-native — Dynamo passes them through unchanged. See [SGLang's best-practices doc](https://docs.sglang.ai/advanced_features/hicache_best_practices.html) for the complete flag reference and tuning guidance.
+> The HiCache flags (`--enable-hierarchical-cache`, `--hicache-ratio`, `--hicache-write-policy`, `--hicache-storage-backend`, `--hicache-mem-layout`, etc.) are SGLang-native — Dynamo passes them through unchanged. See [SGLang's best-practices doc](https://docs.sglang.io/docs/advanced_features/hicache_best_practices) for the complete flag reference and tuning guidance.
 
 ## Tier-Aware Shared KV Cache Routing
 
@@ -231,7 +231,7 @@ curl -s localhost:8000/metrics | grep shared_cache
 
 ## Further Reading
 
-- [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html) and [Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
+- [SGLang HiCache Design](https://docs.sglang.io/docs/advanced_features/hicache_design) and [Best Practices](https://docs.sglang.io/docs/advanced_features/hicache_best_practices)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite
 - [KVBM Guide](../../kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache

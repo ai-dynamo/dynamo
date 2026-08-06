@@ -52,6 +52,13 @@ def mock_kube_api():
     mock_api.update_graph_replicas = AsyncMock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
     mock_api.is_deployment_ready = Mock()
+    # Default: no terminating pods; tests that want to simulate terminating pods
+    # override this per-test.
+    mock_api.has_terminating_pods = Mock(return_value=False)
+    mock_api.list_pods_for_graph = Mock(return_value=[])
+    mock_api.partition_pods_by_component = Mock(return_value={})
+    # Default: no blocking rollout; tests that want InProgress/Pending override.
+    mock_api.is_rolling_update_blocking_settlement = Mock(return_value=(False, ""))
     return mock_api
 
 
@@ -1310,6 +1317,165 @@ async def test_get_actual_worker_counts_no_components(
     assert is_stable is True
 
 
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_no_pod_list_when_power_disabled(
+    kubernetes_connector, mock_kube_api
+):
+    """The ordinary connector path remains Pod-list free."""
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+
+    await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    mock_kube_api.list_pods_for_graph.assert_not_called()
+    mock_kube_api.has_terminating_pods.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_power_aware_worker_counts_uses_one_partitioned_pod_snapshot(
+    kubernetes_connector, mock_kube_api
+):
+    """The power-aware path lists once and checks locally partitioned Pods."""
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    prefill_pods = [object()]
+    decode_pods = [object()]
+    all_pods = [*prefill_pods, *decode_pods]
+    mock_kube_api.list_pods_for_graph.return_value = all_pods
+    mock_kube_api.partition_pods_by_component.return_value = {
+        "prefill-component": prefill_pods,
+        "decode-component": decode_pods,
+    }
+    mock_kube_api.has_terminating_pods.return_value = False
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = await kubernetes_connector.get_power_aware_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    mock_kube_api.list_pods_for_graph.assert_called_once_with("test-graph")
+    mock_kube_api.partition_pods_by_component.assert_called_once_with(all_pods)
+    assert mock_kube_api.has_terminating_pods.call_args_list == [
+        call(prefill_pods),
+        call(decode_pods),
+    ]
+    assert mock_kube_api.has_terminating_pods.call_count == 2
+    assert is_stable is True
+    assert prefill_count == 2
+    assert decode_count == 4
+
+
+@pytest.mark.asyncio
+async def test_get_power_aware_worker_counts_inprogress_rollout_is_unstable(
+    kubernetes_connector, mock_kube_api
+):
+    """InProgress rollout with replica-stable counts must be unstable when power is on.
+
+    Startup settlement already blocks on Pending/InProgress via
+    is_rolling_update_blocking_settlement. The runtime power snapshot
+    must apply the same gate so
+    a scale-up is not admitted while old and new pod generations overlap.
+    """
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    # Replica counts look stable to per-service checks.
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    mock_kube_api.has_terminating_pods.return_value = False
+    # Deployment-level rollingUpdate is InProgress.
+    mock_kube_api.is_rolling_update_blocking_settlement.return_value = (
+        True,
+        "rollingUpdate.phase=InProgress",
+    )
+
+    _, _, is_stable = await kubernetes_connector.get_power_aware_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    assert is_stable is False
+
+
+@pytest.mark.asyncio
+async def test_get_power_aware_worker_counts_failed_rollout_is_unstable(
+    kubernetes_connector, mock_kube_api
+):
+    """Failed rollout must be treated as unstable by the power snapshot.
+
+    is_rolling_update_blocking_settlement only covers Pending/InProgress; Failed
+    was intentionally excluded there because startup raises immediately. At
+    runtime there is no raise, so the power-aware method must be fail-closed
+    and return is_stable=False so power-aware ticks do not admit scale-ups
+    during a terminal (Failed) rollout state.
+    """
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "components": [
+                _component("prefill-component"),
+                _component("decode-component"),
+            ]
+        },
+        "status": {
+            "rollingUpdate": {"phase": "Failed", "message": "pod CrashLoopBackOff"}
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    mock_kube_api.has_terminating_pods.return_value = False
+    # is_rolling_update_blocking_settlement does not cover Failed; simulate that.
+    mock_kube_api.is_rolling_update_blocking_settlement.return_value = (False, "")
+
+    _, _, is_stable = await kubernetes_connector.get_power_aware_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    assert is_stable is False
+
+
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_inprogress_rollout_is_stable_when_power_off(
+    kubernetes_connector, mock_kube_api
+):
+    """InProgress rollout does not affect the ordinary count path.
+
+    Power-disabled planners do not have pods/list RBAC and must not call the
+    rolling-update helper. The legacy replica-count path stays unchanged.
+    """
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+
+    _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    assert is_stable is True
+    mock_kube_api.is_rolling_update_blocking_settlement.assert_not_called()
+
+
 # Tests for _resolve_dgd_service / get_worker_info component-filter.
 #
 # Regression: the filter that compares an MDC entry's ``component`` field
@@ -1588,3 +1754,46 @@ def test_service_get_component_name_from_endpoint_arg_missing_value():
         service=_component("VllmPrefillWorker", args=["--endpoint"]),
     )
     assert service.get_component_name_from_endpoint_arg() is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deployment_ready_does_not_require_backing(kubernetes_connector):
+    """Production power-off path must keep the legacy readiness contract."""
+    with patch.object(
+        kubernetes_connector.kube_api,
+        "wait_for_graph_deployment_ready",
+        new_callable=AsyncMock,
+    ) as wait:
+        await kubernetes_connector.wait_for_deployment_ready(include_planner=False)
+    wait.assert_awaited_once_with(
+        kubernetes_connector.graph_deployment_name,
+        include_planner=False,
+        require_backing_settled=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_settled_graph_deployment_requires_backing(kubernetes_connector):
+    """Power settlement path must opt into generation + backing gates."""
+    with patch.object(
+        kubernetes_connector.kube_api,
+        "wait_for_graph_deployment_ready",
+        new_callable=AsyncMock,
+        return_value={"metadata": {"name": "dgd"}},
+    ) as wait:
+        got = await kubernetes_connector.wait_for_settled_graph_deployment(
+            include_planner=False,
+            require_prefill=False,
+            require_decode=True,
+            decode_component_name="CustomDecode",
+        )
+    assert got == {"metadata": {"name": "dgd"}}
+    wait.assert_awaited_once_with(
+        kubernetes_connector.graph_deployment_name,
+        include_planner=False,
+        require_backing_settled=True,
+        require_prefill=False,
+        require_decode=True,
+        prefill_component_name=None,
+        decode_component_name="CustomDecode",
+    )

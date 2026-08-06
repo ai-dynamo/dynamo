@@ -290,7 +290,7 @@ To swap the image on an existing deployment quickly:
 export DEPLOYMENT_FILE=agg.yaml
 export FASTVIDEO_IMAGE=<my-registry/fastvideo-runtime:my-tag>
 
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FASTVIDEO_IMAGE)' \
+yq '(.spec.components[].podTemplate.spec.containers[] | select(.name == "main") | .image) = env(FASTVIDEO_IMAGE)' \
   ${DEPLOYMENT_FILE} > ${DEPLOYMENT_FILE}.generated
 
 kubectl apply -f ${DEPLOYMENT_FILE}.generated -n ${NAMESPACE}

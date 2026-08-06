@@ -324,7 +324,7 @@ def _build_dynamo_preproc(
     logprobs = request.get("logprobs")
     top_logprobs = request.get("top_logprobs")
     if logprobs is True:
-        logprobs_val = top_logprobs or 1
+        logprobs_val = top_logprobs if top_logprobs is not None else 1
     elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
         logprobs_val = logprobs
     elif top_logprobs not in (None, 0):
@@ -529,6 +529,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=pre.prompt_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -586,6 +587,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=preproc_result.prompt_token_ids,
         )
 
         async for item in self._generate_and_stream(

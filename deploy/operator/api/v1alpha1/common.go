@@ -196,8 +196,7 @@ type GPUMemoryServiceSpec struct {
 	// DGD/DCD services apply this to service pods. Auto-created checkpoints
 	// apply checkpoint job clients before creating the DynamoCheckpoint; manual
 	// DynamoCheckpoint users must provide an already-prepared pod template.
-	// In each rendered pod, only matching container names are wired; absent
-	// names are ignored.
+	// Every name must match a user-declared container in the enclosing pod spec.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
