@@ -409,7 +409,9 @@ upgrade, when an HTTP 503 admission response is no longer possible.
 
 <ParamField path="--rejection-frontend-request-concurrency-limit" type="integer" default="null">
   Maximum concurrent frontend-admitted HTTP inference requests, enforced separately for each served
-  model. Disabled when unset.
+  model. The unit of enforcement is one HTTP request: a batch completions request or a request with
+  `n > 1` consumes a single slot regardless of how many generations it fans out to. Disabled when
+  unset.
 
   Environment variable: `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT`
 </ParamField>
