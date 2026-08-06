@@ -109,9 +109,12 @@ repos:
       name: Check component-rendered data has an agent-readable twin
       entry: python3 docs/fern/scripts/check_agent_twins.py
       language: system
-      # Coarse trigger: the pages are what carry the twin, and the component
-      # list lives in the script, so a component rename should re-run it too.
-      files: ^docs/fern/(pages/.*\.mdx|components/.*\.tsx|scripts/check_agent_twins\.py)$
+      # releases.data.ts is the reason this runs at all: it is where a new
+      # release appears, and the twin then has to carry it. It is .ts, not
+      # .tsx, so a components/*.tsx pattern misses it entirely. Component
+      # files matter for the undeclared-component tripwire, and only the
+      # governed page matters among the pages.
+      files: ^docs/fern/(components/releases\.data\.ts|components/.*\.tsx|pages/reference/general/compatibility\.mdx|scripts/check_agent_twins\.py)$
       pass_filenames: false
     - id: check-agent-twins-selftest
       name: Self-test the agent-twin matcher

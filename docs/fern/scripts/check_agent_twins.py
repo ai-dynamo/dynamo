@@ -78,11 +78,17 @@ def _components() -> set[str]:
 
 LLMS_ONLY = re.compile(r"<llms-only>(.*?)</llms-only>", re.S)
 
-# Fraction of the derived items a twin must mention. Set from the current
-# pages: the compatibility twin carries every feature and every stable
-# release, so the slack is headroom for legitimate summarizing, not a
-# tolerance for missing data.
-THRESHOLD = 0.8
+# Fraction of the derived items a twin must mention, per component. A release
+# row either exists in the twin or it does not, so the support matrix is
+# all-or-nothing: at 0.8 over 15 releases, adding a sixteenth the twin never
+# gains still passes at 94%, which is the exact change this check exists to
+# catch. Feature names keep headroom because the twin names them in prose as
+# well as in the table, where an exact count is brittle without being safer.
+THRESHOLD: dict[str, float] = {
+    "ReleaseSupportMatrix": 1.0,
+    "FeatureHeatmap": 0.8,
+}
+DEFAULT_THRESHOLD = 0.8
 
 
 def _releases(source: str) -> set[str]:
@@ -203,12 +209,13 @@ def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
             if not re.search(rf"(?<![\w.]){re.escape(i)}(?![\w.])", blob, re.I)
         )
         covered = 1 - len(missing) / len(spec)
-        if covered < THRESHOLD:
+        floor = THRESHOLD.get(component, DEFAULT_THRESHOLD)
+        if covered < floor:
             shown = ", ".join(missing[:6])
             more = f" (+{len(missing) - 6} more)" if len(missing) > 6 else ""
             problems.append(
                 f"{rel}: <llms-only> twin covers {covered:.0%} of what "
-                f"{component} renders, below {THRESHOLD:.0%}. Missing: {shown}{more}"
+                f"{component} renders, below {floor:.0%}. Missing: {shown}{more}"
             )
     return problems
 
@@ -224,6 +231,7 @@ def _selftest() -> int:
     exp = {
         "ReleaseSupportMatrix": {"1.3.0", "1.3.1", "1.2.0", "1.2.1", "1.1.0"},
         "FeatureInteractions": (r"[Ff]eature interactions", r"\*vLLM\*", r"\*SGLang\*"),
+        "FeatureHeatmap": {"alpha", "bravo", "charlie", "delta", "echo"},
     }
     twin = "<llms-only>{}</llms-only>"
     full = twin.format("1.3.0 1.3.1 1.2.0 1.2.1 1.1.0")
@@ -231,14 +239,28 @@ def _selftest() -> int:
         ("no component", "Prose mentioning 1.3.0.", True),
         ("component, no twin", "<ReleaseSupportMatrix />", False),
         ("twin covering everything", "<ReleaseSupportMatrix />\n" + full, True),
+        # Releases are all-or-nothing. One missing row must fail, because
+        # adding a release the twin never gains is the change this catches,
+        # and at a fractional threshold that change passes.
         (
-            "twin at threshold",
+            "one release missing fails",
             "<ReleaseSupportMatrix />\n" + twin.format("1.3.0 1.3.1 1.2.0 1.2.1"),
+            False,
+        ),
+        (
+            "twin well below",
+            "<ReleaseSupportMatrix />\n" + twin.format("1.3.0"),
+            False,
+        ),
+        # Features keep headroom, since the twin names them in prose too.
+        (
+            "feature headroom holds",
+            "<FeatureHeatmap />\n" + twin.format("alpha bravo charlie delta"),
             True,
         ),
         (
-            "twin below threshold",
-            "<ReleaseSupportMatrix />\n" + twin.format("1.3.0"),
+            "features below headroom",
+            "<FeatureHeatmap />\n" + twin.format("alpha"),
             False,
         ),
         (
