@@ -1,5 +1,7 @@
 # Binaries
 bin/
+pagebroker/pagebroker
+pagebroker/pagebroker-test
 *.exe
 
 # Build artifacts

@@ -1,0 +1,22 @@
+syntax = "proto2";
+package snapshot.pagebroker;
+
+message Request {
+  enum Operation {
+    SUBMIT = 1;
+    COMMIT = 2;
+    ABORT = 3;
+  }
+  required Operation operation = 1;
+  optional string transaction_id = 2;
+  optional string checkpoint_path = 3;
+  optional bool staging = 4 [default = false];
+}
+
+message Response {
+  required bool ok = 1;
+  optional string transaction_id = 2;
+  optional string staging_path = 3;
+  optional string scratch_path = 4;
+  optional string error = 5;
+}
