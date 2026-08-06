@@ -52,6 +52,17 @@ git log --format='%h %s%n%(trailers:key=Signed-off-by)' upstream/main..HEAD
 
 Each listed commit must have a sign-off trailer.
 
+## Sign Commits for Automatic Fork CI
+
+For a pull request from a fork that uses automatic trusted-CI approval, GitHub must report every
+commit in the pull request as `Verified`. A DCO sign-off from `git commit -s` does not add a
+cryptographic signature. Configure [GitHub-supported commit
+signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+and use that configuration whenever you create, amend, or rebase a commit.
+
+Open the pull request's **Commits** tab and confirm that GitHub shows `Verified` for every commit.
+If any commit is not verified, the automatic `/ok to test` comment is not posted.
+
 ## Repair the Latest Commit
 
 If only the latest commit is missing its sign-off, amend it:
