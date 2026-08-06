@@ -31,7 +31,7 @@ agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, bloc
 **512**, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA
 knee: the highest value holding P50 TTFT < 5 s and P50 output >= 50 tok/s/user.
 
-Use the agentic 15% trace in `perf/traces/` (Git LFS), first 1,500 requests:
+Use the agentic trace in `perf/traces/` (Git LFS), first 1,500 requests:
 
 ```bash
 git lfs install
@@ -112,7 +112,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | per profile — see the table above | |
 | `CONCURRENCY` | sweep to the SLA knee | Single value per run; restart server pods between values |
-| `TRACE_FILE` | `/model-cache/traces/mooncake_1500.jsonl` | first 1,500 requests of the agentic 15% trace |
+| `TRACE_FILE` | `/model-cache/traces/mooncake_1500.jsonl` | first 1,500 requests of the agentic trace |
 | `TARGET_MODEL` | `Qwen/Qwen3.5-122B-A10B` | Must match `--served-model-name` |
 
 ## Artifacts
