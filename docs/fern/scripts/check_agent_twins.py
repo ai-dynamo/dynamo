@@ -89,12 +89,22 @@ def _features(source: str) -> set[str]:
     return set(re.findall(r'name:\s*"([^"]+)"', blk))
 
 
-def expectations(source: str) -> dict[str, set[str]]:
-    """What each component's twin has to account for, derived from the data."""
+def expectations(source: str) -> dict[str, object]:
+    """What each component's twin has to account for.
+
+    A set means every item must appear: the support matrix either carries a
+    release row or it does not.
+
+    The tuple-of-regexes shape is supported for a component whose data cannot
+    be expressed as a name list, because the names also appear in a
+    neighbouring table and would satisfy the check on their own. Nothing needs
+    it today. The pairwise interaction matrices are plain markdown, which
+    reaches the twin natively and needs no guard.
+    """
+    feats = _features(source)
     return {
         "ReleaseSupportMatrix": _releases(source),
-        "FeatureHeatmap": _features(source),
-        "InteractionStatus": _features(source),
+        "FeatureHeatmap": feats,
     }
 
 
@@ -106,6 +116,20 @@ def _uses(text: str, component: str) -> bool:
 def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
     text = path.read_text(encoding="utf-8")
     used = [c for c in expected if _uses(text, c)]
+    # A component that renders data but is not declared above would slip past
+    # silently, so the naming convention is the tripwire: adding one forces a
+    # decision about its twin instead of defaulting to no coverage.
+    undeclared = sorted(
+        set(re.findall(r"<([A-Z]\w*(?:Matrix|Heatmap|Status|Table))[\s/>]", text))
+        - set(expected)
+    )
+    if undeclared:
+        rel_u = path.relative_to(REPO) if path.is_relative_to(REPO) else path
+        return [
+            f"{rel_u}: renders {', '.join(undeclared)}, which is not declared in "
+            f"expectations(). Add it with what its twin must carry, or rename it "
+            f"if it does not render data."
+        ]
     if not used:
         return []
 
@@ -117,14 +141,31 @@ def check(path: Path, expected: dict[str, set[str]]) -> list[str]:
             f"twin, so the data reaches humans and not llms.txt."
         ]
 
-    blob = "\n".join(twins).lower()
+    blob = "\n".join(twins)
     problems: list[str] = []
     for component in sorted(used):
-        items = expected[component]
-        if not items:
+        spec = expected[component]
+
+        if isinstance(spec, tuple):
+            missing = [pat for pat in spec if not re.search(pat, blob)]
+            if missing:
+                problems.append(
+                    f"{rel}: <llms-only> twin is missing the structure "
+                    f"{component} renders. No match for: {', '.join(missing)}"
+                )
             continue
-        missing = sorted(i for i in items if i.lower() not in blob)
-        covered = 1 - len(missing) / len(items)
+
+        if not spec:
+            continue
+        # Word-boundary, so "1.3.0rc19" does not satisfy "1.3.0". A twin of
+        # release candidates would otherwise score full marks while carrying
+        # no released row at all.
+        missing = sorted(
+            i
+            for i in spec
+            if not re.search(rf"(?<![\w.]){re.escape(i)}(?![\w.])", blob, re.I)
+        )
+        covered = 1 - len(missing) / len(spec)
         if covered < THRESHOLD:
             shown = ", ".join(missing[:6])
             more = f" (+{len(missing) - 6} more)" if len(missing) > 6 else ""
