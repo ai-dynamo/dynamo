@@ -583,6 +583,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
+		PageBrokerEnabled:           pageBrokerEnabled(pod),
+		PageBrokerStaging:           pod.Annotations[snapshotprotocol.PageBrokerAnnotation] == "staged",
+		PageBrokerSocket:            "/run/pagebroker/pagebroker.sock",
 	}
 	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
@@ -738,6 +741,11 @@ func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointI
 		return checkpointLocations{HostPath: hostLocation, ContainerPath: location}, nil
 	}
 	return checkpointLocations{HostPath: location, ContainerPath: location}, nil
+}
+
+func pageBrokerEnabled(pod *corev1.Pod) bool {
+	mode := pod.Annotations[snapshotprotocol.PageBrokerAnnotation]
+	return mode == "true" || mode == "direct" || mode == "staged"
 }
 
 func (w *NodeController) refreshRestoreCheckpointLocation(ctx context.Context, pod *corev1.Pod, containerID string, checkpointID string, checkpointLocation checkpointLocations) (checkpointLocations, error) {

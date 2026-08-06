@@ -28,7 +28,10 @@ type Transaction struct {
 	client           *Client
 	id               string
 	staging, scratch string
+	provider         *os.File
 }
+
+func (t *Transaction) StagingPath() string { return t.staging }
 
 func Stage(ctx context.Context, socket, checkpoint string) (*Transaction, error) {
 	return NewClient(socket).Stage(ctx, checkpoint)
@@ -48,16 +51,26 @@ func (c *Client) Direct(ctx context.Context, checkpoint string) (*Transaction, e
 
 func (c *Client) open(ctx context.Context, checkpoint string, staging bool) (*Transaction, error) {
 	id := "tx-" + uuid.NewString()
-	r, err := c.call(ctx, 1, id, checkpoint, staging)
+	r, provider, err := c.submit(ctx, id, checkpoint, staging)
 	if err != nil {
 		return nil, err
 	}
 	if !r.ok {
 		return nil, fmt.Errorf("submit rejected: %s", r.err)
 	}
-	return &Transaction{client: c, id: id, staging: r.staging, scratch: r.scratch}, nil
+	if _, err := os.Stat(checkpoint); err != nil {
+		_ = provider.Close()
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = c.call(cleanup, 3, id, "", false)
+		return nil, fmt.Errorf("checkpoint is unavailable after submit: %w", err)
+	}
+	return &Transaction{client: c, id: id, staging: checkpoint, scratch: r.scratch, provider: provider}, nil
 }
 func (t *Transaction) Files() ([]*os.File, error) {
+	if t.provider == nil {
+		return nil, fmt.Errorf("PageBroker provider connection is unavailable")
+	}
 	image, err := os.Open(t.staging)
 	if err != nil {
 		return nil, fmt.Errorf("open staged checkpoint: %w", err)
@@ -72,9 +85,12 @@ func (t *Transaction) Files() ([]*os.File, error) {
 		image.Close()
 		return nil, fmt.Errorf("open PageBroker scratch: %w", err)
 	}
-	return []*os.File{image, work}, nil
+	provider := t.provider
+	t.provider = nil
+	return []*os.File{provider, image, work}, nil
 }
 func (t *Transaction) Commit(ctx context.Context) error {
+	t.closeProvider()
 	r, err := t.client.call(ctx, 2, t.id, "", false)
 	if err != nil {
 		return err
@@ -85,6 +101,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 	return nil
 }
 func (t *Transaction) Abort(ctx context.Context) error {
+	t.closeProvider()
 	r, err := t.client.call(ctx, 3, t.id, "", false)
 	if err != nil {
 		return err
@@ -93,6 +110,13 @@ func (t *Transaction) Abort(ctx context.Context) error {
 		return fmt.Errorf("abort rejected: %s", r.err)
 	}
 	return nil
+}
+
+func (t *Transaction) closeProvider() {
+	if t.provider != nil {
+		_ = t.provider.Close()
+		t.provider = nil
+	}
 }
 
 type response struct {
@@ -139,6 +163,37 @@ func contextError(ctx context.Context, err error) error {
 		return ctx.Err()
 	}
 	return err
+}
+
+func (c *Client) submit(ctx context.Context, id, checkpoint string, staging bool) (response, *os.File, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unixpacket", c.socket)
+	if err != nil {
+		return response{}, nil, err
+	}
+	defer connection.Close()
+	stop := watchContext(ctx, connection)
+	defer stop()
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return response{}, nil, fmt.Errorf("PageBroker connection is %T, want UnixConn", connection)
+	}
+	if _, err := connection.Write(request(1, id, checkpoint, staging)); err != nil {
+		return response{}, nil, contextError(ctx, err)
+	}
+	buf := make([]byte, 65536)
+	n, err := connection.Read(buf)
+	if err != nil {
+		return response{}, nil, contextError(ctx, err)
+	}
+	r, err := parse(buf[:n])
+	if err != nil || !r.ok {
+		return r, nil, err
+	}
+	provider, err := unixConnection.File()
+	if err != nil {
+		return response{}, nil, fmt.Errorf("duplicate PageBroker provider connection: %w", err)
+	}
+	return r, provider, nil
 }
 
 func call(ctx context.Context, socket string, op int, id, path string, staging bool) (response, error) {

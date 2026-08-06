@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
 	"syscall"
 	"time"
 
@@ -17,10 +18,13 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
-	TargetPodIP    string
+	CheckpointPath       string
+	CUDADeviceMap        string
+	CgroupRoot           string
+	TargetPodIP          string
+	PageBrokerImageFD    int
+	PageBrokerWorkFD     int
+	PageBrokerProviderFD int
 }
 
 type RestoreInNamespaceResult struct {
@@ -120,9 +124,26 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		}
 	}()
 
+	var providerForCRIU *os.File
+	if opts.PageBrokerProviderFD >= 0 {
+		providerSocket := os.NewFile(uintptr(opts.PageBrokerProviderFD), "pagebroker-provider")
+		if providerSocket == nil {
+			return nil, 0, fmt.Errorf("open inherited PageBroker provider socket fd %d", opts.PageBrokerProviderFD)
+		}
+		defer providerSocket.Close()
+		fd, err := syscall.Dup(int(providerSocket.Fd()))
+		if err != nil {
+			return nil, 0, fmt.Errorf("duplicate PageBroker provider socket: %w", err)
+		}
+		providerForCRIU = os.NewFile(uintptr(fd), "pagebroker-provider-criu")
+		// CRIU owns this duplicate until its cleanup callback returns. The parent
+		// endpoint remains open so the provider can serve CRIU throughout restore.
+		defer providerForCRIU.Close()
+	}
+
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.PageBrokerImageFD, opts.PageBrokerWorkFD, providerForCRIU, log)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -125,6 +125,8 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            - name: pagebroker-run
+              mountPath: /run/pagebroker
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             # Mount the checkpoint PVC directly in namespace-local agent mode
             - name: checkpoints
@@ -166,7 +168,43 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        - name: pagebroker
+          image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
+          imagePullPolicy: {{ .Values.daemonset.image.pullPolicy }}
+          command: ["/usr/local/bin/pagebroker", "serve"]
+          securityContext:
+            privileged: true
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: pagebroker-staging
+              mountPath: /staging
+            - name: pagebroker-scratch
+              mountPath: /scratch
+            - name: pagebroker-run
+              mountPath: /run/pagebroker
+            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+              readOnly: true
+            {{- end }}
       volumes:
+        - name: pagebroker-staging
+          emptyDir:
+            medium: Memory
+        - name: pagebroker-scratch
+          emptyDir: {}
+        - name: pagebroker-run
+          emptyDir: {}
         # Configuration ConfigMap
         - name: config
           configMap:

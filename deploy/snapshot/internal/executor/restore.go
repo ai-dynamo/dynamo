@@ -18,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -35,6 +36,9 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	PageBrokerEnabled           bool
+	PageBrokerStaging           bool
+	PageBrokerSocket            string
 }
 
 // Restore performs external restore for the given request.
@@ -53,6 +57,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"namespace", req.PodNamespace,
 		"container", req.ContainerName,
 	)
+	log.Info("PageBroker restore mode", "enabled", req.PageBrokerEnabled, "staging", req.PageBrokerStaging, "socket", req.PageBrokerSocket)
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
 	hostInspectStart := time.Now()
@@ -63,9 +68,31 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	hostInspectDuration := time.Since(hostInspectStart)
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
-	result, err := execNSRestore(ctx, log, req, snap)
+	var transaction *pagebroker.Transaction
+	if req.PageBrokerEnabled {
+		if req.PageBrokerStaging {
+			transaction, err = pagebroker.Stage(ctx, req.PageBrokerSocket, req.CheckpointLocation)
+		} else {
+			transaction, err = pagebroker.Direct(ctx, req.PageBrokerSocket, req.CheckpointLocation)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("PageBroker staging failed: %w", err)
+		}
+	}
+	result, err := execNSRestore(ctx, log, req, snap, transaction)
 	if err != nil {
+		if transaction != nil {
+			_ = transaction.Abort(ctx)
+		}
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	if transaction != nil {
+		if err := transaction.Commit(ctx); err != nil {
+			log.Error(err, "PageBroker cleanup failed after successful restore")
+			if abortErr := transaction.Abort(ctx); abortErr != nil {
+				log.Error(abortErr, "PageBroker abort cleanup also failed")
+			}
+		}
 	}
 	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
@@ -192,7 +219,7 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, transaction *pagebroker.Transaction) (*RestoreInNamespaceResult, error) {
 	checkpointPath := req.ContainerCheckpointLocation
 	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
 		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
@@ -200,11 +227,25 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
+	var inherited []*os.File
+	if transaction != nil {
+		var err error
+		inherited, err = transaction.Files()
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			for _, file := range inherited {
+				_ = file.Close()
+			}
+		}()
+	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p",
+		"--wdns=/",
 		"--", req.NSRestorePath,
 		"--checkpoint-path", checkpointPath,
 	}
@@ -217,10 +258,18 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	if transaction != nil {
+		args = append(args,
+			"--pagebroker-provider-fd", "3",
+			"--pagebroker-image-fd", "4",
+			"--pagebroker-work-fd", "5",
+		)
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
+	cmd.ExtraFiles = inherited
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
