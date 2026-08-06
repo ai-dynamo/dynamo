@@ -282,6 +282,9 @@ class OmniHandler(BaseOmniHandler):
             worker_type=WorkerType.Aggregated,
             needs=[],
             max_gpu_lora_count=self._advertised_gpu_lora_capacity,
+            rejection_frontend_request_concurrency_limit=(
+                self.config.rejection_frontend_request_concurrency_limit
+            ),
         )
 
     async def generate(

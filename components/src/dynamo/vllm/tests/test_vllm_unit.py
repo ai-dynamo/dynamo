@@ -143,6 +143,8 @@ async def test_register_vllm_model_forwards_frontend_concurrency_limit(monkeypat
         custom_jinja_template=None,
         kv_state_endpoint=None,
         served_model_aliases=[],
+        use_kv_events=False,
+        dyn_default_thinking_mode=None,
         rejection_frontend_request_concurrency_limit=17,
         engine_args=SimpleNamespace(
             enable_lora=False,
