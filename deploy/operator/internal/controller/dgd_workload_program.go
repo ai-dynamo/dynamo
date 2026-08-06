@@ -78,6 +78,9 @@ func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
 	if r.isGrovePathway(dgd) {
 		return r.newGroveProgram()
 	}
+	if r.wantsDisaggregatedSet(dgd) {
+		return r.newDisaggregatedSetProgram()
+	}
 	return r.newComponentProgram()
 }
 

@@ -34,6 +34,7 @@ type componentProgram struct {
 	restartProgress *componentRestartProgressResolver
 	workloads       *componentWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
+	legacyCleanup   func(context.Context, *nvidiacomv1beta1.DynamoGraphDeployment) error
 	lwsEnabled      bool
 }
 
@@ -56,7 +57,10 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		restartProgress: newComponentRestartProgressResolver(r.Client),
 		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
+		legacyCleanup: func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+			return r.cleanupDisaggregatedSetOnLegacyPath(ctx, dgd, true)
+		},
+		lwsEnabled: r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
 }
 
@@ -131,6 +135,11 @@ func (p *componentProgram) Reconcile(
 		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
+		}
+	}
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful && p.legacyCleanup != nil {
+		if err := p.legacyCleanup(ctx, req.DGD); err != nil {
+			return programResult, err
 		}
 	}
 
