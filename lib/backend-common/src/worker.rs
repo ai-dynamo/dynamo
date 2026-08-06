@@ -1683,6 +1683,7 @@ async fn build_local_model(
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
+        .model_aliases(engine_config.model_aliases.clone())
         .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
@@ -2030,6 +2031,7 @@ mod tests {
         };
         let engine_config = EngineConfig {
             model: "media-config-test".to_string(),
+            model_aliases: vec!["media-alias".to_string()],
             ..EngineConfig::default()
         };
 
@@ -2039,6 +2041,7 @@ mod tests {
 
         assert!(local_model.card().media_decoder.is_some());
         assert!(local_model.card().media_fetcher.is_some());
+        assert_eq!(local_model.card().aliases, ["media-alias"]);
     }
 
     #[test]

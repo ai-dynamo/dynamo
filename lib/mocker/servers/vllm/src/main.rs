@@ -9,7 +9,6 @@ use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
-use tonic_health::ServingStatus;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,10 +83,10 @@ async fn main() -> anyhow::Result<()> {
     );
     let (health, health_service) = tonic_health::server::health_reporter();
     health
-        .set_service_status("vllm.Control", ServingStatus::Serving)
+        .set_serving::<ControlServer<VllmMockerService>>()
         .await;
     health
-        .set_service_status("vllm.Inference", ServingStatus::Serving)
+        .set_serving::<InferenceServer<VllmMockerService>>()
         .await;
     tonic::transport::Server::builder()
         .add_service(InferenceServer::new(service.clone()))

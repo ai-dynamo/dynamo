@@ -74,6 +74,7 @@ impl DiscoveredModel {
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
+            model_aliases: self.identity.aliases.clone(),
             runtime_data: Default::default(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),

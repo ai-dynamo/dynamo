@@ -540,6 +540,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let config = engine.start(0).await.expect("start");
     assert_eq!(config.model, "model-source");
     assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+    assert_eq!(config.model_aliases, ["model-alias"]);
     let registration = config.llm.expect("LLM registration");
     assert_eq!(registration.context_length, Some(8192));
     assert_eq!(registration.kv_cache_block_size, Some(16));

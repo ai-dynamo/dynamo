@@ -16,7 +16,6 @@ use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic_health::ServingStatus;
 
 struct RunningServer {
     endpoint: String,
@@ -41,10 +40,10 @@ impl RunningServer {
         let control_service = service.clone();
         let (health, health_service) = tonic_health::server::health_reporter();
         health
-            .set_service_status("vllm.Control", ServingStatus::Serving)
+            .set_serving::<ControlServer<VllmMockerService>>()
             .await;
         health
-            .set_service_status("vllm.Inference", ServingStatus::Serving)
+            .set_serving::<InferenceServer<VllmMockerService>>()
             .await;
         tokio::spawn(async move {
             tonic::transport::Server::builder()
