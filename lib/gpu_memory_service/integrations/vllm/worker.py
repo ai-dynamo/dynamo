@@ -76,10 +76,8 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 def kv_reuse_enabled() -> bool:
     """Opt in to committing the KV layout so it survives this engine (default off).
 
-    Two consequences an operator should know about, both inherent rather than
-    incidental: the KV pages are held by the GMS server after this engine dies (that is
-    the feature), and sleep therefore no longer returns KV memory to the device for this
-    tag -- the same property that makes same-engine sleep/wake reuse work.
+    Consequence worth knowing: the GMS server holds the KV pages after this engine
+    dies, so sleep no longer returns KV memory to the device for this tag.
     """
     return os.getenv("DYN_GMS_PERSIST_KV", "0") not in ("0", "", "false", "False")
 
@@ -447,10 +445,9 @@ class GMSWorker(Worker):
             # registration.
             was_scratch = is_scratch(kv_cache_manager)
             assert kv_cache_manager.is_unmapped, "GMS kv_cache is not unmapped"
-            # "Adopt if there is something to adopt, otherwise build one." A standby
-            # taking over is granted RW_DATA and reattaches the prior engine's pages;
-            # the first engine finds nothing, is granted RW, and allocates. Same code
-            # either way -- the granted mode tells us which happened.
+            # "Adopt if there is anything, otherwise build one." A standby is granted
+            # RW_DATA and reattaches; the first engine is granted RW and allocates.
+            # Same call either way; the granted mode says which happened.
             kv_cache_manager.connect(
                 RequestedLockType.RW_DATA_OR_RW
                 if kv_reuse_enabled()
@@ -463,32 +460,24 @@ class GMSWorker(Worker):
                 # this mempool to server-backed create_mapping.
                 kv_cache_manager.prepare_scratch_for_reallocation()
             if adopted:
-                # KV reuse (shadow failover): a prior engine committed its KV layout, so
-                # the server -- which owns the physical memory, not the process that was
-                # writing it -- kept the pages when that engine died. Reattach the SAME
-                # bytes by name instead of allocating a fresh, empty pool. remap maps
-                # RW-writable, so this engine keeps serving.
+                # A prior engine committed its KV layout, so the server kept the pages
+                # when it died. Reattach the same bytes by name rather than allocating
+                # an empty pool; remap is RW-writable, so this engine keeps serving.
                 logger.info(
                     "[GMS] KV reuse: adopting %d committed kv_cache allocations "
                     "from a prior engine (skipping fresh reallocation)",
                     len(kv_cache_manager.list_handles(tag="kv_cache")),
                 )
-                # If the inherited layout does not fit this engine (a standby that
-                # profiled a different num_gpu_blocks), remap raises and the wake fails.
-                # Recovering in place needs a way to give the layout back, which is a
-                # follow-up; today an operator reclaims it by starting an engine that
-                # connects RW, which clears the layout on connect. Pin identical geometry
-                # across engines to stay off this path.
+                # If the inherited layout does not fit (a standby that profiled a
+                # different num_gpu_blocks), remap raises and the wake fails. Recovering
+                # in place is a follow-up; for now pin identical geometry across engines.
                 kv_cache_manager.remap_all_vas()
             else:
                 kv_cache_manager.reallocate_all_handles(tag="kv_cache")
                 kv_cache_manager.remap_all_vas()
-            # Seal the shape. This is the atomic boundary for KV durability: from here
-            # the pages outlive this engine, so a standby can adopt them. Dying before
-            # this point leaves a half-built pool that the server discards, which is what
-            # makes a crash mid-allocation safe. Sealing keeps our mappings and lets us
-            # go on writing -- only the geometry is frozen. Skipped when we adopted a
-            # layout that is already sealed.
+            # Seal the shape. The atomic boundary for KV durability: from here the
+            # pages outlive this engine. Dying before it leaves a half-built pool the
+            # server discards. Skipped when we adopted an already-sealed layout.
             if kv_reuse_enabled() and not adopted:
                 commit = kv_cache_manager.commit_layout()
                 logger.info(

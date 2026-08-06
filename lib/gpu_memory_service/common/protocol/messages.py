@@ -41,9 +41,8 @@ class CommitLayoutRequest(msgspec.Struct, tag="commit_layout_request"):
 class CommitLayoutResponse(msgspec.Struct, tag="commit_layout_response"):
     success: bool
     memory_layout_hash: str = ""
-    # What the caller holds now. Committing a layout narrows the session to RW_DATA,
-    # and like HandshakeResponse the server is the authority on that rather than the
-    # client assuming it.
+    # What the caller holds now. Like HandshakeResponse, the server is the authority
+    # rather than the client assuming.
     granted_lock_type: Optional[GrantedLockType] = None
 
 
@@ -58,9 +57,8 @@ class GetLockStateResponse(msgspec.Struct, tag="get_lock_state_response"):
     waiting_writers: int
     committed: bool
     is_ready: bool
-    # Pages are sealed and outlive their session. Implied by `committed`; reported
-    # separately so "held because a writer is live" is distinguishable from "held
-    # deliberately for reattach".
+    # Implied by `committed`; reported separately so "held by a live writer" is
+    # distinguishable from "held for reattach".
     layout_committed: bool = False
 
 

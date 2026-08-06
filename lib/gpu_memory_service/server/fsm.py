@@ -14,9 +14,8 @@ from gpu_memory_service.common.locks import GrantedLockType
 class ServerState(str, Enum):
     EMPTY = "EMPTY"
     RW = "RW"
-    # A committed layout with no session: the pages are durable and reattachable, but
-    # nothing is promised about their contents. Distinct from COMMITTED, which also
-    # asserts the contents are published and stable (and so admits RO readers).
+    # Pages are durable and reattachable; nothing is promised about their contents.
+    # COMMITTED additionally asserts the contents are stable, which is what admits readers.
     ALLOCATED = "ALLOCATED"
     COMMITTED = "COMMITTED"
     RO = "RO"
@@ -75,16 +74,15 @@ TRANSITIONS: list[Transition] = [
         event=StateEvent.RW_COMMIT,
         to_state=ServerState.COMMITTED,
     ),
-    # Seal the shape. The writer keeps its session and its mappings -- only the
-    # allocation set is frozen -- so the derived state stays RW until it disconnects,
-    # at which point RW_ABORT resolves to ALLOCATED instead of EMPTY.
+    # Seals the shape without ending the session, so the state stays RW until the
+    # writer disconnects.
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.LAYOUT_COMMIT,
         to_state=ServerState.RW,
     ),
-    # Resolves to ALLOCATED when the layout was committed, EMPTY otherwise. The
-    # derived `state` property picks between them; death never demotes the layout.
+    # to_state is None: the derived state resolves to ALLOCATED if the layout was
+    # committed, EMPTY otherwise.
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_ABORT,
@@ -123,8 +121,7 @@ class GMSFSM:
             return ServerState.RW
         if self._ro_conns:
             return ServerState.RO
-        # Content-committed is the stronger claim (it entails a durable layout), so it
-        # wins when both hold.
+        # COMMITTED implies a durable layout, so it wins when both hold.
         if self._committed:
             return ServerState.COMMITTED
         if self._layout_committed:
@@ -151,9 +148,8 @@ class GMSFSM:
     def layout_committed(self) -> bool:
         """The allocation set is sealed, so it outlives the session that built it.
 
-        Implied by ``committed``: publishing contents necessarily means the pages
-        persist. Kept as a separate field only because a *new* writer invalidates the
-        contents (``RW_CONNECT`` clears ``_committed``) without making the pages vanish.
+        Implied by ``committed``. Separate because ``RW_CONNECT`` clears ``_committed``
+        -- a new writer invalidates the contents -- but must not clear this.
         """
         return self._layout_committed or self._committed
 
@@ -184,9 +180,8 @@ class GMSFSM:
 
         if event == StateEvent.RW_CONNECT:
             self._rw_conn = conn
-            # A writer can mutate the bytes, so any published contents are no longer
-            # trustworthy. The pages are untouched, so a sealed layout stays sealed --
-            # unless the caller asked for full RW, which means "replace it".
+            # A new writer invalidates any published contents but not the pages,
+            # unless it asked for full RW, which means "replace this layout".
             self._committed = False
             if conn.mode == GrantedLockType.RW:
                 self._layout_committed = False

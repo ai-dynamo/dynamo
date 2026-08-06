@@ -1192,14 +1192,20 @@ def test_requesting_rw_replaces_a_committed_layout(gms_thread):
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
-    """The one failure ALLOCATED exists to prevent: a reader on a live, mutating pool."""
-    _server, socket_path, thread = gms_thread
+    """A reader must never attach to a live, mutating pool.
+
+    This needs no new code: can_acquire_ro already requires a content commit, which
+    ALLOCATED does not have. The reader waits exactly as it would for a loader that has
+    not committed yet, and times out.
+    """
+    server, socket_path, thread = gms_thread
     _writer, _ = _build_sealed_layout(socket_path)
     thread.disconnect_rw_session()
 
     reader = GMSClientMemoryManager(socket_path, device=0)
-    with pytest.raises(Exception):
-        reader.connect(RequestedLockType.RO, timeout_ms=500)
+    with pytest.raises(TimeoutError):
+        reader.connect(RequestedLockType.RO, timeout_ms=200)
+    assert server._gms.state is ServerState.ALLOCATED
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)

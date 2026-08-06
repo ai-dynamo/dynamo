@@ -200,9 +200,8 @@ class GMS:
         return self._allocations.clear_all()
 
     def on_connect(self, conn: Connection) -> None:
-        # A full-RW writer means "replace": clear whatever is here so it builds its own
-        # layout. An RW_DATA writer means "adopt": it was granted that mode precisely
-        # because a committed layout exists, and it joined to write into those pages.
+        # RW means "replace": clear whatever is here. RW_DATA means "adopt": that mode
+        # is only granted when a committed layout exists.
         if conn.mode == GrantedLockType.RW:
             had_committed_layout = self._sessions.snapshot().committed
             cleared = self._clear_layout_state()
@@ -226,12 +225,9 @@ class GMS:
     async def cleanup_connection(self, conn: Connection | None) -> None:
         event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
-            # Death never demotes: a crash is not a statement of intent, so it cannot
-            # withdraw a promise the writer already made. If the layout was committed
-            # the pages outlive this session (the server owns the physical memory, not
-            # the process that was writing it) and the state resolves to ALLOCATED, so
-            # a standby can adopt them. Only an unsealed layout -- including one a writer
-            # died part-way through building -- is discarded.
+            # A crash cannot withdraw a promise the writer already made. A committed
+            # layout outlives the session and resolves to ALLOCATED for a standby to
+            # adopt; an unsealed one, including a half-built pool, is discarded.
             if self._sessions.layout_committed:
                 logger.warning(
                     "RW aborted; layout is committed, keeping %d allocations for reattach",
@@ -281,10 +277,8 @@ class GMS:
                 raise AssertionError("RW state is not active")
 
             # Seal the shape, not the bytes. Unlike CommitRequest this keeps the session
-            # open and the caller's mappings intact -- it is downgraded to RW_DATA and
-            # goes on writing. Computing the layout hash is only meaningful now that the
-            # geometry can no longer change, and it gives the layout an identity a
-            # reattaching standby can check itself against.
+            # and the caller's mappings. The layout hash only becomes meaningful here,
+            # now that the geometry can no longer change.
             allocations = self._allocations.list_allocations()
             allocations_by_id = {info.allocation_id: info for info in allocations}
             self._validate_metadata_integrity(allocations_by_id)
