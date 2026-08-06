@@ -39,6 +39,7 @@ struct FakeVllm {
     headers_pending: Arc<AtomicBool>,
     release_headers: Arc<Notify>,
     hold_before_first_token: Arc<AtomicBool>,
+    close_before_first_token: Arc<AtomicBool>,
     first_token_pending: Arc<AtomicBool>,
     release_first_token: Arc<Notify>,
     server_stream_dropped: Arc<AtomicBool>,
@@ -124,6 +125,7 @@ impl pb::inference_server::Inference for FakeVllm {
         });
         let hang = self.hang.load(Ordering::SeqCst);
         let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
+        let close_before_first_token = self.close_before_first_token.load(Ordering::SeqCst);
         let first_token_pending = self.first_token_pending.clone();
         let release_first_token = self.release_first_token.clone();
         let dropped = self.server_stream_dropped.clone();
@@ -157,6 +159,9 @@ impl pb::inference_server::Inference for FakeVllm {
                 first_token_pending.store(true, Ordering::SeqCst);
                 release_first_token.notified().await;
                 first_token_pending.store(false, Ordering::SeqCst);
+            }
+            if close_before_first_token {
+                return;
             }
 
             if hang {
@@ -492,6 +497,22 @@ fn request() -> PreprocessedRequest {
         })))
         .build()
         .expect("request")
+}
+
+fn decode_request() -> PreprocessedRequest {
+    let mut request = request();
+    request.prefill_result = Some(PrefillResult {
+        disaggregated_params: json!({
+            "do_remote_decode": false,
+            "do_remote_prefill": true,
+            "remote_engine_id": "prefill-0",
+            "remote_host": "127.0.0.1",
+            "remote_port": 20097,
+            "remote_block_ids": [7, 8],
+        }),
+        prompt_tokens_details: None,
+    });
+    request
 }
 
 fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmSidecarEngine {
@@ -838,20 +859,11 @@ async fn decode_cancellation_waits_for_submission_and_first_token() {
     let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
     engine.start(0).await.expect("start");
 
-    let mut decode_request = request();
-    decode_request.prefill_result = Some(PrefillResult {
-        disaggregated_params: json!({
-            "do_remote_decode": false,
-            "do_remote_prefill": true,
-            "remote_engine_id": "prefill-0",
-            "remote_host": "127.0.0.1",
-            "remote_port": 20097,
-            "remote_block_ids": [7, 8],
-        }),
-        prompt_tokens_details: None,
-    });
     let context = dynamo_backend_common::testing::mock_context();
-    let generate = engine.generate(decode_request, GenerateContext::new(context.clone(), None));
+    let generate = engine.generate(
+        decode_request(),
+        GenerateContext::new(context.clone(), None),
+    );
     tokio::pin!(generate);
 
     tokio::select! {
@@ -909,6 +921,33 @@ async fn decode_cancellation_waits_for_submission_and_first_token() {
     })
     .await
     .expect("server stream dropped after first token");
+}
+
+#[tokio::test]
+async fn decode_cancellation_maps_premature_eof_to_cancelled() {
+    let service = FakeVllm::default();
+    service
+        .close_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(
+            decode_request(),
+            GenerateContext::new(context.clone(), None),
+        )
+        .await
+        .expect("decode stream");
+    context.stop_generating();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("premature EOF did not release decode cancellation")
+        .expect("cancelled terminal")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
 #[tokio::test]
