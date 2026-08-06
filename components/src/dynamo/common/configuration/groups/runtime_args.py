@@ -17,6 +17,7 @@ from dynamo.common.utils.output_modalities import OutputModality
 
 logger = logging.getLogger(__name__)
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
+_U64_MAX = 2**64 - 1
 _fpm_trace_invalid_warning_emitted = False
 
 
@@ -64,6 +65,11 @@ class DynamoRuntimeConfig(ConfigBase):
     tcp_tls_insecure: bool = False
     tcp_tls_server_name: Optional[str] = None
     tcp_tls_handshake_timeout_secs: Optional[int] = None
+    # Per-model frontend admission override carried on this worker's MDC at
+    # registration. Overrides the frontend's global
+    # --rejection-frontend-request-concurrency-limit for the served model.
+    # None = use the frontend default.
+    rejection_frontend_request_concurrency_limit: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -98,6 +104,24 @@ class DynamoRuntimeConfig(ConfigBase):
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
 
+        if (
+            self.rejection_frontend_request_concurrency_limit is not None
+            and self.rejection_frontend_request_concurrency_limit <= 0
+        ):
+            raise ValueError(
+                "--rejection-frontend-request-concurrency-limit must be a "
+                "positive integer, got "
+                f"{self.rejection_frontend_request_concurrency_limit}"
+            )
+        if (
+            self.rejection_frontend_request_concurrency_limit is not None
+            and self.rejection_frontend_request_concurrency_limit > _U64_MAX
+        ):
+            raise ValueError(
+                "--rejection-frontend-request-concurrency-limit must be at most "
+                f"{_U64_MAX}, got "
+                f"{self.rejection_frontend_request_concurrency_limit}"
+            )
         # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
         if self.tcp_tls_cert_path:
             os.environ["DYN_TCP_TLS_CERT_PATH"] = self.tcp_tls_cert_path
@@ -377,6 +401,20 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Max requests handled concurrently by the engine (worker-pool "
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--rejection-frontend-request-concurrency-limit",
+            env_var="DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Per-model frontend admission override: maximum concurrent "
+            "frontend-admitted requests for the model this worker serves. "
+            "Carried on the worker's registration (MDC) and takes precedence "
+            "over the frontend's global "
+            "--rejection-frontend-request-concurrency-limit. Disabled by "
+            "default (frontend default applies).",
         )
 
         add_argument(

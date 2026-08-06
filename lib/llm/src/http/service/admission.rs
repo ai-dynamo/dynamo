@@ -74,6 +74,12 @@ impl FrontendLocalGateState {
 /// (`metric_model` collapses to the shared unknown-model sentinel); such
 /// requests are exempted here so they surface the usual 404 instead of a
 /// misleading admission 503.
+///
+/// The effective limit resolves per the DEP: the dedicated per-model
+/// `ModelDeploymentCard::rejection_frontend_request_concurrency_limit` override
+/// wins over the frontend-global
+/// `--rejection-frontend-request-concurrency-limit`; either alone activates the
+/// gate for that model.
 pub(crate) fn evaluate_model_concurrency_gate(
     state: &State,
     model: &str,
@@ -83,8 +89,12 @@ pub(crate) fn evaluate_model_concurrency_gate(
         return None;
     }
 
-    let limit = state.admission_gate_config().request_concurrency_limit()?;
+    let global_limit = state.admission_gate_config().request_concurrency_limit();
     let manager = state.manager();
+    let has_seen_model_override = manager.has_seen_request_concurrency_limit_override();
+    if global_limit.is_none() && !has_seen_model_override {
+        return None;
+    }
 
     // `metric_model_for` maps every unregistered name to this sentinel. The
     // ordinary unknown-model case returned above because the strings differ,
@@ -94,20 +104,42 @@ pub(crate) fn evaluate_model_concurrency_gate(
         return None;
     }
 
+    let model_override = if has_seen_model_override {
+        manager.request_concurrency_limit_override(model)
+    } else {
+        None
+    };
+    let (limit, source) = match model_override {
+        Some(limit) => (limit, ConcurrencyLimitSource::ModelDeploymentCard),
+        None => (global_limit?, ConcurrencyLimitSource::FrontendGlobal),
+    };
     let inflight = state.metrics_clone().get_inflight_count(metric_model);
     if inflight >= 0 && inflight as u64 > limit {
+        let configured_limit = match source {
+            ConcurrencyLimitSource::ModelDeploymentCard => format!(
+                "per-model MDC override rejection_frontend_request_concurrency_limit={limit}"
+            ),
+            ConcurrencyLimitSource::FrontendGlobal => {
+                format!("frontend-global --rejection-frontend-request-concurrency-limit={limit}")
+            }
+        };
         return Some(reject(
             state,
             admission_gate::REQUEST_CONCURRENCY,
             metric_model,
             format!(
                 "Frontend admission gate rejected this request: {inflight} in-flight \
-                 requests for model '{metric_model}' exceeds frontend-global \
-                 --rejection-frontend-request-concurrency-limit={limit}; retry later"
+                 requests for model '{metric_model}' exceeds {configured_limit}; retry later"
             ),
         ));
     }
     None
+}
+
+#[derive(Clone, Copy)]
+enum ConcurrencyLimitSource {
+    ModelDeploymentCard,
+    FrontendGlobal,
 }
 
 /// [`evaluate_model_concurrency_gate`] shaped as an OpenAI-style 503 error.

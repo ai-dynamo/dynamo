@@ -172,6 +172,12 @@ pub struct ModelManager {
     /// Alias → primary model name mapping. Used to normalize metrics labels.
     alias_to_primary: DashMap<String, String>,
 
+    /// Sticky process-local hint that at least one registered WorkerSet has
+    /// advertised a per-model request-concurrency override. This lets the
+    /// fully-disabled frontend avoid a model-map lookup on every request while
+    /// still noticing overrides discovered after HTTP service startup.
+    has_seen_request_concurrency_limit_override: AtomicBool,
+
     /// Serializes name-reservation transitions — the primary claim in
     /// [`Self::add_worker_set`] and the alias claim in [`Self::register_alias`] —
     /// so a name cannot be concurrently claimed as both a primary and an alias.
@@ -203,6 +209,7 @@ impl ModelManager {
             lora_controller_cancel: parking_lot::Mutex::new(None),
             lora_controller_handles: parking_lot::Mutex::new(Vec::new()),
             alias_to_primary: DashMap::new(),
+            has_seen_request_concurrency_limit_override: AtomicBool::new(false),
             reservation_lock: parking_lot::Mutex::new(()),
         }
     }
@@ -264,6 +271,7 @@ impl ModelManager {
             );
             return false;
         }
+        self.note_request_concurrency_limit_override(&worker_set);
         let model = self.get_or_create_model(model_name);
         let topology_namespace = (matches!(
             worker_set.card().worker_type,
@@ -309,6 +317,7 @@ impl ModelManager {
             return false;
         }
 
+        self.note_request_concurrency_limit_override(&worker_set);
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), worker_set);
         true
@@ -832,17 +841,41 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        self.add_chat_completions_model_with_card(
+            model,
+            card_checksum,
+            Self::aggregated_local_card(),
+            engine,
+        )
+    }
+
+    /// Like [`Self::add_chat_completions_model`], but with a caller-supplied
+    /// ModelDeploymentCard so in-process registrations can carry card-level
+    /// settings (e.g. a per-model frontend admission override).
+    pub fn add_chat_completions_model_with_card(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        card: ModelDeploymentCard,
+        engine: OpenAIChatCompletionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_chat_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
-        );
+        // In-process cards often come from `with_name_only`, which leaves
+        // `worker_type` unset; readiness would then route this WorkerSet
+        // through the legacy no-declared-worker-type handling (and warn once
+        // per process). Default the role to Aggregated, matching
+        // `aggregated_local_card()`.
+        let mut card = card;
+        if card.worker_type.is_none() {
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        }
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.chat_engine = Some(engine);
+        self.note_request_concurrency_limit_override(&ws);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
@@ -1982,6 +2015,44 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
+    /// Per-model frontend admission concurrency override from the dedicated
+    /// ModelDeploymentCard field, if any of the model's worker sets supplied
+    /// one.
+    pub fn request_concurrency_limit_override(&self, model: &str) -> Option<u64> {
+        self.get_model(model)
+            .and_then(|model_entry| model_entry.request_concurrency_limit_override())
+    }
+
+    /// Whether this manager has ever registered a valid per-model frontend
+    /// request-concurrency override.
+    ///
+    /// The value intentionally remains true after the corresponding model is
+    /// removed. Clearing it safely would require coordinating all concurrent
+    /// model and alias removals; a sticky false-to-true transition keeps the
+    /// disabled fast path correct and makes removal races impossible.
+    #[inline]
+    pub(crate) fn has_seen_request_concurrency_limit_override(&self) -> bool {
+        self.has_seen_request_concurrency_limit_override
+            .load(Ordering::Acquire)
+    }
+
+    fn note_request_concurrency_limit_override(&self, worker_set: &WorkerSet) {
+        if worker_set
+            .card()
+            .rejection_frontend_request_concurrency_limit
+            .is_some_and(|limit| limit > 0)
+        {
+            // Publish the hint before the WorkerSet is inserted so the flag
+            // is at worst conservatively true. This does not close the
+            // admission race entirely: a request that loads the flag just
+            // before this store can still be admitted ungated once the model
+            // becomes routable — bounded, transient, and indistinguishable
+            // from a request that arrived before registration.
+            self.has_seen_request_concurrency_limit_override
+                .store(true, Ordering::Release);
+        }
+    }
+
     /// Lists all models with worker monitors configured.
     pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         let mut result = Vec::new();
@@ -2491,6 +2562,27 @@ mod tests {
 
         mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn request_concurrency_override_hint_activates_and_remains_sticky() {
+        let mm = ModelManager::new();
+        assert!(!mm.has_seen_request_concurrency_limit_override());
+
+        mm.add_worker_set("uncapped", "ns1", make_worker_set("ns1", "abc"));
+        assert!(!mm.has_seen_request_concurrency_limit_override());
+        assert_eq!(mm.request_concurrency_limit_override("uncapped"), None);
+
+        let mut card = ModelDeploymentCard::with_name_only("capped");
+        card.rejection_frontend_request_concurrency_limit = Some(2);
+        let ws = WorkerSet::new("ns2".to_string(), card.mdcsum().to_string(), card);
+        mm.add_worker_set("capped", "ns2", ws);
+        assert!(mm.has_seen_request_concurrency_limit_override());
+        assert_eq!(mm.request_concurrency_limit_override("capped"), Some(2));
+
+        mm.remove_worker_set("capped", "ns2");
+        assert!(mm.has_seen_request_concurrency_limit_override());
+        assert_eq!(mm.request_concurrency_limit_override("capped"), None);
     }
 
     #[test]

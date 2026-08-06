@@ -2244,9 +2244,15 @@ async def register_model(
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
+    rejection_frontend_request_concurrency_limit: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
+
+    Frontend admission override:
+        `rejection_frontend_request_concurrency_limit` is carried on the MDC and
+        overrides the frontend's global --rejection-frontend-request-concurrency-limit
+        for this model. Must be >= 1; omit to use the frontend default.
     LoRA Registration:
         The `lora_name` and `base_model_path` parameters must be provided together or not at all.
         Providing only one of these parameters will raise a ValueError.
@@ -3379,6 +3385,7 @@ class backend:
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
             default_thinking_mode: Optional[str] = None,
+            rejection_frontend_request_concurrency_limit: Optional[int] = None,
         ) -> None: ...
 
     class Worker:

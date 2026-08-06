@@ -22,6 +22,7 @@ use crate::{
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
+use dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -245,7 +246,7 @@ async fn run_watcher(
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_update) = rx.recv().await {
             update_http_endpoints(http_service.clone(), model_update.clone());
-            update_model_metrics(model_update, metrics.clone());
+            update_model_metrics(model_update, metrics.clone(), http_service.model_manager());
         }
     });
 
@@ -289,12 +290,40 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
 fn update_model_metrics(
     model_type: ModelUpdate,
     metrics: Arc<crate::http::service::metrics::Metrics>,
+    manager: &ModelManager,
 ) {
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
             if let Err(err) = metrics.update_metrics_from_mdc(&card) {
                 tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
+            }
+            let card_limit = card
+                .rejection_frontend_request_concurrency_limit
+                .filter(|limit| *limit > 0);
+            for served_name in std::iter::once(card.display_name).chain(card.aliases) {
+                if let Some(effective) = manager.request_concurrency_limit_override(&served_name) {
+                    match card_limit {
+                        // Differing worker-set advertisements resolve to the
+                        // minimum; surface the disagreement instead of hiding
+                        // it behind the effective value.
+                        Some(own) if own != effective => tracing::warn!(
+                            gate = admission_gate::REQUEST_CONCURRENCY,
+                            model = %served_name,
+                            card_limit = own,
+                            effective_limit = effective,
+                            "worker sets advertise differing per-model \
+                             concurrency overrides; enforcing the minimum"
+                        ),
+                        _ => tracing::info!(
+                            gate = admission_gate::REQUEST_CONCURRENCY,
+                            model = %served_name,
+                            card_limit = ?card_limit,
+                            effective_limit = effective,
+                            "frontend admission gate enabled for model"
+                        ),
+                    }
+                }
             }
         }
         ModelUpdate::Removed(card) => {
