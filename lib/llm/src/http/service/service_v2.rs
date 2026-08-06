@@ -1220,18 +1220,16 @@ impl HttpServiceConfigBuilder {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
-        inference_router = inference_router.layer(
-            TraceLayer::new_for_http()
-                .make_span_with(make_inference_request_span)
-                .on_response(on_response),
-        );
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             track_inflight_inference,
         ));
-        // Frontend-local admission gates run outermost so rejected requests are
-        // never counted as inflight inference. Layered only when configured, so
-        // the disabled default adds no per-request work.
+        // Frontend-local admission gates run outside inflight tracking so
+        // rejected requests are never counted as inflight inference, but as a
+        // route_layer so the router's 404 fallback is never replaced by an
+        // admission 503. Layered only when configured, so the disabled
+        // default adds no per-request work. Note: matched-but-disabled
+        // endpoints are still gated before their enablement check.
         if admission_gate_config.runtime_task_limit().is_some()
             || admission_gate_config
                 .request_plane_connection_limit()
@@ -1241,11 +1239,18 @@ impl HttpServiceConfigBuilder {
                 state.clone(),
                 request_plane_exempt_path,
             ));
-            inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+            inference_router = inference_router.route_layer(axum::middleware::from_fn_with_state(
                 gate_state,
                 super::admission::enforce_frontend_local_gates,
             ));
         }
+        // Tracing wraps admission so shed requests still produce request
+        // spans and the shared status/latency response log.
+        inference_router = inference_router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_inference_request_span)
+                .on_response(on_response),
+        );
 
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
