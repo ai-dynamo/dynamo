@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+
 import numpy as np
 import pytest
 import torch
@@ -210,9 +212,7 @@ def _selective_import(present: set[str]):
     """Fake importlib.import_module for the preflight's real-import probe:
     decoder modules import only when listed in `present` (a broken native
     install behaves exactly like an absent one -- ImportError either way)."""
-    import importlib as _il
-
-    real = _il.import_module
+    real = importlib.import_module
 
     def fake(name, *args, **kwargs):
         if name in ("torchcodec", "decord"):
