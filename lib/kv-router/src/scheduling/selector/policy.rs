@@ -48,6 +48,7 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     pub const ROUTING: Self = Self(1 << 2);
     pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+    pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

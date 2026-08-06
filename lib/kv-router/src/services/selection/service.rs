@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::KvRouterConfig;
+use crate::identity::RoutingPartitionRef;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::selector::WorkerSelectionPolicy;
@@ -69,7 +70,14 @@ impl SelectionServiceBuilder {
 
     pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
-        F: Fn(&KvRouterConfig, &'static str) -> WorkerSelectionPolicy + Send + Sync + 'static,
+        F: for<'a> Fn(
+                &KvRouterConfig,
+                &'static str,
+                RoutingPartitionRef<'a>,
+            ) -> WorkerSelectionPolicy
+            + Send
+            + Sync
+            + 'static,
     {
         self.worker_selection_policy_factory = Some(Box::new(factory));
         self

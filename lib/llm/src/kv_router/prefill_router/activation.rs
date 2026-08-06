@@ -8,7 +8,7 @@ use anyhow::Result;
 use tokio::sync::oneshot;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
+    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
     conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
     selector::{DefaultWorkerSelector, WorkerSelector},
@@ -66,7 +66,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             kv_cache_block_size,
             kv_router_config,
             decode_router,
-            Arc::new(|config, worker_type| {
+            Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(Some(config.clone()), worker_type)
             }),
             prefill_load_estimator,
@@ -241,6 +241,7 @@ where
                 .expect("enabled prefill router has a worker selector factory"))(
                 &effective_kv_router_config,
                 WORKER_TYPE_PREFILL,
+                RoutingPartitionRef::new(&self.model_name, DEFAULT_ROUTING_GROUP),
             );
             let kv_chooser = model_manager
                 .kv_chooser_for_with_selector(

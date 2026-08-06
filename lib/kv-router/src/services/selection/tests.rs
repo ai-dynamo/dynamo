@@ -231,7 +231,11 @@ impl FactoryRendezvous {
 
 async fn native_policy_app<F>(factory: F) -> Router
 where
-    F: Fn(&crate::config::KvRouterConfig, &'static str) -> WorkerSelectionPolicy
+    F: for<'a> Fn(
+            &crate::config::KvRouterConfig,
+            &'static str,
+            RoutingPartitionRef<'a>,
+        ) -> WorkerSelectionPolicy
         + Send
         + Sync
         + 'static,
@@ -270,13 +274,16 @@ async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_partitions = Arc::new(Mutex::new(Vec::new()));
     let factory_rendezvous = Arc::new(FactoryRendezvous::default());
     let calls = Arc::clone(&factory_calls);
+    let partitions = Arc::clone(&factory_partitions);
     let rendezvous = Arc::clone(&factory_rendezvous);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
-        .worker_selection_policy_factory(move |config, worker_type| {
+        .worker_selection_policy_factory(move |config, worker_type, partition| {
             calls.fetch_add(1, Ordering::Relaxed);
+            partitions.lock().unwrap().push(partition.into_owned());
             rendezvous.wait_for_peer();
             WorkerSelectionPolicy::new(
                 config.clone(),
@@ -321,6 +328,15 @@ async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
         StatusCode::CREATED
     );
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+    let mut partitions = factory_partitions.lock().unwrap().clone();
+    partitions.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+    assert_eq!(
+        partitions,
+        [
+            RoutingPartitionRef::new("model", "default").into_owned(),
+            RoutingPartitionRef::new("other-model", "default").into_owned(),
+        ]
+    );
 
     let reserved = post(
         app.clone(),
@@ -340,7 +356,7 @@ async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
-    let app = native_policy_app(|config, worker_type| {
+    let app = native_policy_app(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
             worker_type,
@@ -372,7 +388,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
-    let app = native_policy_app(|config, worker_type| {
+    let app = native_policy_app(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
             worker_type,

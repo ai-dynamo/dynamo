@@ -22,7 +22,7 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, WorkerSelectionPolicy,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::DistributedRuntime;
@@ -54,7 +54,14 @@ impl HttpFrontend {
     /// request. Dynamo continues to own discovery, scheduling, validation, and accounting.
     pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
-        F: Fn(&KvRouterConfig, &'static str) -> WorkerSelectionPolicy + Send + Sync + 'static,
+        F: for<'a> Fn(
+                &KvRouterConfig,
+                &'static str,
+                RoutingPartitionRef<'a>,
+            ) -> WorkerSelectionPolicy
+            + Send
+            + Sync
+            + 'static,
     {
         self.worker_selection_policy_factory = Some(Arc::new(factory));
         self
@@ -83,7 +90,7 @@ impl HttpFrontend {
                     distributed_runtime,
                     engine_config,
                     self.frontend_route_extensions,
-                    Arc::new(|config, worker_type| {
+                    Arc::new(|config, worker_type, _partition| {
                         DefaultWorkerSelector::new(Some(config.clone()), worker_type)
                     }),
                 )

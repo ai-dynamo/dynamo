@@ -33,8 +33,9 @@ The following policy selects the worker with the fewest active requests:
 
 ```rust
 use dynamo_kv_router::{
-    KvRouterConfig, WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerInputView, WorkerInputs,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
 };
 
 struct ActiveRequestScorer;
@@ -49,10 +50,10 @@ impl WorkerScorer for ActiveRequestScorer {
         _context: &WorkerSelectionContext<'_>,
         candidate: &WorkerCandidate,
     ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(candidate
+        let load = candidate
             .load()
-            .expect("scorer requested load inputs")
-            .active_requests() as f64)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("load inputs unavailable"))?;
+        Ok(load.active_requests() as f64)
     }
 }
 
@@ -77,6 +78,7 @@ impl WorkerPicker for MinimumCostPicker {
 fn active_request_policy(
     config: &KvRouterConfig,
     worker_type: &'static str,
+    _partition: RoutingPartitionRef<'_>,
 ) -> WorkerSelectionPolicy {
     WorkerSelectionPolicy::new(
         config.clone(),
@@ -87,7 +89,7 @@ fn active_request_policy(
 }
 ```
 
-The factory runs when Dynamo constructs a decode or prefill worker set, not for each request. Policy state belongs to that scheduler queue actor and is called serially.
+The factory runs when Dynamo constructs a decode or prefill worker set, not for each request. It receives the model and routing group through `RoutingPartitionRef`. Policy state belongs to that scheduler queue actor and is called serially.
 
 ## Request Worker Inputs
 
@@ -141,5 +143,6 @@ let router = EppRouter::from_selection_service(epp_config, service).await?;
 - Request only the signal groups the policy reads.
 - Use host eligibility for hard exclusion. Scorers bias costs; the picker chooses among eligible rows.
 - Keep blocking I/O out of `score` and `pick`; both execute in the scheduler queue actor.
+- Do not panic in `score` or `pick`. Return `WorkerSelectionPolicyError`; a panic stops the scheduler queue actor.
 
 For Dynamo's default cost model, see [Routing Concepts](../knowledge-base/modular-components/router/routing-concepts.md). For the embedded service lifecycle and reservation API, see [Standalone Selection Service](../knowledge-base/modular-components/router/standalone-selection.md).

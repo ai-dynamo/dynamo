@@ -349,7 +349,7 @@ where
     C: Borrow<KvRouterConfig> + Send,
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::ALL
+        WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
     }
 
     fn score(
@@ -393,7 +393,10 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Option<(WorkerWithDpRank, f64)> {
-    debug_assert_eq!(scorer.required_worker_inputs(), WorkerInputs::ALL);
+    debug_assert_eq!(
+        scorer.required_worker_inputs(),
+        WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+    );
     if let Some(worker) = eligibility.pinned_worker() {
         let row = input.row(worker, None, WorkerInputs::ALL);
         return Some((
@@ -653,6 +656,12 @@ mod tests {
         );
         assert_eq!(
             input(WorkerInputs::LOAD).context.min_active_prefill_tokens,
+            0
+        );
+        assert_eq!(
+            input(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
+                .context
+                .min_active_prefill_tokens,
             7
         );
     }

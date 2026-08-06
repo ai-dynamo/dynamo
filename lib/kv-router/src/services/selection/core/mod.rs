@@ -48,7 +48,13 @@ use super::types::{
 };
 
 pub(crate) type SelectionWorkerPolicyFactory = Box<
-    dyn Fn(&crate::config::KvRouterConfig, &'static str) -> WorkerSelectionPolicy + Send + Sync,
+    dyn for<'a> Fn(
+            &crate::config::KvRouterConfig,
+            &'static str,
+            crate::identity::RoutingPartitionRef<'a>,
+        ) -> WorkerSelectionPolicy
+        + Send
+        + Sync,
 >;
 
 type SelectionScheduler = LocalScheduler<
@@ -507,7 +513,7 @@ impl SelectionCore {
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
-                    |factory| factory(&self.kv_router_config, WORKER_TYPE),
+                    |factory| factory(&self.kv_router_config, WORKER_TYPE, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config

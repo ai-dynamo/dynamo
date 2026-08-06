@@ -14,7 +14,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
+    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use futures::StreamExt;
@@ -388,7 +388,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
-            Arc::new(|config, worker_type| {
+            Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(Some(config.clone()), worker_type)
             }),
         )
@@ -1665,6 +1665,7 @@ where
                     let selector = (self.worker_selector_factory)(
                         &router_config.kv_router_config,
                         WORKER_TYPE_DECODE,
+                        RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
                     );
                     Some(
                         self.manager

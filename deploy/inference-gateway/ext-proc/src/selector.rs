@@ -555,7 +555,7 @@ models:
     async fn prebuilt_service_runs_custom_policy_through_reservation() {
         let service = SelectionServiceBuilder::new(KvRouterConfig::default())
             .indexer_threads(1)
-            .worker_selection_policy_factory(|config, worker_type| {
+            .worker_selection_policy_factory(|config, worker_type, _partition| {
                 WorkerSelectionPolicy::new(
                     config.clone(),
                     worker_type,

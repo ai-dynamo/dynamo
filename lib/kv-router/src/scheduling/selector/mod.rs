@@ -62,7 +62,7 @@ impl<'a> WorkerSelectionInput<'a> {
         weights: LogitWeights,
         inputs: WorkerInputs,
     ) -> Self {
-        let min_active_prefill_tokens = if inputs.contains(WorkerInputs::LOAD)
+        let min_active_prefill_tokens = if inputs.contains(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
             && request.track_prefill_tokens
             && weights.overlap_score_credit_decay > 0.0
         {
@@ -314,7 +314,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
     let weights = selection_weights(kv_router_config, request);
     let inputs = match &state {
-        WorkerSelectionPolicyStateRef::Default(_) => WorkerInputs::ALL,
+        WorkerSelectionPolicyStateRef::Default(_) => {
+            WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+        }
         WorkerSelectionPolicyStateRef::Custom(state) => RefCell::borrow(state).worker_inputs,
     };
     let input =
