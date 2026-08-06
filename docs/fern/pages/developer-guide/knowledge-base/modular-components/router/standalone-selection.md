@@ -103,10 +103,17 @@ Content-Type: application/json
 }
 ```
 
-`POST /workers` returns `201`. `PATCH /workers/{worker_id}` updates supplied
-fields, `DELETE /workers/{worker_id}` removes the worker, and `GET /workers`
-lists catalog state. `model_name` and `routing_group` scope all selection, indexer,
-and load state; both default to `"default"` when omitted.
+`worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
+is an upsert and returns `201`: reusing an existing ID replaces its catalog
+record. If the model or routing group changes, the worker is removed from the
+previous partition and moved to the new one, which can leave the previous
+partition not ready. Assign a unique ID to every live worker across the entire
+service.
+
+`PATCH /workers/{worker_id}` updates supplied fields, `DELETE
+/workers/{worker_id}` removes the worker, and `GET /workers` lists catalog
+state. `model_name` and `routing_group` scope selection, indexer, and load state;
+both default to `"default"` when omitted.
 
 `GET /health` is process liveness. `GET /ready` returns `200` only after at
 least one worker is schedulable, otherwise `503` with lifecycle details.
