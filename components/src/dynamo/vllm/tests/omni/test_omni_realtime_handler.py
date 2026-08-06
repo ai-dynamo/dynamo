@@ -20,11 +20,9 @@ import pytest
 try:
     # Importing the omni package pulls omni_handler -> vllm_omni; the handler
     # logic itself is vllm-free, but the package import is not.
-    # The handler reads audio off a vLLM-Omni MultimodalPayload (``mm.tensors``),
-    # so the fake engine outputs below must use the real type, not a plain dict.
-    from vllm_omni.engine.mm_outputs import MultimodalPayload
+    from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
-    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
+    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler, Turn
 except (ImportError, ModuleNotFoundError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -49,22 +47,42 @@ class _FakeContext:
         return self._stopped
 
 
-def _audio_output(samples: np.ndarray, sample_rate: int = 16000):
+# ``OmniRequestOutput.multimodal_output`` is a property that returns whichever
+# shape the step produced: a MultimodalPayload when a stage attached a non-empty
+# one, and the plain-dict fallback field otherwise. Both shapes are Mappings and
+# the handler must read either, so every audio-bearing fixture is parametrized
+# over the two.
+def _payload_obj(tensors: dict, metadata: dict):
+    return MultimodalPayload(tensors=tensors, metadata=metadata)
+
+
+def _payload_dict(tensors: dict, metadata: dict):
+    return {**tensors, **metadata}
+
+
+payload_shapes = pytest.mark.parametrize(
+    "make_payload",
+    [_payload_obj, _payload_dict],
+    ids=["multimodal_payload", "plain_dict"],
+)
+
+
+def _audio_output(samples: np.ndarray, make_payload=_payload_obj, sample_rate=16000):
     return SimpleNamespace(
         stage_id=1,
         outputs=[],
-        multimodal_output=MultimodalPayload(
-            tensors={"audio": samples}, metadata={"sr": sample_rate}
-        ),
+        multimodal_output=make_payload({"audio": samples}, {"sr": sample_rate}),
     )
 
 
 def _text_output(text: str):
+    # Stage-0 steps attach no payload, so the property falls through to its
+    # ``dict`` default -- the shape that reaches the handler on every turn.
     return SimpleNamespace(
         stage_id=0,
         outputs=[SimpleNamespace(text=text, token_ids=[1, 2, 3])],
         prompt_token_ids=[0],
-        multimodal_output=MultimodalPayload(),
+        multimodal_output={},
     )
 
 
@@ -180,6 +198,43 @@ def test_full_turn_event_sequence():
     out_f32 = np.frombuffer(deltas, dtype=np.int16).astype(np.float32) / 32767.0
     assert out_f32.shape == in_f32.shape
     assert np.allclose(out_f32, in_f32, atol=2e-4)
+
+
+def _bare_turn() -> Turn:
+    """A Turn wired to nothing; extract_audio_chunks needs no engine."""
+    return Turn(engine_client=None, streaming_input_factory=None)
+
+
+@payload_shapes
+@pytest.mark.parametrize("key", ["audio", "model_outputs"], ids=["audio", "model_out"])
+def test_extract_audio_chunks_reads_both_payload_shapes(make_payload, key):
+    samples = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
+    output = SimpleNamespace(
+        multimodal_output=make_payload({key: samples}, {"sr": 16000})
+    )
+    chunks = _bare_turn().extract_audio_chunks(output)
+    assert len(chunks) == 1
+    assert np.allclose(chunks[0], samples)
+
+
+@pytest.mark.parametrize(
+    "multimodal_output",
+    [
+        {},  # what a step that attached no payload reports
+        "not-a-mapping",
+    ],
+    ids=["empty_dict", "non_mapping"],
+)
+def test_extract_audio_chunks_without_audio_is_empty(multimodal_output):
+    output = SimpleNamespace(multimodal_output=multimodal_output)
+    assert _bare_turn().extract_audio_chunks(output) == []
+
+
+def test_extract_audio_chunks_skips_non_waveform_model_outputs():
+    # ``model_outputs`` is model-defined; a structured value there survives
+    # np.asarray as an object array and must be skipped, not raised on.
+    output = SimpleNamespace(multimodal_output={"model_outputs": {"logits": [1, 2]}})
+    assert _bare_turn().extract_audio_chunks(output) == []
 
 
 def test_unknown_client_events_are_ignored():

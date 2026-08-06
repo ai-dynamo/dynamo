@@ -133,7 +133,7 @@ fn dynamo_trace_input_validation_errors_are_clear() {
 }
 
 #[test]
-fn test_from_mooncake_single_turn_preserves_fields() {
+fn test_from_mooncake_single_turn_loads_fields_and_canonicalizes_hashes() {
     let file = write_trace(&[serde_json::json!({
         "timestamp": 123.0,
         "input_length": 8,
@@ -150,9 +150,38 @@ fn test_from_mooncake_single_turn_preserves_fields() {
     assert_eq!(session.turns.len(), 1);
     assert_eq!(session.turns[0].input_length, 8);
     assert_eq!(session.turns[0].max_output_tokens, 4);
-    assert_eq!(session.turns[0].hash_ids, vec![7, 8]);
+    assert_eq!(session.turns[0].hash_ids, vec![0, 1]);
     assert_eq!(session.turns[0].priority, -3);
     assert_eq!(session.turns[0].strict_priority, 7);
+}
+
+#[test]
+fn mooncake_hash_ids_preserve_identity_above_u32() {
+    let shared = 0xB300_0000_0000_0000_u64;
+    let distinct = 0xB300_0001_0000_0000_u64;
+    let file = write_trace(&[
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [shared],
+        }),
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [distinct],
+        }),
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [shared],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 1).unwrap();
+    let requests = trace.to_single_turn_requests().unwrap();
+
+    assert_ne!(requests[0].tokens, requests[1].tokens);
+    assert_eq!(requests[0].tokens, requests[2].tokens);
 }
 
 #[test]
@@ -440,9 +469,9 @@ fn test_from_applied_compute_agentic_prefix_extends_hashes_across_turns() {
 
     let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.0, 0).unwrap();
     let turns = &trace.sessions[0].turns;
-    assert_eq!(turns[0].hash_ids, vec![1, 2, 3]);
-    assert_eq!(turns[1].hash_ids, vec![1, 2, 3]);
-    assert_eq!(turns[2].hash_ids, vec![1, 2, 3, 4]);
+    assert_eq!(turns[0].hash_ids, vec![0, 1, 2]);
+    assert_eq!(turns[1].hash_ids, vec![0, 1, 2]);
+    assert_eq!(turns[2].hash_ids, vec![0, 1, 2, 3]);
 }
 
 #[test]
@@ -699,6 +728,25 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
         .to_direct_request(trace.block_size, Uuid::from_u128(2), Some(10.0))
         .unwrap();
     assert_eq!(request.tokens.len(), 18);
+}
+
+#[test]
+#[should_panic(expected = "hash prefix expansion overflow")]
+fn test_expand_hash_prefix_depth_rejects_offset_overflow() {
+    Trace {
+        block_size: 1,
+        sessions: vec![SessionTrace {
+            session_id: "session".to_string(),
+            first_arrival_timestamp_ms: None,
+            turns: vec![TurnTrace {
+                input_length: 1,
+                max_output_tokens: 1,
+                hash_ids: vec![u32::MAX / 3],
+                ..Default::default()
+            }],
+        }],
+    }
+    .expand_hash_prefix_depth(3);
 }
 
 #[test]

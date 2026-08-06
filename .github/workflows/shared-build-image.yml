@@ -366,7 +366,7 @@ jobs:
           IMAGE_REPOSITORY: ai-dynamo/dynamo
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           set -x
           EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
@@ -565,6 +565,16 @@ jobs:
             --current-run-id "${DIFF_RUN_ID}" \
             >> "$GITHUB_OUTPUT"
 
+      # builder's pinned to specific pods and the pool can scale down mid-job.
+      # re-route first or the extract just dies on buildx's 20s connect timeout.
+      - name: Refresh BuildKit builder
+        if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
       - name: Compliance extract
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
         uses: ./.github/actions/compliance-extract
@@ -601,7 +611,7 @@ jobs:
           # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -609,7 +619,7 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""

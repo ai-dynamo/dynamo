@@ -5,12 +5,12 @@ use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
+use crate::identity::RoutingPartitionId;
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 use super::error::SelectionError;
 use super::types::{
-    SelectionKey, SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle, WorkerPatchRequest,
-    WorkerRequest,
+    SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
 
 #[derive(Debug, Default)]
@@ -91,7 +91,7 @@ impl WorkerCatalog {
         records
     }
 
-    pub(super) fn has_schedulable_for_key(&self, key: &SelectionKey) -> bool {
+    pub(super) fn has_schedulable_for_key(&self, key: &RoutingPartitionId) -> bool {
         self.workers.read().values().any(|record| {
             record.lifecycle == WorkerLifecycle::Schedulable
                 && record.model_name == key.model_name
@@ -101,7 +101,7 @@ impl WorkerCatalog {
 
     pub(super) fn scheduler_configs_for_key(
         &self,
-        key: &SelectionKey,
+        key: &RoutingPartitionId,
     ) -> HashMap<WorkerId, SelectionWorkerConfig> {
         self.workers
             .read()
@@ -130,7 +130,7 @@ impl WorkerCatalog {
     pub(super) fn schedulable_endpoint(
         &self,
         worker_id: WorkerId,
-        key: &SelectionKey,
+        key: &RoutingPartitionId,
     ) -> Option<String> {
         let workers = self.workers.read();
         let record = workers.get(&worker_id)?;
@@ -146,7 +146,7 @@ impl WorkerCatalog {
     pub(super) fn schedulable_worker_endpoint(
         &self,
         worker: WorkerWithDpRank,
-        key: &SelectionKey,
+        key: &RoutingPartitionId,
     ) -> Option<String> {
         let workers = self.workers.read();
         let record = workers.get(&worker.worker_id)?;

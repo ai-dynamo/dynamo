@@ -68,8 +68,41 @@ pub enum KvEventSourceConfig {
 
 enum KvEventSource {
     Zmq {
-        zmq_handle: tokio::task::JoinHandle<()>,
+        listener_abort_handle: tokio::task::AbortHandle,
+        supervisor_handle: tokio::task::JoinHandle<bool>,
     },
+}
+
+async fn supervise_zmq_listener(
+    listener_handle: tokio::task::JoinHandle<()>,
+    endpoint: String,
+    topic: String,
+    cancellation_token: CancellationToken,
+) -> bool {
+    let result = listener_handle.await;
+    if cancellation_token.is_cancelled() {
+        return false;
+    }
+
+    match result {
+        Ok(()) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                "ZMQ listener terminated unexpectedly; stopping KV event publisher"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                %error,
+                "ZMQ listener task failed unexpectedly; stopping KV event publisher"
+            );
+        }
+    }
+    cancellation_token.cancel();
+    true
 }
 
 impl KvEventSource {
@@ -88,41 +121,67 @@ impl KvEventSource {
                 topic,
                 image_token_id,
             } => {
-                let zmq_handle = component
-                    .drt()
-                    .runtime()
-                    .secondary()
-                    .spawn(start_zmq_listener(
-                        endpoint,
-                        topic,
-                        worker_id,
-                        tx,
-                        cancellation_token.clone(),
-                        kv_block_size,
-                        next_event_id,
-                        image_token_id,
-                    ));
+                let listener_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(start_zmq_listener(
+                            endpoint.clone(),
+                            topic.clone(),
+                            worker_id,
+                            tx,
+                            cancellation_token.clone(),
+                            kv_block_size,
+                            next_event_id,
+                            image_token_id,
+                        ));
+                let listener_abort_handle = listener_handle.abort_handle();
+                let supervisor_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(supervise_zmq_listener(
+                            listener_handle,
+                            endpoint,
+                            topic,
+                            cancellation_token,
+                        ));
 
-                Ok(KvEventSource::Zmq { zmq_handle })
+                Ok(KvEventSource::Zmq {
+                    listener_abort_handle,
+                    supervisor_handle,
+                })
             }
         }
     }
 
     fn shutdown(&self) {
         match self {
-            KvEventSource::Zmq { zmq_handle } => {
-                zmq_handle.abort();
+            KvEventSource::Zmq {
+                listener_abort_handle,
+                supervisor_handle,
+            } => {
+                listener_abort_handle.abort();
+                supervisor_handle.abort();
             }
         }
     }
 }
 
 /// A publisher of KV events.
+///
+/// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
+/// publisher ID. Restarting the engine publisher independently while this value survives is not
+/// supported. Future independent restart support must either emit an ordered rank-scoped
+/// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,
     /// The source of KV events.
-    /// Can be `None` if all events provided through [`KvEventPublisher::publish`].
+    /// Can be `None` if all events are provided through
+    /// [`KvEventPublisher::publish`] or [`KvEventPublisher::publish_batch`].
     source: Option<KvEventSource>,
     /// The cancellation token.
     cancellation_token: CancellationToken,
@@ -331,6 +390,13 @@ impl KvEventPublisher {
                 None
             };
 
+            if cancellation_token_clone.is_cancelled() {
+                if let Some(endpoint) = recovery_endpoint {
+                    let _ = endpoint.shutdown().await;
+                }
+                return;
+            }
+
             let source = DiscoveredKvEventSource {
                 kv_state_endpoint: kv_state_endpoint.clone(),
                 worker: WorkerWithDpRank::new(worker_id, dp_rank),
@@ -404,6 +470,29 @@ impl KvEventPublisher {
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         self.send_singleton(PlacementEvent::local_gpu(self.worker_id, event))
+    }
+
+    /// Publish an ordered list of engine events as one processor input.
+    ///
+    /// The processor handles the complete list without receiving another list
+    /// or servicing its batching timer between source events. Existing
+    /// coalescing and block-count limits still apply within the list. Empty
+    /// lists are ignored.
+    pub fn publish_batch(
+        &self,
+        events: Vec<KvCacheEvent>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let placement_events = events
+            .into_iter()
+            .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
+            .collect();
+        self.tx.send(placement_events).map_err(|err| {
+            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        })
     }
 
     pub fn publish_with_storage_tier(

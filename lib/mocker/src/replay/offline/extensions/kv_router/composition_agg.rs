@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use super::{KvRouterPlacement, ReplayKvRouterConfig};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
+#[cfg(test)]
+use crate::loadgen::ReplayRequestPayload;
 use crate::loadgen::WorkloadDriver;
 use crate::replay::offline::agg::{AggRuntimeImpl, AggregatedPlacement};
 #[cfg(test)]
@@ -90,13 +92,13 @@ impl AdaptiveAggPlacement {
 }
 
 #[cfg(test)]
-impl PlacementPolicy<DirectRequest> for AdaptiveAggPlacement {
+impl PlacementPolicy<ReplayRequestPayload> for AdaptiveAggPlacement {
     type Metadata = KvReplayMetadata;
     type Observation = RouterEventBatch;
 
     fn place(
         &mut self,
-        request: &DirectRequest,
+        request: &ReplayRequestPayload,
         metadata: Self::Metadata,
         session_id: Option<String>,
         now_ms: f64,
@@ -110,79 +112,97 @@ impl PlacementPolicy<DirectRequest> for AdaptiveAggPlacement {
     fn observe(&mut self, observation: Self::Observation, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
             Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::observe(policy, observation, now_ms)
+                PlacementPolicy::<ReplayRequestPayload>::observe(policy, observation, now_ms)
             }
-            Self::Kv(policy) => policy.observe(observation, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::observe(policy, observation, now_ms)
+            }
         }
     }
 
     fn cancel_pending(&mut self, request_id: Uuid) -> bool {
         match self {
             Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::cancel_pending(policy, request_id)
+                PlacementPolicy::<ReplayRequestPayload>::cancel_pending(policy, request_id)
             }
-            Self::Kv(policy) => policy.cancel_pending(request_id),
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::cancel_pending(policy, request_id)
+            }
         }
     }
 
     fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::request_terminal(policy, request_id, now_ms)
-            }
-            Self::Kv(policy) => policy.request_terminal(request_id, now_ms),
+            Self::RoundRobin(policy) => PlacementPolicy::<ReplayRequestPayload>::request_terminal(
+                policy, request_id, now_ms,
+            ),
+            Self::Kv(policy) => PlacementPolicy::<ReplayRequestPayload>::request_terminal(
+                policy, request_id, now_ms,
+            ),
         }
     }
 
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::prefill_completed(policy, request_id, now_ms)
-            }
-            Self::Kv(policy) => policy.prefill_completed(request_id, now_ms),
+            Self::RoundRobin(policy) => PlacementPolicy::<ReplayRequestPayload>::prefill_completed(
+                policy, request_id, now_ms,
+            ),
+            Self::Kv(policy) => PlacementPolicy::<ReplayRequestPayload>::prefill_completed(
+                policy, request_id, now_ms,
+            ),
         }
     }
 
     fn pending_count(&self) -> usize {
         match self {
-            Self::RoundRobin(policy) => PlacementPolicy::<DirectRequest>::pending_count(policy),
-            Self::Kv(policy) => policy.pending_count(),
+            Self::RoundRobin(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::pending_count(policy)
+            }
+            Self::Kv(policy) => PlacementPolicy::<ReplayRequestPayload>::pending_count(policy),
         }
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
             Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_ready(policy, worker, now_ms)
+                PlacementPolicy::<ReplayRequestPayload>::worker_ready(policy, worker, now_ms)
             }
-            Self::Kv(policy) => policy.worker_ready(worker, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::worker_ready(policy, worker, now_ms)
+            }
         }
     }
 
     fn worker_draining(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
             Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_draining(policy, worker, now_ms)
+                PlacementPolicy::<ReplayRequestPayload>::worker_draining(policy, worker, now_ms)
             }
-            Self::Kv(policy) => policy.worker_draining(worker, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::worker_draining(policy, worker, now_ms)
+            }
         }
     }
 
     fn worker_removed(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
             Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_removed(policy, worker, now_ms)
+                PlacementPolicy::<ReplayRequestPayload>::worker_removed(policy, worker, now_ms)
             }
-            Self::Kv(policy) => policy.worker_removed(worker, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::worker_removed(policy, worker, now_ms)
+            }
         }
     }
 
     fn topology_settled(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
             Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::topology_settled(policy, now_ms)
+                PlacementPolicy::<ReplayRequestPayload>::topology_settled(policy, now_ms)
             }
-            Self::Kv(policy) => policy.topology_settled(now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::topology_settled(policy, now_ms)
+            }
         }
     }
 }

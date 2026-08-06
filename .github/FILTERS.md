@@ -9,10 +9,13 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | Filter | Triggers |
 |--------|----------|
 | `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
+| `dev_images` | dev / local-dev image builds only (no runtime or GPU jobs) |
 | `operator` | Kubernetes operator tests |
-| `snapshot` | Snapshot Agent tests |
+| `snapshot` | Snapshot Agent + all-framework DynamoCheckpoint deploy tests |
+| `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
+| `sidecar` | Nothing directly; sidecar source and proto files also match `rust` |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
@@ -21,7 +24,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `docs`, `examples`, and `ignore` don't trigger any CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter.
+> **Note:** `docs`, `examples`, `ignore`, and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks.
 
 ## Fixing "Uncovered Files" Errors
 
