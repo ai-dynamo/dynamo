@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -298,6 +299,28 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 		string(dcd.Spec.ComponentType),
 		GetDCDEffectiveWorkerHash(dcd),
 	)
+}
+
+// GetGroveRuntimeNamespace returns the effective runtime namespace for a Grove
+// component. Grove uses the same canonical worker hash as its rendered pod
+// template once suffixing has been enabled.
+func GetGroveRuntimeNamespace(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) (string, error) {
+	if dgd == nil || component == nil {
+		return "", nil
+	}
+	namespace := dgd.GetDynamoNamespaceForComponent(component)
+	if !IsWorkerComponent(string(component.ComponentType)) ||
+		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != "true" {
+		return namespace, nil
+	}
+	workerHash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
+	}
+	return ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash), nil
 }
 
 // GetDCDSubComponentType returns the alpha subcomponent type restored by API

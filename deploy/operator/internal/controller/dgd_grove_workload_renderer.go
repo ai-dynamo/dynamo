@@ -84,7 +84,10 @@ func (r *groveWorkloadRenderer) Render(
 		existingPodCliqueSet = nil
 	}
 
-	renderDeployment := groveRenderDeployment(dgd, existingPodCliqueSet)
+	renderDeployment, err := groveRenderDeployment(dgd, existingPodCliqueSet)
+	if err != nil {
+		return nil, err
+	}
 	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx,
@@ -110,10 +113,52 @@ func (r *groveWorkloadRenderer) Render(
 func groveRenderDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
-) *nvidiacomv1beta1.DynamoGraphDeployment {
+) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
 	renderDeployment := dgd.DeepCopy()
 	applyGroveCompatibility(renderDeployment, pcs)
-	return renderDeployment
+	if err := applyGroveWorkerHashSuffix(renderDeployment, dgd); err != nil {
+		return nil, err
+	}
+	return renderDeployment, nil
+}
+
+func applyGroveWorkerHashSuffix(
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	if !groveWorkerHashSuffixEnabled(hashSource) {
+		return nil
+	}
+
+	var hasWorker bool
+	for i := range renderDeployment.Spec.Components {
+		if dynamo.IsWorkerComponent(string(renderDeployment.Spec.Components[i].ComponentType)) {
+			hasWorker = true
+			break
+		}
+	}
+	if !hasWorker {
+		return nil
+	}
+
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(hashSource)
+	if err != nil {
+		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
+	}
+	for i := range renderDeployment.Spec.Components {
+		component := &renderDeployment.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		if component.PodTemplate == nil {
+			component.PodTemplate = &corev1.PodTemplateSpec{}
+		}
+		if component.PodTemplate.Labels == nil {
+			component.PodTemplate.Labels = make(map[string]string)
+		}
+		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	return nil
 }
 
 func applyGroveCompatibility(

@@ -83,7 +83,10 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	renderDeployment := groveRenderDeployment(dgd, desiredPodCliqueSet)
+	renderDeployment, err := groveRenderDeployment(dgd, desiredPodCliqueSet)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to prepare Grove deployment: %w", err)
+	}
 
 	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, desiredPodCliqueSet)
 	if err != nil {

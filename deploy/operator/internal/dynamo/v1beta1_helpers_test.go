@@ -187,6 +187,36 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 	}
 }
 
+func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "grove",
+			Namespace:   "k8s",
+			Annotations: map[string]string{commonconsts.AnnotationGroveWorkerHashSuffixEnabled: "true"},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: commonconsts.ComponentTypeWorker,
+			}},
+		},
+	}
+	component := &dgd.Spec.Components[0]
+	hash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
+	}
+
+	got, err := GetGroveRuntimeNamespace(dgd, component)
+	if err != nil {
+		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
+	}
+	want := dgd.GetDynamoNamespaceForComponent(component) + "-" + hash
+	if got != want {
+		t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
+	}
+}
+
 func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
