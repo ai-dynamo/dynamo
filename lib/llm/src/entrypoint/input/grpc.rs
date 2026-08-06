@@ -8,6 +8,7 @@ use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
+    frontend_config::AdmissionGateConfig,
     grpc::service::kserve,
     http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
@@ -24,6 +25,8 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    warn_if_admission_gates_are_ignored(engine_config.local_model().admission_gate_config());
+
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .metrics_prefix(engine_config.local_model().metrics_prefix())
@@ -116,6 +119,22 @@ pub async fn run(
 
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
+}
+
+fn warn_if_admission_gates_are_ignored(config: &AdmissionGateConfig) {
+    if config.request_concurrency_limit().is_none()
+        && config.runtime_task_limit().is_none()
+        && config.request_plane_connection_limit().is_none()
+    {
+        return;
+    }
+
+    tracing::warn!(
+        request_concurrency_limit = ?config.request_concurrency_limit(),
+        runtime_task_limit = ?config.runtime_task_limit(),
+        request_plane_connection_limit = ?config.request_plane_connection_limit(),
+        "frontend admission gates are HTTP-only and are ignored in KServe gRPC mode"
+    );
 }
 
 /// Spawns a task that watches for new models in store,

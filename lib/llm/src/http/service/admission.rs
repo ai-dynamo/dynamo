@@ -7,8 +7,8 @@
 //! tokenization using only coarse frontend-local state:
 //!
 //! - **Request concurrency** (`--rejection-frontend-request-concurrency-limit`):
-//!   enforced separately for each served model on the OpenAI-compatible HTTP
-//!   inference endpoints, protecting downstream model capacity. Realtime
+//!   enforced separately for each served model on HTTP inference
+//!   request/response endpoints, protecting downstream model capacity. Realtime
 //!   WebSocket sessions select their model after the HTTP upgrade and are not
 //!   included.
 //! - **Runtime tasks** (`--rejection-frontend-runtime-task-limit`): alive tasks
@@ -61,8 +61,8 @@ impl FrontendLocalGateState {
 }
 
 /// Per-served-model request concurrency gate, returning the rejection message
-/// so callers can shape their own error body. Rejection metrics and logs are
-/// recorded here.
+/// so non-OpenAI surfaces (e.g. the Anthropic Messages API) can shape their
+/// own error body. Rejection metrics and logs are recorded here.
 ///
 /// Must be called AFTER the per-model inflight gauge has been incremented
 /// (i.e. after the handler creates its `InflightGuard`): each request then

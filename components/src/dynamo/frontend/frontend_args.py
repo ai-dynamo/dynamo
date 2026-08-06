@@ -545,9 +545,8 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             arg_type=int,
             help=(
-                "Frontend admission gate: maximum concurrent frontend-admitted OpenAI-"
-                "compatible HTTP inference requests for each served model, enforced "
-                "before tokenization. "
+                "Frontend admission gate: maximum concurrent frontend-admitted HTTP "
+                "inference requests for each served model, enforced before tokenization. "
                 "Requests over the limit are rejected with HTTP 503. Realtime WebSocket "
                 "sessions are not included. Disabled by default; set to enable."
             ),
