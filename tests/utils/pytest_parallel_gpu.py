@@ -318,12 +318,6 @@ _MAX_RETRIES = 3
 # Last-resort deadline behind the child's own --timeout, for when pytest-timeout
 # is swallowed by a C-level block and the stuck child stalls the whole run.
 _WATCHDOG_GRACE_S = 120
-# Fallback job budget when the workflow does not pass one through.
-_WATCHDOG_DEFAULT_BUDGET_S = 120 * 60
-# Fraction of the job budget the watchdog may use. The remainder covers image
-# pull, checkout, model download and artifact upload, none of which are inside
-# the deadline being measured.
-_WATCHDOG_BUDGET_FRACTION = 0.8
 
 
 def _watchdog_multiplier() -> int:
@@ -348,13 +342,14 @@ def _watchdog_cap() -> float:
 
     The job kills the whole step at timeout-minutes, so a deadline past that
     never fires and the runner dies first instead. GitHub exposes no variable
-    for it, so shared-test.yml passes it through.
+    for it, so shared-test.yml passes it through. The 80% leaves room for image
+    pull, checkout and artifact upload, which sit outside the measured window.
     """
     try:
         budget = float(os.environ["GPU_TEST_TIMEOUT_MINUTES"]) * 60
     except (KeyError, ValueError):
-        budget = _WATCHDOG_DEFAULT_BUDGET_S
-    return budget * _WATCHDOG_BUDGET_FRACTION
+        budget = 120 * 60
+    return budget * 0.8
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -850,7 +845,6 @@ def run_parallel(
     env_base = os.environ.copy()
     watchdog_multiplier = _watchdog_multiplier()
     watchdog_cap = _watchdog_cap()
-    watchdog_unguarded: set[int] = set()
 
     while pending or running:
         now = time.monotonic()
@@ -863,29 +857,18 @@ def run_parallel(
             if run_info.proc.poll() is not None:
                 continue
             elapsed = now - run_info.start_time
-            want = run_info.test.timeout * watchdog_multiplier + _WATCHDOG_GRACE_S
-            deadline = min(want, watchdog_cap)
-            # Clamping this far would cut into the test's own first attempt, so
-            # guarding it would kill healthy runs. Say so and leave it alone
-            # rather than silently enforcing a deadline we know is too tight.
-            if deadline < run_info.test.timeout + _WATCHDOG_GRACE_S:
-                if w_id not in watchdog_unguarded:
-                    watchdog_unguarded.add(w_id)
-                    _print(
-                        f"[watchdog] w{w_id} not guarded: its {run_info.test.timeout:.0f}s "
-                        f"timeout does not fit in the {watchdog_cap:.0f}s the job "
-                        f"budget allows. Raise gpu_test_timeout_minutes or lower "
-                        f"the test's timeout to bring it back under the watchdog."
-                    )
-                continue
+            deadline = run_info.test.timeout * watchdog_multiplier + _WATCHDOG_GRACE_S
+            # Pull it in to the job budget, but never so far that it would cut
+            # into the test's own first attempt. A test too long to fit simply
+            # goes unguarded, which is what it was before this existed.
+            if watchdog_cap >= run_info.test.timeout + _WATCHDOG_GRACE_S:
+                deadline = min(deadline, watchdog_cap)
             if elapsed <= deadline:
                 continue
             if run_info.watchdog_reason is None:
                 limit_note = (
-                    f"ran {elapsed:.0f}s, limit {deadline:.0f}s = "
-                    f"{run_info.test.timeout:.0f}s test timeout "
-                    f"x{watchdog_multiplier} + {_WATCHDOG_GRACE_S}s for retries "
-                    f"and startup, capped at {watchdog_cap:.0f}s by the job budget"
+                    f"ran {elapsed:.0f}s against a {deadline:.0f}s limit, from a "
+                    f"{run_info.test.timeout:.0f}s test timeout"
                 )
                 run_info.watchdog_reason = (
                     f"killed by the orchestrator: hit its time limit "
