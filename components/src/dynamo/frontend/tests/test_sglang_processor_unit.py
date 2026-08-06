@@ -64,7 +64,8 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_0,
-    # Download tokenizer once per module scope
+    # Registers the tokenizer in the session predownload manifest (tests/conftest.py)
+    # so it stays fetchable after a worker's predownload test flips HF_HUB_OFFLINE.
     pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),

@@ -27,9 +27,8 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.gpu_0,
     # This file builds a real tokenizer at module scope; declare the model so
-    # predownload_tokenizers warms the HF cache once per session instead of
-    # every xdist worker fetching it over the network (flake surface on the
-    # CPU lanes this file now runs on).
+    # Registers the tokenizer in the session predownload manifest (tests/conftest.py)
+    # so it stays fetchable after a worker's predownload test flips HF_HUB_OFFLINE.
     pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
