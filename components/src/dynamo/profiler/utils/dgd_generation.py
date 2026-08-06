@@ -55,6 +55,7 @@ from dynamo.profiler.utils.profile_common import (
     needs_mocker_aic_perf_model,
     needs_profile_data,
 )
+from dynamo.profiler.utils.replay_optimize.constants import AIC_BACKEND_VERSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +416,11 @@ def _inject_mocker_aic_args(
     if "--aic-perf-model" not in args_list:
         args_list.append("--aic-perf-model")
     args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
+    backend_version = AIC_BACKEND_VERSIONS.get(aic_spec.backend)
+    if backend_version is not None:
+        args_list = set_argument_value(
+            args_list, "--aic-backend-version", backend_version
+        )
     args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
     args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
     args_list = set_argument_value(
