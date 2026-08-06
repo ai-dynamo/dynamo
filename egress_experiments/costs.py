@@ -131,28 +131,32 @@ def spin(microseconds: float) -> None:
 # large buffer is genuine CPU that other threads can run straight through.
 # Verified: 1 -> 8 threads, wall 0.214 -> 0.223 s while total work grows 8x
 # (perfect scaling); the same measurement with `spin` goes 0.061 -> 0.178 s.
-_OFFGIL_BUF = b"\x5a" * (1 << 20)
+# 32 KB: cache-resident, so this is compute-bound on the SHA unit rather than
+# memory-bandwidth bound. A 1 MB buffer streamed from DRAM and shared bandwidth
+# across cores, so pinned parallel runs interfered -- an off-GIL architecture
+# measured 15 % slower in a 5-up batch while the baseline was unaffected.
+_OFFGIL_BUF = b"\x5a" * (32 << 10)
+#: hashlib only releases the GIL above HASHLIB_GIL_MINSIZE (2047 bytes).
+_OFFGIL_MIN_BLOCK = 2048
+#: Sliced as a memoryview, never as bytes. ``buf[:n]`` COPIES, and that memcpy
+#: runs while HOLDING the GIL -- GIL-held work inside the one primitive whose
+#: entire purpose is to not hold it. memoryview slicing is zero-copy.
+_OFFGIL_MV = memoryview(_OFFGIL_BUF)
 _offgil_bytes_per_us: Optional[float] = None
 
 
-def _offgil_block_bytes() -> int:
-    """Bytes per hash block, sized to ~10 us of work.
-
-    Small enough that a ``spin_offgil`` of a few tens of microseconds lands
-    close to its target, large enough to stay well above hashlib's
-    GIL-release threshold (2047 bytes) and to keep the clock checks in the
-    noise.
-    """
+def _calibrate_offgil() -> float:
+    """Bytes of SHA-256 per microsecond on this machine."""
     global _offgil_bytes_per_us
     if _offgil_bytes_per_us is None:
-        probe, reps = 1 << 16, 64
+        probe, reps = 1 << 15, 256
         digest = hashlib.sha256()
         start = _perf()
         for _ in range(reps):
-            digest.update(_OFFGIL_BUF[:probe])
+            digest.update(_OFFGIL_MV[:probe])
         elapsed_us = (_perf() - start) / 1000.0
         _offgil_bytes_per_us = (probe * reps) / max(elapsed_us, 1e-9)
-    return max(4096, min(len(_OFFGIL_BUF), int(_offgil_bytes_per_us * 10)))
+    return _offgil_bytes_per_us
 
 
 def spin_offgil(microseconds: float) -> None:
@@ -166,17 +170,21 @@ def spin_offgil(microseconds: float) -> None:
     if microseconds <= 0:
         return
     _cell_offgil()[0] += microseconds
-    # Deadline-driven rather than "hash N bytes from one calibration": a single
-    # up-front calibration drifts with cache state and ran 26 % short. Hashing
-    # in ~10 us blocks and re-checking the clock is self-correcting. The clock
-    # read does briefly take the GIL, which a real Rust thread would not, but
-    # it is ~100 ns against a ~10 us block -- about 1 %, and in the direction
-    # that UNDER-states the benefit of moving work off the GIL.
-    block = _offgil_block_bytes()
+    # Size each block to land exactly on the deadline, then re-check. A fixed
+    # ~10 us block overshot by up to 1.34x at the stage sizes that matter
+    # (10-50 us), because the last block always ran to completion -- charging
+    # off-GIL architectures a third more CPU than the model claimed, which
+    # handicapped precisely the thing under test. `spin` is accurate to 1-3 %,
+    # so the two were not comparable.
+    bytes_per_us = _calibrate_offgil()
     deadline = _perf() + int(microseconds * 1000)
     digest = hashlib.sha256()
-    while _perf() < deadline:
-        digest.update(_OFFGIL_BUF[:block])
+    while True:
+        remaining_us = (deadline - _perf()) / 1000.0
+        block = int(remaining_us * bytes_per_us)
+        if block < _OFFGIL_MIN_BLOCK:
+            return
+        digest.update(_OFFGIL_MV[: min(block, len(_OFFGIL_MV))])
 
 
 def pad_to(start_ns: int, target_microseconds: float) -> None:
