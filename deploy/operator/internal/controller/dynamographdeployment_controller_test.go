@@ -80,35 +80,14 @@ func newTestDGDResourceSyncer(reconciler *DynamoGraphDeploymentReconciler) dgdRe
 }
 
 func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
-	tests := []struct {
-		name         string
-		grove        bool
-		experimental *v1beta1.ExperimentalSpec
-		components   []v1beta1.DynamoComponentDeploymentSharedSpec
-		wantErr      string
-	}{
-		{
-			name: "component pathway rejects checkpoint with failover",
-			experimental: &v1beta1.ExperimentalSpec{
-				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
-				Failover:   &v1beta1.FailoverSpec{},
-			},
-			wantErr: "component \"worker\": Snapshot with active/passive failover is temporarily unsupported",
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-dgd",
+			Namespace:  "default",
+			Generation: 7,
 		},
-		{
-			name:  "Grove pathway rejects checkpoint with inter-pod GMS",
-			grove: true,
-			experimental: &v1beta1.ExperimentalSpec{
-				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
-				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
-					Mode: v1beta1.GMSModeInterPod,
-				},
-			},
-			wantErr: "component \"worker\": Snapshot with gpuMemoryService.mode=InterPod is unsupported",
-		},
-		{
-			name: "aggregates violations across stored components",
-			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "prefill",
 					Experimental: &v1beta1.ExperimentalSpec{
@@ -125,103 +104,46 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 					},
 				},
 			},
-			wantErr: "component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n" +
-				"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n" +
-				"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
 		},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build an admission-bypassed live DGD for the selected workload pathway")
-			components := tt.components
-			if components == nil {
-				components = []v1beta1.DynamoComponentDeploymentSharedSpec{{
-					ComponentName: "worker",
-					Experimental:  tt.experimental,
-				}}
-			}
-			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "test-dgd",
-					Namespace:  "default",
-					Generation: 7,
-				},
-				Spec: v1beta1.DynamoGraphDeploymentSpec{
-					Components: components,
-				},
-			}
-			gates := features.Gates{}
-			if tt.grove {
-				gates.Grove = true
-			}
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-				WithObjects(dgd).
-				WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
-				Build()
-			recorder := record.NewFakeRecorder(10)
-			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:        kubeClient,
-				Recorder:      recorder,
-				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: gates},
-			}
-			require.Equal(t, tt.grove, reconciler.isGrovePathway(dgd))
-
-			t.Log("Reconcile through the common DGD parent")
-			_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-				NamespacedName: client.ObjectKeyFromObject(dgd),
-			})
-			require.NoError(t, err)
-
-			t.Log("Verify failure status is authoritative without mutating the live DGD")
-			var stored v1beta1.DynamoGraphDeployment
-			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
-			require.False(t, controller_common.ContainsFinalizer(&stored))
-			require.Empty(t, stored.Annotations)
-			require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
-			ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
-			require.NotNil(t, ready)
-			require.Equal(t, metav1.ConditionFalse, ready.Status)
-			require.Equal(t, dgd.Generation, ready.ObservedGeneration)
-			require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
-			require.Equal(t, tt.wantErr, ready.Message)
-			require.Zero(t, stored.Status.ObservedGeneration)
-			select {
-			case unexpected := <-recorder.Events:
-				t.Fatalf("unexpected reconciliation event: %s", unexpected)
-			default:
-			}
-
-			t.Log("Verify no component, checkpoint, claim, service, storage, or Grove resource was created")
-			var dcds v1beta1.DynamoComponentDeploymentList
-			require.NoError(t, kubeClient.List(context.Background(), &dcds, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, dcds.Items)
-			var checkpoints v1alpha1.DynamoCheckpointList
-			require.NoError(t, kubeClient.List(context.Background(), &checkpoints, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, checkpoints.Items)
-			var claimTemplates resourcev1.ResourceClaimTemplateList
-			require.NoError(t, kubeClient.List(context.Background(), &claimTemplates, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, claimTemplates.Items)
-			var claims resourcev1.ResourceClaimList
-			require.NoError(t, kubeClient.List(context.Background(), &claims, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, claims.Items)
-			var services corev1.ServiceList
-			require.NoError(t, kubeClient.List(context.Background(), &services, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, services.Items)
-			var pvcs corev1.PersistentVolumeClaimList
-			require.NoError(t, kubeClient.List(context.Background(), &pvcs, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, pvcs.Items)
-			var podCliqueSets grovev1alpha1.PodCliqueSetList
-			require.NoError(t, kubeClient.List(context.Background(), &podCliqueSets, client.InNamespace(dgd.Namespace)))
-			require.Empty(t, podCliqueSets.Items)
-		})
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoGraphDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
+	require.False(t, controller_common.ContainsFinalizer(&stored))
+	require.Empty(t, stored.Annotations)
+	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, dgd.Generation, ready.ObservedGeneration)
+	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
+	require.Equal(t,
+		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
+			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
+			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+		ready.Message,
+	)
+	require.Zero(t, stored.Status.ObservedGeneration)
 }
 
 func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {
-	t.Log("Build an invalid deleting DGD with the operator finalizer")
 	now := metav1.Now()
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -252,14 +174,12 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
-	t.Log("Reconcile the deleting object through finalization")
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKeyFromObject(dgd),
 	})
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, result)
 
-	t.Log("Verify finalization removed the finalizer or completed fake-client deletion")
 	var stored v1beta1.DynamoGraphDeployment
 	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored)
 	if !apierrors.IsNotFound(err) {

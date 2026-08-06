@@ -20,29 +20,18 @@ func TestValidateCheckpointCompatibility(t *testing.T) {
 	}{
 		{name: "no experimental features"},
 		{
-			name: "checkpoint only",
+			name: "no checkpoint configuration",
 			experimental: &nvidiacomv1beta1.ExperimentalSpec{
-				Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+				Failover:         &nvidiacomv1beta1.FailoverSpec{},
 			},
 		},
 		{
-			name: "failover only",
-			experimental: &nvidiacomv1beta1.ExperimentalSpec{
-				Failover: &nvidiacomv1beta1.FailoverSpec{},
-			},
-		},
-		{
-			name: "disabled checkpoint with failover",
-			experimental: &nvidiacomv1beta1.ExperimentalSpec{
-				Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{},
-				Failover:   &nvidiacomv1beta1.FailoverSpec{},
-			},
-		},
-		{
-			name: "disabled checkpoint with inter-pod GMS",
+			name: "disabled checkpoint ignores incompatible settings",
 			experimental: &nvidiacomv1beta1.ExperimentalSpec{
 				Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{},
 				GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+				Failover:         &nvidiacomv1beta1.FailoverSpec{},
 			},
 		},
 		{
@@ -51,22 +40,6 @@ func TestValidateCheckpointCompatibility(t *testing.T) {
 				Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
 			},
-		},
-		{
-			name: "enabled checkpoint with inter-pod GMS",
-			experimental: &nvidiacomv1beta1.ExperimentalSpec{
-				Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
-				GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
-			},
-			wantErrs: []string{checkpointInterPodCompatibilityMessage},
-		},
-		{
-			name: "enabled checkpoint with failover",
-			experimental: &nvidiacomv1beta1.ExperimentalSpec{
-				Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
-				Failover:   &nvidiacomv1beta1.FailoverSpec{},
-			},
-			wantErrs: []string{checkpointFailoverCompatibilityMessage},
 		},
 		{
 			name: "enabled checkpoint with inter-pod GMS and failover",

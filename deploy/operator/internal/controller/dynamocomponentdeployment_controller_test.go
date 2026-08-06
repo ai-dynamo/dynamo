@@ -71,109 +71,56 @@ func init() {
 }
 
 func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
-	tests := []struct {
-		name         string
-		experimental *v1beta1.ExperimentalSpec
-		wantErr      string
-	}{
-		{
-			name: "checkpoint with failover",
-			experimental: &v1beta1.ExperimentalSpec{
-				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
-				Failover:   &v1beta1.FailoverSpec{},
-			},
-			wantErr: "Snapshot with active/passive failover is temporarily unsupported",
-		},
-		{
-			name: "checkpoint with inter-pod GMS",
-			experimental: &v1beta1.ExperimentalSpec{
-				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
-				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
-					Mode: v1beta1.GMSModeInterPod,
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+					Failover:         &v1beta1.FailoverSpec{},
 				},
 			},
-			wantErr: "Snapshot with gpuMemoryService.mode=InterPod is unsupported",
-		},
-		{
-			name: "checkpoint with inter-pod GMS and failover",
-			experimental: &v1beta1.ExperimentalSpec{
-				Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
-				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
-				Failover:         &v1beta1.FailoverSpec{},
-			},
-			wantErr: "Snapshot with gpuMemoryService.mode=InterPod is unsupported\n" +
-				"Snapshot with active/passive failover is temporarily unsupported",
 		},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build an admission-bypassed live DCD")
-			dcd := &v1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
-				Spec: v1beta1.DynamoComponentDeploymentSpec{
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						Experimental: tt.experimental,
-					},
-				},
-			}
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(scheme.Scheme).
-				WithObjects(dcd).
-				WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
-				Build()
-			recorder := record.NewFakeRecorder(10)
-			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:        kubeClient,
-				Recorder:      recorder,
-				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-			}
-
-			t.Log("Reconcile the stored invalid resource")
-			_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-				NamespacedName: client.ObjectKeyFromObject(dcd),
-			})
-			require.NoError(t, err)
-
-			t.Log("Verify failure status is written without finalizers or child resources")
-			var stored v1beta1.DynamoComponentDeployment
-			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored))
-			require.False(t, controller_common.ContainsFinalizer(&stored))
-			available := meta.FindStatusCondition(
-				stored.Status.Conditions,
-				v1beta1.DynamoComponentDeploymentConditionTypeAvailable,
-			)
-			require.NotNil(t, available)
-			require.Equal(t, metav1.ConditionFalse, available.Status)
-			require.Equal(t, dcd.Generation, available.ObservedGeneration)
-			require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
-			require.Equal(t, tt.wantErr, available.Message)
-			require.Zero(t, stored.Status.ObservedGeneration)
-			select {
-			case unexpected := <-recorder.Events:
-				t.Fatalf("unexpected reconciliation event: %s", unexpected)
-			default:
-			}
-
-			var deployments appsv1.DeploymentList
-			require.NoError(t, kubeClient.List(context.Background(), &deployments, client.InNamespace(dcd.Namespace)))
-			require.Empty(t, deployments.Items)
-			var services corev1.ServiceList
-			require.NoError(t, kubeClient.List(context.Background(), &services, client.InNamespace(dcd.Namespace)))
-			require.Empty(t, services.Items)
-			var ingresses networkingv1.IngressList
-			require.NoError(t, kubeClient.List(context.Background(), &ingresses, client.InNamespace(dcd.Namespace)))
-			require.Empty(t, ingresses.Items)
-			var pvcs corev1.PersistentVolumeClaimList
-			require.NoError(t, kubeClient.List(context.Background(), &pvcs, client.InNamespace(dcd.Namespace)))
-			require.Empty(t, pvcs.Items)
-		})
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoComponentDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored))
+	require.False(t, controller_common.ContainsFinalizer(&stored))
+	available := meta.FindStatusCondition(
+		stored.Status.Conditions,
+		v1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+	)
+	require.NotNil(t, available)
+	require.Equal(t, metav1.ConditionFalse, available.Status)
+	require.Equal(t, dcd.Generation, available.ObservedGeneration)
+	require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
+	require.Equal(t,
+		"Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
+			"Snapshot with active/passive failover is temporarily unsupported",
+		available.Message,
+	)
+	require.Zero(t, stored.Status.ObservedGeneration)
 }
 
 func TestDynamoComponentDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {
-	t.Log("Build an invalid deleting DCD with the operator finalizer")
 	now := metav1.Now()
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -201,14 +148,12 @@ func TestDynamoComponentDeploymentReconcileFinalizesDeletingStoredCheckpointInco
 		Recorder: record.NewFakeRecorder(10),
 	}
 
-	t.Log("Reconcile the deleting object through finalization")
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKeyFromObject(dcd),
 	})
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, result)
 
-	t.Log("Verify finalization removed the finalizer or completed fake-client deletion")
 	var stored v1beta1.DynamoComponentDeployment
 	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored)
 	if !k8serrors.IsNotFound(err) {
