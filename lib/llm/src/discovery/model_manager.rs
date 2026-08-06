@@ -864,6 +864,15 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_chat_{}", model);
+        // In-process cards often come from `with_name_only`, which leaves
+        // `worker_type` unset; readiness would then route this WorkerSet
+        // through the legacy no-declared-worker-type handling (and warn once
+        // per process). Default the role to Aggregated, matching
+        // `aggregated_local_card()`.
+        let mut card = card;
+        if card.worker_type.is_none() {
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        }
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.chat_engine = Some(engine);
         self.note_request_concurrency_limit_override(&ws);
