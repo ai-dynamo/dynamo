@@ -64,6 +64,12 @@ class NvCreateAudioSpeechRequest(BaseModel):
     max_new_tokens: Optional[int] = None
     """Maximum tokens to generate (default: 2048)."""
 
+    # Audex-specific params
+    cfg_scale: Optional[float] = None
+    """Classifier-free guidance strength (Audex). 1.0 disables guidance; 1.5 is
+    the recommended TTS quality setting, and 3.0 the official TTA setting
+    (applied by default for text-to-audio)."""
+
 
 class AudioData(BaseModel):
     """Audio data in response."""

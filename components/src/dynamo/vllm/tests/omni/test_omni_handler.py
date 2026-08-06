@@ -171,7 +171,10 @@ class TestBuildEngineInputs:
             request_type=RequestType.AUDIO_GENERATION,
         )
 
-        async def mock_engine_inputs(req):
+        seen = {}
+
+        async def mock_engine_inputs(req, request_id=None):
+            seen["request_id"] = request_id
             return expected
 
         handler.audio = MagicMock()
@@ -179,9 +182,116 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(
             NvCreateAudioSpeechRequest(input="Hello world"),
             RequestType.AUDIO_GENERATION,
+            request_id="req-1",
         )
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
+        # Audex binds its CFG pair id to the final request id.
+        assert seen["request_id"] == "req-1"
+
+
+class TestStreamedAudioIsResolved:
+    """A chunk-streaming codec decoder emits the waveform repeatedly as
+    cumulative snapshots, interleaved with empty payloads. The response must
+    carry the complete waveform exactly once."""
+
+    @staticmethod
+    def _audio_output(samples):
+        import numpy as np
+
+        return SimpleNamespace(
+            final_output_type="audio",
+            multimodal_output={
+                "audio": np.asarray(samples, dtype=np.float32),
+                "sr": 24000,
+            },
+        )
+
+    async def _run(self, handler, stage_outputs):
+        from contextlib import asynccontextmanager
+
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        handler.output_formatter = OutputFormatter(model_name="test-model")
+
+        async def fake_generate(**kwargs):
+            for so in stage_outputs:
+                yield so
+
+        handler.engine_client.generate = fake_generate
+
+        @asynccontextmanager
+        async def no_abort_monitor(context, request_id):
+            yield None
+
+        handler._abort_monitor = no_abort_monitor
+        handler.config.output_modalities = ["audio"]
+        handler.audio = MagicMock()
+        handler.audio.build_engine_inputs = _AsyncReturn(
+            EngineInputs(
+                prompt={"prompt": "hi"}, request_type=RequestType.AUDIO_GENERATION
+            )
+        )
+
+        return [
+            c
+            async for c in handler._generate_openai_mode(
+                {"input": "hi"}, MagicMock(), "req-1"
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_complete_waveform_is_returned_once(self):
+        import base64
+        import io
+
+        import soundfile as sf
+
+        handler = _make_handler()
+        chunks = await self._run(
+            handler,
+            [
+                self._audio_output([]),  # streams can open with an empty payload
+                self._audio_output([0.1] * 1200),
+                self._audio_output([0.1] * 2400),  # cumulative, not incremental
+            ],
+        )
+
+        assert len(chunks) == 1
+        assert chunks[0]["status"] == "completed"
+        audio, sr = sf.read(
+            io.BytesIO(base64.b64decode(chunks[0]["data"][0]["b64_json"]))
+        )
+        # The final snapshot verbatim: not the partial one, and not 3600 samples
+        # of the snapshots concatenated.
+        assert len(audio) == 2400
+        assert sr == 24000
+
+    @pytest.mark.asyncio
+    async def test_no_audio_at_all_reports_failure(self):
+        """Otherwise the client gets a valid but silent, header-only file."""
+        handler = _make_handler()
+        chunks = await self._run(handler, [self._audio_output([])])
+
+        assert len(chunks) == 1
+        assert chunks[0]["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_buffer_is_released_after_the_request(self):
+        """The formatter is shared, so a finished request must leave no state."""
+        handler = _make_handler()
+        await self._run(handler, [self._audio_output([0.1] * 1200)])
+        assert handler.output_formatter.audio._pending == {}
+
+
+class _AsyncReturn:
+    """Awaitable stub that ignores its arguments and returns a fixed value."""
+
+    def __init__(self, value):
+        self._value = value
+
+    async def __call__(self, *args, **kwargs):
+        return self._value
 
 
 class TestI2VEngineInputs:

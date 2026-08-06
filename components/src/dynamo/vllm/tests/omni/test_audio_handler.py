@@ -244,3 +244,224 @@ class TestEngineInputsFromAudio:
         req = NvCreateAudioSpeechRequest(input="hello", speed=2.0)
         inputs = await handler.build_engine_inputs(req)
         assert inputs.speed == 2.0
+
+
+def _make_audex_handler(*stages, **config_overrides):
+    """Audio handler whose engine reports the given Audex ``model_stage`` names."""
+    handler = _make_audio_handler(**config_overrides)
+    handler.engine_client.stage_list = [
+        SimpleNamespace(model_stage=stage) for stage in stages
+    ]
+    handler.engine_client.stage_configs = []
+    handler.engine_client.default_sampling_params_list = [
+        SimpleNamespace(max_tokens=2048, temperature=0.1, extra_args=None),
+        SimpleNamespace(max_tokens=8192, temperature=0.0, extra_args=None),
+    ]
+    return handler
+
+
+class TestAudexModelDetection:
+    """Tests for _audex_model_type."""
+
+    def test_tts_pipeline_detected(self):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        assert handler._audex_model_type() == "audex"
+
+    def test_tta_pipeline_detected(self):
+        handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
+        assert handler._audex_model_type() == "audex_tta"
+
+    def test_s2s_pipeline_detected(self):
+        """audex_omni is speech-capable only alongside the code2wav decoder."""
+        handler = _make_audex_handler("audex_omni", "audex_code2wav")
+        assert handler._audex_model_type() == "audex"
+
+    def test_thinker_only_pipeline_is_not_speech(self):
+        """The thinker-only deployment is text-final: no speech path."""
+        handler = _make_audex_handler("audex_omni")
+        assert handler._audex_model_type() is None
+
+    def test_non_audex_pipeline(self):
+        handler = _make_audex_handler("qwen3_tts")
+        assert handler._audex_model_type() is None
+
+    def test_stage_configs_shapes(self):
+        """model_stage is read from nested engine_args and from dict configs."""
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = []
+        handler.engine_client.stage_configs = [
+            SimpleNamespace(engine_args={"model_stage": "audex_thinker"}),
+            {"engine_args": {"model_stage": "audex_code2wav"}},
+        ]
+        assert handler._audex_model_type() == "audex"
+
+
+class TestAudexEngineInputs:
+    """Tests for the Audex prompt/param contract."""
+
+    @pytest.mark.asyncio
+    async def test_tts_prompt_primes_codec_generation(self):
+        """The ChatML prompt must prime <speechgen_start>, not pass raw text.
+
+        A plain text prompt makes the thinker emit a text continuation with
+        zero codec tokens, which fails the request downstream.
+        """
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="Hello world")
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+
+        prompt = inputs.prompt["prompt"]
+        assert prompt != "Hello world"
+        assert prompt.endswith("<think></think><speechgen_start>")
+        assert "Hello world" in prompt
+        assert "<|text to speech|>" in prompt
+        assert inputs.request_type == RequestType.AUDIO_GENERATION
+
+    @pytest.mark.asyncio
+    async def test_tts_unguided_by_default(self):
+        """No cfg_scale means no CFG plumbing (the official TTS baseline)."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello")
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+
+        stage0 = inputs.sampling_params_list[0]
+        assert "cfg_scale" not in stage0.extra_args
+        assert "cfg_pair_id" not in stage0.extra_args
+        assert stage0.temperature == 0.1
+
+    @pytest.mark.asyncio
+    async def test_tts_cfg_scale_one_stays_unguided(self):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.0)
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+        assert "cfg_scale" not in inputs.sampling_params_list[0].extra_args
+
+    @pytest.mark.asyncio
+    async def test_tts_cfg_attaches_pair_contract(self, monkeypatch):
+        """Guided requests carry the pair id and a length-matched null prompt."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        monkeypatch.setattr(
+            handler, "_get_audex_tokenizer", lambda model_type: MagicMock()
+        )
+        import vllm_omni.model_executor.models.audex.prompt as audex_prompt
+
+        monkeypatch.setattr(audex_prompt, "build_null_prompt", lambda cond, tok: "NULL")
+
+        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.5)
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+
+        stage0 = inputs.sampling_params_list[0]
+        assert stage0.extra_args["cfg_scale"] == 1.5
+        assert stage0.extra_args["cfg_role"] == "cond"
+        assert stage0.extra_args["cfg_pair_id"] == "r1"
+        assert stage0.extra_args["cfg_null_prompt"] == "NULL"
+        # Guidance sharpens the distribution, so temperature drops.
+        assert stage0.temperature == 0.05
+
+    @pytest.mark.asyncio
+    async def test_cfg_ignored_without_request_id(self):
+        """Without a pair id, decode unguided rather than corrupt a pair."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.5)
+        inputs = await handler.build_engine_inputs(req)
+        assert "cfg_pair_id" not in inputs.sampling_params_list[0].extra_args
+
+    @pytest.mark.asyncio
+    async def test_shared_engine_defaults_not_mutated(self):
+        """Per-request CFG state must not leak into the engine's shared defaults."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        shared = handler.engine_client.default_sampling_params_list
+
+        req = NvCreateAudioSpeechRequest(input="hello", max_new_tokens=64)
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+
+        assert inputs.sampling_params_list[0].max_tokens == 64
+        assert shared[0].max_tokens == 2048
+        assert shared[0].extra_args is None
+
+    @pytest.mark.asyncio
+    async def test_tta_prompt_and_rvq_contract(self, monkeypatch):
+        """TTA primes <audiogen_start> and always attaches the RVQ phase mask."""
+        handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
+        monkeypatch.setattr(
+            handler, "_get_audex_tokenizer", lambda model_type: MagicMock()
+        )
+        import vllm_omni.model_executor.models.audex.prompt as audex_prompt
+        import vllm_omni.model_executor.models.audex.tta as audex_tta
+
+        monkeypatch.setattr(
+            audex_tta, "build_tta_phase_token_ids", lambda tok: ([[1], [2]], 10, 11)
+        )
+        monkeypatch.setattr(
+            audex_prompt, "build_tta_null_prompt", lambda cond, tok: "NULL"
+        )
+
+        req = NvCreateAudioSpeechRequest(input="a dog barking")
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+
+        assert inputs.prompt["prompt"].endswith("<think></think><audiogen_start>")
+        assert "<|text to audio|>" in inputs.prompt["prompt"]
+
+        extra = inputs.sampling_params_list[0].extra_args
+        assert extra["tta_rvq"]["start_tid"] == 10
+        assert extra["tta_rvq"]["start_in_prompt"] is True
+        # TTA guidance is effectively mandatory; the official default is 3.0.
+        assert extra["cfg_scale"] == 3.0
+        assert extra["cfg_pair_id"] == "r1"
+
+
+class TestAudexValidation:
+    """Audex rejects parameters it cannot honor instead of ignoring them."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("voice", [None, "", "default", "DEFAULT"])
+    async def test_default_voice_accepted(self, voice):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello", voice=voice)
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+        assert inputs.prompt["prompt"].endswith("<speechgen_start>")
+
+    @pytest.mark.asyncio
+    async def test_named_voice_rejected(self):
+        """Audex has one built-in voice; a named voice must not be silently ignored."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello", voice="vivian")
+        with pytest.raises(ValueError, match="single built-in voice"):
+            await handler.build_engine_inputs(req, request_id="r1")
+
+    @pytest.mark.asyncio
+    async def test_tta_voice_rejected(self):
+        handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
+        req = NvCreateAudioSpeechRequest(input="rain", voice="vivian")
+        with pytest.raises(ValueError, match="no voices"):
+            await handler.build_engine_inputs(req, request_id="r1")
+
+    @pytest.mark.asyncio
+    async def test_ref_audio_rejected(self):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(
+            input="hello", ref_audio="data:audio/wav;base64,AAAA"
+        )
+        with pytest.raises(ValueError, match="reference audio"):
+            await handler.build_engine_inputs(req, request_id="r1")
+
+    @pytest.mark.asyncio
+    async def test_cfg_scale_out_of_range_rejected(self):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=50.0)
+        with pytest.raises(ValueError, match="cfg_scale"):
+            await handler.build_engine_inputs(req, request_id="r1")
+
+    @pytest.mark.asyncio
+    async def test_max_new_tokens_out_of_range_rejected(self):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="hello", max_new_tokens=99999)
+        with pytest.raises(ValueError, match="max_new_tokens"):
+            await handler.build_engine_inputs(req, request_id="r1")
+
+    @pytest.mark.asyncio
+    async def test_empty_input_rejected(self):
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="   ")
+        with pytest.raises(ValueError, match="empty"):
+            await handler.build_engine_inputs(req, request_id="r1")
