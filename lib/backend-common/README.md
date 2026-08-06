@@ -5,16 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend covers aggregated and
-> disaggregated (prefill/decode) inference, metrics + Prometheus
-> bridging, KV event publishing, KV-aware (DP-rank) routing,
-> health-check canaries, OpenTelemetry tracing, request-side
-> guided decoding, and both completion-side and prompt-side
-> logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
-> routes (pause/resume, profiling, weight updates), text-in-text-out,
-> and snapshot/CRIU are still on the non-unified path. The Python `Worker`
-> ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
-> is a thin shim over this crate.
+`dynamo-backend-common` provides the shared Rust engine contract and Worker
+lifecycle. Engine implementations own inference behavior; the Worker owns
+runtime registration, endpoint serving, cancellation monitoring, and shutdown.
+The Python `Worker`
+([`dynamo.common.backend`](../../components/src/dynamo/common/backend/)) is a
+thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
 > [Writing Unified Backends](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)

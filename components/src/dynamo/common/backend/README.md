@@ -1,10 +1,8 @@
 # Dynamo Python Backend
 
-**Supported today:** aggregated and disaggregated (prefill/decode/encode)
-inference, the shared multimodal request and encoder-handoff contract,
-metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
-routing, health-check canaries, OpenTelemetry tracing, and request-side
-guided decoding / structural tag.
+`dynamo.common.backend` provides the shared Python engine contract and Worker
+integration. Engine implementations own inference behavior; the Worker owns
+runtime registration, endpoint serving, cancellation monitoring, and shutdown.
 
 > **Looking for a walkthrough?** Start with the
 > [Writing Unified Backends](../../../../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
@@ -26,6 +24,7 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
     |   - cleanup()                          (shutdown)
     |
+    +-- TokenspeedLLMEngine    <-- tokenspeed/llm_engine.py
     +-- SampleLLMEngine        <-- sample_engine.py
 
 Worker                  <-- runtime integration (worker.py)
