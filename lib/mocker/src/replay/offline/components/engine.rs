@@ -602,19 +602,17 @@ where
         rank_id: usize,
         boundary: PassBoundary,
         mut executed: EnginePassResult,
-        collector: Option<&mut TraceCollector>,
+        collector: &mut TraceCollector,
         effects: &mut EngineEffects<Observation::Batch>,
     ) {
         if let Some(fpm) = executed.fpm.as_mut() {
             fpm.wall_time_secs = boundary.wall_time_secs();
         }
-        if let Some(collector) = collector {
-            collector.on_scheduler_pass(
-                &executed,
-                boundary.start_ms,
-                boundary.tokens_visible.then_some(boundary.end_ms),
-            );
-        }
+        collector.on_scheduler_pass(
+            &executed,
+            boundary.start_ms,
+            boundary.tokens_visible.then_some(boundary.end_ms),
+        );
 
         let admitted_requests = !executed.admissions.is_empty();
         let had_raw_observations = !executed.kv_events.is_empty();
@@ -678,11 +676,8 @@ where
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
-        mut collector: Option<&mut TraceCollector>,
+        collector: &mut TraceCollector,
     ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
-        if self.pass_mode == EnginePassMode::Visible && collector.is_none() {
-            bail!("offline replay visible engine pass requires a collector");
-        }
         // The serial coordinator may make another component observable at the
         // same virtual timestamp. Match the former full scan by retrying
         // effect-free groups on the next coordinator drive, but not again
@@ -743,7 +738,7 @@ where
                         tokens_visible: self.pass_mode == EnginePassMode::Visible,
                     },
                     executed,
-                    collector.as_deref_mut(),
+                    collector,
                     &mut effects,
                 );
                 group_end_ms
@@ -818,7 +813,7 @@ where
                         rank_id,
                         boundary,
                         executed,
-                        collector.as_deref_mut(),
+                        collector,
                         &mut effects,
                     );
                 }
@@ -1070,7 +1065,7 @@ mod tests {
         collector.on_arrival(fast, 0.0, 4, 1);
         collector.on_arrival(slow, 0.0, 8, 1);
 
-        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let effects = engine.drive_ready(0.0, &mut collector).unwrap();
 
         let scheduled = effects.scheduled_completion.as_ref().unwrap();
         assert_eq!(scheduled.payloads.len(), 2);
@@ -1101,7 +1096,7 @@ mod tests {
         let mut collector = TraceCollector::default();
         collector.on_arrival(slow, 0.0, 8, 1);
 
-        let mut first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let mut first_epoch = engine.drive_ready(0.0, &mut collector).unwrap();
         let first_scheduled = first_epoch.scheduled_completion.as_ref().unwrap();
         assert_eq!(first_scheduled.payloads.len(), 2);
         assert!(engine.debug_snapshots().iter().all(|rank| rank.busy));
@@ -1121,17 +1116,12 @@ mod tests {
         let mid_epoch = Uuid::from_u128(41);
         collector.on_arrival(mid_epoch, 4.0, 4, 1);
         engine.dispatch(1, timed_request(mid_epoch, 4)).unwrap();
-        assert!(
-            engine
-                .drive_ready(4.0, Some(&mut collector))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(engine.drive_ready(4.0, &mut collector).unwrap().is_empty());
 
         for payload in first_epoch.scheduled_completion.take().unwrap().payloads {
             engine.on_scheduled_completion(payload).unwrap();
         }
-        let second_epoch = engine.drive_ready(9.0, Some(&mut collector)).unwrap();
+        let second_epoch = engine.drive_ready(9.0, &mut collector).unwrap();
         let second_scheduled = second_epoch.scheduled_completion.as_ref().unwrap();
         assert_eq!(second_scheduled.payloads.len(), 2);
         assert!((second_scheduled.at_ms - 14.0).abs() < f64::EPSILON);
@@ -1150,7 +1140,7 @@ mod tests {
 
             let mut now_ms = 0.0;
             while engine.in_flight() > 0 {
-                let effects = engine.drive_ready(now_ms, Some(&mut collector)).unwrap();
+                let effects = engine.drive_ready(now_ms, &mut collector).unwrap();
                 assert!(effects.immediate_completions.is_empty());
                 let scheduled = effects.scheduled_completion.unwrap();
                 assert_eq!(scheduled.payloads.len(), dp_size as usize);
@@ -1211,7 +1201,7 @@ mod tests {
         engine.dispatch(0, timed_request(completed, 4)).unwrap();
         assert_eq!(engine.in_flight(), 1);
         let effects = engine
-            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .drive_ready(0.0, &mut TraceCollector::default())
             .unwrap();
         let completion = take_only_completion(effects);
         assert_eq!(engine.in_flight(), 1);
@@ -1242,14 +1232,14 @@ mod tests {
             .unwrap();
 
         let first = engine
-            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .drive_ready(0.0, &mut TraceCollector::default())
             .unwrap();
         let first = take_only_completion(first);
         assert_eq!(first.worker_idx, 0);
         assert_eq!(engine.ready_groups, BTreeSet::from([1]));
 
         let second = engine
-            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .drive_ready(0.0, &mut TraceCollector::default())
             .unwrap();
         let second = take_only_completion(second);
         assert_eq!(second.worker_idx, 1);
@@ -1294,7 +1284,7 @@ mod tests {
         ] {
             let mut engine = make_engine(engine_type);
             engine.dispatch(0, request(uuid)).unwrap();
-            let pass_start = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+            let pass_start = engine.drive_ready(0.0, &mut collector).unwrap();
             assert!(
                 pass_start.pass_start_events.0.is_empty(),
                 "{engine_type:?} exposed KV events before pass completion"
@@ -1400,7 +1390,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let effects = engine.drive_ready(0.0, &mut collector).unwrap();
         assert_eq!(
             effects
                 .scheduled_completion
@@ -1458,13 +1448,13 @@ mod tests {
             .unwrap();
         let mut collector = TraceCollector::default();
 
-        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let first = engine.drive_ready(0.0, &mut collector).unwrap();
         assert_eq!(first.admissions.len(), 1);
         let first = take_only_completion(first);
         assert_eq!(first.completed_requests, 0);
         engine.on_scheduled_completion(first).unwrap();
 
-        let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let second = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(second.admissions.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
         assert!(second.scheduled_completion.is_none());
@@ -1476,7 +1466,7 @@ mod tests {
         assert_eq!(engine.ready_groups, BTreeSet::from([0]));
         engine.on_scheduled_completion(second).unwrap();
 
-        let final_pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let final_pass = engine.drive_ready(0.0, &mut collector).unwrap();
         let final_pass = take_only_completion(final_pass);
         assert_eq!(final_pass.completed_requests, 1);
         assert!(
@@ -1505,7 +1495,7 @@ mod tests {
             .unwrap();
         let mut collector = TraceCollector::default();
 
-        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let first = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(first.is_empty());
         assert!(engine.ready_groups.is_empty());
         assert_eq!(engine.deferred_ready_groups, BTreeSet::from([0]));
@@ -1519,7 +1509,7 @@ mod tests {
             }]
         );
 
-        let retry = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let retry = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(retry.is_empty());
         assert_eq!(engine.deferred_ready_groups, BTreeSet::from([0]));
     }
@@ -1580,7 +1570,7 @@ mod tests {
             )
             .unwrap();
         let mut collector = TraceCollector::default();
-        let mut pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let mut pass = engine.drive_ready(0.0, &mut collector).unwrap();
         assert_eq!(
             pass.scheduled_completion.as_ref().unwrap().payloads.len(),
             1
@@ -1680,7 +1670,7 @@ mod tests {
             )
             .unwrap();
         let mut collector = TraceCollector::default();
-        let mut seed = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let mut seed = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(
             seed.pass_start_events
                 .0

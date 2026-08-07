@@ -2045,7 +2045,7 @@ where
         loop {
             let effects = self
                 .prefill_engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+                .drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);
@@ -2061,7 +2061,7 @@ where
         loop {
             let effects = self
                 .decode_engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+                .drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 #[cfg(test)]
