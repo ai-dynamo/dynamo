@@ -1323,11 +1323,51 @@ class PoolingPayload(BasePayload):
     endpoint: str = "/v1/pooling"
     expected_prompt_tokens: Optional[int] = None
 
-    @staticmethod
-    def _validate_json_data(data: Any) -> None:
+    # Tasks whose output is one vector per token, so the response must stay a
+    # matrix. Validating only ``data[0]`` would accept a flattened vector here,
+    # which is the exact regression these cases exist to catch.
+    _TOKEN_WISE_TASKS = frozenset(("token_embed", "token_classify"))
+
+    _DTYPE_WIDTHS = {
+        "float32": 4,
+        "float16": 2,
+        "bfloat16": 2,
+        "fp8_e4m3": 1,
+        "fp8_e5m2": 1,
+    }
+
+    def _validate_json_data(self, data: Any) -> None:
         assert isinstance(data, list) and data, "pooling data must be non-empty"
+
+        if self.body.get("task") in self._TOKEN_WISE_TASKS:
+            self._validate_token_wise_data(data)
+            return
+
         values = data[0] if isinstance(data[0], list) else data
         assert values and all(isinstance(value, (int, float)) for value in values)
+
+    @staticmethod
+    def _validate_token_wise_data(data: Any) -> None:
+        """Require a non-empty matrix of numeric rows with a consistent width.
+
+        Rejects a flattened vector, ragged rows, empty rows, and non-numeric
+        values — every row is checked, not just the first.
+        """
+        assert all(
+            isinstance(row, list) for row in data
+        ), f"token-wise output must be a list of rows, got {data!r}"
+
+        width = len(data[0])
+        assert width, "token-wise rows must be non-empty"
+        for position, row in enumerate(data):
+            assert len(row) == width, (
+                f"token-wise rows must have a consistent width; row {position} "
+                f"has {len(row)}, expected {width}"
+            )
+            assert all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in row
+            ), f"token-wise row {position} has non-numeric values: {row!r}"
 
     def _handle_json_response(self, response: Any) -> str:
         result = response.json()
@@ -1337,13 +1377,7 @@ class PoolingPayload(BasePayload):
         assert result.get("data"), "Empty pooling data"
 
         encoding_format = self.body.get("encoding_format", "float")
-        dtype_width = {
-            "float32": 4,
-            "float16": 2,
-            "bfloat16": 2,
-            "fp8_e4m3": 1,
-            "fp8_e5m2": 1,
-        }[self.body.get("embed_dtype", "float32")]
+        dtype_width = self._DTYPE_WIDTHS[self.body.get("embed_dtype", "float32")]
         for index, item in enumerate(result["data"]):
             assert item.get("index") == index
             assert item.get("object") == "pooling"
@@ -1377,12 +1411,45 @@ class PoolingPayload(BasePayload):
         assert metadata_header is not None, "bytes response is missing metadata"
         metadata = json.loads(metadata_header)
         assert metadata.get("data"), "bytes metadata has no tensor entries"
+
+        # A client reconstructs each tensor from (start, end, shape, dtype,
+        # endianness) alone, so metadata that merely stays in bounds is not
+        # enough — it must agree with the body byte-for-byte. Checking only
+        # bounds lets an offset/shape serialization regression pass here while
+        # clients cannot reconstruct anything.
+        dtype_width = self._DTYPE_WIDTHS[self.body.get("embed_dtype", "float32")]
+        expected_start = 0
         for index, item in enumerate(metadata["data"]):
             assert item.get("index") == index
             assert item.get("embed_dtype") == self.body.get("embed_dtype", "float32")
             assert item.get("endianness") == self.body.get("endianness", "native")
             assert item["start"] < item["end"] <= len(response.content)
-            assert item.get("shape")
+
+            shape = item.get("shape")
+            assert shape, "bytes metadata entry is missing shape"
+            assert all(
+                isinstance(dim, int) and dim > 0 for dim in shape
+            ), f"tensor {index} has a non-positive shape: {shape!r}"
+
+            element_count = math.prod(shape)
+            expected_bytes = element_count * dtype_width
+            actual_bytes = item["end"] - item["start"]
+            assert actual_bytes == expected_bytes, (
+                f"tensor {index} span is {actual_bytes} bytes but shape {shape} "
+                f"at {dtype_width} bytes/element needs {expected_bytes}"
+            )
+
+            # Spans must tile the body in order: contiguous and non-overlapping.
+            assert item["start"] == expected_start, (
+                f"tensor {index} starts at {item['start']}, expected "
+                f"{expected_start} (spans must be contiguous and non-overlapping)"
+            )
+            expected_start = item["end"]
+
+        assert expected_start == len(response.content), (
+            f"metadata spans cover {expected_start} bytes but the body is "
+            f"{len(response.content)} bytes"
+        )
 
         usage = metadata.get("usage")
         assert isinstance(usage, dict), "bytes metadata is missing usage"
