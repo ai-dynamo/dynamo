@@ -30,6 +30,8 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const snapshotRestorePausedEnv = "DYN_SNAPSHOT_RESTORE_PAUSED"
+
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
 	_ = ApplyRestorePodMetadataWithStorageConfig(
 		labels,
@@ -37,6 +39,16 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		checkpointInfo,
 		configv1alpha1.CheckpointStorageConfiguration{},
 	)
+}
+
+func setLiteralEnv(env []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			env[i] = corev1.EnvVar{Name: name, Value: value}
+			return env
+		}
+	}
+	return append(env, corev1.EnvVar{Name: name, Value: value})
 }
 
 func ApplyRestorePodMetadataWithStorageConfig(
@@ -277,6 +289,9 @@ func InjectResolvedCheckpointIntoPodSpec(
 		}
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
+		}
+		if restore.info.RestorePaused {
+			container.Env = setLiteralEnv(container.Env, snapshotRestorePausedEnv, "1")
 		}
 		targetContainers = append(targetContainers, container)
 	}
