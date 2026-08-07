@@ -316,6 +316,39 @@ def test_nvext_token_data_accepts_maximum_valid_token_id():
     assert handler._get_input_param(request) == {"input_ids": [1, 151935]}
 
 
+def test_nvext_token_data_allows_only_llava_image_token_with_image():
+    handler = _new_token_input_handler(maximum_input_token_id=31999)
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(),
+            model_config=SimpleNamespace(image_token_id=32000),
+        )
+    )
+    request = {
+        "token_ids": [1, 32000],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 32000]}
+
+    request["token_ids"].append(2**32 - 1)
+    with pytest.raises(HttpError, match="4294967295"):
+        handler._get_input_param(request)
+
+
+def test_nvext_token_data_handles_missing_multimodal_metadata():
+    handler = _new_token_input_handler()
+    handler.engine = SimpleNamespace(tokenizer_manager=SimpleNamespace())
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1]}
+
+
 @pytest.mark.parametrize("invalid_token_id", [151936, 2**32 - 1])
 def test_nvext_token_data_rejects_out_of_vocabulary_token_id(invalid_token_id):
     handler = _new_token_input_handler()
@@ -359,24 +392,32 @@ def test_nvext_token_data_rejects_marked_string_payload():
     assert error.value.code == 400
 
 
-def test_nvext_token_data_rejects_request_when_model_bound_is_unavailable():
+def test_nvext_token_data_skips_validation_when_model_bound_is_unavailable():
     handler = _new_token_input_handler()
     handler._max_input_token_id = None
     request = {
-        "token_ids": [1],
+        "token_ids": [2**32 - 1],
         "extra_args": {"nvext": {"token_in": True}},
     }
 
-    with pytest.raises(
-        HttpError,
-        match=r"Unable to validate nvext\.token_data for this model",
-    ) as error:
+    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
+
+
+def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id():
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [True],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
         handler._get_input_param(request)
 
     assert error.value.code == 400
 
 
-@pytest.mark.parametrize("invalid_token_id", [-1, True, 1.5, "1"])
+@pytest.mark.parametrize("invalid_token_id", [True, 1.5, "1"])
 def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
     handler = _new_token_input_handler()
     request = {

@@ -293,6 +293,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             dist_init_method="tcp://127.0.0.1:0",
             rank=0,
         )
+        self._max_input_token_id = self._resolve_max_input_token_id_from_model_config(
+            self.encoder.model_config
+        )
 
         # Let SGLang accept the NVDEC-backed decoder this handler builds, so it
         # keeps ownership of frame selection (see _install_load_video_passthrough).
@@ -951,6 +954,17 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # Keep URL inputs on SGLang's existing loading path and materialize only
         # frontend-decoded images received through NIXL.
         image_items, video_urls = self._extract_media_inputs(raw_request)
+        preprocessed_request = PreprocessedRequest.model_validate(raw_request)
+        allowed_oov_ids = frozenset(
+            token_id
+            for media_inputs, token_id in (
+                (image_items, self.image_token_id),
+                (video_urls, self.video_token_id),
+            )
+            if media_inputs and token_id is not None
+        )
+        self._validate_token_ids(preprocessed_request.token_ids, allowed_oov_ids)
+
         (
             image_inputs,
             image_cache_keys,
@@ -977,7 +991,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             MultiModalGroup(multimodal_input=MultiModalInput(video_url=url))
             for url in video_urls
         ]
-        preprocessed_request = PreprocessedRequest.model_validate(raw_request)
 
         # Build SglangMultimodalRequest from the pre-tokenized request
         request = SglangMultimodalRequest(
