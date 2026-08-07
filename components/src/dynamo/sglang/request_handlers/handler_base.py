@@ -924,6 +924,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         """Resolve the largest token ID accepted by the model embedding table."""
         tokenizer_manager = getattr(engine, "tokenizer_manager", None)
         model_config = getattr(tokenizer_manager, "model_config", None)
+        return BaseWorkerHandler._resolve_max_input_token_id_from_model_config(
+            model_config
+        )
+
+    @staticmethod
+    def _resolve_max_input_token_id_from_model_config(
+        model_config: Any,
+    ) -> Optional[int]:
         model_vocab_size: object = getattr(model_config, "vocab_size", None)
 
         # Compatibility fallback for SGLang model configs that expose the
@@ -940,6 +948,55 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return None
         return model_vocab_size - 1
 
+    def _resolve_request_multimodal_token_ids(
+        self, request: Dict[str, Any]
+    ) -> frozenset[int]:
+        mm_data = request.get("multi_modal_data")
+        if not isinstance(mm_data, dict):
+            return frozenset()
+
+        tokenizer_manager = self.engine.tokenizer_manager
+        mm_tokens = getattr(tokenizer_manager.mm_processor, "mm_tokens", None)
+        token_ids = set()
+
+        if mm_tokens is not None:
+            for modality in ("image", "video", "audio"):
+                if not mm_data.get(f"{modality}_url"):
+                    continue
+                token_id = getattr(mm_tokens, f"{modality}_token_id", None)
+                if isinstance(token_id, int) and not isinstance(token_id, bool):
+                    token_ids.add(token_id)
+
+        # Some processors, including LLaVA's wrapper, expose only the image
+        # token on ModelConfig. LLaVA also represents video frames as images.
+        if mm_data.get("image_url") or mm_data.get("video_url"):
+            image_token_id = tokenizer_manager.model_config.image_token_id
+            if isinstance(image_token_id, int) and not isinstance(image_token_id, bool):
+                token_ids.add(image_token_id)
+
+        return frozenset(token_ids)
+
+    def _validate_token_ids(
+        self,
+        token_ids: Any,
+        allowed_oov_ids: frozenset[int] = frozenset(),
+    ) -> None:
+        if not isinstance(token_ids, list):
+            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+        if self._max_input_token_id is None:
+            raise HttpError(400, "Unable to validate nvext.token_data for this model")
+
+        for index, token_id in enumerate(token_ids):
+            if isinstance(token_id, bool) or not isinstance(token_id, int):
+                raise HttpError(
+                    400,
+                    f"nvext.token_data[{index}] must be an integer token ID",
+                )
+            if token_id < 0 or (
+                token_id > self._max_input_token_id and token_id not in allowed_oov_ids
+            ):
+                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+
     def _validate_nvext_token_data(
         self,
         request: Dict[str, Any],
@@ -953,19 +1010,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
             return
 
-        if not isinstance(token_ids, list):
-            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
-        if self._max_input_token_id is None:
-            raise HttpError(400, "Unable to validate nvext.token_data for this model")
-
-        for index, token_id in enumerate(token_ids):
-            if isinstance(token_id, bool) or not isinstance(token_id, int):
-                raise HttpError(
-                    400,
-                    f"nvext.token_data[{index}] must be an integer token ID",
-                )
-            if token_id < 0 or token_id > self._max_input_token_id:
-                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+        self._validate_token_ids(
+            token_ids,
+            self._resolve_request_multimodal_token_ids(request),
+        )
 
     @staticmethod
     def _get_guided_decoding_params(

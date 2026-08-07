@@ -316,6 +316,27 @@ def test_nvext_token_data_accepts_maximum_valid_token_id():
     assert handler._get_input_param(request) == {"input_ids": [1, 151935]}
 
 
+def test_nvext_token_data_allows_only_llava_image_token_with_image():
+    handler = _new_token_input_handler(maximum_input_token_id=31999)
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(),
+            model_config=SimpleNamespace(image_token_id=32000),
+        )
+    )
+    request = {
+        "token_ids": [1, 32000],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 32000]}
+
+    request["token_ids"].append(2**32 - 1)
+    with pytest.raises(HttpError, match="4294967295"):
+        handler._get_input_param(request)
+
+
 @pytest.mark.parametrize("invalid_token_id", [151936, 2**32 - 1])
 def test_nvext_token_data_rejects_out_of_vocabulary_token_id(invalid_token_id):
     handler = _new_token_input_handler()
