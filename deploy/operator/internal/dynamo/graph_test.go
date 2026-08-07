@@ -6449,6 +6449,59 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 	assertGMSClientContainer(t, metricsClient)
 }
 
+func TestTwoShadowIntraPodFailoverRendersForDCDAndDGD(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Resources:     &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm"},
+			},
+		},
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
+		Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod, NumShadows: 2},
+	})
+	config := &configv1alpha1.OperatorConfiguration{}
+
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: *component.DeepCopy(),
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+	}
+	renderers := map[string]func() (*corev1.PodSpec, error){
+		"DCD": func() (*corev1.PodSpec, error) {
+			return GenerateBasePodSpecForController(
+				dcd, nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, nil,
+				GenerateBasePodSpecForControllerOptions{},
+			)
+		},
+		"DGD": func() (*corev1.PodSpec, error) {
+			return GeneratePodSpecForComponent(
+				component, BackendFrameworkVLLM, nil, dgd, RoleMain, 1, config,
+				commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+			)
+		},
+	}
+
+	for name, render := range renderers {
+		t.Run(name, func(t *testing.T) {
+			podSpec, err := render()
+			require.NoError(t, err)
+			require.Len(t, podSpec.Containers, 3)
+			assert.Equal(t, []string{"engine-0", "engine-1", "engine-2"}, []string{
+				podSpec.Containers[0].Name,
+				podSpec.Containers[1].Name,
+				podSpec.Containers[2].Name,
+			})
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers(t *testing.T) {
 	t.Log("Set up intra-pod GMS with two unresolved extra clients")
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -8606,7 +8659,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			Ready:                   true,
 			Hash:                    "abc123def4567890",
 			CheckpointName:          "decode-checkpoint",
-			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
 		},
 	}
 
@@ -8624,7 +8677,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
 		assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
 			"clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
-		for _, engineName := range IntraPodFailoverEngineContainerNames() {
+		for _, engineName := range []string{"engine-0", "engine-1"} {
 			c := findContainerInClique(t, clique, engineName)
 			assert.NotEqual(t, []string{"sleep", "infinity"}, c.Command,
 				"%s in clique %q must stay cold-start-shaped in Immediate startup", engineName, clique.Name)
