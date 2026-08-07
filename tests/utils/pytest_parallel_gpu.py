@@ -35,10 +35,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import psutil
+
 _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+# Below the sys.path insert above, which is what makes these resolvable.
+from tests.utils.managed_process import terminate_process_tree  # noqa: E402
 from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
@@ -118,6 +122,7 @@ class _RunningTest:
     start_time: float
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
+    watchdog_reason: str | None = None
 
 
 def _print(msg: str = "") -> None:
@@ -143,6 +148,49 @@ def _fmt_req(test: _TestEntry) -> str:
 
 _JUNIT_DIR = os.path.join(tempfile.gettempdir(), "gpu_parallel_junit")
 _JUNIT_COMBINED = os.path.join(_JUNIT_DIR, "combined.xml")
+
+
+def _junit_path(test_name: str) -> str:
+    """Where a child is told to write its --junitxml, keyed on the node id."""
+    safe_name = test_name.replace("/", "_").replace("::", "__")
+    return os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+
+
+def _write_watchdog_junit(test: _TestEntry, duration: float, reason: str) -> None:
+    """Write the JUnit entry a watchdog-killed child never got to write.
+
+    SIGKILL means pytest never reaches its own --junitxml write, so without this
+    the test is absent from the aggregated report entirely -- a silent hole in
+    Datadog test visibility and CI test reports rather than a visible failure.
+    """
+    import xml.etree.ElementTree as ET
+
+    classname, _, name = test.name.rpartition("::")
+    # _aggregate_junit_xml skips any file whose root is not a <testsuite> and
+    # sums these counters off it, so the wrapper is required even for one case.
+    # Its own name attribute is discarded there, so it is not worth inventing.
+    suite = ET.Element(
+        "testsuite", {"tests": "1", "failures": "1", "time": f"{duration:.3f}"}
+    )
+    case = ET.SubElement(
+        suite,
+        "testcase",
+        {
+            "classname": classname or test.name,
+            "name": name or test.name,
+            "time": f"{duration:.3f}",
+        },
+    )
+    ET.SubElement(
+        case, "failure", {"message": reason, "type": "WatchdogTimeout"}
+    ).text = reason
+    try:
+        os.makedirs(_JUNIT_DIR, exist_ok=True)
+        ET.ElementTree(suite).write(
+            _junit_path(test.name), encoding="unicode", xml_declaration=True
+        )
+    except OSError as exc:
+        _print(f"[watchdog] could not write a JUnit entry for {test.name}: {exc}")
 
 
 def _parse_junit_skipped(junit_path: str) -> str | None:
@@ -266,6 +314,29 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+
+# Last-resort deadline behind the child's own --timeout, for when pytest-timeout
+# is swallowed by a C-level block and the stuck child stalls the whole run. A
+# test whose deadline lands past the step's own timeout-minutes is simply not
+# guarded, which is where it was before this existed.
+_WATCHDOG_GRACE_S = 120
+
+
+def _watchdog_multiplier() -> int:
+    """How many of a child's own --timeout windows to allow before killing it.
+
+    Taken straight from DD_CIVISIBILITY_FLAKY_RETRY_COUNT (shared-test.yml),
+    since Datadog Auto Test Retries is what makes a healthy child run its test
+    more than once and each attempt gets a fresh --timeout window.
+
+    This is deliberately below the theoretical worst case of retries + 1 full
+    attempts: across 376 observed child runs the slowest took 0.78x its declared
+    timeout, so 2x leaves comfortable room while still catching a hang early.
+    """
+    try:
+        return max(1, int(os.environ["DD_CIVISIBILITY_FLAKY_RETRY_COUNT"]))
+    except (KeyError, ValueError):
+        return 2  # matches the shipped retry count
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -711,7 +782,7 @@ def run_parallel(
         parent_cov_file = env.get("COVERAGE_FILE")
         if parent_cov_file:
             env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}"
-        junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+        junit_path = _junit_path(test.name)
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
         )
@@ -759,9 +830,43 @@ def run_parallel(
         return run_info
 
     env_base = os.environ.copy()
+    watchdog_multiplier = _watchdog_multiplier()
 
     while pending or running:
         now = time.monotonic()
+
+        # Kill anything past its deadline; the completion check below reaps it
+        # this same iteration and frees its GPU budget for the queued tests.
+        # Keyed on poll(), not on watchdog_reason, so a kill that fails is
+        # retried next iteration instead of leaving the child alive forever.
+        for w_id, run_info in list(running.items()):
+            if run_info.proc.poll() is not None:
+                continue
+            elapsed = now - run_info.start_time
+            deadline = run_info.test.timeout * watchdog_multiplier + _WATCHDOG_GRACE_S
+            if elapsed <= deadline:
+                continue
+            if run_info.watchdog_reason is None:
+                limit_note = (
+                    f"ran {elapsed:.0f}s against a {deadline:.0f}s limit, from a "
+                    f"{run_info.test.timeout:.0f}s test timeout"
+                )
+                run_info.watchdog_reason = (
+                    f"killed by the orchestrator: hit its time limit "
+                    f"({limit_note}) and its own "
+                    f"{run_info.test.timeout:.0f}s timeout did not stop it"
+                )
+                _print(
+                    f"[watchdog] w{w_id} hit its time limit ({limit_note}). Its "
+                    f"own timeout did not stop it — killing the test process and "
+                    f"everything it started."
+                )
+            try:
+                terminate_process_tree(
+                    run_info.proc.pid, immediate_kill=True, timeout=5
+                )
+            except (psutil.Error, OSError) as exc:
+                _print(f"[watchdog] w{w_id} kill failed ({exc}) — retrying")
 
         # Check for completed subprocesses
         for w_id in list(running.keys()):
@@ -771,12 +876,21 @@ def run_parallel(
                 if run_info.reader_thread is not None:
                     run_info.reader_thread.join(timeout=5)
                 duration = now - run_info.start_time
-                passed = rc == 0
+                # Not `rc == 0`: terminate_process_tree reaps the child via
+                # psutil, so Popen.poll() hits ChildProcessError and subprocess
+                # falls back to status 0 -- a kill would read as a pass.
+                passed = rc == 0 and run_info.watchdog_reason is None
                 test = run_info.test
                 gi = test.assigned_gpu
 
                 # Detect retryable init errors (profiling race, OOM at startup)
-                if not passed and test.retries < _MAX_RETRIES:
+                # A stuck test is not a transient startup failure, so never
+                # relaunch one even if its output carries a retryable marker.
+                if (
+                    not passed
+                    and run_info.watchdog_reason is None
+                    and test.retries < _MAX_RETRIES
+                ):
                     matched_marker = None
                     for line in run_info.captured:
                         for marker in _RETRYABLE_INIT_MARKERS:
@@ -804,8 +918,7 @@ def run_parallel(
                 skipped = False
                 skip_reason: str | None = None
                 if passed:
-                    safe_name = test.name.replace("/", "_").replace("::", "__")
-                    junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+                    junit_path = _junit_path(test.name)
                     skip_reason = _parse_junit_skipped(junit_path)
                     if skip_reason is not None:
                         passed = False
@@ -824,6 +937,11 @@ def run_parallel(
                         if stripped and not stripped.startswith("="):
                             fail_reason = stripped
                             break
+                    # Stated outright; after a SIGKILL the child's output is
+                    # only whatever happened to flush.
+                    if run_info.watchdog_reason is not None:
+                        fail_reason = run_info.watchdog_reason
+                        _write_watchdog_junit(test, duration, fail_reason)
 
                 if skipped:
                     status = "SKIPPED"
