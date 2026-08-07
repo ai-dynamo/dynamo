@@ -25,9 +25,15 @@ explicitly documented otherwise.
 
 ## Compatibility Shims
 
-Keep version-specific compatibility code narrow and temporary. Prefer a derived
-wire-only representation over restoring deprecated data as a second source of
-truth. Every shim must name its compatibility window and removal condition, for
+Keep version-specific compatibility code narrow, close to the wire boundary,
+and temporary. Translate legacy input into canonical state immediately, and
+derive legacy output from canonical state. Do not plumb legacy fields through
+internal APIs, make core logic branch on them, or rely on their presence after
+deserialization. When both representations are present, the current
+representation is authoritative unless a specific compatibility rule says
+otherwise.
+
+Every shim must name its compatibility window and removal condition, for
 example:
 
 ```rust
