@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+import requests
 from gpu_memory_service.server.fsm import ServerState
 
 from tests.gpu_memory_service.common.runtime import (
@@ -275,6 +276,163 @@ def test_gms_shadow_engine_failover_sglang(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     _run_shadow_failover_test(request, SGLangWithGMSProcess)
+
+
+# ---------------------------------------------------------------------------
+# Prefix-cache reuse across failover (vLLM, persisted KV layout + index)
+# ---------------------------------------------------------------------------
+
+# Long enough to span many cache blocks, so a hit is unambiguous rather than noise.
+REUSE_PROMPT = " ".join(
+    f"Section {i}: the quick brown fox jumps over the lazy dog." for i in range(1, 161)
+)
+
+
+class VLLMWithGMSPersistKVProcess(VLLMWithGMSProcess):
+    """vLLM configured to carry the KV layout *and* its prefix index across a failover.
+
+    ``kv_index_dir`` is set by the test to a per-run path both engines share, the way two
+    engines on one node would.
+    """
+
+    kv_index_dir = ""
+
+    def env_updates(self) -> dict[str, str]:
+        env = dict(super().env_updates())
+        env.update(
+            {
+                "DYN_GMS_PERSIST_KV": "1",
+                "GMS_KV_INDEX_PATH": os.path.join(type(self).kv_index_dir, "kv_index"),
+                # Both engines must derive identical block hashes. vLLM roots the hash
+                # chain at os.urandom(32) per process unless this is pinned, and an
+                # unpinned seed degrades silently to a MISS.
+                "PYTHONHASHSEED": "0",
+            }
+        )
+        return env
+
+
+def _prefix_cache_hits(engine) -> int:
+    """Total prefix-cache hits reported by one engine.
+
+    Skips the prometheus_client sidecar series: ``_created`` is a unix timestamp and the
+    histogram parts would dwarf the counter.
+    """
+    response = requests.get(
+        f"http://localhost:{engine.system_port}/metrics", timeout=30
+    )
+    response.raise_for_status()
+    total = 0.0
+    for line in response.text.splitlines():
+        if line.startswith("#") or "prefix_cache_hits" not in line:
+            continue
+        name = line.split(maxsplit=1)[0]
+        if name.endswith(("_created", "_sum", "_bucket")):
+            continue
+        total += float(line.rsplit(maxsplit=1)[-1])
+    return int(total)
+
+
+def _resume_shadow_when_primary_dies(shadow, primary):
+    """Resume the shadow, checking it waits for the primary's KV session to end."""
+    resume_timeout_s = 300
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        resume_future = executor.submit(shadow.resume, resume_timeout_s)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not resume_future.done():
+            time.sleep(0.2)
+        assert not resume_future.done(), (
+            "Shadow resume completed before the primary died; "
+            "the KV-cache RW handoff did not block as expected"
+        )
+
+        _kill_process_group(primary)
+        return resume_future.result(timeout=resume_timeout_s)
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(900)
+@pytest.mark.vllm
+def test_gms_shadow_failover_reuses_prefix_cache_vllm(
+    request, runtime_services_dynamic_ports, predownload_models, tmp_path
+):
+    """A standby that adopts the primary's KV layout should also inherit its prefix cache.
+
+    Adopting the pages alone is not enough to produce a hit: the index that names them
+    lives in the scheduler's ``BlockPool`` in process RAM and cannot be recovered from the
+    bytes, because block hashes are over token ids rather than content. So the standby
+    would hold correct KV it cannot find, and this asserts the difference.
+    """
+    VLLMWithGMSPersistKVProcess.kv_index_dir = str(tmp_path)
+
+    with GMSProcessManager(request, VLLMWithGMSPersistKVProcess) as manager:
+        frontend_port = manager.frontend_port
+        weights_gms = manager.weights_gms
+        kv_cache_gms = manager.kv_cache_gms
+
+        shadow = manager.start_engine("shadow-a")
+        weights_state = pause_engine(
+            weights_gms,
+            kv_cache_gms,
+            shadow,
+            pause_label="Shadow pause",
+        )
+        weights_hash = weights_state.memory_layout_hash
+
+        primary = manager.start_engine("primary", read_only_weights=True)
+        assert_completion_ok(
+            frontend_port,
+            "Primary test",
+            failure_message="Primary inference failed",
+            success_message="Primary inference OK",
+        )
+        weights_with_primary, _ = wait_for_active_layout(
+            weights_gms,
+            kv_cache_gms,
+            expected_weights_hash=weights_hash,
+            min_weight_ro_sessions=1,
+        )
+
+        # Warm the prefix, then send it again so the primary itself demonstrates a hit.
+        # Without this the assertion below could pass on an engine that never cached.
+        for label in ("cold", "hot"):
+            assert_completion_ok(
+                frontend_port,
+                REUSE_PROMPT,
+                failure_message=f"Primary {label} prefix request failed",
+                success_message=f"Primary {label} prefix request OK",
+            )
+        primary_hits = _prefix_cache_hits(primary)
+        assert primary_hits > 0, (
+            "Primary never reported a prefix-cache hit on the repeated prompt, "
+            "so the premise of the reuse check does not hold"
+        )
+
+        assert _resume_shadow_when_primary_dies(shadow, primary)["status"] == "ok"
+        wait_for_resumed_layout(
+            weights_gms,
+            kv_cache_gms,
+            weights_with_primary,
+            min_weight_ro_sessions=1,
+        )
+
+        # The standby has never seen this prompt. Any hit it reports came from the
+        # primary's pages plus the replayed index.
+        assert _prefix_cache_hits(shadow) == 0, "standby cached the prompt on its own"
+        assert_completion_ok(
+            frontend_port,
+            REUSE_PROMPT,
+            failure_message="Shadow prefix request after failover failed",
+            success_message="Shadow prefix request after failover OK",
+            retry_timeout=60.0,
+        )
+        shadow_hits = _prefix_cache_hits(shadow)
+        assert shadow_hits > 0, (
+            "Standby re-prefilled a prompt the primary had already cached; "
+            f"the prefix index did not survive the failover (primary hits={primary_hits})"
+        )
 
 
 # ---------------------------------------------------------------------------
