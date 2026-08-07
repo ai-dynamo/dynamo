@@ -1343,7 +1343,18 @@ impl Endpoint {
             .metrics_labels(metrics_labels)
             .handler(ingress);
 
-        if let Some(payload) = health_payload_json {
+        // Canary health checks require a local engine registered in the DRT
+        // endpoint registry, which only the pull path creates. Skip the payload
+        // on push endpoints; warn once so the gap is visible rather than silent.
+        if use_push_egress {
+            if health_payload_json.is_some() {
+                tracing::warn!(
+                    "health_check_payload ignored for push-egress endpoint: \
+                     canary health checks require a local engine and are not \
+                     supported on the push path"
+                );
+            }
+        } else if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
 
