@@ -99,6 +99,60 @@ def test_non_goodput_filters_predictive_throughput_policies() -> None:
     assert plan.potential_runtime_hooks[0].provider == "dynamo.planner"
 
 
+def test_pareto_goodput_uses_sla_planner_target() -> None:
+    adapter = create_provider()
+    context = replace(
+        _sweep_context(target="pareto"),
+        goal={
+            "target": "pareto",
+            "pareto_objectives": ["goodput_per_gpu", "throughput_per_user"],
+            "sla": {"ttft_ms": 2000.0, "itl_ms": 30.0},
+        },
+    )
+
+    plan = adapter.generate_search_space(
+        {
+            "scaling_policy": ["throughput_180_5"],
+            "fpm_sampling": ["default"],
+            "load_sensitivity": ["default"],
+            "load_predictor_candidates": ["constant_last"],
+        },
+        context,
+    )
+    replay_spec = adapter.materialize_replay(
+        plan,
+        {
+            "scaling_policy": "throughput_180_5",
+            "fpm_sampling": "default",
+            "load_sensitivity": "default",
+        },
+        _candidate_context(),
+    )
+
+    assert isinstance(plan.state, dict)
+    assert plan.state["optimization_target"] == "sla"
+    planner_config = replay_spec.runtime_hooks[0].config["planner_config"]
+    assert isinstance(planner_config, dict)
+    assert planner_config["optimization_target"] == "sla"
+    assert planner_config["ttft_ms"] == 2000.0
+    assert planner_config["itl_ms"] == 30.0
+
+
+def test_default_pareto_keeps_throughput_planner_target() -> None:
+    context = replace(
+        _sweep_context(target="pareto"),
+        goal={"target": "pareto", "pareto_objectives": None, "sla": None},
+    )
+
+    plan = create_provider().generate_search_space(
+        {"scaling_policy": ["disabled"]},
+        context,
+    )
+
+    assert isinstance(plan.state, dict)
+    assert plan.state["optimization_target"] == "throughput"
+
+
 def test_disabled_policy_materializes_no_runtime_hook() -> None:
     adapter = create_provider()
     plan = adapter.generate_search_space(

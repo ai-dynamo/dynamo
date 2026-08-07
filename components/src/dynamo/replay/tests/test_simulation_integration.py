@@ -224,6 +224,7 @@ def test_real_static_path_preserves_goodput() -> None:
     assert "planner_total_ticks" not in report.metrics
 
 
+@pytest.mark.pre_merge
 @pytest.mark.post_merge
 @pytest.mark.timeout(300)
 def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:

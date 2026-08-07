@@ -24,6 +24,7 @@ def test_aisimulate_distribution_publishes_aisimulate_sweeper_package():
     # Planner CI, assert the artifact contains the canonical package and no alias.
     if any(path.startswith("aisimulate/") for path in packaged_files):
         assert any(path.startswith("aisimulate/sweeper/") for path in packaged_files)
+        assert not any(path.startswith("aisimulate/spica/") for path in packaged_files)
         assert not any(path.startswith("sweeper/") for path in packaged_files)
 
 
