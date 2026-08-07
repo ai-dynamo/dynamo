@@ -50,66 +50,7 @@ pub struct HttpError {
     pub message: String,
 }
 
-/// Construct a typed invalid-argument error for validation performed at an
-/// HTTP protocol adapter boundary.
-pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
-        .error_type(DynamoErrorType::InvalidArgument)
-        .message(message)
-        .build()
-}
-
-/// Sanitized HTTP error categories used by endpoint handlers.
-#[derive(Debug, Clone, Copy)]
-pub enum SanitizedError {
-    Cancelled,
-    Overloaded,
-    Unavailable,
-    Internal,
-    PreserveServerError(StatusCode),
-}
-
-impl SanitizedError {
-    pub fn for_backend_status(status: StatusCode) -> Option<Self> {
-        if status.as_u16() == 499 {
-            Some(Self::Cancelled)
-        } else if status.is_client_error() {
-            None
-        } else if status.is_server_error() {
-            Some(Self::PreserveServerError(status))
-        } else {
-            Some(Self::Internal)
-        }
-    }
-
-    pub fn status(self) -> StatusCode {
-        match self {
-            Self::Cancelled => StatusCode::from_u16(499).expect("499 is a valid status code"),
-            Self::Overloaded => overload_status_code(),
-            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::PreserveServerError(code) => code,
-        }
-    }
-
-    pub fn log_as_error(self) -> bool {
-        !matches!(self, Self::Cancelled)
-    }
-}
-
-impl std::fmt::Display for SanitizedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cancelled => f.write_str("Request cancelled"),
-            Self::Overloaded => f.write_str("Service temporarily overloaded"),
-            Self::Unavailable => f.write_str("Service temporarily unavailable"),
-            Self::Internal | Self::PreserveServerError(_) => f.write_str(INTERNAL_ERROR_MESSAGE),
-        }
-    }
-}
-
 /// Protocol-neutral error categories used for metrics and protocol rendering.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HttpErrorKind {
     Validation,
@@ -130,7 +71,6 @@ pub(crate) enum HttpErrorKind {
 /// diagnostic. Protocol modules only translate this model into their wire
 /// envelope; they do not re-classify errors.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct ClassifiedHttpError {
     kind: HttpErrorKind,
     status: StatusCode,
@@ -139,13 +79,21 @@ pub(crate) struct ClassifiedHttpError {
     details: Option<Box<Value>>,
 }
 
+/// Construct a typed invalid-argument error for validation performed at an
+/// HTTP protocol adapter boundary.
+pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message(message)
+        .build()
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ValidationScope {
     Chain,
     Outermost,
 }
 
-#[allow(dead_code)]
 impl ClassifiedHttpError {
     /// Classify an arbitrary error through the same logical nested-error flow
     /// used by `from_annotated`; generic callers retain chain-wide validation
@@ -492,7 +440,6 @@ fn find_dynamo_error_in_chain<'a>(
     None
 }
 
-#[allow(dead_code)]
 fn metric_type_for_kind(kind: HttpErrorKind) -> MetricErrorType {
     match kind {
         HttpErrorKind::Validation | HttpErrorKind::Authentication | HttpErrorKind::Permission => {
@@ -515,7 +462,6 @@ impl std::fmt::Display for ClassifiedHttpError {
 
 impl std::error::Error for ClassifiedHttpError {}
 
-#[allow(dead_code)]
 fn kind_for_status(status: StatusCode) -> HttpErrorKind {
     match status {
         StatusCode::UNAUTHORIZED => HttpErrorKind::Authentication,
@@ -531,7 +477,6 @@ fn kind_for_status(status: StatusCode) -> HttpErrorKind {
     }
 }
 
-#[allow(dead_code)]
 fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut parts = Vec::new();
     let mut current = Some(err);
@@ -857,23 +802,5 @@ mod tests {
             ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(unknown)).unwrap();
         assert_eq!(classified.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(classified.message(), INTERNAL_ERROR_MESSAGE);
-    }
-
-    #[test]
-    fn backend_statuses_are_classified() {
-        assert!(matches!(
-            SanitizedError::for_backend_status(StatusCode::from_u16(499).unwrap()),
-            Some(SanitizedError::Cancelled)
-        ));
-        assert!(matches!(
-            SanitizedError::for_backend_status(StatusCode::SERVICE_UNAVAILABLE),
-            Some(SanitizedError::PreserveServerError(status))
-                if status == StatusCode::SERVICE_UNAVAILABLE
-        ));
-        assert!(SanitizedError::for_backend_status(StatusCode::BAD_REQUEST).is_none());
-        assert!(matches!(
-            SanitizedError::for_backend_status(StatusCode::from_u16(399).unwrap()),
-            Some(SanitizedError::Internal)
-        ));
     }
 }
