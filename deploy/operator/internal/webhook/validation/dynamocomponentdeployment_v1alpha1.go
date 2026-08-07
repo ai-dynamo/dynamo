@@ -19,6 +19,7 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -43,9 +44,45 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	fldPath *field.Path,
 	dynamoNamespace string,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
+	allErrs := v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoNamespace,
 	)
+	if v.requestVersionSource != runtimeVersionSourceV1Alpha1 ||
+		spec.Failover == nil || !spec.Failover.Enabled ||
+		spec.Failover.Mode != nvidiacomv1alpha1.GMSModeIntraPod {
+		return allErrs
+	}
+	return append(allErrs, twoShadowIntraPodFailoverProfileErrors(
+		spec.Failover.NumShadows,
+		alphaMainContainer(&spec.DynamoComponentDeploymentSharedSpec),
+		alphaNumberOfNodes(&spec.DynamoComponentDeploymentSharedSpec),
+		spec.BackendFramework,
+		effectiveVLLMExecutorBackend(
+			alphaPodAnnotations(&spec.DynamoComponentDeploymentSharedSpec),
+		),
+		fldPath.Child("failover"),
+	)...)
+}
+
+func alphaMainContainer(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
+	if spec.ExtraPodSpec == nil {
+		return nil
+	}
+	return spec.ExtraPodSpec.MainContainer
+}
+
+func alphaNumberOfNodes(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) int32 {
+	if spec.Multinode == nil {
+		return 1
+	}
+	return spec.Multinode.NodeCount
+}
+
+func alphaPodAnnotations(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	if spec.ExtraPodMetadata == nil {
+		return nil
+	}
+	return spec.ExtraPodMetadata.Annotations
 }

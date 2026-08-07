@@ -196,7 +196,9 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
 		if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames(
+				&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+			)
 		}
 		if err := gms.OverlayClients(
 			&info.GPUMemoryService,

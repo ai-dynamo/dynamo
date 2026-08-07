@@ -41,6 +41,7 @@ type sharedValidation struct {
 	mgr                                ctrl.Manager
 	warnings                           admission.Warnings
 	runtimeVersionSource               runtimeVersionValidationSource
+	requestVersionSource               runtimeVersionValidationSource
 	allowMissingRuntimeVersionOverride bool
 }
 
@@ -319,6 +320,23 @@ func (v *sharedValidation) validateFailoverSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	failoverMode := effectiveGMSMode(failover.Mode)
+	if v.requestVersionSource == runtimeVersionSourceV1Beta1 &&
+		failoverMode == nvidiacomv1beta1.GMSModeIntraPod &&
+		effectiveNumShadows(failover) > 2 {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("numShadows"),
+			failover.NumShadows,
+			`is invalid for mode="IntraPod": supported values are 1 and 2`,
+		))
+	} else if v.requestVersionSource == runtimeVersionSourceV1Beta1 &&
+		failoverMode == nvidiacomv1beta1.GMSModeInterPod &&
+		effectiveNumShadows(failover) > 1 {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("numShadows"),
+			failover.NumShadows,
+			`is invalid for mode="InterPod": supported value is 1`,
+		))
+	}
 	if gms == nil {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,

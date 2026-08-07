@@ -25,6 +25,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
@@ -149,6 +150,39 @@ func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]stri
 	default:
 		return value, true
 	}
+}
+
+func twoShadowIntraPodFailoverProfileErrors(
+	numShadows int32,
+	mainContainer *corev1.Container,
+	numberOfNodes int32,
+	backendFramework string,
+	vllmExecutorBackend string,
+	failoverPath *field.Path,
+) field.ErrorList {
+	if numShadows != 2 {
+		return nil
+	}
+	if err := dynamo.TwoShadowIntraPodFailoverProfileError(
+		mainContainer,
+		numberOfNodes,
+		backendFramework,
+		vllmExecutorBackend,
+	); err != nil {
+		return field.ErrorList{field.Forbidden(failoverPath, err.Error())}
+	}
+	return nil
+}
+
+// effectiveVLLMExecutorBackend follows pod rendering precedence: the first
+// (most specific) annotation set containing the key wins.
+func effectiveVLLMExecutorBackend(annotationSets ...map[string]string) string {
+	for _, annotations := range annotationSets {
+		if value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
+			return value
+		}
+	}
+	return ""
 }
 
 // inferencePoolAvailabilityError checks the InferencePool API.

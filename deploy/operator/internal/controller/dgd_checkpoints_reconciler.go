@@ -154,7 +154,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
 		if dynamo.IsIntraPodFailoverEnabled(component) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames(component)
 		}
 		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to apply checkpoint gpuMemoryService config for component %s: %w", componentName, err)

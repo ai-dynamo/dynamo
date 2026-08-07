@@ -78,8 +78,22 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, deployment, runtimeVersionSource, runtimeVersionSource)
+}
+
+func (v *DynamoGraphDeploymentValidator) validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	requestVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSource,
+			requestVersionSource: requestVersionSource,
+		},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -104,7 +118,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSource,
+			requestVersionSource: runtimeVersionSource,
+		},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}
@@ -148,7 +167,34 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathwayRequirement: grovePathwayRequirement,
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+	if v.requestVersionSource == runtimeVersionSourceV1Beta1 {
+		allErrs = append(allErrs, validateTwoShadowProfiles(dgd)...)
+	}
 
+	return allErrs
+}
+
+func validateTwoShadowProfiles(dgd *nvidiacomv1beta1.DynamoGraphDeployment) field.ErrorList {
+	allErrs := field.ErrorList{}
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		failover := failoverFor(component)
+		if failover == nil || effectiveGMSMode(failover.Mode) != nvidiacomv1beta1.GMSModeIntraPod {
+			continue
+		}
+		allErrs = append(allErrs, twoShadowIntraPodFailoverProfileErrors(
+			effectiveNumShadows(failover),
+			dynamo.GetMainContainer(component),
+			component.GetNumberOfNodes(),
+			dgd.Spec.BackendFramework,
+			effectiveVLLMExecutorBackend(
+				dynamo.GetPodTemplateAnnotations(component),
+				dgd.Annotations,
+				dgd.Spec.Annotations,
+			),
+			field.NewPath("spec", "components").Index(i).Child("experimental", "failover"),
+		)...)
+	}
 	return allErrs
 }
 

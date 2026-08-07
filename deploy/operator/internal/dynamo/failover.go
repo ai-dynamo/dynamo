@@ -387,8 +387,8 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 // ──────────────────────────────────────────────────────────────────────────────
 // Intra-pod GMS failover (Mode: intraPod)
 //
-// The main container is cloned into two engine containers (active + standby)
-// within the same pod. GPU access is shared via DRA and a GMS sidecar
+// The main container is cloned into one active and one or two standby engine
+// containers within the same pod. GPU access is shared via DRA and a GMS sidecar
 // injects weights via the shared emptyDir volume.
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -413,12 +413,63 @@ func IsIntraPodFailoverEnabled(component *v1beta1.DynamoComponentDeploymentShare
 	return mode == "" || mode == v1beta1.GMSModeIntraPod
 }
 
-func IntraPodFailoverEngineContainerNames() []string {
-	names := make([]string, 0, failoverEngineCount)
-	for i := 0; i < failoverEngineCount; i++ {
+func IntraPodFailoverEngineContainerNames(component *v1beta1.DynamoComponentDeploymentSharedSpec) []string {
+	if !IsIntraPodFailoverEnabled(component) {
+		return nil
+	}
+	engineCount := failoverEngineCount
+	if component.Experimental.Failover.NumShadows == 2 {
+		engineCount = 3
+	}
+	names := make([]string, 0, engineCount)
+	for i := 0; i < engineCount; i++ {
 		names = append(names, fmt.Sprintf("engine-%d", i))
 	}
 	return names
+}
+
+// buildFailoverPodWithComponent preserves the historical one-shadow transform
+// and adds the narrow, transactional two-shadow transform.
+func buildFailoverPodWithComponent(
+	podSpec *corev1.PodSpec,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	numberOfNodes int32,
+	backendFramework BackendFramework,
+) error {
+	numShadows := component.Experimental.Failover.NumShadows
+	if numShadows <= 1 {
+		return buildFailoverPod(podSpec, numberOfNodes, backendFramework)
+	}
+	if numShadows > 2 {
+		return fmt.Errorf("intra-pod failover supports one or two shadows")
+	}
+	if len(podSpec.Containers) == 0 {
+		return fmt.Errorf("pod spec must have at least one container for failover transformation")
+	}
+	if err := TwoShadowIntraPodFailoverProfileError(
+		&podSpec.Containers[0],
+		numberOfNodes,
+		string(backendFramework),
+		GetPodTemplateAnnotations(component)[commonconsts.KubeAnnotationVLLMDistributedExecutorBackend],
+	); err != nil {
+		return err
+	}
+
+	ports, err := threeEngineVLLMPorts(&podSpec.Containers[0])
+	if err != nil {
+		return err
+	}
+	updated := podSpec.DeepCopy()
+	mainContainer := updated.Containers[0]
+	sidecars := updated.Containers[1:]
+	engines := make([]corev1.Container, len(ports))
+	for i := range ports {
+		engines[i] = buildEngineContainer(mainContainer, i, ports[i].system)
+	}
+	updated.Containers = append(engines, sidecars...)
+	applyThreeEngineVLLMOverrides(updated, ports)
+	*podSpec = *updated
+	return nil
 }
 
 // buildFailoverPod clones the main container into two engine containers (active + standby).

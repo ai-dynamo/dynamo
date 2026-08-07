@@ -641,7 +641,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 						},
 						Failover: &v1beta1.FailoverSpec{
 							Mode:       v1beta1.GMSModeIntraPod,
-							NumShadows: 1,
+							NumShadows: 2,
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Enabled:             true,
