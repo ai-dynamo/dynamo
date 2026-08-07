@@ -153,7 +153,11 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
             .iter()
             .find(|event| event.event == "content_block_start")
             .expect("missing tool block start");
-        assert_eq!(start.data["content_block"]["id"], "call_list_directory");
+        let block_id = start.data["content_block"]["id"].as_str().unwrap();
+        assert!(
+            block_id.starts_with("toolu_") && block_id.len() > "toolu_".len(),
+            "streamed tool_use id must be Anthropic-native, got {block_id:?}"
+        );
         assert_eq!(start.data["content_block"]["name"], "list_directory");
 
         let deltas: Vec<_> = events
@@ -305,11 +309,21 @@ async fn parallel_tools_preserve_identity_and_arguments() {
             })
             .collect();
         assert_eq!(
-            starts,
-            vec![
-                (0, "call_read_a".into(), "read_file".into()),
-                (1, "call_read_b".into(), "read_file".into())
-            ]
+            starts
+                .iter()
+                .map(|(index, _, name)| (*index, name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "read_file"), (1, "read_file")]
+        );
+        for (index, id, _) in &starts {
+            assert!(
+                id.starts_with("toolu_") && id.len() > "toolu_".len(),
+                "tool_use id at block {index} must be Anthropic-native, got {id:?}"
+            );
+        }
+        assert_ne!(
+            starts[0].1, starts[1].1,
+            "parallel tool calls must receive distinct generated ids"
         );
 
         let mut arguments = BTreeMap::<u64, String>::new();
@@ -380,10 +394,20 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
         assert_eq!(first_response.status(), reqwest::StatusCode::OK);
         let first_body: Value = first_response.json().await.unwrap();
         let prior_content = first_body["content"].clone();
-        assert!(prior_content.as_array().is_some_and(|blocks| {
-            blocks.iter().any(|block| block["type"] == "thinking")
-                && blocks.iter().any(|block| block["type"] == "tool_use")
-        }));
+        let prior_blocks = prior_content.as_array().expect("content must be an array");
+        assert!(prior_blocks.iter().any(|block| block["type"] == "thinking"));
+
+        let tool_use = prior_blocks
+            .iter()
+            .find(|block| block["type"] == "tool_use")
+            .expect("missing tool_use block");
+        let generated_id = tool_use["id"].as_str().unwrap().to_string();
+        assert!(
+            generated_id.starts_with("toolu_") && generated_id.len() > "toolu_".len(),
+            "non-streamed tool_use id must be Anthropic-native, got {generated_id:?}"
+        );
+        assert_eq!(tool_use["name"], "list_directory");
+        assert_eq!(tool_use["input"], json!({"path": "/tmp"}));
 
         let second_response = post_messages(
             &svc,
@@ -397,7 +421,7 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
                     {"role": "assistant", "content": prior_content},
                     {"role": "user", "content": [{
                         "type": "tool_result",
-                        "tool_use_id": "call_list_directory",
+                        "tool_use_id": generated_id,
                         "content": "a.txt"
                     }]}
                 ]
@@ -436,10 +460,10 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
                 );
                 let calls = assistant.tool_calls.as_deref().expect("tool calls missing");
                 assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].id, "call_list_directory");
+                assert_eq!(calls[0].id, generated_id);
                 assert_eq!(calls[0].function.name, "list_directory");
                 assert_eq!(calls[0].function.arguments, r#"{"path":"/tmp"}"#);
-                assert_eq!(tool_result.tool_call_id, "call_list_directory");
+                assert_eq!(tool_result.tool_call_id, generated_id);
                 assert!(matches!(
                     &tool_result.content,
                     ChatCompletionRequestToolMessageContent::Text(text) if text == "a.txt"
