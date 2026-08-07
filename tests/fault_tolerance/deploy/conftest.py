@@ -35,6 +35,17 @@ def pytest_addoption(parser):
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
     )
+    parser.addoption(
+        "--set",
+        dest="scenario_set_values",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Set an ad hoc scenario parameter for deploy tests. May be repeated. "
+            "For example: --set profile=soak"
+        ),
+    )
 
 
 def pytest_generate_tests(metafunc):
