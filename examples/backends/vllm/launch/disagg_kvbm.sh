@@ -18,7 +18,7 @@ python -m dynamo.frontend &
 
 # run decode worker on GPU 0, without enabling KVBM
 # NOTE: remove --enforce-eager for production use
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --enforce-eager &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --enforce-eager --disaggregation-mode decode --disable-hybrid-kv-cache-manager &
 
 # run prefill worker on GPU 1 with KVBM enabled using 20GB of CPU cache
 # NOTE: remove --enforce-eager for production use
