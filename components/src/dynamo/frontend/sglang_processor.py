@@ -625,6 +625,8 @@ class SglangProcessor:
             # finish_reason.  Use si=1 for the first chunk to minimize
             # TTFT, then switch to the configured interval.
             pending_token_ids: list[int] = []
+            pending_log_probs: list[float] | None = None
+            pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             pending_usage: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
@@ -674,6 +676,14 @@ class SglangProcessor:
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
+                if (log_probs := engine_response.get("log_probs")) is not None:
+                    if pending_log_probs is None:
+                        pending_log_probs = []
+                    pending_log_probs.extend(log_probs)
+                if (top_logprobs := engine_response.get("top_logprobs")) is not None:
+                    if pending_top_logprobs is None:
+                        pending_top_logprobs = []
+                    pending_top_logprobs.extend(top_logprobs)
 
                 # Flush on finish or when we've accumulated enough tokens.
                 # First chunk flushes immediately (si=1) to minimize TTFT.
@@ -684,6 +694,10 @@ class SglangProcessor:
                         "token_ids": pending_token_ids,
                         "finish_reason": finish_reason,
                     }
+                    if pending_log_probs is not None:
+                        mapped_response["log_probs"] = pending_log_probs
+                    if pending_top_logprobs is not None:
+                        mapped_response["top_logprobs"] = pending_top_logprobs
 
                     if self.debug_perf:
                         t_pp0 = time.monotonic()
@@ -742,6 +756,8 @@ class SglangProcessor:
                     yield envelope
 
                     pending_token_ids = []
+                    pending_log_probs = None
+                    pending_top_logprobs = None
                     pending_usage = None
                     first_chunk = False
         except Unknown:
