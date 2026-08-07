@@ -38,7 +38,6 @@ VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     component: str
     use_kv_events: bool
-    connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
