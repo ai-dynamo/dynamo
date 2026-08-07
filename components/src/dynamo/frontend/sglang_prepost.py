@@ -979,6 +979,7 @@ class SglangStreamingPostProcessor:
         # incomplete byte-fallback sequence.
         self._decode_context_ids = list((prompt_token_ids or [])[-5:])
         self._pending_decode_ids: list[int] = []
+        self._pending_logprobs_content: list[dict[str, Any]] = []
         self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
@@ -1081,6 +1082,13 @@ class SglangStreamingPostProcessor:
 
         return {"content": content, "refusal": None} if content else None
 
+    def _take_pending_logprobs(self) -> dict[str, Any] | None:
+        if not self._pending_logprobs_content:
+            return None
+        content = self._pending_logprobs_content
+        self._pending_logprobs_content = []
+        return {"content": content, "refusal": None}
+
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
     ) -> tuple[str | None, str]:
@@ -1164,6 +1172,8 @@ class SglangStreamingPostProcessor:
             openai_logprobs = self._build_openai_logprobs(
                 log_probs, top_logprobs, token_ids
             )
+            if openai_logprobs is not None:
+                self._pending_logprobs_content.extend(openai_logprobs["content"])
 
         if self._fast_plain_text:
             if delta_text:
@@ -1171,14 +1181,14 @@ class SglangStreamingPostProcessor:
                     "index": 0,
                     "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
-                    "logprobs": openai_logprobs,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             elif finish_reason:
                 return {
                     "index": 0,
                     "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
-                    "logprobs": openai_logprobs,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             return None
 
@@ -1395,7 +1405,7 @@ class SglangStreamingPostProcessor:
                 "index": 0,
                 "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
-                "logprobs": openai_logprobs,
+                "logprobs": self._take_pending_logprobs(),
             }
 
         return None
