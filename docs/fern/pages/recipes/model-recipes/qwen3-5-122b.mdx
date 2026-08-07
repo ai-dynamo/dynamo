@@ -1,0 +1,168 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.5-122B-A10B"
+subtitle: "Serve Qwen3.5-122B-A10B-FP8 with Dynamo and vLLM on H200 for long-context agentic workloads."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Both targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. FP8 weights fit a single 143 GB H200 at the full 262,144-token context. Aggregated runs two TP1 replicas with MTP speculative decoding; disaggregated splits one prefill worker from two decode workers over NIXL. Pick your topology; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
+<span><b>Precision</b> FP8 + FP8 KV cache</span>
+<span><b>GPUs</b> 1x H200 per replica, `replicas: 2`</span>
+<span><b>Parallelism</b> TP1</span>
+<span><b>Spec decode</b> MTP, 3 tokens</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
+<span><b>Precision</b> FP8 + FP8 KV cache</span>
+<span><b>GPUs</b> 1x H200 prefill + 2x H200 decode</span>
+<span><b>Parallelism</b> TP1 per worker</span>
+<span><b>Spec decode</b> None — see Limitations</span>
+<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+</div>
+</div>
+
+## Prerequisites
+
+1. Dynamo Platform installed on the target cluster with DGD CRDs served.
+2. nvcr pull access for `nvcr.io/nvidia/ai-dynamo`. The manifests set no `imagePullSecrets` — create `nvcr-secret` and attach it to the namespace's default service account.
+3. A Hugging Face token stored as `hf-token-secret`. The checkpoint is public and Apache-2.0.
+4. A `model-cache` PVC (ReadWriteMany), populated with the manifests in `model-cache/`.
+
+<div data-variant="disagg">
+
+5. GPU-local RDMA NICs exposed to pods (an `rdma/ib` device plugin) for NIXL KV transfer.
+
+</div>
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
+```
+
+## Deploy
+
+Create the cache and download the checkpoint. Set `storageClassName` in `model-cache.yaml` to a ReadWriteMany class first.
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.5-122b/fp8/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+<div data-variant="agg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen35-122b-agg-h200-agentic \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. A full 8x H200 node runs `replicas: 8`.
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/vllm/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen35-122b-disagg-h200-agentic \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+First cold starts take roughly 30 minutes while the runtime loads 118 GB of weights and captures CUDA graphs.
+
+## Smoke Test
+
+```bash
+kubectl port-forward -n ${NAMESPACE} \
+  svc/$(kubectl get svc -o name -n ${NAMESPACE} | grep frontend | head -1 | cut -d/ -f2) 8000:8000 &
+
+curl http://localhost:8000/v1/models
+
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "Qwen/Qwen3.5-122B-A10B",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "max_tokens": 32
+}'
+```
+
+## Benchmark
+
+The benchmark replays a Mooncake-format agentic trace through AIPerf. See [perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/perf/README.md) for the full workflow.
+
+AIPerf builds its replay schedule from a `timestamp` field. The shipped trace rows have none, and without one AIPerf replays a small default instead of the whole file, so add one:
+
+```bash
+git lfs install
+git lfs pull --include "recipes/*/perf/traces/*"
+python3 -c "
+import json
+src='recipes/qwen3.5-122b/fp8/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+for line in open(src):
+    print(json.dumps({'timestamp': 0, **json.loads(line)}))
+" > mooncake_agentic.jsonl
+```
+
+Confirm a run replayed the whole file: `Request Count` in `profile_export_aiperf.csv` should be about 3,411, plus roughly 130 rows that exceed the 262,144-token context and return errors.
+
+## Expected Performance
+
+Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loop. SLA: P50 TTFT under 5 s and P50 output at or above 50 tok/s/user. Each target is reported at its highest SLA-passing concurrency. Aggregated runs `replicas: 2`.
+
+| Target | GPUs | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
+|--------|------|-------------|-------------------|------------|-------------------------|
+| Aggregated, 2x TP1 + MTP | 2 | 8 | 136.3 | 760 ms | 381.3 |
+| Disaggregated 1P2D | 3 | 18 | 52.5 | 3087 ms | 256.5 |
+
+## Compare All Targets
+
+| Target | Topology | GPUs | Spec decode | Reported point |
+|--------|----------|------|-------------|----------------|
+| `agg-h200-agentic` | Aggregated | 2 | MTP, 3 tokens | c8, TTFT-bound |
+| `disagg-h200-agentic` | Disaggregated 1P2D | 3 | None | c18, at the 50 tok/s/user floor |
+
+Aggregated and disaggregated deliver near-identical total throughput (762 vs 769 output tok/s); disaggregated spends a third GPU on a dedicated prefill worker that emits no output tokens, which is why its per-GPU figure is lower. What disaggregation buys is capacity at the SLA — 18 concurrent users at the 50 tok/s/user floor, against roughly 8 for aggregated.
+
+## Notes
+
+Benchmark aggregated with the shipped `speculative-config` ConfigMap key. MTP measures an acceptance length of about 3.2 on this trace, so the `speculative-config-synthetic` override is not needed.
+
+Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they diverge, prefix hashing does not line up and KV-aware routing silently degrades toward round-robin.
+
+## Limitations
+
+Aggregated cannot reach the 50 tok/s/user target on H200. FP8 weights leave roughly 20 GB for paged KV, capping the running batch near 8 requests, so added concurrency becomes queue delay rather than slower decode: 136 tok/s/user at c8 (TTFT 0.8 s), 112 at c14 (TTFT 9.2 s). Use disaggregated for that operating point.
+
+Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
+
+MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
+
+## Source
+
+- [recipes/qwen3.5-122b/fp8](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.5-122b/fp8)
+- [Aggregated deploy manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/vllm/agg-h200-agentic/deploy.yaml)
+- [Disaggregated deploy manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/vllm/disagg-h200-agentic/deploy.yaml)
+- [Benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/perf/README.md)

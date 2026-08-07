@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-5-122b
+title: Qwen3.5-122B-A10B
+page: pages/recipes/model-recipes/qwen3-5-122b.mdx
+provider: alibaba
+model:
+  name: Qwen3.5-122B-A10B
+  hf_id: Qwen/Qwen3.5-122B-A10B-FP8
+  precision: FP8 + FP8 KV
+status: validated
+targets:
+- id: agg-h200-agentic
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp1
+  - fp8-kv-cache
+  - mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 8
+  deploy:
+    asset: recipes/qwen3.5-122b/fp8/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3.5-122b/fp8/perf/README.md
+  expected_performance:
+    available: true
+    summary: 381.3 output tok/s/GPU, 136.3 user tok/s P50, TTFT P50 760 ms at concurrency 8 over 2 replicas (3,541-request agentic trace)
+- id: disagg-h200-agentic
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 3
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p2d
+  - tp1-per-role
+  - fp8-kv-cache
+  - kv-aware-routing
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 18
+  deploy:
+    asset: recipes/qwen3.5-122b/fp8/vllm/disagg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3.5-122b/fp8/perf/README.md
+  expected_performance:
+    available: true
+    summary: 256.5 output tok/s/GPU, 52.5 user tok/s P50, TTFT P50 3087 ms at concurrency 18 (3,541-request agentic trace)
+related_benchmarks: []
+maintainer: null
+gaps:
+- NVFP4 B200 profiles for this model are tracked separately and are not yet on main; add them
+  as targets here once they land
+- aggregated cannot reach the 50 tok/s/user SLA target on H200 (KV-headroom bound); it is
+  reported at its highest TTFT-passing concurrency instead
+- aggregated knee is bracketed but not pinned (c8 passes at 760 ms, c14 fails at 9.2 s), so
+  the reported 381.3 tok/s/GPU understates it
+- disaggregated carries --no-async-scheduling on vLLM < 0.26.0, costing ~7% throughput
+- no perf.yaml in this recipe; the benchmark is driven from perf/README.md
