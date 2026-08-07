@@ -162,6 +162,29 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+{% if device == "cuda" %}
+# Apply pinned SGLang hotfixes to the source tree carried by the upstream runtime
+# image and assert the vendored patches contain no test-path hunks.
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang_patches \
+    set -eu; \
+    SGLANG_DIR="/sgl-workspace/sglang"; \
+    python3 -c "import importlib.util, os; spec = importlib.util.find_spec('sglang'); assert spec and spec.origin; assert os.path.realpath(spec.origin).startswith('${SGLANG_DIR}/'), spec.origin"; \
+    patch_series="$(find /tmp/sglang_patches -maxdepth 1 -type f -name '*.patch' | sort)"; \
+    test -n "${patch_series}"; \
+    set +e; \
+    grep -El '^(---|\+\+\+) [ab]/(test|tests|.*/test|.*/tests)/' ${patch_series} > /tmp/sglang_patch_test_hunks; \
+    grep_status="$?"; \
+    set -e; \
+    if [ "${grep_status}" -eq 0 ]; then \
+        echo "SGLang runtime patches contain test hunks:" >&2; \
+        cat /tmp/sglang_patch_test_hunks >&2; \
+        exit 1; \
+    elif [ "${grep_status}" -ne 1 ]; then \
+        exit "${grep_status}"; \
+    fi; \
+    git -C "${SGLANG_DIR}" apply ${patch_series}
+{% endif %}
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
@@ -200,8 +223,7 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
 # the test harness forks a fresh process per test. Without baked .pyc, every test
 # process recompiles torch/transformers/sglang from source on first import (~+3.5s
-# each), which previously added ~8-10 min to the sglang CI job. This was implicitly
-# provided by the now-removed vendored-patch step that ran `import sglang` at build.
+# each), which previously added ~8-10 min to the sglang CI job.
 RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
     python3 -m compileall -q -j0 "$SITE_PACKAGES" && \
     (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)
