@@ -58,13 +58,43 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.core,
-    pytest.mark.gpu_1,  # needs sglang & GPU packages installed but does not actually use GPU
+    pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,
 ]
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+@pytest.fixture(autouse=True)
+def _cpu_engine_when_no_accelerator(monkeypatch):
+    """Honor the file's gpu_0 contract on hosts with no accelerator.
+
+    Many tests here run parse_args, and SGLang's ServerArgs.__post_init__
+    auto-detects a device only when --device is not given; on a host with no
+    accelerator the detection walks every platform and ends in
+    NotImplementedError (get_device -> SRTPlatform(unknown), verified on the
+    amd64 image with the GPU masked). SGLANG_USE_CPU_ENGINE=1 is SGLang's
+    public knob that makes the detection return "cpu". Set it only when CUDA
+    is absent so GPU hosts keep exercising the real detection path, and clear
+    the lru_caches on both probes so a worker that cached the no-env result
+    while running another file's tests cannot poison this one (and vice
+    versa on teardown, via the second clear).
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        yield
+        return
+    from sglang.srt.utils import common as _sgl_common
+
+    monkeypatch.setenv("SGLANG_USE_CPU_ENGINE", "1")
+    _sgl_common.is_cpu.cache_clear()
+    _sgl_common.get_device.cache_clear()
+    yield
+    _sgl_common.is_cpu.cache_clear()
+    _sgl_common.get_device.cache_clear()
 
 
 def test_configured_engine_route_cannot_replace_built_in_route():
