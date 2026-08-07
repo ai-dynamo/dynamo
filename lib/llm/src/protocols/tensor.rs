@@ -4,7 +4,7 @@
 use crate::protocols::Annotated;
 use anyhow::Result;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
@@ -264,55 +264,21 @@ impl AnnotationsProvider for NvCreateTensorRequest {
     }
 }
 
-pub struct DeltaAggregator {
-    response: Option<NvCreateTensorResponse>,
-    error: Option<String>,
-}
-
 impl NvCreateTensorResponse {
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateTensorResponse>>,
     ) -> Result<NvCreateTensorResponse> {
-        let aggregator = stream
-            .fold(
-                DeltaAggregator {
-                    response: None,
-                    error: None,
-                },
-                |mut aggregator, delta| async move {
-                    let delta = match delta.ok() {
-                        Ok(delta) => delta,
-                        Err(error) => {
-                            if aggregator.error.is_none() {
-                                aggregator.error = Some(error);
-                            }
-                            return aggregator;
-                        }
-                    };
-                    match delta.data {
-                        Some(resp) => {
-                            if aggregator.response.is_none() {
-                                aggregator.response = Some(resp);
-                            } else if aggregator.error.is_none() {
-                                aggregator.error =
-                                    Some("Multiple responses in non-streaming mode".to_string());
-                            }
-                        }
-                        None => {
-                            // Ignore metadata-only deltas in non-streaming mode.
-                        }
-                    }
-                    aggregator
-                },
-            )
-            .await;
-        if let Some(error) = aggregator.error {
-            Err(anyhow::anyhow!(error))
-        } else if let Some(response) = aggregator.response {
-            Ok(response)
-        } else {
-            Err(anyhow::anyhow!("No response received"))
+        pin_mut!(stream);
+        let mut response = None;
+        while let Some(delta) = stream.next().await {
+            let Some(next) = delta.into_data().map_err(anyhow::Error::new)? else {
+                continue;
+            };
+            if response.replace(next).is_some() {
+                anyhow::bail!("Multiple responses in non-streaming mode");
+            }
         }
+        response.ok_or_else(|| anyhow::anyhow!("No response received"))
     }
 }
 
