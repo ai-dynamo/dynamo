@@ -65,6 +65,13 @@ preferences:
   framework: ""                    # vLLM, SGLang, or TRT-LLM
   mode: ""                         # agg, disagg
 
+resources:
+  gpu_floor: null                  # GPUs guaranteed available to this work
+  gpu_ceiling: null                # maximum GPUs the user authorizes, across all concurrent experiments
+  parallel_experiments: null      # whether the user authorizes concurrent candidate experiments within the ceiling
+  pinned: []                       # configuration knobs the user forbids changing (e.g. ["mode", "precision"])
+  teardown_deadline: ""            # optional wall-clock bound by which all run resources must be gone
+
 objectives:
   ttft_ms_p95_max: null            # optional time to first token
   itl_ms_p95_max: null             # optional inter-token-latency
@@ -92,6 +99,9 @@ created_at: ""
 - Require `deployment.dgd_path` to resolve to `<EXP_ROOT>/inputs/user_provided_dgd.yaml`, and require
   `deployment.dgd_sha256` to match that file.
 - `kube_context` and `namespace` are required. The namespace must already exist.
+- Treat `resources.gpu_ceiling` as authorization, not entitlement: every GPU-consuming experiment still requires its
+  own evidence and adversarial review. Treat `resources.pinned` entries as hard constraints enforced at hypothesis
+  review and deploy preflight, not as style preferences.
 - `storage_class` is optional when the required PVC already exists or a suitable cluster default is known. If the run
   must create a PVC and no suitable class can be determined safely, return a focused question to the user.
 - Token lengths are optional customer-provided traffic hints, not required benchmark keys. Prefer real traces or

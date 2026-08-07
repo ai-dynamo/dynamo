@@ -61,6 +61,14 @@ Ask only for blocking facts that remain unknown or contradictory after reading a
 - Accept natural-language answers; do not make the user author YAML.
 - Do not ask for secret values, kubeconfig contents, registry credentials, or Kubernetes Secret data.
 - Do not add a ceremonial confirmation round when the user's message already provides an unambiguous value.
+- Ask once for the resource envelope: the GPU floor and ceiling in play for this work, whether parallel experiments
+  are authorized within the ceiling, any knobs the user forbids changing, and any teardown deadline. Record the
+  answers in the contract's `resources` block. When capacity within the ceiling allows, downstream roles prefer
+  running approved candidates in parallel (one variable per slot, slot attribution in every ledger record) over
+  queueing them serially.
+- When the user's production deployment shape differs from the unit under test (for example, fleet-level traffic
+  numbers but a single-replica test deployment), derive the per-unit load explicitly and confirm it with the user
+  before recording it.
 
 If blocking facts remain, return the questions to the parent and stop without handing work to a downstream role.
 
@@ -118,6 +126,22 @@ Before finalizing:
 
 Do not overwrite the contract after handoff to `recipe-deployer`. A different performance question may use a new
 benchmark series within this contract; a material change to the user workload requires a new experiment root.
+
+## Contract Corrections
+
+A correction of fact is different from a material change: the user is not changing the workload, they are fixing a
+misreported description of the same workload (a wrong traffic number, a fleet-level figure that should have been
+per-replica, a mistaken SLO value). When the user corrects the contract:
+
+1. Append a correction annotation to the experiment ledger recording what changed, why, and when. Never rewrite or
+   delete prior records.
+2. Mark every run measured under the pre-correction contract as superseded, not invalid: those runs remain evidence
+   about the conditions they actually measured.
+3. Update the contract file in place with the correction noted inline, and recompute its SHA256.
+4. Re-establish the baseline under the corrected contract before proposing any new candidate.
+
+If the user is genuinely changing the workload rather than correcting its description, the existing rule applies:
+new experiment root.
 
 ## Return
 
