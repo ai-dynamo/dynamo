@@ -176,7 +176,7 @@ spec:
         - name: ENDPOINT
           value: qwen35-122b-agg-b200-agentic-frontend:8000
         - name: TRACE_FILE
-          value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+          value: /model-cache/traces/mooncake_agentic.jsonl
         - name: CONCURRENCY
           value: "64"
         # --- The remainder is shared across both variants. ---
