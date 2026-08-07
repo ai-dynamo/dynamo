@@ -89,7 +89,7 @@ type PythonServerStreamingIngress = Ingress<
     python_payload::PythonIngressPayloadAdapter,
 >;
 
-/// Ingress for the flag-gated push egress path (`DYN_TRTLLM_PUSH_EGRESS=1`).
+/// Ingress for the push egress path (handlers that declare `response_sender`).
 ///
 /// Requests still decode into a Python object (the handler wants one), but
 /// responses are owned Rust values by the time they reach the channel, so the
@@ -1278,25 +1278,15 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        // Flag-gated push egress (`DYN_TRTLLM_PUSH_EGRESS=1`): the handler
-        // pushes each response into a Rust channel via its `response_sender`
-        // argument, instead of Rust pulling `__anext__` off its generator on a
-        // tokio thread once per response. Requires the handler to declare a
-        // `response_sender` parameter -- NOT `context`, which every handler
-        // accepts and would therefore make this check always true, rendering
-        // the pull-path fallback unreachable. Anything else stays on pull.
-        let use_push_egress = push_egress::push_egress_enabled()
-            && if push_egress::handler_supports_push(&generator) {
-                true
-            } else {
-                tracing::warn!(
-                    "{} is set but this handler does not declare a `response_sender` \
-                     parameter (is it missing @push_egress_capable?); \
-                     falling back to the pull egress path",
-                    push_egress::PUSH_EGRESS_ENV,
-                );
-                false
-            };
+        // Push egress: the handler pushes each response into a Rust channel via
+        // its `response_sender` argument, instead of Rust pulling `__anext__`
+        // off its generator on a tokio thread once per response. Selected per
+        // handler, purely by signature -- a handler must declare a
+        // `response_sender` parameter, which in practice means the TRT-LLM
+        // workers' `@push_egress_capable` decorator. NOT `context`, which every
+        // handler accepts and would therefore make this check always true,
+        // rendering the pull path unreachable. Anything else stays on pull.
+        let use_push_egress = push_egress::handler_supports_push(&generator);
 
         // `register_local_engine` only applies to the pull path: the push
         // engine hands responses to a per-request sender rather than returning
@@ -1304,10 +1294,7 @@ impl Endpoint {
         // local registry does not model.
         let mut local_engine: Option<Arc<engine::PythonAsyncEngine>> = None;
         let ingress: Arc<dyn rs::pipeline::network::PushWorkHandler> = if use_push_egress {
-            tracing::info!(
-                "{}=1: serving endpoint with push egress",
-                push_egress::PUSH_EGRESS_ENV
-            );
+            tracing::info!("serving endpoint with push egress");
             PythonPushEgressIngress::for_engine_with_adapter(
                 Arc::new(push_egress::PythonPushEngine::new(
                     generator,

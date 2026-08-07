@@ -150,7 +150,7 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
     }
 }
 
-/// Response encoder for the flag-gated push egress path (`push_egress.rs`).
+/// Response encoder for the push egress path (`push_egress.rs`).
 ///
 /// The push path converts each response to an owned Rust value on the Python
 /// thread that produced it, so by the time a frame reaches here it holds no

@@ -86,11 +86,9 @@ where
             let python_input = to_python_input(py)?;
 
             // The closure returns the FULL kwarg list rather than just the
-            // context, so a caller that needs several keyword arguments can
-            // build them under one GIL acquisition and share objects between
-            // them. The push-egress path relies on this: it hands the same
-            // `ResponseSender` to the handler both as `response_sender=` and on
-            // `context.response_sender`, and the two must be the same object.
+            // context, so a caller needing several keyword arguments builds
+            // them all under one GIL acquisition. The push-egress path relies
+            // on this to pass `context` and `response_sender` together.
             let gen_result = match to_python_kwargs {
                 Some(to_python_kwargs) => {
                     let kwargs = to_python_kwargs(py)?;
@@ -328,6 +326,39 @@ where
     Ok(ResponseStream::new(response_stream, context.context()))
 }
 
+/// Convert one Python response object into the wire value.
+///
+/// Yields tagged with `_dynamo_annotated: True` are wire `Annotated<R>`
+/// envelopes; everything else is plain data.
+///
+/// Shared by both egress paths — the pull path via [`process_item`] and the
+/// push path via `push_egress::decode_response` — so the two cannot drift and
+/// start disagreeing about what a given Python object means on the wire. The
+/// caller owns the error mapping; the GIL is already held either way.
+pub(crate) fn depythonize_annotated<Resp>(
+    bound: &Bound<'_, PyAny>,
+) -> Result<Annotated<Resp>, pythonize::PythonizeError>
+where
+    Resp: for<'de> Deserialize<'de>,
+{
+    let is_envelope = bound
+        .downcast::<PyDict>()
+        .ok()
+        .and_then(|d| {
+            d.get_item(pyo3::intern!(bound.py(), "_dynamo_annotated"))
+                .ok()
+                .flatten()
+        })
+        .and_then(|v| v.is_truthy().ok())
+        .unwrap_or(false);
+
+    if is_envelope {
+        depythonize::<Annotated<Resp>>(bound)
+    } else {
+        depythonize::<Resp>(bound).map(Annotated::from_data)
+    }
+}
+
 async fn process_item<Resp>(
     item: Result<Py<PyAny>, PyErr>,
 ) -> Result<Annotated<Resp>, ResponseProcessingError>
@@ -336,22 +367,7 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| {
-            let bound = item.into_bound(py);
-            // Yields tagged with `_dynamo_annotated: True` are wire
-            // Annotated<R> envelopes; everything else is plain data.
-            let is_envelope = bound
-                .downcast::<PyDict>()
-                .ok()
-                .and_then(|d| d.get_item("_dynamo_annotated").ok().flatten())
-                .and_then(|v| v.is_truthy().ok())
-                .unwrap_or(false);
-            if is_envelope {
-                depythonize::<Annotated<Resp>>(&bound)
-            } else {
-                depythonize::<Resp>(&bound).map(Annotated::from_data)
-            }
-        })
+        Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?

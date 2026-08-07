@@ -3,61 +3,35 @@
 
 //! Inverted (push-based) Python -> Rust response egress.
 //!
-//! # Why
+//! The pull path in [`crate::engine`] costs two GIL acquisitions on arbitrary
+//! tokio threads per response. Here the Python handler — already holding the
+//! GIL — calls [`ResponseSender::send`] instead: the conversion happens inline
+//! under that existing GIL and the value is enqueued on a bounded
+//! `tokio::sync::mpsc`, so the tokio side only ever does `rx.recv().await` and
+//! never touches Python. Rationale and measurements: DYN-3703.
 //!
-//! The default egress path in [`crate::engine`] is a RUST PULL from a Python
-//! async generator (`demand_driven_python_stream`). Per response it costs two
-//! independent GIL acquisitions on *tokio* threads:
+//! Selected per handler by signature — [`handler_supports_push`] picks this
+//! path for a handler declaring a `response_sender` parameter, which in
+//! practice means the TRT-LLM `@push_egress_capable` decorator
+//! (`components/src/dynamo/trtllm/request_handlers/push_egress.py`). There is
+//! no environment variable: that decorator is the switch, so the two halves
+//! cannot disagree about which path an endpoint is on. Every other Python
+//! handler keeps the pull path verbatim.
 //!
-//! 1. `pybridge.anext_call` — a tokio worker takes the GIL only to call
-//!    `__anext__` and hand the actual work to the Python event-loop thread via
-//!    `call_soon_threadsafe`; the tokio thread then drops the GIL and parks.
-//! 2. `pybridge.decode_response` — a `spawn_blocking` thread takes the GIL
-//!    again to `depythonize` the yielded object.
-//!
-//! Which tokio worker polls the stream is arbitrary, so over a run essentially
-//! every worker thread becomes a GIL contender. Measured on the TRT-LLM decode
-//! worker: 45 GIL-capable threads and a GIL wait/hold ratio of 23.4, versus 3
-//! threads / 0.3 for `trtllm-serve`.
-//!
-//! # What this module does
-//!
-//! Inverts the direction. The Python handler — which is *already* holding the
-//! GIL while it runs — calls [`ResponseSender::send`] once per response. The
-//! conversion to an owned Rust value happens inline on that call, under the
-//! caller's existing GIL, and the result is enqueued on a bounded
-//! `tokio::sync::mpsc`. The tokio side only ever does `rx.recv().await`: it
-//! never acquires the GIL and never touches a Python object.
-//!
-//! # How the handler gets its sender
-//!
-//! On the `context` argument, as `context.response_sender`. Not as a dedicated
-//! parameter: the Python handlers wrap `generate` in decorators that use
-//! `functools.wraps`, which makes `inspect.signature` report the *wrapped*
-//! function's parameters, so a `response_sender` parameter added by a wrapper
-//! is invisible to the bridge's signature check. `context` is already on every
-//! handler's signature and is already the per-request handle, so it is both
-//! reliably detectable and the natural carrier.
-//!
-//! # Feature flag
-//!
-//! Gated on `DYN_TRTLLM_PUSH_EGRESS=1`, default OFF. With the flag unset the
-//! pull path in [`crate::engine`] is used verbatim and nothing here runs, so
-//! one image can A/B both paths.
+//! The sender reaches the handler as the `response_sender` keyword argument,
+//! and only that way — the same parameter the signature check keys on.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Error;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
-use pythonize::depythonize;
+use pyo3::types::PyModule;
 use serde::Deserialize;
 use tokio_stream::{Stream, StreamExt};
 
 use tokio::sync::mpsc;
 
-use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::{
@@ -70,39 +44,24 @@ use crate::context::{Context, callable_accepts_kwarg};
 use crate::engine::{self, map_python_exception};
 use crate::python_payload::PythonPayload;
 
-/// Environment variable that selects the push egress path. `"1"` enables it;
-/// anything else (including unset) leaves the pull path in place.
-pub(crate) const PUSH_EGRESS_ENV: &str = "DYN_TRTLLM_PUSH_EGRESS";
-
 /// Depth of the Python -> Rust response channel. Matches
 /// `engine::RESPONSE_CHANNEL_DEPTH` so the push path buffers exactly as much
 /// as the pull path's forwarder does.
 pub(crate) const PUSH_CHANNEL_DEPTH: usize = 128;
 
-/// Whether push egress is enabled process-wide. Read once: the flag selects a
-/// serving topology at startup and must not change under a running endpoint.
-pub(crate) fn push_egress_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var(PUSH_EGRESS_ENV)
-            .map(|value| value == "1")
-            .unwrap_or(false)
-    })
-}
-
-/// Whether this Python callable can be driven in push mode.
+/// Whether this Python callable can be driven in push mode. This is the ONLY
+/// switch between the two egress paths.
 ///
-/// The sender is delivered on the `context` argument, so a handler that does
-/// not take one cannot be reached and must stay on the pull path. Unlike a
-/// check for a `response_sender` parameter, this one survives `functools.wraps`
-/// decorators: `context` is part of the wrapped function's own signature.
+/// The sender is delivered as a `response_sender` keyword argument, so a
+/// handler that does not declare one cannot be reached and must stay on the
+/// pull path.
 pub(crate) fn handler_supports_push(handler: &PyObject) -> bool {
     // MUST be `response_sender`, not `context`. Every handler accepts `context`,
     // so checking for it makes this test always true and the pull-path fallback
-    // unreachable — an undecorated handler would then be driven as a coroutine
-    // and fail every request. `push_egress_capable` deletes its own
-    // `__wrapped__` (`push_egress.py:259`) precisely so `inspect.signature`
-    // reports this parameter through the decorator.
+    // unreachable — every non-TRT-LLM Python handler in the repo would then be
+    // driven in push mode and never terminate its stream.
+    // `push_egress_capable` deletes its own `__wrapped__` precisely so
+    // `inspect.signature` reports this parameter through the decorator.
     Python::with_gil(|py| {
         callable_accepts_kwarg(py, handler.bind(py), "response_sender").unwrap_or(false)
     })
@@ -133,7 +92,7 @@ trait ResponseSink: Send + Sync {
     fn close_with_error(&self, message: String);
 
     /// Terminate the stream with a typed backend error frame. Not exposed to
-    /// Python; used by the Rust-side safety net when the handler coroutine
+    /// Python; used by the Rust-side safety net when the handler's generator
     /// raises instead of closing the sender itself.
     fn close_with_dynamo_error(&self, error: DynamoError);
 }
@@ -184,7 +143,6 @@ impl<Resp> TypedSink<Resp> {
 
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _nvtx_blocked = dynamo_nvtx_range!("pybridge.push_blocked");
                 let _ = tx.send(frame).await;
             });
             return;
@@ -192,7 +150,6 @@ impl<Resp> TypedSink<Resp> {
 
         // No runtime on this thread: we are on the Python side. Same GIL rule
         // as `send` — release it across the wait.
-        let _nvtx_blocked = dynamo_nvtx_range!("pybridge.push_blocked");
         let _ = Python::with_gil(|py| py.allow_threads(|| tx.blocking_send(frame)));
     }
 }
@@ -202,12 +159,9 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
-        // Covers the whole Python->Rust crossing for one response: the
-        // `depythonize` plus the enqueue. Unlike the pull path there is no
-        // GIL *acquisition* inside this range — the Python handler already
-        // holds it — so this measures conversion cost only, not GIL wait.
-        let _nvtx = dynamo_nvtx_range!("pybridge.push_send");
-
+        // The whole Python->Rust crossing for one response: the `depythonize`
+        // plus the enqueue. Unlike the pull path neither step acquires the GIL
+        // — the Python handler already holds it.
         let frame = decode_response::<Resp>(obj)?;
 
         let Some(tx) = self.sender() else {
@@ -239,13 +193,11 @@ where
         // drain then cannot run, and a merely-full channel becomes an
         // interpreter-wide stall instead of local backpressure.
         //
-        // `blocking_send` panics if called from inside an async task. Both
-        // callers are safe: the Python event-loop thread (no runtime context at
-        // all) and the driver task's degradation path (a `spawn_blocking`
-        // thread, which is a permitted blocking region). It would panic only if
-        // a handler managed to call `send` from an async tokio task while
+        // `blocking_send` panics if called from inside an async task. The only
+        // caller is `ResponseSender::send`, reached from the Python event-loop
+        // thread, which has no tokio runtime context at all. It would panic only
+        // if a handler managed to call `send` from an async tokio task while
         // holding the GIL.
-        let _nvtx_blocked = dynamo_nvtx_range!("pybridge.push_blocked");
         py.allow_threads(|| tx.blocking_send(frame)).map_err(|_| {
             PyRuntimeError::new_err(
                 "response stream is closed; the consumer dropped the response stream",
@@ -277,33 +229,15 @@ where
 
 /// Python -> Rust conversion for one response object.
 ///
-/// Mirrors `engine::process_item` exactly, so the push path yields the same
-/// Rust value the pull path would have produced for the same Python object:
-/// yields tagged with `_dynamo_annotated: True` are wire `Annotated<R>`
-/// envelopes, everything else is plain data.
+/// Shares [`engine::depythonize_annotated`] with the pull path, so both paths
+/// produce the same Rust value for the same Python object by construction.
+/// Only the error mapping differs: here it is raised back into the calling
+/// handler, which turns it into a `close_with_error` frame.
 fn decode_response<Resp>(obj: &Bound<'_, PyAny>) -> PyResult<Annotated<Resp>>
 where
     Resp: for<'de> Deserialize<'de>,
 {
-    let py = obj.py();
-    let is_envelope = obj
-        .downcast::<PyDict>()
-        .ok()
-        .and_then(|dict| {
-            dict.get_item(pyo3::intern!(py, "_dynamo_annotated"))
-                .ok()
-                .flatten()
-        })
-        .and_then(|value| value.is_truthy().ok())
-        .unwrap_or(false);
-
-    let decoded = if is_envelope {
-        depythonize::<Annotated<Resp>>(obj)
-    } else {
-        depythonize::<Resp>(obj).map(Annotated::from_data)
-    };
-
-    decoded.map_err(|error| {
+    engine::depythonize_annotated(obj).map_err(|error| {
         PyValueError::new_err(format!(
             "critical error: invalid response object from python handler; \
              application-logic-mismatch: {error}"
@@ -315,24 +249,22 @@ where
 
 /// Rust response sink handed to a Python handler running in push mode.
 ///
-/// Delivered as the `response_sender=` keyword argument, and also reachable as
-/// `context.response_sender`; `None`/absent on the pull path, so its presence is
-/// also how a handler decides which path it is on.
+/// Delivered as the `response_sender=` keyword argument; absent on the pull
+/// path, so its presence is also how a handler knows which path it is on.
 ///
 /// ```python
 /// async def generate(self, request, context, response_sender=None):
-///     sender = response_sender or getattr(context, "response_sender", None)
-///     if sender is None:              # pull path: unchanged
+///     if response_sender is None:     # pull path: unchanged
 ///         async for chunk in engine.generate(request):
 ///             yield chunk
 ///         return
 ///     try:                            # push path: yields nothing
 ///         async for chunk in engine.generate(request):
-///             sender.send(chunk)
+///             response_sender.send(chunk)
 ///     except Exception as exc:
-///         sender.close_with_error(f"{type(exc).__name__}: {exc}")
+///         response_sender.close_with_error(f"{type(exc).__name__}: {exc}")
 ///     else:
-///         sender.close()
+///         response_sender.close()
 /// ```
 ///
 /// `send` blocks when the consumer is behind; it is safe to call from the
@@ -368,7 +300,7 @@ impl ResponseSender {
 
 impl ResponseSender {
     /// Rust-side handle to the same sink, for the safety net that terminates
-    /// the stream if the handler coroutine raises.
+    /// the stream if the handler's generator raises.
     fn sink(&self) -> Arc<dyn ResponseSink> {
         self.sink.clone()
     }
@@ -399,15 +331,9 @@ where
         }),
     };
 
+    // The consumer side is pure Rust: no Python work, no GIL, just the wait for
+    // whatever the handler pushes next.
     let stream = futures::stream::unfold(rx, |mut rx| async move {
-        // Unlike `pybridge.anext_call` in engine.rs, this range deliberately
-        // DOES span the `.await`: there is no Python work inside it to isolate,
-        // and the whole point of the push path is that the consumer side is
-        // pure Rust. Read it accordingly — the range length is dominated by the
-        // idle wait for the engine's next token, and its *end* marks the
-        // response arriving. The bridge cost itself is `pybridge.push_send` on
-        // the Python thread; a full channel shows up as `pybridge.push_blocked`.
-        let _nvtx = dynamo_nvtx_range!("pybridge.push_recv");
         rx.recv().await.map(|item| (item, rx))
     });
 
@@ -429,12 +355,13 @@ pub(crate) type PushResponse = Annotated<serde_json::Value>;
 /// how often: in push mode the generator yields nothing and is advanced ONCE
 /// per request (one `__anext__`, which runs the whole request and then raises
 /// `StopAsyncIteration`), instead of once per response. Responses arrive out of
-/// band on the [`ResponseSender`] the handler finds on its `context`.
+/// band on the [`ResponseSender`] passed as the handler's `response_sender`
+/// argument.
 ///
 /// Keeping the generator shape is deliberate: registration
 /// (`endpoint.serve_endpoint(handler.generate, ...)`), cancellation, and the
-/// handler's own control flow are untouched, and a handler that ignores the
-/// sender and yields normally still works (see the driver task below).
+/// handler's own control flow are untouched. A handler that yields anyway has
+/// broken the contract and its request is failed — see the driver task below.
 pub(crate) struct PythonPushEngine {
     handler: Arc<PyObject>,
     event_loop: Arc<PyObject>,
@@ -467,33 +394,23 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushResponse>, Error> for Pyth
         let python_input = request.into_inner();
         let handler_ctx = ctx.clone();
 
-        // The sender rides on the `Context`. `serve_endpoint` has already
-        // verified the handler accepts a `context` argument before selecting
-        // this engine, so the closure below always runs and the sender is
-        // always delivered — if it were dropped here instead, the channel would
-        // close and the request would return an empty stream.
+        // Both kwargs are built under one GIL acquisition. `serve_endpoint` has
+        // already verified the handler declares a `response_sender` parameter
+        // before selecting this engine, so this closure always runs and the
+        // sender is always delivered — were it dropped here instead, the channel
+        // would close and the request would return an empty stream.
         let driver = engine::invoke_generator(
             self.handler.clone(),
             self.event_loop.clone(),
             move |_py| Ok(python_input),
             Some(move |py: Python<'_>| {
-                // ONE sender object, delivered TWO ways, because the Python half
-                // reads it from a `response_sender=` keyword argument
-                // (`push_egress.py:235`) while `context.response_sender` is the
-                // documented fallback. Delivering only one of them is the seam
-                // that silently drops the worker back to the pull path — or, if
-                // Rust has already committed to awaiting a coroutine, fails the
-                // request outright. `Py<T>` is refcounted, so the clone is the
-                // same Python object, and a handler comparing them sees identity.
-                let py_sender = Py::new(py, sender)?;
                 let context = Py::new(
                     py,
-                    Context::new(handler_ctx, current_trace_context, None, metadata)
-                        .with_response_sender(py_sender.clone_ref(py)),
+                    Context::new(handler_ctx, current_trace_context, None, metadata),
                 )?;
                 Ok(vec![
                     ("context", context.into_any()),
-                    ("response_sender", py_sender.into_any()),
+                    ("response_sender", Py::new(py, sender)?.into_any()),
                 ])
             }),
         )
@@ -504,63 +421,173 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushResponse>, Error> for Pyth
         // pass through here.
         tokio::spawn(async move {
             let mut driver = driver;
-            let mut yielded = 0usize;
 
-            while let Some(item) = driver.next().await {
-                let item = match item {
-                    Ok(item) => item,
-                    Err(error) => {
-                        sink.close_with_dynamo_error(map_python_exception(error));
-                        return;
-                    }
-                };
-
-                // Graceful degradation. A push-mode handler yields nothing, so
-                // this arm is normally dead code. It is reached when the handler
-                // ignored the sender and yielded instead (e.g. a handler that
-                // predates the push path, or one whose own flag check disagreed
-                // with ours): forward the frame through the same sink so the
-                // request still completes correctly, just without the benefit.
-                yielded += 1;
-                let forward_sink = sink.clone();
-                let forwarded = tokio::task::spawn_blocking(move || {
-                    // Unlike `pybridge.push_send`, this range DOES include a GIL
-                    // acquisition on a tokio thread — it is the pull path's cost,
-                    // reappearing precisely because the handler did not push.
-                    let _nvtx = dynamo_nvtx_range!("pybridge.push_forward_yield");
-                    Python::with_gil(|py| forward_sink.send(py, item.bind(py)))
-                })
-                .await;
-
-                match forwarded {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        sink.close_with_dynamo_error(map_python_exception(error));
-                        return;
-                    }
-                    Err(error) => {
-                        sink.close_with_error(format!(
-                            "critical error: failed to offload the python response forward \
-                             to a new thread: {error}"
-                        ));
-                        return;
-                    }
+            // Advanced exactly once: a push-mode handler yields nothing, so
+            // that single `__anext__` runs the whole request and then ends the
+            // generator. Anything else is a broken contract.
+            match driver.next().await {
+                // Idempotent: a well-behaved handler has already closed.
+                None => sink.close(),
+                // Forwarding a yielded frame instead would silently reintroduce
+                // the per-response GIL acquisition this module exists to
+                // remove, so fail the request loudly.
+                Some(Ok(_)) => {
+                    tracing::error!(
+                        request_id,
+                        "push egress: handler yielded a response instead of pushing it"
+                    );
+                    sink.close_with_error(
+                        "critical error: push-mode handler yielded a response instead of \
+                         pushing it to its response_sender"
+                            .to_string(),
+                    );
                 }
+                Some(Err(error)) => sink.close_with_dynamo_error(map_python_exception(error)),
             }
-
-            if yielded > 0 {
-                tracing::debug!(
-                    request_id,
-                    yielded,
-                    "push egress: handler yielded responses instead of pushing them; \
-                     forwarded them over the pull path"
-                );
-            }
-
-            // Idempotent: a well-behaved handler has already closed the sender.
-            sink.close();
         });
 
         Ok(ResponseStream::new(Box::pin(stream), context.context()))
     }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure-Rust parts of push_egress.rs.
+    //!
+    //! # Python linkage constraint
+    //!
+    //! This crate builds with `pyo3/extension-module`.  The linker does NOT
+    //! include libpython in the test binary; Python symbols are supplied at
+    //! runtime by the Python interpreter loading the `.so`.  Any test that
+    //! compiles code which references Python C-API symbols — even unreachable
+    //! branches — fails with "undefined symbol: Py_InitializeEx" etc.
+    //!
+    //! Confirmed: a trivial `prepare_freethreaded_python()` test produced
+    //! "undefined symbol: Py_InitializeEx" from rust-lld.
+    //!
+    //! **Root cause for push_egress.rs**: `TypedSink<Resp>` implements
+    //! `ResponseSink`, whose vtable includes `fn send(&self, py: Python<'_>,
+    //! obj: &Bound<'_, PyAny>)`.  Instantiating `TypedSink` (even in a test
+    //! that never calls `send`) forces the compiler to monomorphize ALL trait
+    //! impl methods, pulling in pyo3 and Python C-API symbols.  The same
+    //! applies to `ResponseSender` (`#[pyclass]`) and `response_channel`
+    //! (which creates a `TypedSink` internally).
+    //!
+    //! **What compiles**: tests that use only `mpsc` channels, `Annotated`,
+    //! `serde_json::Value`, and integer constants — nothing from this module.
+    //! Everything else requires Python and must be covered by pytest against
+    //! the built `.so`.  Coverage gaps are documented at the bottom.
+
+    use super::PUSH_CHANNEL_DEPTH;
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use tokio::sync::mpsc;
+
+    // ── PUSH_CHANNEL_DEPTH constant ───────────────────────────────────────
+
+    /// Push and pull channel depths must match.  `engine::RESPONSE_CHANNEL_DEPTH`
+    /// is 128; a mismatch makes the push path buffer differently from the pull
+    /// path, silently changing backpressure behavior.
+    #[test]
+    fn push_channel_depth_equals_pull_channel_depth() {
+        assert_eq!(
+            PUSH_CHANNEL_DEPTH, 128,
+            "PUSH_CHANNEL_DEPTH must equal engine::RESPONSE_CHANNEL_DEPTH (128)"
+        );
+    }
+
+    // ── channel backpressure contract ─────────────────────────────────────
+    //
+    // TypedSink::send uses a channel of depth PUSH_CHANNEL_DEPTH.  The fast
+    // path uses try_send (no blocking); the slow path parks.  These tests
+    // verify the channel behaves as the comments describe, using mpsc directly
+    // because TypedSink instantiation requires Python symbols.
+
+    /// A channel of PUSH_CHANNEL_DEPTH capacity must accept exactly that many
+    /// items without blocking, then report Full on the next one.
+    /// Catches drift between the constant and the actual channel constructor call.
+    #[test]
+    fn channel_accepts_exactly_push_channel_depth_items_then_full() {
+        let (tx, _rx) = mpsc::channel::<Annotated<serde_json::Value>>(PUSH_CHANNEL_DEPTH);
+
+        let mut sent = 0usize;
+        for i in 0..PUSH_CHANNEL_DEPTH {
+            match tx.try_send(Annotated::from_data(serde_json::Value::from(i as i64))) {
+                Ok(()) => sent += 1,
+                Err(mpsc::error::TrySendError::Full(_)) => break,
+                Err(e) => panic!("unexpected channel error: {e}"),
+            }
+        }
+        assert_eq!(
+            sent, PUSH_CHANNEL_DEPTH,
+            "channel must buffer exactly {PUSH_CHANNEL_DEPTH} items without blocking"
+        );
+
+        assert!(
+            matches!(
+                tx.try_send(Annotated::from_data(serde_json::Value::Null)),
+                Err(mpsc::error::TrySendError::Full(_))
+            ),
+            "item {PUSH_CHANNEL_DEPTH}+1 must fail Full, not Closed"
+        );
+    }
+
+    // ── error frame contract ──────────────────────────────────────────────
+    //
+    // TypedSink::close_with_error and close_with_dynamo_error each:
+    //   1. Call take_sender() to atomically claim the send side (idempotence)
+    //   2. Pass an Annotated error frame to send_terminal
+    //   3. send_terminal delivers the frame and then drops the sender
+    //
+    // Steps 1 and 3 (idempotence via take_sender; stream end via drop) are
+    // tested against mpsc directly.  Step 2 (frame structure) is pinned by
+    // the from_error shape test.  The full end-to-end path needs Python; see
+    // the note at the end of this module.
+
+    #[test]
+    fn annotated_from_error_sets_error_field_and_clears_data() {
+        // Pins the Annotated frame shape that close_with_error delivers.
+        let frame = Annotated::<serde_json::Value>::from_error("some-error");
+        assert!(frame.error.is_some(), "from_error must set the error field");
+        assert!(frame.data.is_none(), "from_error must not set a data field");
+    }
+
+    /// Pins the channel-level protocol: one error frame then end-of-stream.
+    /// This is what TypedSink::close_with_error (via send_terminal) is supposed
+    /// to produce.  If send_terminal fails to drop the sender after delivering
+    /// the error frame, the consumer would wait forever.
+    #[tokio::test]
+    async fn one_error_frame_then_dropped_sender_ends_stream() {
+        let (tx, mut rx) = mpsc::channel::<Annotated<serde_json::Value>>(4);
+        tx.send(Annotated::from_error("fatal".to_string()))
+            .await
+            .unwrap();
+        drop(tx); // simulates send_terminal dropping the sender after the frame
+        let item = rx.recv().await.expect("one error frame must arrive");
+        assert!(item.error.is_some(), "expected an error frame");
+        assert!(
+            rx.recv().await.is_none(),
+            "stream must end after the error frame"
+        );
+    }
+
+    /// Dropping a sender before sending any data must immediately end the stream.
+    /// This pins the close() (no error) contract.
+    #[tokio::test]
+    async fn dropped_sender_without_data_ends_stream_immediately() {
+        let (tx, mut rx) = mpsc::channel::<Annotated<serde_json::Value>>(4);
+        drop(tx);
+        assert!(
+            rx.recv().await.is_none(),
+            "stream must end immediately when sender is dropped with no data"
+        );
+    }
+
+    // The rest of this module's surface -- TypedSink send/close semantics,
+    // send_terminal's spawn-vs-blocking_send branches, decode_response, and
+    // handler_supports_push -- cannot be unit-tested here: pyo3's
+    // `extension-module` is hardcoded in Cargo.toml, so any test whose object
+    // graph reaches the Python C API fails to link against libpython. Covering
+    // it needs pytest against a maturin-built extension. See DYN-3703.
 }

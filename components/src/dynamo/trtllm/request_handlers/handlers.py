@@ -68,9 +68,7 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
-    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
-    # inspects this signature for `response_sender`, and range_decorator
-    # needs to wrap a real async-generator function. See push_egress.py.
+    # Must stay outermost -- see push_egress.py.
     @push_egress_capable
     async def generate(
         self, request: dict, context: Context
@@ -137,9 +135,7 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
-    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
-    # inspects this signature for `response_sender`, and range_decorator
-    # needs to wrap a real async-generator function. See push_egress.py.
+    # Must stay outermost -- see push_egress.py.
     @push_egress_capable
     async def generate(
         self, request: dict, context: Context
@@ -228,9 +224,7 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
-    # inspects this signature for `response_sender`, and range_decorator
-    # needs to wrap a real async-generator function. See push_egress.py.
+    # Must stay outermost -- see push_egress.py.
     @push_egress_capable
     async def generate(
         self, request: dict, context: Context
