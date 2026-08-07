@@ -1321,8 +1321,10 @@ scheduler to stop computing for this request).
   transport layer goes away (e.g. in-flight NIXL KV transfers on
   prefill workers). Default is no-op.
 - `cleanup()` is called once on shutdown. Release all engine
-  resources. The framework guarantees `cleanup()` runs exactly once if
-  `start()` succeeded — even if registration or serve fails afterward.
+  resources. The framework guarantees `cleanup()` runs exactly once after
+  `start()` is invoked, whether `start()` succeeds or returns an error. It is
+  not called when `start()` was never invoked. Release resources allocated
+  during construction through `Drop` rather than relying on `cleanup()`.
 
 Make `cleanup()` idempotent and tolerant of being called from a
 half-initialized state. An engine that tears down NCCL groups in
