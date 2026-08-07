@@ -7,17 +7,24 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from gpu_memory_service.failover_lock import FailoverLockError
+from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+from vllm.v1.engine.exceptions import EngineDeadError
 
+import dynamo.vllm.handlers as handlers_mod
+import dynamo.vllm.worker_factory as worker_factory_mod
+from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.engine_monitor import VllmEngineMonitor
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
-    _DecodeWorkerLifecycle,
     _wait_and_load_benchmark,
+    _WorkerLifecycle,
 )
 
 pytestmark = [
@@ -40,6 +47,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "endpoint_types": "chat",
         # Pin to the real Config default: an auto-created Mock attribute is
         # truthy, which enables the GMS shadow-mode path and imports the
         # optional gpu_memory_service package (absent in some test images).
@@ -69,7 +77,7 @@ def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
     handler.cleanup.side_effect = lambda: calls.append("handler")
     engine_client = Mock()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
-    resources = _DecodeWorkerLifecycle(
+    resources = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=7.0),
         handler=handler,
@@ -87,7 +95,7 @@ def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     engine_client = Mock()
-    resources = _DecodeWorkerLifecycle(
+    resources = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=5.0),
         handler=handler,
@@ -106,7 +114,7 @@ def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
     handler.cleanup.side_effect = handler_error
     engine_client = Mock()
     engine_client.shutdown.side_effect = engine_error
-    lifecycle = _DecodeWorkerLifecycle(
+    lifecycle = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=5.0),
         handler=handler,
@@ -143,7 +151,7 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
 
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
-    assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+    assert "Failed to clean up worker after an earlier failure" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -232,6 +240,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
         component="backend",
         endpoint="generate",
         enable_rl=False,
+        gms_shadow_mode=False,
         engine_args=SimpleNamespace(enable_lora=False),
         enable_multimodal=True,
         custom_encoder_class="encoder.Backend",
@@ -245,6 +254,273 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     if failure_stage == "configure":
         handler_constructor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failover_election_retains_real_lock_through_wake(monkeypatch, tmp_path):
+    lock_path = str(tmp_path / "failover.lock")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", lock_path)
+    monkeypatch.setenv("ENGINE_ID", "2")
+    pause_controller = Mock()
+    pause_controller.pause = AsyncMock()
+    during_resume, after_return = (FlockFailoverLock(lock_path) for _ in range(2))
+    owner = None
+
+    async def resume():
+        with pytest.raises(FailoverLockError, match="Timed out acquiring flock"):
+            await during_resume.acquire(
+                "during-resume", poll_interval=0.005, timeout=0.02
+            )
+
+    pause_controller.resume = resume
+    factory = WorkerFactory(Mock(), Mock(), AsyncMock(), Mock(), Mock())
+    try:
+        was_failover, owner = await factory._wake_with_failover_lock(
+            pause_controller,
+            Mock(),
+            SimpleNamespace(gms_shadow_mode=True),
+        )
+
+        assert was_failover is False
+        assert isinstance(owner, FlockFailoverLock)
+        pause_controller.pause.assert_awaited_once_with(1)
+        pause_controller.mark_resumed.assert_called_once_with()
+        with pytest.raises(FailoverLockError, match="Timed out acquiring flock"):
+            await after_return.acquire(
+                "after-return", poll_interval=0.005, timeout=0.02
+            )
+
+        await owner.release()
+        owner = None
+        await after_return.acquire("after-release", timeout=0.1)
+    finally:
+        if owner is not None:
+            await owner.release()
+        await during_resume.release()
+        await after_return.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "handler_type", "create_method"),
+    [
+        ("decode", handlers_mod.DecodeWorkerHandler, "_create_decode_worker"),
+        ("prefill", handlers_mod.PrefillWorkerHandler, "_create_prefill_worker"),
+    ],
+)
+@pytest.mark.parametrize("failure_stage", ["before_transfer", "after_transfer"])
+async def test_shadow_monitor_cleanup_has_exactly_one_owner(
+    monkeypatch, mode, handler_type, create_method, failure_stage
+):
+    election_entered = asyncio.Event()
+    release_election = asyncio.Event()
+
+    async def blocked_election(*_args, **_kwargs):
+        election_entered.set()
+        await release_election.wait()
+        return True, Mock()
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_client = Mock(vllm_config=vllm_config)
+    prometheus_temp_dir = Mock()
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        prometheus_temp_dir,
+        Mock(),
+    )
+    early_monitor = Mock()
+    monitor_constructor = Mock(return_value=early_monitor)
+    monkeypatch.setattr(worker_factory_mod, "VllmEngineMonitor", monitor_constructor)
+    monkeypatch.setattr(handlers_mod, "VllmEngineMonitor", monitor_constructor)
+    monkeypatch.setattr(handlers_mod, "get_dp_range_for_worker", lambda _config: (0, 1))
+    monkeypatch.setattr(handlers_mod, "VllmMultimodalRequestProcessor", Mock())
+    monkeypatch.setattr(handlers_mod, "InputParamManager", Mock())
+    monkeypatch.setattr(handlers_mod, "RLRouteRegistry", Mock())
+    monkeypatch.setattr(worker_factory_mod, "get_dp_range_for_worker", lambda _: (0, 1))
+    monkeypatch.setattr(
+        worker_factory_mod, "configure_kv_event_block_size", AsyncMock()
+    )
+
+    factory = WorkerFactory(
+        Mock(return_value=engine_setup),
+        Mock(return_value=None),
+        AsyncMock(),
+        Mock(return_value=None),
+        Mock(),
+    )
+    factory._wake_with_failover_lock = blocked_election  # type: ignore[assignment]
+    factory._maybe_create_failover_metrics = Mock()  # type: ignore[assignment]
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    created_handlers = []
+
+    def fail_after_transfer(_runtime, handler, **_kwargs):
+        created_handlers.append(handler)
+        raise RuntimeError("post-transfer setup failed")
+
+    factory.register_engine_routes = fail_after_transfer  # type: ignore[assignment]
+
+    endpoint = Mock(connection_id=Mock(return_value="cid"))
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock(endpoint=Mock(return_value=endpoint))
+    config = _make_config(
+        gms_shadow_mode=True,
+        namespace="dyn",
+        component=mode,
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False, trust_remote_code=False),
+        model="model",
+        served_model_name=None,
+        served_model_aliases=[],
+        custom_encoder_class=None,
+        use_vllm_tokenizer=False,
+        frontend_decoding=False,
+        endpoint_types="chat",
+        custom_jinja_template=None,
+    )
+    shutdown_event = asyncio.Event()
+    task = asyncio.create_task(
+        getattr(factory, create_method)(runtime, config, shutdown_event, [])
+    )
+
+    await asyncio.wait_for(election_entered.wait(), timeout=1)
+    monitor_constructor.assert_called_once_with(runtime, engine_client, shutdown_event)
+    assert created_handlers == []
+    factory.register_vllm_model.assert_not_awaited()
+    endpoint.serve_endpoint.assert_not_called()
+
+    if failure_stage == "before_transfer":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert created_handlers == []
+        prometheus_temp_dir.cleanup.assert_not_called()
+    else:
+        release_election.set()
+        with pytest.raises(RuntimeError, match="post-transfer setup failed"):
+            await task
+        assert len(created_handlers) == 1
+        assert type(created_handlers[0]) is handler_type
+        assert created_handlers[0].engine_monitor is early_monitor
+        prometheus_temp_dir.cleanup.assert_called_once_with()
+
+    assert shutdown_event.is_set()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert monitor_constructor.call_count == 1
+    early_monitor.cancel.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_monitor_detects_engine_death_while_wake_is_pending(
+    monkeypatch, tmp_path
+):
+    wake_started = asyncio.Event()
+    finish_wake = asyncio.Event()
+
+    async def pending_wake():
+        wake_started.set()
+        await finish_wake.wait()
+
+    async def fail_health_check_during_wake():
+        await wake_started.wait()
+        raise EngineDeadError("engine died during wake")
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_client = Mock(
+        vllm_config=vllm_config,
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=pending_wake,
+        resume_generation=AsyncMock(),
+        check_health=fail_health_check_during_wake,
+    )
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        Mock(),
+        Mock(),
+    )
+    monitor_created = asyncio.Event()
+    monitor_holder = {}
+
+    def create_monitor(runtime, engine, shutdown_event):
+        monitor = object.__new__(VllmEngineMonitor)
+        monitor.runtime = runtime
+        monitor.engine_client = engine
+        monitor.shutdown_event = shutdown_event
+        monitor.health_config = EngineHealthMonitorConfig(
+            interval=60,
+            check_timeout=0,
+            shutdown_timeout=0,
+        )
+        monitor._shutdown_engine = MagicMock()
+        monitor._monitor_task = asyncio.create_task(monitor._check_engine_health())
+        monitor._stats_task = asyncio.get_running_loop().create_future()
+        monitor_holder["monitor"] = monitor
+        monitor_created.set()
+        return monitor
+
+    monkeypatch.setattr(worker_factory_mod, "VllmEngineMonitor", create_monitor)
+    monkeypatch.setattr(
+        worker_factory_mod,
+        "configure_kv_event_block_size",
+        AsyncMock(side_effect=RuntimeError("stop after wake")),
+    )
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", str(tmp_path / "failover.lock"))
+    factory = WorkerFactory(
+        Mock(return_value=engine_setup),
+        Mock(),
+        AsyncMock(),
+        Mock(),
+        Mock(),
+    )
+    factory._maybe_create_failover_metrics = Mock()  # type: ignore[assignment]
+    endpoint = Mock(connection_id=Mock(return_value="cid"))
+    runtime = Mock(endpoint=Mock(return_value=endpoint))
+    config = _make_config(
+        gms_shadow_mode=True,
+        namespace="dyn",
+        component="decode",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    with patch(
+        "dynamo.vllm.engine_monitor.os._exit",
+        side_effect=RuntimeError("process exit"),
+    ) as exit_process:
+        worker_task = asyncio.create_task(
+            factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+        )
+        await asyncio.wait_for(monitor_created.wait(), timeout=1)
+        await asyncio.wait_for(wake_started.wait(), timeout=1)
+        monitor = monitor_holder["monitor"]
+
+        with pytest.raises(RuntimeError, match="process exit"):
+            await monitor._monitor_task
+
+        assert not worker_task.done()
+        monitor._shutdown_engine.assert_called_once_with()
+        runtime.shutdown.assert_called_once_with()
+        exit_process.assert_called_once_with(1)
+
+        finish_wake.set()
+        with pytest.raises(RuntimeError, match="stop after wake"):
+            await worker_task
+        assert monitor._stats_task.cancelled()
 
 
 def _single_rank_benchmark_payload(
@@ -851,7 +1127,9 @@ class TestPrefillRegistrationContract:
             setup_metrics_collection_fn=Mock(),
         )
         factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
-        factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+        factory._wake_with_failover_lock = AsyncMock(  # type: ignore[assignment]
+            return_value=(False, None)
+        )
         factory.register_engine_routes = Mock()  # type: ignore[assignment]
 
         # embedding_cache_manager=None skips register_embedding_cache_metrics.
@@ -935,7 +1213,9 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         setup_metrics_collection_fn=Mock(),
     )
     factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
-    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory._wake_with_failover_lock = AsyncMock(  # type: ignore[assignment]
+        return_value=(False, None)
+    )
     factory.register_engine_routes = Mock()  # type: ignore[assignment]
 
     handler = Mock(embedding_cache_manager=None)

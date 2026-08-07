@@ -27,9 +27,11 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         endpoint: Endpoint,
         dp_rank: int = 0,
         component_gauges: Optional[LLMBackendMetrics] = None,
+        publication_gate: Optional[asyncio.Event] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
         self._endpoint = endpoint
+        self._publication_gate = publication_gate
         self.dp_rank = dp_rank
         self.component_gauges = component_gauges or LLMBackendMetrics()
         self.num_gpu_block = 1
@@ -39,6 +41,8 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     async def _create_endpoint(self) -> None:
         """Create the NATS endpoint asynchronously."""
         try:
+            if self._publication_gate is not None:
+                await self._publication_gate.wait()
             await self.inner.create_endpoint(self._endpoint)
             logging.debug("vLLM metrics publisher endpoint created")
         except Exception:
@@ -137,10 +141,14 @@ class StatLoggerFactory:
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
         embedding_worker: bool = False,
+        defer_publication: bool = False,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.embedding_worker = embedding_worker
+        self.publication_gate = asyncio.Event()
+        if not defer_publication:
+            self.publication_gate.set()
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
@@ -158,6 +166,7 @@ class StatLoggerFactory:
             endpoint=self.endpoint,
             dp_rank=dp_rank,
             component_gauges=self.component_gauges,
+            publication_gate=self.publication_gate,
         )
         self.created_logger = logger
 
@@ -174,3 +183,7 @@ class StatLoggerFactory:
     def init_publish(self) -> None:
         if self.created_logger:
             self.created_logger.init_publish()
+
+    def enable_publication(self) -> None:
+        """Allow created stat loggers to register their metrics endpoints."""
+        self.publication_gate.set()
