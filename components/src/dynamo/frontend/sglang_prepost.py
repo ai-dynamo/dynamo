@@ -1044,6 +1044,43 @@ class SglangStreamingPostProcessor:
         self._pending_decode_ids = []
         return delta_text
 
+    def _build_openai_logprobs(
+        self,
+        log_probs: list[float],
+        top_logprobs: list[list[dict[str, Any]]] | None,
+        token_ids: list[int],
+    ) -> dict[str, Any] | None:
+        if len(log_probs) != len(token_ids):
+            return None
+
+        content: list[dict[str, Any]] = []
+        for index, (token_id, logprob) in enumerate(zip(token_ids, log_probs)):
+            token = self.tokenizer.decode([token_id], skip_special_tokens=False)
+            candidates = top_logprobs[index] if top_logprobs else []
+            openai_top_logprobs = []
+            for candidate in candidates:
+                candidate_token = candidate.get("token") or ""
+                candidate_bytes = candidate.get("bytes")
+                if candidate_bytes is None and candidate_token:
+                    candidate_bytes = list(candidate_token.encode("utf-8"))
+                openai_top_logprobs.append(
+                    {
+                        "token": candidate_token,
+                        "logprob": float(candidate["logprob"]),
+                        "bytes": candidate_bytes,
+                    }
+                )
+            content.append(
+                {
+                    "token": token,
+                    "logprob": float(logprob),
+                    "bytes": list(token.encode("utf-8")) if token else None,
+                    "top_logprobs": openai_top_logprobs,
+                }
+            )
+
+        return {"content": content, "refusal": None} if content else None
+
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
     ) -> tuple[str | None, str]:
@@ -1106,6 +1143,8 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        log_probs = engine_response.get("log_probs")
+        top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
 
@@ -1114,6 +1153,11 @@ class SglangStreamingPostProcessor:
             if token_ids or finish_reason is not None
             else ""
         )
+        openai_logprobs = None
+        if log_probs is not None:
+            openai_logprobs = self._build_openai_logprobs(
+                log_probs, top_logprobs, token_ids
+            )
 
         if self._fast_plain_text:
             if delta_text:
@@ -1121,14 +1165,14 @@ class SglangStreamingPostProcessor:
                     "index": 0,
                     "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": openai_logprobs,
                 }
             elif finish_reason:
                 return {
                     "index": 0,
                     "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": openai_logprobs,
                 }
             return None
 
@@ -1345,7 +1389,7 @@ class SglangStreamingPostProcessor:
                 "index": 0,
                 "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
-                "logprobs": None,
+                "logprobs": openai_logprobs,
             }
 
         return None
