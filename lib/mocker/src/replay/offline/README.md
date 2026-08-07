@@ -150,17 +150,20 @@ pub(in crate::replay::offline) struct SimulationEvent {
 }
 
 pub(in crate::replay::offline) enum SimulationEventKind {
-    WorkerCompletion { stage, worker_idx, completed_requests, output_signals, kv_events },
+    WorkerCompletion { /* private completion payload */ },
     WorkerCompletionBatch { payloads },
-    DecodeHandoff { uuid },
+    TransferComplete { handoff_id },
     WorkerReady { stage, worker_id },
+    // Non-exhaustive: other internal event variants are omitted.
 }
 ```
 
-- `WorkerCompletion` is emitted after a worker pass is executed and applied when the harness clock reaches `pass.end_ms`. It carries the `stage` (`Aggregated`, `Prefill`, or `Decode`), `worker_idx`, `completed_requests`, `output_signals`, and router-visible `kv_events`.
+- `WorkerCompletion` is emitted after a worker pass is executed and applied when the harness clock reaches `pass.end_ms`. Its private payload carries the stage, worker identity, completed-request count, tracked scheduler outputs, lifecycle events, router-visible KV events, progress flags, optional FPM snapshot, and accept-length counters.
 - `WorkerCompletionBatch` stores the ordered rank payloads for one positive-duration attention-DP epoch in a single heap event. Each payload is still applied independently in rank order.
-- `DecodeHandoff` is used by the disaggregated harness to move a request from prefill to decode at the same logical timestamp (see below).
-- `WorkerReady` marks the point at which a worker returns to the admission pool after a pass completes.
+- `TransferComplete` marks the modeled end of a disaggregated KV transfer.
+- `WorkerReady` marks completion of configured worker startup delay. Pass completion itself is represented by `WorkerCompletion` or `WorkerCompletionBatch`.
+
+Inside the scheduler/runtime boundary, `EngineOutputs` keeps public `OutputSignal` values in their original vector and stores aggregate replay's generational request keys in a private sidecar. Aggregate replay uses those keys for release-build request-ID validation and direct lifecycle-state access without hashing the UUID for every token. Disaggregated replay and ordinary live batches have no sidecar, so their original `Vec<OutputSignal>` moves unchanged into the existing processing or publication path.
 
 ## Router Integration
 

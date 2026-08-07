@@ -838,7 +838,7 @@ mod vllm {
         let pass = core.execute_pass(&mut collector, 0.0);
 
         assert_eq!(pass.output_signals.len(), 1);
-        let terminal = &pass.output_signals[0];
+        let terminal = &pass.output_signals.as_slice()[0];
         assert_eq!(terminal.uuid, uuid);
         assert!(terminal.token_id.is_some());
         assert!(terminal.completed);
@@ -882,7 +882,7 @@ mod vllm {
                 .take(2)
                 .all(|signal| !signal.completed)
         );
-        let terminal = pass.output_signals.last().unwrap();
+        let terminal = pass.output_signals.as_slice().last().unwrap();
         assert!(terminal.completed);
         assert!(!terminal.rejected);
         assert!(!core.state().requests.contains_key(&uuid));
@@ -1377,7 +1377,7 @@ mod trtllm {
             }
             let pass = core.execute_pass(&mut collector, now_ms);
             now_ms = pass.end_ms.max(now_ms + 1.0);
-            for signal in &pass.output_signals {
+            for signal in pass.output_signals.iter() {
                 if signal.uuid == oversized && signal.completed && signal.rejected {
                     oversized_rejected = true;
                 }

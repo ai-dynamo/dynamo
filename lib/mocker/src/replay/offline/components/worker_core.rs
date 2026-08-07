@@ -3,7 +3,7 @@
 
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
-use crate::scheduler::{EngineCore, EnginePassResult, SglangCore, VllmCore};
+use crate::scheduler::{EngineCore, EnginePassResult, EngineRequest, SglangCore, VllmCore};
 
 fn record_pass(collector: &mut TraceCollector, pass: &EnginePassResult, now_ms: f64) {
     collector.on_scheduler_pass(pass, now_ms, Some(pass.token_completion_ms));
@@ -62,7 +62,9 @@ impl ReplayWorkerCore {
         &mut self,
         request: crate::common::protocols::DirectRequest,
     ) -> uuid::Uuid {
-        self.core.receive(request)
+        self.core
+            .receive_engine(EngineRequest::untracked(request))
+            .expect("ordinary request ID must be unique")
     }
 
     pub(crate) fn num_requests(&self) -> usize {
@@ -85,7 +87,7 @@ mod tests {
     use super::*;
     use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
     use crate::scheduler::vllm::MockerMetrics;
-    use crate::scheduler::{AdmissionEvent, RouterEventVisibility};
+    use crate::scheduler::{AdmissionEvent, EngineOutputs, RouterEventVisibility};
     use uuid::Uuid;
 
     #[test]
@@ -97,13 +99,13 @@ mod tests {
             end_ms: 20.0,
             token_completion_ms: 5.0,
             completed_requests: 1,
-            output_signals: vec![OutputSignal {
+            output_signals: EngineOutputs::untracked(vec![OutputSignal {
                 uuid,
                 token_id: Some(1),
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: None,
-            }],
+            }]),
             admissions: vec![AdmissionEvent {
                 uuid,
                 reused_input_tokens: 0,

@@ -429,7 +429,7 @@ mod source_holds {
         .unwrap();
 
         let first = execute(&mut core, 0.0);
-        assert!(!first.output_signals[0].completed);
+        assert!(!first.output_signals.as_slice()[0].completed);
         let active_before_terminal = core.kv_manager.num_active_blocks();
         assert!(active_before_terminal > 0);
         let expected_held_blocks = core.state.requests[&request_id]
@@ -438,7 +438,7 @@ mod source_holds {
             .div_ceil(core.args.block_size);
 
         let terminal = execute(&mut core, first.end_ms);
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert!(matches!(
             terminal.lifecycle_events.as_slice(),
             [SchedulerLifecycleEvent::SourceHeld {
@@ -502,7 +502,7 @@ mod source_holds {
 
         let first = execute(&mut core, 0.0);
         let terminal = execute(&mut core, first.end_ms);
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert!(!core.source_is_held(second_id));
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
     }
@@ -1130,6 +1130,8 @@ mod core_behavior {
             let pass = core.execute_pass(&mut collector, step as f64);
             emitted.extend(
                 pass.output_signals
+                    .into_untracked()
+                    .unwrap()
                     .into_iter()
                     .filter(|signal| signal.uuid == uuid)
                     .map(|signal| signal.token_id.expect("planned token should be present")),
@@ -1344,6 +1346,7 @@ mod core_behavior {
         let pass = core.execute_pass(&mut collector, 0.0);
         let signal = pass
             .output_signals
+            .as_slice()
             .first()
             .expect("prefill pass should emit one completed signal");
 
@@ -1369,8 +1372,8 @@ mod core_behavior {
         let pass = core.execute_pass(&mut collector, 0.0);
 
         assert_eq!(pass.output_signals.len(), 1);
-        assert_eq!(pass.output_signals[0].uuid, uuid);
-        assert!(!pass.output_signals[0].completed);
+        assert_eq!(pass.output_signals.as_slice()[0].uuid, uuid);
+        assert!(!pass.output_signals.as_slice()[0].completed);
         assert_eq!(
             core.state
                 .requests
@@ -1615,6 +1618,7 @@ mod core_behavior {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
+                replay_request_key: None,
                 sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
@@ -3142,6 +3146,7 @@ mod offload {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
+                replay_request_key: None,
                 sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens,

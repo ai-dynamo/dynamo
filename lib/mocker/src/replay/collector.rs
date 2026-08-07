@@ -1163,7 +1163,7 @@ impl TraceCollector {
         }
         if let Some(token_completion_ms) = token_completion_ms {
             self.on_output_signals(
-                &pass.output_signals,
+                pass.output_signals.as_slice(),
                 token_completion_ms,
                 pass.accept_length_output_tokens > pass.accept_length_decode_forwards,
             );
@@ -1598,6 +1598,7 @@ fn std_dev(values: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::EngineOutputs;
 
     fn build_distribution_stats_sorted(values: &[f64]) -> TraceDistributionStats {
         if values.is_empty() {
@@ -1760,7 +1761,7 @@ mod tests {
                     reused_input_tokens: 1,
                 },
             ],
-            output_signals: vec![
+            output_signals: EngineOutputs::untracked(vec![
                 OutputSignal {
                     uuid: first,
                     token_id: Some(10),
@@ -1789,7 +1790,7 @@ mod tests {
                     rejected: false,
                     handoff_delay_ms: None,
                 },
-            ],
+            ]),
             lifecycle_events: Vec::new(),
             mocker_metrics: crate::scheduler::vllm::MockerMetrics::default(),
             router_event_visibility: crate::scheduler::RouterEventVisibility::PassEnd,

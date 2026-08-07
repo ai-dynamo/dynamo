@@ -28,10 +28,10 @@ use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
-    DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
-    RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
-    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, build_fpm_snapshot,
-    capture_router_event_sink,
+    DestinationHolds, EnginePassResult, EngineRequest, MockerMetrics, PendingDestinations,
+    RemovedSource, ReplayRequestKey, RouterEventVisibility, SchedulerCommand,
+    SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion,
+    SourceHolds, build_fpm_snapshot, capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -157,13 +157,16 @@ impl SglangCore {
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
-        match self
-            .apply_command(SchedulerCommand::Submit(request))
+        self.receive_engine(EngineRequest::untracked(request))
             .expect("ordinary request ID must be unique")
-        {
-            SchedulerCommandResult::Submitted(uuid) => uuid,
-            _ => unreachable!("submit command must return a request ID"),
-        }
+    }
+
+    pub(crate) fn receive_engine(&mut self, request: EngineRequest) -> anyhow::Result<Uuid> {
+        let (mut request, replay_request_key) = request.into_parts();
+        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        request.uuid = Some(uuid);
+        self.validate_request_id(uuid)?;
+        self.submit_with_replay_key(request, replay_request_key)
     }
 
     pub(crate) fn apply_command(
@@ -184,7 +187,7 @@ impl SglangCore {
                 request.uuid = Some(uuid);
                 self.validate_request_id(uuid)?;
                 Ok(SchedulerCommandEffects::new(
-                    SchedulerCommandResult::Submitted(self.submit(request)?),
+                    SchedulerCommandResult::Submitted(self.submit_with_replay_key(request, None)?),
                 ))
             }
             SchedulerCommand::CancelRequest { request_id } => {
@@ -208,7 +211,7 @@ impl SglangCore {
                 self.validate_request_id(uuid)?;
                 self.source_holds.register(uuid, handoff_id)?;
                 let submitted = self
-                    .submit(request)
+                    .submit_with_replay_key(request, None)
                     .expect("prevalidated handoff request must submit");
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(submitted),
@@ -245,7 +248,7 @@ impl SglangCore {
                 {
                     anyhow::bail!("destination handoff {handoff_id:?} is already active");
                 }
-                let request = self.build_request(request);
+                let request = self.build_request(request, None);
                 let prompt_footprint = request
                     .prompt_len()
                     .div_ceil(self.config.block_size)
@@ -367,8 +370,12 @@ impl SglangCore {
             || self.running.iter().any(|request| request.uuid == uuid)
     }
 
-    fn submit(&mut self, request: DirectRequest) -> anyhow::Result<Uuid> {
-        let request = self.build_request(request);
+    fn submit_with_replay_key(
+        &mut self,
+        request: DirectRequest,
+        replay_request_key: Option<ReplayRequestKey>,
+    ) -> anyhow::Result<Uuid> {
+        let request = self.build_request(request, replay_request_key);
         if self.request_is_active(request.uuid) {
             anyhow::bail!("request {} is already active", request.uuid);
         }
@@ -378,7 +385,11 @@ impl SglangCore {
         Ok(uuid)
     }
 
-    fn build_request(&self, request: DirectRequest) -> SglangRequest {
+    fn build_request(
+        &self,
+        request: DirectRequest,
+        replay_request_key: Option<ReplayRequestKey>,
+    ) -> SglangRequest {
         let max_output_tokens = request
             .output_token_ids
             .as_ref()
@@ -388,7 +399,12 @@ impl SglangCore {
             max_output_tokens,
             request.output_token_ids.is_some(),
         );
-        SglangRequest::new(request, self.config.block_size, output_storage_hint)
+        SglangRequest::new_with_replay_key(
+            request,
+            self.config.block_size,
+            output_storage_hint,
+            replay_request_key,
+        )
     }
 
     fn complete_source(&mut self, request: SglangRequest) {
@@ -767,7 +783,7 @@ impl SglangCore {
         #[cfg(debug_assertions)]
         debug_assert_eq!(
             (accept_length.output_tokens, accept_length.decode_forwards),
-            crate::scheduler::accept_length_sample(&decode.output_signals)
+            crate::scheduler::accept_length_sample(decode.output_signals.as_slice())
         );
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         Ok(EnginePassResult {

@@ -10,10 +10,12 @@ use uuid::Uuid;
 use crate::cache::radix_cache::KvPageId;
 use crate::common::protocols::DirectRequest;
 use crate::kv_manager::sglang_backend::RadixRequestLease;
+use crate::scheduler::ReplayRequestKey;
 
 #[derive(Debug)]
 pub(super) struct SglangRequest {
     pub(super) uuid: Uuid,
+    pub(super) replay_request_key: Option<ReplayRequestKey>,
     pub(super) sequence_tokens: Vec<u32>,
     pub(super) prompt_len: usize,
     pub(super) max_output_tokens: usize,
@@ -24,7 +26,12 @@ pub(super) struct SglangRequest {
 }
 
 impl SglangRequest {
-    pub(super) fn new(req: DirectRequest, block_size: usize, output_storage_hint: usize) -> Self {
+    pub(super) fn new_with_replay_key(
+        req: DirectRequest,
+        block_size: usize,
+        output_storage_hint: usize,
+        replay_request_key: Option<ReplayRequestKey>,
+    ) -> Self {
         let prompt_len = req.tokens.len();
         let max_output_tokens = req
             .output_token_ids
@@ -44,6 +51,7 @@ impl SglangRequest {
 
         Self {
             uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
+            replay_request_key,
             sequence_tokens,
             prompt_len,
             max_output_tokens,
