@@ -358,9 +358,8 @@ def replay_index(block_pool, layout_id: str) -> int:
         if block_id == null_id or block_id < 0 or block_id >= len(block_pool.blocks):
             continue
         if int(_gen[block_id]) != gen:
-            reused += (
-                1  # handed out since the snapshot, so its bytes are someone else's
-            )
+            # Handed out since the snapshot, so its bytes are someone else's now.
+            reused += 1
             continue
         block = block_pool.blocks[block_id]
         if block.block_hash is not None or block.ref_cnt != 0:
