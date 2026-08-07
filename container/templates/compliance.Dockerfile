@@ -11,7 +11,9 @@
 #
 #   1. licenses          -- runs compliance.generators against the
 #                           previously-defined build stage, validates output
-#                           against policy, and stages the unified /legal tree
+#                           against policy (or records an explicitly allowed
+#                           branch-scoped failure), and stages the unified /legal
+#                           tree
 #                           (flat NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json).
 #   2. compliance_artifact -- FROM scratch; exposes the unified /legal tree for
 #                           CI extraction as a single `-compliance` artifact.
@@ -118,10 +120,37 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
 # Policy gate runs on the single unified CSV (its `ecosystem` column scopes each
-# row), replacing the per-ecosystem loop. Non-zero exit fails the build.
-RUN python3 -m compliance.policy.validate \
-        --policy /opt/compliance/policy/licenses.toml \
-        --input /legal/osrb-deps.csv
+# row), replacing the per-ecosystem loop. Validation always runs so violations
+# remain visible in the build log. Non-zero exit fails the build unless a caller
+# explicitly allows it for a branch-scoped CI exception; suppressed failures
+# leave a marker in /legal as part of the shipped compliance inventory.
+# The validator returns 1 for policy violations and 2 for a missing input. The
+# message check distinguishes a policy verdict from another exit-1 Python error.
+ARG ALLOW_LICENSE_POLICY_FAILURE=false
+RUN set +e; \
+    VALIDATION_LOG="/tmp/license-policy-validation.log"; \
+    python3 -m compliance.policy.validate \
+            --policy /opt/compliance/policy/licenses.toml \
+            --input /legal/osrb-deps.csv \
+            > "${VALIDATION_LOG}" 2>&1; \
+    POLICY_STATUS="$?"; \
+    cat "${VALIDATION_LOG}"; \
+    set -e; \
+    if [ "${POLICY_STATUS}" -ne 0 ]; then \
+        if [ "${POLICY_STATUS}" -eq 1 ] \
+            && grep -q '^License validation failed:' "${VALIDATION_LOG}" \
+            && [ "${ALLOW_LICENSE_POLICY_FAILURE}" = "true" ]; then \
+            { \
+                printf '%s\n\n' \
+                    "License-policy failure allowed for {{ framework }}-{{ target }}{% if make_efa %}-efa{% endif %} by ALLOW_LICENSE_POLICY_FAILURE=true."; \
+                cat "${VALIDATION_LOG}"; \
+            } > /legal/LICENSE-POLICY-FAILURE-ALLOWED.txt; \
+            echo "WARNING: license-policy failure allowed for {{ framework }}-{{ target }}{% if make_efa %}-efa{% endif %}"; \
+        else \
+            exit "${POLICY_STATUS}"; \
+        fi; \
+    fi; \
+    rm -f "${VALIDATION_LOG}"
 
 
 #######################################
