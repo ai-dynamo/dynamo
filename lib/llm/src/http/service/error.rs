@@ -32,7 +32,7 @@ fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
 /// Overload / admission-control rejection status. Reads
 /// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
 /// environment is fixed at runtime and this is on the rejection path.
-pub fn overload_status_code() -> StatusCode {
+pub(crate) fn overload_status_code() -> StatusCode {
     static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
         let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
         parse_overload_status_code(value.as_deref())
@@ -411,8 +411,8 @@ impl HttpProblem {
         &self.diagnostic
     }
 
-    pub(crate) fn details(&self) -> Option<Box<Value>> {
-        self.details.clone()
+    pub(crate) fn details(&self) -> Option<&Value> {
+        self.details.as_deref()
     }
 
     pub(crate) fn metric_type(&self) -> MetricErrorType {
@@ -720,7 +720,7 @@ mod tests {
             INTERNAL_ERROR_MESSAGE,
             "busy".to_string(),
         );
-        assert_eq!(overloaded.status().as_u16(), 529);
+        assert_eq!(overloaded.status(), overload_status_code());
         assert_eq!(overloaded.kind(), HttpProblemKind::Overloaded);
         let unavailable = HttpProblem::from_dynamo_error(
             &DynamoError::builder()
