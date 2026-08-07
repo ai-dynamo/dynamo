@@ -1423,6 +1423,9 @@ class MetricCheck:
     error_msg: Callable[[str, Any], str]
     success_msg: Callable[[str, Any], str]
     multiline: bool = False
+    # Skip (don't fail) if the metric is absent or non-numeric — for worker-type-
+    # dependent gauges (e.g. decode KV stats a prefill worker reports as NaN).
+    optional: bool = False
 
 
 @dataclass
@@ -1513,6 +1516,11 @@ class MetricsPayload(BasePayload):
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
     check_lifecycle_gauges: bool = False
+    # True only for a disaggregated prefill worker, which doesn't emit the
+    # decode-side KV gauges (absent from /metrics); aggregated scenarios keep
+    # requiring them. Remove once the prefill worker populates them
+    # (https://github.com/ai-dynamo/dynamo/issues/11919).
+    optional_kvstats: bool = False
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -1581,6 +1589,7 @@ class MetricsPayload(BasePayload):
                 validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+                optional=self.optional_kvstats,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
@@ -1590,6 +1599,7 @@ class MetricsPayload(BasePayload):
                     f"{name} should be between 0.0 and 1.0, but got {value}"
                 ),
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+                optional=self.optional_kvstats,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.model_info.LOAD_TIME_SECONDS}",
@@ -1668,6 +1678,11 @@ class MetricsPayload(BasePayload):
             else:
                 # Standard single-value metric check
                 if metric.name not in content:
+                    if metric.optional:
+                        logger.info(
+                            "Skipping optional metric '%s' (absent)", metric.name
+                        )
+                        continue
                     raise AssertionError(
                         f"Metric '{metric.name}' not found in metrics output"
                     )
@@ -1675,6 +1690,12 @@ class MetricsPayload(BasePayload):
                 pattern = metric.pattern(metric.name)
                 matches = re.findall(pattern, content)
                 if not matches:
+                    if metric.optional:
+                        logger.info(
+                            "Skipping optional metric '%s' (no parseable value, e.g. NaN)",
+                            metric.name,
+                        )
+                        continue
                     raise AssertionError(
                         f"Could not parse value for metric '{metric.name}'"
                     )

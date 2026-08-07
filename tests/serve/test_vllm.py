@@ -371,6 +371,33 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_lmcache": VLLMConfig(
+        name="disaggregated_lmcache",
+        directory=vllm_dir,
+        script_name="disagg_lmcache.sh",
+        marks=[
+            pytest.mark.lmcache,
+            _xfail_lmcache_upstream_container(),
+            pytest.mark.gpu_2,
+            # 2 workers on separate GPUs + a 20s startup sleep; generous over ~200s.
+            pytest.mark.timeout(700),
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            # LMCache lives on the prefill worker, which doesn't emit the
+            # decode-side KV gauges, so relax those two here only.
+            metric_payload_default(
+                min_num_requests=6,
+                backend="lmcache",
+                port=DefaultPort.SYSTEM2.value,
+                optional_kvstats=True,
+            ),
+        ],
+    ),
     "disaggregated_same_gpu": VLLMConfig(
         name="disaggregated_same_gpu",
         directory=vllm_dir,
