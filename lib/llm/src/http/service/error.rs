@@ -20,6 +20,12 @@ struct BackendHttpPayload {
     message: String,
 }
 
+#[derive(serde::Deserialize)]
+struct LegacyBackendHttpPayload {
+    code: Option<u16>,
+    message: Option<String>,
+}
+
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
     let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
     value
@@ -226,13 +232,7 @@ impl HttpProblem {
     /// Classify a backend stream event through the same logical nested-error
     /// flow as `from_error`; the event's outer typed validation is authoritative,
     /// while nested operational failures retain their retry/cancellation meaning.
-    pub(crate) fn from_annotated<T>(event: &Annotated<T>) -> Option<Self> {
-        #[derive(serde::Deserialize)]
-        struct ErrorPayload {
-            message: Option<String>,
-            code: Option<u16>,
-        }
-
+    pub(crate) fn from_annotated<T: serde::Serialize>(event: &Annotated<T>) -> Option<Self> {
         if event.is_error() {
             if let Some(error) = event.error.as_ref() {
                 return Some(Self::from_error_with_validation_scope(
@@ -249,32 +249,53 @@ impl HttpProblem {
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or_else(|| "unspecified error".to_string());
 
-            // Compatibility for legacy error events that carried a JSON body
-            // in their comment instead of the structured `error` field.
-            if let Ok(payload) = serde_json::from_str::<ErrorPayload>(&diagnostic) {
-                let status = payload
-                    .code
-                    .and_then(|code| StatusCode::from_u16(code).ok())
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let message = payload.message.unwrap_or_else(|| diagnostic.clone());
-                return Some(Self::from_backend_status(status, message, diagnostic));
+            // Compatibility with v1.3 workers during v1.4 rolling upgrades.
+            // TODO(v1.5): Remove when v1.3 leaves the N-1 compatibility window.
+            if let Some(problem) = Self::from_legacy_http_json(diagnostic.clone()) {
+                return Some(problem);
             }
 
             return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
         }
 
-        // Legacy backends used a comment-only, otherwise empty annotation as
-        // an error marker. Preserve that signal, but never expose or interpret
-        // the untyped comment as a client-safe status/message.
-        if event.data.is_none()
-            && event.event.is_none()
-            && let Some(comments) = event.comment.as_ref()
+        // Compatibility with v1.3 workers during v1.4 rolling upgrades: older
+        // streams may carry HTTP errors in data or an untagged JSON comment.
+        // TODO(v1.5): Remove when v1.3 leaves the N-1 compatibility window.
+        if let Some(data) = event.data.as_ref()
+            && let Ok(diagnostic) = serde_json::to_string(data)
+            && let Some(problem) = Self::from_legacy_http_json(diagnostic)
+        {
+            return Some(problem);
+        }
+
+        if let Some(comments) = event.comment.as_ref()
             && !comments.is_empty()
         {
-            return Some(Self::internal(INTERNAL_ERROR_MESSAGE, comments.join(", ")));
+            let diagnostic = comments.join(", ");
+            if let Some(problem) = Self::from_legacy_http_json(diagnostic.clone()) {
+                return Some(problem);
+            }
+
+            // Legacy backends also used a comment-only, otherwise empty
+            // annotation as an error marker. Preserve that signal, but never
+            // expose an unstructured comment as a client-safe message.
+            if event.data.is_none() && event.event.is_none() {
+                return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
+            }
         }
 
         None
+    }
+
+    fn from_legacy_http_json(diagnostic: String) -> Option<Self> {
+        let payload = serde_json::from_str::<LegacyBackendHttpPayload>(&diagnostic).ok()?;
+        let code = payload.code?;
+        if code < 400 {
+            return None;
+        }
+        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let message = payload.message.unwrap_or_else(|| diagnostic.clone());
+        Some(Self::from_backend_status(status, message, diagnostic))
     }
 
     pub(crate) fn from_backend_status(
@@ -708,6 +729,54 @@ mod tests {
             assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
         }
+    }
+
+    #[test]
+    fn legacy_data_and_untagged_comment_errors_remain_supported() {
+        let cases = [
+            (
+                "data payload",
+                Annotated {
+                    data: Some(serde_json::json!({
+                        "code": 415,
+                        "message": "unsupported media type",
+                    })),
+                    id: None,
+                    event: None,
+                    comment: None,
+                    error: None,
+                },
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported media type",
+            ),
+            (
+                "untagged comment",
+                Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("legacy.backend.annotation".to_string()),
+                    comment: Some(vec![
+                        r#"{"code":400,"message":"bad prompt","type":"Bad Request"}"#.to_string(),
+                    ]),
+                    error: None,
+                },
+                StatusCode::BAD_REQUEST,
+                "bad prompt",
+            ),
+        ];
+
+        for (shape, event, expected_status, expected_message) in cases {
+            let problem = HttpProblem::from_annotated(&event)
+                .unwrap_or_else(|| panic!("{shape} must remain an error"));
+            assert_eq!(problem.status(), expected_status, "{shape}");
+            assert_eq!(problem.message(), expected_message, "{shape}");
+        }
+
+        let normal = Annotated::from_data(serde_json::json!({
+            "code": 200,
+            "message": "normal response",
+        }));
+        assert!(HttpProblem::from_annotated(&normal).is_none());
     }
 
     #[test]
