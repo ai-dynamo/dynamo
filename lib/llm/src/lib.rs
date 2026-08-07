@@ -18,6 +18,7 @@ pub mod fpm_publisher;
 pub mod fpm_trace;
 pub mod frontend_config;
 pub mod grpc;
+mod hf_runtime;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;

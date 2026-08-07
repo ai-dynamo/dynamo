@@ -5,7 +5,8 @@ use dynamo_llm::common::checked_file::CheckedFile;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use dynamo_llm::tokenizers::{
-    BasetenTokenizer, EncodeSegment, HuggingFaceTokenizer, TikTokenTokenizer, traits::Encoder,
+    BasetenTokenizer, EncodeSegment, Encoding, HuggingFaceTokenizer, TikTokenTokenizer,
+    traits::{Decoder, Encoder},
 };
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
@@ -68,6 +69,32 @@ async fn test_tokenizer_from_hf_like_local_repo() {
         TokenizerKind::HfTokenizerJson(_) => (),
         TokenizerKind::TikTokenModel(_) => panic!("Expected HfTokenizerJson, got TikTokenModel"),
     }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_default_hf_model_card_matches_hf_encode_and_decode() {
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
+        let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
+        let production = mdc.tokenizer().unwrap();
+        let direct = HuggingFaceTokenizer::from_file(&format!("{HF_PATH}/tokenizer.json")).unwrap();
+        let prompt = "Hello, tokenizer!";
+
+        let actual = production.encode(prompt).unwrap();
+        let expected = direct.encode(prompt).unwrap();
+        assert!(
+            matches!(actual, Encoding::Sp(_)),
+            "the default runtime path must return token IDs without offset data"
+        );
+        assert_eq!(actual.token_ids(), expected.token_ids());
+        assert_eq!(
+            production
+                .decode(actual.token_ids(), false)
+                .unwrap()
+                .as_str(),
+            direct.decode(expected.token_ids(), false).unwrap().as_str()
+        );
+    });
 }
 
 #[test]

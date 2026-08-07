@@ -177,6 +177,9 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
+hf-tokenizers = { package = "tokenizers", git = "https://github.com/huggingface/tokenizers.git", rev = "f54e490a44d6502401cdd0932eb9377875fe2317", default-features = false, features = [
+  "onig",
+] }
 
 # backend
 galil-seiferas = { version = "0.1" }
