@@ -633,7 +633,12 @@ impl OpenAIPreprocessor {
         let mut sampling_passthrough = serde_json::Map::new();
 
         if let Some(fields) = request.unsupported_fields() {
-            for key in ["detokenize", "allowed_token_ids", "bad_words_token_ids"] {
+            for key in [
+                "detokenize",
+                "allowed_token_ids",
+                "bad_words_token_ids",
+                "logprob_token_ids",
+            ] {
                 if let Some(value) = fields.get(key) {
                     sampling_passthrough.insert(key.to_string(), value.clone());
                 }
@@ -5031,6 +5036,7 @@ mod tests {
             "detokenize": false,
             "allowed_token_ids": [10, 11],
             "bad_words_token_ids": [[12, 13]],
+            "logprob_token_ids": [14, 15],
             "nvext": {
                 "cache_salt": "step_7",
                 "extra_fields": ["completion_token_ids"],
@@ -5062,6 +5068,10 @@ mod tests {
         assert_eq!(
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
+        );
+        assert_eq!(
+            extra_args["sampling_options"]["logprob_token_ids"],
+            serde_json::json!([14, 15])
         );
     }
 
