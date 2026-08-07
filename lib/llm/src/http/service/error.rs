@@ -181,8 +181,22 @@ impl HttpProblem {
             current = error.source();
         }
 
-        // For typed failures, the outermost category owns classification; an
-        // invalid-argument cause must not downgrade an outer unavailable error.
+        // Preserve the existing handler precedence for typed failures anywhere
+        // in the chain. In particular, an untyped wrapper must not hide an
+        // overload, unavailable, or cancellation signal.
+        for error_type in [
+            DynamoErrorType::ResourceExhausted,
+            DynamoErrorType::Unavailable,
+            DynamoErrorType::InvalidArgument,
+            DynamoErrorType::Backend(BackendError::InvalidArgument),
+            DynamoErrorType::Cancelled,
+        ] {
+            if let Some(dynamo_error) = find_dynamo_error_in_chain(err, error_type) {
+                return Self::from_dynamo_error(dynamo_error, internal_message, diagnostic);
+            }
+        }
+
+        // All other typed failures retain outermost-error classification.
         let mut current = Some(err);
         while let Some(error) = current {
             if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
@@ -395,6 +409,22 @@ impl HttpProblem {
     }
 }
 
+fn find_dynamo_error_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+    error_type: DynamoErrorType,
+) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>()
+            && dynamo_error.error_type() == error_type
+        {
+            return Some(dynamo_error);
+        }
+        current = error.source();
+    }
+    None
+}
+
 #[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
 fn metric_type_for_kind(kind: HttpProblemKind) -> MetricErrorType {
     match kind {
@@ -506,6 +536,42 @@ mod tests {
                 value,
                 "expected {value} to be preserved"
             );
+        }
+    }
+
+    #[test]
+    fn nested_operational_errors_preserve_classification() {
+        for (error_type, expected_kind, expected_status) in [
+            (
+                DynamoErrorType::ResourceExhausted,
+                HttpProblemKind::Overloaded,
+                overload_status_code(),
+            ),
+            (
+                DynamoErrorType::Unavailable,
+                HttpProblemKind::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                DynamoErrorType::Cancelled,
+                HttpProblemKind::Cancelled,
+                StatusCode::from_u16(499).unwrap(),
+            ),
+        ] {
+            let error = DynamoError::builder()
+                .error_type(DynamoErrorType::Unknown)
+                .message("outer wrapper")
+                .cause(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message("nested operational failure")
+                        .build(),
+                )
+                .build();
+
+            let problem = HttpProblem::from_error(&error, "request failed");
+            assert_eq!(problem.kind(), expected_kind);
+            assert_eq!(problem.status(), expected_status);
         }
     }
 
