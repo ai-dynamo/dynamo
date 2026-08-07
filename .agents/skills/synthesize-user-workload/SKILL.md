@@ -61,6 +61,14 @@ Ask only for blocking facts that remain unknown or contradictory after reading a
 - Accept natural-language answers; do not make the user author YAML.
 - Do not ask for secret values, kubeconfig contents, registry credentials, or Kubernetes Secret data.
 - Do not add a ceremonial confirmation round when the user's message already provides an unambiguous value.
+- When the user supplies resource limits — a ceiling on total concurrent GPU use, or knobs they forbid changing —
+  record them in the contract's `resources` block. Ask about limits only when the run's scope makes them blocking
+  (for example, when architectural changes such as replica scaling or disaggregation are in scope and the ceiling
+  determines what may be proposed). Candidates run serially under the current iteration model; parallel candidate
+  execution is not supported.
+- When the user's production deployment shape differs from the unit under test (for example, fleet-level traffic
+  numbers but a single-replica test deployment), derive the per-unit load explicitly and confirm it with the user
+  before recording it.
 
 If blocking facts remain, return the questions to the parent and stop without handing work to a downstream role.
 
@@ -118,6 +126,28 @@ Before finalizing:
 
 Do not overwrite the contract after handoff to `recipe-deployer`. A different performance question may use a new
 benchmark series within this contract; a material change to the user workload requires a new experiment root.
+
+## Contract Corrections
+
+A correction of fact is the user fixing a misreported description of the same workload (a wrong traffic number, a
+fleet-level figure that should have been per-replica, a mistaken SLO value).
+
+**Before handoff to `recipe-deployer`**: the contract is still this skill's working file; amend it, note the
+correction inline, and recompute its SHA256.
+
+**After handoff**: the contract and its hash are frozen and historical artifacts reference them; do not mutate either.
+Instead:
+
+1. Start a new experiment root via this skill, carrying the corrected values forward and re-capturing the canonical
+   DGD copy there.
+2. Write one append-only supersedence marker in the old root, `<OLD_EXP_ROOT>/SUPERSEDED`, recording the corrected
+   field(s), the reason, the timestamp, and the new `EXP_ROOT`. Do not edit or delete any other artifact in the old
+   root: its runs remain valid evidence about the conditions they actually measured.
+3. Re-establish the baseline in the new root before proposing any candidate. Prior conclusions do not carry over;
+   they may be cited as evidence about the superseded conditions.
+
+This makes a post-handoff correction operationally identical to a material workload change (both open a new root);
+the distinction is recorded by the SUPERSEDED marker, not by editing frozen files.
 
 ## Return
 

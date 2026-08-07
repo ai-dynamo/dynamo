@@ -65,6 +65,10 @@ preferences:
   framework: ""                    # vLLM, SGLang, or TRT-LLM
   mode: ""                         # agg, disagg
 
+resources:
+  gpu_ceiling: null                # maximum total GPUs the user authorizes this run to hold at once
+  pinned: []                       # configuration knobs the user forbids changing (e.g. ["mode", "precision"])
+
 objectives:
   ttft_ms_p95_max: null            # optional time to first token
   itl_ms_p95_max: null             # optional inter-token-latency
@@ -92,6 +96,11 @@ created_at: ""
 - Require `deployment.dgd_path` to resolve to `<EXP_ROOT>/inputs/user_provided_dgd.yaml`, and require
   `deployment.dgd_sha256` to match that file.
 - `kube_context` and `namespace` are required. The namespace must already exist.
+- Treat `resources.gpu_ceiling` as authorization, not entitlement: every GPU-consuming experiment still requires its
+  own evidence and adversarial review. `hardware[]` describes what the workload serves on; `gpu_ceiling` bounds the
+  run's total concurrent GPU holdings and must be at least the assigned DGD's total request. When unset, the assigned
+  DGD's own footprint is the bound. `hypothesis-challenger` must reject candidates that change a `pinned` knob or
+  exceed `gpu_ceiling`; `deploy-dynamo-recipe` preflight must verify both before mutation.
 - `storage_class` is optional when the required PVC already exists or a suitable cluster default is known. If the run
   must create a PVC and no suitable class can be determined safely, return a focused question to the user.
 - Token lengths are optional customer-provided traffic hints, not required benchmark keys. Prefer real traces or

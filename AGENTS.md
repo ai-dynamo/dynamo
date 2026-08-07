@@ -66,6 +66,18 @@ exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hoo
 `validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
 a maintainer comments `/nvskills-ci` on the PR.
 
+## Improving These Instructions
+
+If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
+this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
+write and requires operator consent. Rules:
+
+1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
+2. Prepare at most one issue per optimization session; batch findings into it.
+3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
+4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
+   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
+
 ## Optimization Role Dispatch
 
 When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
