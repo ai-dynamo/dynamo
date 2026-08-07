@@ -230,6 +230,11 @@ def test_prompt_logprobs_completion_returns_none_when_absent():
     assert extract_prompt_logprobs_from_completion_output(output) is None
 
 
+def test_prompt_logprobs_completion_returns_none_when_empty():
+    output = SimpleNamespace(prompt_logprobs=[])
+    assert extract_prompt_logprobs_from_completion_output(output) is None
+
+
 def test_prompt_logprobs_completion_preserves_none_bos_position():
     # vLLM emits `None` at index 0 (no logprob for the very first token).
     output = SimpleNamespace(
