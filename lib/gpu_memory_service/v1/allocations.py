@@ -20,7 +20,7 @@ class GMSAllocationManager:
         self._granularity = int(self._vmm.get_allocation_granularity(device))
         if self._granularity <= 0:
             raise ValueError("allocation granularity must be positive")
-        self._allocations: dict[str, int] = {}
+        self._allocations: dict[str, tuple[int, int]] = {}
         self._lock = threading.Lock()
 
     def allocate(self, allocation_id: str, aligned_size: int) -> None:
@@ -36,16 +36,16 @@ class GMSAllocationManager:
             )
             if not allocated:
                 raise MemoryError(f"cannot allocate {aligned_size} GPU bytes")
-            self._allocations[allocation_id] = int(handle)
+            self._allocations[allocation_id] = (int(handle), aligned_size)
 
     def export(self, allocation_id: str) -> int:
         with self._lock:
-            handle = self._get(allocation_id)
+            handle, _aligned_size = self._get(allocation_id)
             return int(self._vmm.export_to_shareable_handle(handle))
 
     def free(self, allocation_id: str) -> None:
         with self._lock:
-            handle = self._get(allocation_id)
+            handle, _aligned_size = self._get(allocation_id)
             self._vmm.release(handle)
             del self._allocations[allocation_id]
 
@@ -53,12 +53,21 @@ class GMSAllocationManager:
         with self._lock:
             allocation_ids = tuple(self._allocations)
             for allocation_id in allocation_ids:
-                handle = self._allocations[allocation_id]
+                handle, _aligned_size = self._allocations[allocation_id]
                 self._vmm.release(handle)
                 del self._allocations[allocation_id]
             return len(allocation_ids)
 
-    def _get(self, allocation_id: str) -> int:
+    def snapshot(self) -> tuple[tuple[str, int], ...]:
+        with self._lock:
+            return tuple(
+                (allocation_id, aligned_size)
+                for allocation_id, (_handle, aligned_size) in sorted(
+                    self._allocations.items()
+                )
+            )
+
+    def _get(self, allocation_id: str) -> tuple[int, int]:
         if not allocation_id:
             raise RuntimeError("allocation ID must not be empty")
         try:
