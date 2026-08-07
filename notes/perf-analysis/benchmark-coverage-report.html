@@ -1,0 +1,240 @@
+<!doctype html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dynamo benchmarking — three-tier coverage</title>
+<style>
+  :root{
+    --surface:#fcfcfb; --plane:#f9f9f7;
+    --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,0.10);
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b; --na:#898781;
+    --goodT:#e4f6ef; --warningT:#fdf3dd; --criticalT:#fbeaea; --naT:#f2f1ee;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#1a1a19; --plane:#0d0d0d;
+      --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10);
+      --good:#0ca30c; --warning:#fab219; --critical:#d03b3b; --na:#898781;
+      --goodT:#123027; --warningT:#332813; --criticalT:#3a1c1c; --naT:#252523;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:40px 28px 72px;
+    background:var(--plane); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    font-size:14px; line-height:1.55;
+  }
+  main{max-width:1120px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 8px}
+  .stamp{color:var(--muted);font-size:11.5px;margin:0 0 32px;font-variant-numeric:tabular-nums}
+  h2{font-size:17px;margin:40px 0 4px;letter-spacing:-.005em}
+  h2 .n{color:var(--muted);font-weight:400;margin-right:8px}
+  .lede{color:var(--ink2);margin:0 0 18px;max-width:76ch}
+  section{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:22px 24px;margin-bottom:22px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--ink2);border-bottom:1px solid var(--axis);padding:7px 10px;font-size:12px;letter-spacing:.02em}
+  td{padding:7px 10px;border-bottom:1px solid var(--grid);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--naT);padding:1px 5px;border-radius:4px;color:var(--ink2)}
+  .tierhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:2px}
+  .pill{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--axis);border-radius:100px;padding:2px 9px}
+  /* coverage matrix */
+  .matrix{width:100%;border-collapse:separate;border-spacing:2px;font-size:12.5px}
+  .matrix th.stage{text-align:left;width:190px;font-weight:600;color:var(--ink);border:none;padding:8px 10px}
+  .matrix th.tier{text-align:center;font-weight:600;color:var(--ink2);border:none;padding:6px 8px;font-size:11.5px;letter-spacing:.03em}
+  .matrix td{border:none;border-radius:6px;padding:9px 10px;text-align:center;font-size:11.5px;font-weight:600;line-height:1.3}
+  .matrix td small{display:block;font-weight:400;font-size:10.5px;opacity:.85;margin-top:2px}
+  .c-good{background:var(--goodT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--good)}
+  .c-warning{background:var(--warningT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--warning)}
+  .c-critical{background:var(--criticalT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--critical)}
+  .c-na{background:var(--naT);color:var(--muted);box-shadow:inset 0 0 0 1.5px var(--axis)}
+  .glyph{font-weight:700;margin-right:4px}
+  .stagecell{background:var(--naT);border-radius:6px;text-align:left!important;font-weight:600;color:var(--ink)}
+  .stagecell small{display:block;font-weight:400;color:var(--muted);font-size:10.5px;margin-top:1px}
+  /* flow strip */
+  .flow{display:flex;gap:4px;align-items:stretch;margin:6px 0 20px;flex-wrap:wrap}
+  .flow .step{flex:1 1 96px;min-width:96px;border-radius:6px;padding:8px 8px 9px;font-size:11px;font-weight:600;text-align:center;line-height:1.25}
+  .flow .step small{display:block;font-weight:400;font-size:10px;opacity:.8;margin-top:2px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--grid);font-size:11.5px;color:var(--ink2)}
+  .legend .k{display:flex;align-items:center;gap:6px}
+  .sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+  .note{font-size:12px;color:var(--ink2);background:var(--naT);border-left:2px solid var(--axis);padding:10px 14px;border-radius:0 6px 6px 0;margin:16px 0 0}
+  .note strong{color:var(--ink)}
+  ul{margin:8px 0 0;padding-left:20px;color:var(--ink2)}
+  li{margin:5px 0}
+  li strong{color:var(--ink)}
+</style>
+</head>
+<body>
+<main>
+
+  <h1>Dynamo benchmarking — three-tier coverage</h1>
+  <p class="sub">What exists at each tier, what each covers, and where the request path is unmeasured.</p>
+  <p class="stamp">Verified against origin/main @ cd6b63b0cc · working draft, not published guidance</p>
+
+  <section>
+    <h2><span class="n">§1</span>The thesis</h2>
+    <p class="lede">Layers are not a design principle to adopt up front. End-to-end measurement is primary; a component harness is justified only where e2e provably cannot answer the question. There is exactly one such case, and it is structural rather than a matter of resolution.</p>
+    <div class="note"><strong>In a saturated system, only the bottleneck's capacity is observable.</strong> Everything else is idle-waiting, so its ceiling is invisible however finely you instrument. E2E names the <em>current</em> bottleneck; component isolation names the <em>next</em> one. The repo already recorded this: against mock workers the frontend sits at 60–85% of its pinned cores, so frontend optimizations "show flat e2e throughput."</div>
+  </section>
+
+  <section>
+    <div class="tierhead"><h2><span class="n">§2</span>Tier 1 — End-to-end</h2><span class="pill">Primary · headline numbers</span></div>
+    <p class="lede">Answers: what is the system doing now, and where does the time go?</p>
+    <table>
+      <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td><code>recipes/**/perf.yaml</code> — 33 files</td><td>Whole path, client-observed</td><td><span class="glyph" style="color:var(--critical)">✕</span>Client-side only. <strong>0 of 33</strong> enable <code>DYN_REQUEST_TRACE</code>, <code>OTEL_EXPORT_ENABLED</code>, <code>DYN_FPM_TRACE</code>, or server metrics; several pass <code>--no-server-metrics</code></td></tr>
+        <tr><td>Benchmarking with AIPerf (CLI + Kubernetes)</td><td>Whole path, client-observed</td><td><span class="glyph" style="color:var(--good)">✔</span>Documented and used</td></tr>
+        <tr><td>Request traces → Perfetto</td><td>Per-request stage breakdown</td><td><span class="glyph" style="color:var(--critical)">✕</span>Exists in the runtime, wired into <strong>no</strong> benchmark</td></tr>
+        <tr><td>Prometheus + Grafana disagg dashboard</td><td>Component latency, queueing, KV</td><td><span class="glyph" style="color:var(--critical)">✕</span>Exists, not collected during benchmark runs</td></tr>
+      </tbody>
+    </table>
+    <div class="note">Tracing and metrics are <strong>launch-time</strong> decisions. Miss them and the run is lost — and every recipe misses them by default, so each published number is an opaque interval with no server-side decomposition.</div>
+  </section>
+
+  <section>
+    <div class="tierhead"><h2><span class="n">§3</span>Tier 2 — Subsystem</h2><span class="pill">Ceiling · isolation</span></div>
+    <p class="lede">Answers: what is this part capable of, independent of what currently constrains it?</p>
+    <table>
+      <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>benchmarks/frontend/scripts/</code></td><td>Ingress → preprocess → route → dispatch, engine mocked</td><td>Sweeps, Kubernetes DGD executor, BPF, flamegraphs, Nsight</td></tr>
+        <tr><td><code>.agents/skills/dynamo-frontend-benchmark/</code></td><td>Same topology</td><td>Methodology, pitfalls, CPU isolation. <strong>Alternative, not a stack</strong> — both bind :8000</td></tr>
+        <tr><td>Offline replay — <code>python -m dynamo.replay</code></td><td>Route + schedule + KV accounting, real router code</td><td>Deterministic, GPU-free, faster than real time</td></tr>
+        <tr><td><code>benchmarks/router/</code></td><td>KV router under varying prefix reuse</td><td>Prefix-ratio, trace replay, agent, priority</td></tr>
+        <tr><td>nixlbench</td><td>Interconnect alone</td><td>VRAM↔VRAM transfer ceiling</td></tr>
+        <tr><td><code>benchmarks/multimodal/</code></td><td>Encode/prefill/decode, embedding transfer</td><td>Sweep harness + dataset generation</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="tierhead"><h2><span class="n">§4</span>Tier 3 — Micro</h2><span class="pill">CI-gateable · attributable</span></div>
+    <p class="lede">Answers: what does this function cost? Ten criterion benches; nine have a single primary author.</p>
+    <table>
+      <thead><tr><th style="width:44%">Bench</th><th style="width:20%">Stage</th><th>Measures</th></tr></thead>
+      <tbody>
+        <tr><td><code>llm/benches/tokenizer_simple.rs</code></td><td>Preprocess</td><td>encode/decode, HF + tiktoken</td></tr>
+        <tr><td><code>llm/benches/tokenizer_dataset.rs</code></td><td>Preprocess</td><td>sequential vs batched</td></tr>
+        <tr><td><code>kv-router/benches/tracking_hash.rs</code></td><td>Route</td><td>block hashing</td></tr>
+        <tr><td><code>kv-router/benches/policy_queue.rs</code></td><td>Route</td><td>scheduling queue, pop + drain</td></tr>
+        <tr><td><code>llm/benches/kv_router_bench.rs</code></td><td>Route</td><td><span class="glyph" style="color:var(--critical)">✕</span><strong>No bench functions found</strong> — likely dead, still compile-gated in CI</td></tr>
+        <tr><td><code>kvbm-logical/benches/block_manager.rs</code></td><td>KV management</td><td>match active/inactive, bulk drop</td></tr>
+        <tr><td><code>runtime/benches/tcp_codec_perf.rs</code></td><td>Transport</td><td>request/response encode + decode</td></tr>
+        <tr><td><code>llm/benches/transfer_context_v2.rs</code></td><td>Transport</td><td>blocking, async, concurrent</td></tr>
+        <tr><td><code>runtime/benches/compute_pool_overhead.rs</code></td><td>Runtime</td><td>compute pool, <code>block_in_place</code></td></tr>
+        <tr><td><code>llm/benches/request_trace_finish_metadata.rs</code></td><td>Postprocess</td><td>finish metadata, tool calls</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="n">§5</span>Inference path — coverage by tier</h2>
+    <p class="lede">Each stage of the request path, scored per tier. Coverage tracks authorship, not the path: stages are covered where someone building them happened to add a benchmark.</p>
+    <p class="lede" style="font-size:12.5px;color:var(--muted);margin-top:-10px">The strip below summarises each stage by its <em>weakest</em> tier; the matrix gives the per-tier detail.</p>
+
+    <div class="flow">
+      <div class="step c-critical"><span class="glyph">✕</span>HTTP ingress<small>axum · OpenAI parse</small></div>
+      <div class="step c-good"><span class="glyph">✔</span>Preprocess<small>tokenize</small></div>
+      <div class="step c-good"><span class="glyph">✔</span>Route<small>hash · schedule</small></div>
+      <div class="step c-warning"><span class="glyph">▲</span>Dispatch<small>push router</small></div>
+      <div class="step c-good"><span class="glyph">✔</span>Transport<small>TCP · KV xfer</small></div>
+      <div class="step c-na"><span class="glyph">—</span>Engine<small>out of scope</small></div>
+      <div class="step c-warning"><span class="glyph">▲</span>KV mgmt<small>blocks · offload</small></div>
+      <div class="step c-warning"><span class="glyph">▲</span>Postprocess<small>detokenize</small></div>
+      <div class="step c-critical"><span class="glyph">✕</span>SSE relay<small>streaming out</small></div>
+    </div>
+
+    <table class="matrix">
+      <thead><tr><th class="stage">Stage</th><th class="tier">Tier 1 · E2E</th><th class="tier">Tier 2 · Subsystem</th><th class="tier">Tier 3 · Micro</th></tr></thead>
+      <tbody>
+        <tr>
+          <th class="stage"><div class="stagecell">HTTP ingress<small>request parse, deserialization</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>inside client interval</small></td>
+          <td class="c-warning"><span class="glyph">▲</span>Partial<small>frontend harness, not isolated</small></td>
+          <td class="c-critical"><span class="glyph">✕</span>None<small>no bench</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">Preprocess<small>tokenize, template</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>frontend + mocker</small></td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>2 benches</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">Route<small>block hash, scheduling</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>replay + router harness</small></td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>2 live, 1 dead</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">Dispatch / egress<small>push router send path</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>frontend harness</small></td>
+          <td class="c-warning"><span class="glyph">▲</span>Partial<small>only via TCP codec</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">Transport<small>TCP, NIXL KV transfer</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>nixlbench</small></td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>2 benches</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">Engine / generation<small>forward pass</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>dominates e2e</small></td>
+          <td class="c-na"><span class="glyph">—</span>Simulated only<small>mocker replaces it</small></td>
+          <td class="c-na"><span class="glyph">—</span>Not Dynamo's<small>engine-owned</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">KV management<small>blocks, offload tiers</small></div></th>
+          <td class="c-warning"><span class="glyph">▲</span>Partial<small>metrics exist, uncollected</small></td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>replay + KVBM lifecycle</small></td>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>block_manager</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">Postprocess<small>detokenize, finish metadata</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good"><span class="glyph">✔</span>Strong</td>
+          <td class="c-warning"><span class="glyph">▲</span>Partial<small>metadata only; no streaming decode</small></td>
+        </tr>
+        <tr>
+          <th class="stage"><div class="stagecell">SSE relay<small>streaming response out</small></div></th>
+          <td class="c-good"><span class="glyph">✔</span>Strong<small>ITL is exactly this</small></td>
+          <td class="c-warning"><span class="glyph">▲</span>Partial<small>mocker output unrepresentative</small></td>
+          <td class="c-critical"><span class="glyph">✕</span>None<small>no bench</small></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="legend">
+      <span class="k"><span class="sw" style="background:var(--goodT);box-shadow:inset 0 0 0 1.5px var(--good)"></span><span class="glyph" style="color:var(--good)">✔</span>Strong — measurable and measured</span>
+      <span class="k"><span class="sw" style="background:var(--warningT);box-shadow:inset 0 0 0 1.5px var(--warning)"></span><span class="glyph" style="color:var(--warning)">▲</span>Partial — indirect or incomplete</span>
+      <span class="k"><span class="sw" style="background:var(--criticalT);box-shadow:inset 0 0 0 1.5px var(--critical)"></span><span class="glyph" style="color:var(--critical)">✕</span>None — no instrument</span>
+      <span class="k"><span class="sw" style="background:var(--naT);box-shadow:inset 0 0 0 1.5px var(--axis)"></span><span class="glyph" style="color:var(--muted)">—</span>Not applicable</span>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">§6</span>What the map says</h2>
+    <ul>
+      <li><strong>Both micro-level holes sit at the client-facing edges.</strong> HTTP ingress and SSE relay have no bench — precisely where a closed-loop client's latency is most sensitive, and precisely what mock workers cannot speak to, since the mocker replaces generation.</li>
+      <li><strong>Tier 1 is weaker than it looks.</strong> Every stage reads "strong" at e2e only because the client interval contains it. With no server-side capture in any recipe, that column measures the whole and attributes nothing.</li>
+      <li><strong>KV management inverts the usual pattern</strong> — better covered at tiers 2 and 3 than at tier 1, because its metrics exist but are never collected during a benchmark.</li>
+      <li><strong>Coverage tracks authorship, not the request path.</strong> Stages are covered where the people building them happened to add benchmarks. Nobody maintains a view of the whole.</li>
+      <li><strong>One dead entry.</strong> <code>llm/benches/kv_router_bench.rs</code> yields no bench functions while remaining compile-gated in CI — build cost plus implied coverage that is not there.</li>
+    </ul>
+    <div class="note"><strong>Provenance.</strong> Tier contents, the 0-of-33 instrumentation count, the port collision between the two frontend harnesses, and the bench inventory were all verified against the tree. Coverage ratings are judgment applied to those facts. The palette is the visualization skill's reserved status set, paired with glyph and label so no cell relies on color alone; its automated validator could not be run here (no JS runtime available), so the documented pre-validated values were used as published.</div>
+  </section>
+
+</main>
+</body>
+</html>
