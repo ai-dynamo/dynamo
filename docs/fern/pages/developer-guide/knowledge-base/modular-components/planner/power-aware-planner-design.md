@@ -5,13 +5,15 @@ title: Power-Aware Planner Design
 subtitle: Static GPU power-cap ownership, admission, projection, and rollout safety
 ---
 
+> [!NOTE]
 > **Tier 3 design documentation** for contributors and architects. For configuration and deployment,
 > see [Planner Examples](planner-examples.md#power-aware-budget-scaling).
 
-**Experimental.** The power-aware Planner adds a projected GPU power ceiling to NVIDIA Dynamo
-autoscaling. It admits or reduces replica proposals according to requested per-GPU caps and one
-DynamoGraphDeployment (DGD) budget. It does not measure power, prove that a cap reached the hardware,
-change a cap at runtime, or remediate a deployment that is already over budget.
+> [!WARNING]
+> **Experimental.** The power-aware Planner adds a projected GPU power ceiling to NVIDIA Dynamo
+> autoscaling. It admits or reduces replica proposals according to requested per-GPU caps and one
+> DynamoGraphDeployment (DGD) budget. It does not measure power, prove that a cap reached the hardware,
+> change a cap at runtime, or remediate a deployment that is already over budget.
 
 ## Decision Summary
 
