@@ -222,7 +222,7 @@ impl LiveBoundaryCore for VllmCore {
         // Wall-clock elapsed time drives the PS bandwidth models across
         // vLLM passes; SGLang reports a duration directly from each pass.
         let now_ms = scheduler_start.elapsed().as_secs_f64() * 1000.0;
-        let pass = self.execute_pass_internal(None, now_ms, None)?;
+        let pass = self.execute_pass_internal(now_ms, None)?;
         let duration = std::time::Duration::from_secs_f64((pass.end_ms - now_ms).max(0.0) / 1000.0);
         Ok(LivePassExecution { pass, duration })
     }
