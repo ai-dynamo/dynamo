@@ -16,6 +16,7 @@
 apiVersion: v1
 kind: Secret
 metadata:
+  # The v0.3.0 chart mounts this pre-existing Secret; it does not create it.
   name: batch-gateway-secrets
 type: Opaque
 stringData:

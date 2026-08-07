@@ -75,7 +75,10 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ### 3. Deploy Batch Metadata and File Storage
 
 Apply the validation-only Valkey service and shared file PVC. Valkey provides
-the Redis-compatible metadata service expected by llm-d Batch Gateway:
+the Redis-compatible metadata service expected by llm-d Batch Gateway. The
+v0.3.0 chart treats `global.secretName` as a reference to a pre-existing Secret;
+it does not create or own that Secret. `batch-infra.yaml` creates the referenced
+Secret, and the cleanup order below removes it after the Helm release:
 
 ```bash
 kubectl apply -n "${NAMESPACE}" -f batch-infra.yaml
@@ -212,5 +215,5 @@ kubectl delete pvc data-batch-gateway-valkey-0 -n "${NAMESPACE}"
 ## Further Reading
 
 - [llm-d Batch Gateway](https://github.com/llm-d/llm-d-batch-gateway)
-- [Dynamo Kubernetes quickstart](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
-- [Dynamo vLLM deployment examples](../../backends/vllm/deploy/README.md)
+- [Dynamo Kubernetes quickstart](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+- [Dynamo vLLM deployment examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/README.md)

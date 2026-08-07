@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 
 TERMINAL_STATUSES = {"completed", "failed", "expired", "cancelled"}
+OUTPUT_EXCERPT_LENGTH = 160
 
 
 def parse_args() -> argparse.Namespace:
@@ -204,6 +205,34 @@ def require_request_counts(
         )
 
 
+def completion_excerpt(output_line: dict[str, object]) -> str:
+    """Return a one-line excerpt from a successful Batch response."""
+    custom_identifier = output_line.get("custom_id")
+    response = output_line.get("response")
+    if not isinstance(response, dict):
+        raise RuntimeError(f"{custom_identifier} output has no response object")
+    body = response.get("body")
+    if not isinstance(body, dict):
+        raise RuntimeError(f"{custom_identifier} output has no response body")
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError(f"{custom_identifier} output has no choices")
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise RuntimeError(f"{custom_identifier} output has an invalid first choice")
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError(f"{custom_identifier} output has no response message")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError(f"{custom_identifier} output has no response content")
+
+    excerpt = " ".join(content.split())
+    if len(excerpt) > OUTPUT_EXCERPT_LENGTH:
+        return excerpt[: OUTPUT_EXCERPT_LENGTH - 3] + "..."
+    return excerpt
+
+
 def make_request(custom_identifier: str, model: str, max_tokens: int) -> str:
     """Build one OpenAI Batch JSONL request line."""
     return json.dumps(
@@ -226,9 +255,24 @@ def make_request(custom_identifier: str, model: str, max_tokens: int) -> str:
     )
 
 
-def validate_success(client: BatchClient, input_path: Path) -> None:
+def input_with_model(input_path: Path, model: str) -> bytes:
+    """Return the checked-in success requests with the selected model."""
+    requests = jsonl_lines(input_path.read_bytes())
+    for request in requests:
+        custom_identifier = request.get("custom_id")
+        body = request.get("body")
+        if not isinstance(body, dict):
+            raise RuntimeError(f"{custom_identifier} input has no request body")
+        body["model"] = model
+    return (
+        "\n".join(json.dumps(request, separators=(",", ":")) for request in requests)
+        + "\n"
+    ).encode()
+
+
+def validate_success(client: BatchClient, input_path: Path, model: str) -> None:
     """Validate upload, completion, and output retrieval."""
-    input_file = client.upload(input_path.name, input_path.read_bytes())
+    input_file = client.upload(input_path.name, input_with_model(input_path, model))
     batch_identifier = client.create_batch(input_file)
     batch = client.wait_for_terminal(batch_identifier)
     if batch["status"] != "completed":
@@ -244,6 +288,11 @@ def validate_success(client: BatchClient, input_path: Path) -> None:
             f"unexpected successful output ids: {custom_identifiers}, expected {expected}"
         )
     print(f"retrieved {len(output_lines)} successful output lines", flush=True)
+    for output_line in sorted(output_lines, key=lambda line: str(line["custom_id"])):
+        print(
+            f"  {output_line['custom_id']}: {completion_excerpt(output_line)}",
+            flush=True,
+        )
 
 
 def validate_error_file(client: BatchClient) -> None:
@@ -290,7 +339,7 @@ def main() -> None:
     input_path = Path(__file__).with_name("batch-input.jsonl")
     client = BatchClient(args.base_url, args.tenant, args.timeout_seconds)
 
-    validate_success(client, input_path)
+    validate_success(client, input_path, args.model)
     validate_error_file(client)
     validate_cancellation(client, args.model)
     print("llm-d Batch Gateway -> dedicated Dynamo example passed", flush=True)
