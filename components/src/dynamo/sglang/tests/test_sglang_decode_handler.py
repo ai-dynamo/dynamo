@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.llm import HttpError
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -295,6 +296,33 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     assert sampling_params["json_schema"] == (
         '{"type": "object", "properties": {"city": {"type": "string"}}}'
     )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#"},
+        {
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"},
+            },
+            "$ref": "#/$defs/A",
+        },
+    ],
+)
+def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    with pytest.raises(HttpError) as error:
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"guided_decoding": {"json": schema}},
+                "stop_conditions": {"max_tokens": 8},
+            }
+        )
+
+    assert error.value.code == 400
 
 
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():

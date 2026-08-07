@@ -1204,6 +1204,66 @@ def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_
         assert getattr(sp.structured_outputs, field) == expected
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#"},
+        json.dumps({"$ref": "#"}),
+        {
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"},
+            },
+            "$ref": "#/$defs/A",
+        },
+    ],
+)
+def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
+    from dynamo.llm import HttpError
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"json": schema}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    with pytest.raises(HttpError) as error:
+        build_sampling_params(request, default_sampling_params={})
+
+    assert error.value.code == 400
+
+
+def test_build_sampling_params_accepts_productive_recursive_guided_json():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    schema = {
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/Node"},
+                    }
+                },
+            }
+        },
+        "$ref": "#/$defs/Node",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"json": schema}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    sampling_params = build_sampling_params(request, default_sampling_params={})
+
+    assert sampling_params.structured_outputs.json == schema
+
+
 def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     from dynamo.vllm.handlers import build_sampling_params
 
