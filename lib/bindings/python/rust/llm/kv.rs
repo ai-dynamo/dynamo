@@ -1854,6 +1854,7 @@ impl KvRouter {
     #[new]
     #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
+        py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
@@ -1891,41 +1892,47 @@ impl KvRouter {
             .transpose()
             .map_err(to_pyerr)?;
 
+        // Release the GIL: this awaits worker registration, which is unbounded
+        // (kv_router.rs: `startup_watch.wait_for(..)`). Holding the GIL across it
+        // wedges the whole interpreter -- callers' timeouts and SIGALRM handlers
+        // both need the GIL to run, so nothing can interrupt a stuck router init.
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async move {
-            let client = endpoint.inner.client().await.map_err(to_pyerr)?;
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
-            // Create PushRouter with KV router mode
-            let push_router = rs::pipeline::PushRouter::<
-                llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                rs::protocols::annotated::Annotated<
-                    llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                >,
-            >::from_client(
-                client,
-                rs::pipeline::network::egress::push_router::RouterMode::KV,
-            )
-            .await
-            .map_err(to_pyerr)?;
+                // Create PushRouter with KV router mode
+                let push_router = rs::pipeline::PushRouter::<
+                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                    rs::protocols::annotated::Annotated<
+                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                    >,
+                >::from_client(
+                    client,
+                    rs::pipeline::network::egress::push_router::RouterMode::KV,
+                )
+                .await
+                .map_err(to_pyerr)?;
 
-            // Create KvRouter using helper function (ensures etcd registration)
-            let kv_router = create_kv_router_from_endpoint(
-                endpoint,
-                block_size,
-                Some(kv_router_config.inner()),
-                prefill_load_estimator,
-            )
-            .await?;
+                // Create KvRouter using helper function (ensures etcd registration)
+                let kv_router = create_kv_router_from_endpoint(
+                    endpoint,
+                    block_size,
+                    Some(kv_router_config.inner()),
+                    prefill_load_estimator,
+                )
+                .await?;
 
-            let kv_push_router = RsKvPushRouter::new(
-                push_router,
-                kv_router,
-                session_affinity_ttl_secs.map(Duration::from_secs),
-            )
-            .map_err(to_pyerr)?;
+                let kv_push_router = RsKvPushRouter::new(
+                    push_router,
+                    kv_router,
+                    session_affinity_ttl_secs.map(Duration::from_secs),
+                )
+                .map_err(to_pyerr)?;
 
-            Ok(Self {
-                inner: Arc::new(kv_push_router),
+                Ok(Self {
+                    inner: Arc::new(kv_push_router),
+                })
             })
         })
     }
