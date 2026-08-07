@@ -125,20 +125,45 @@ func newTestComponentWorkloadsReconciler(
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
 }
 
-func TestGroveRenderDeploymentInjectsCanonicalWorkerHashSuffix(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
-	require.NoError(t, err)
+func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
+	tests := []struct {
+		name              string
+		hashSuffixEnabled bool
+	}{
+		{
+			name:              "enabled",
+			hashSuffixEnabled: true,
+		},
+		{
+			name: "disabled",
+		},
+	}
 
-	rendered, err := groveRenderDeployment(dgd, nil)
-	require.NoError(t, err)
-	worker := rendered.GetComponentByName("worker")
-	require.NotNil(t, worker)
-	assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
-	assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			})
+			if tt.hashSuffixEnabled {
+				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+			}
+
+			rendered, err := groveRenderDeployment(dgd, nil)
+			require.NoError(t, err)
+			worker := rendered.GetComponentByName("worker")
+			require.NotNil(t, worker)
+
+			if tt.hashSuffixEnabled {
+				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+				require.NoError(t, err)
+				require.NotNil(t, worker.PodTemplate)
+				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+			} else {
+				assert.Nil(t, worker.PodTemplate)
+			}
+			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+		})
+	}
 }
 
 func TestShouldTriggerRollingUpdate(t *testing.T) {
