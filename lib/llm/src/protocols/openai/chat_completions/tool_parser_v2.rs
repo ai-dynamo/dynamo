@@ -35,6 +35,12 @@ use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser, create_tool_p
 
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
+// TODO: when glm47 is added here AND DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set,
+// port the streaming <tool_call> truncation recovery from apply_tool_calling_jail
+// (preprocessor.rs) to tool_parser_v2::apply_stream. The v2 path skips the jail
+// entirely, so the ChoiceRecovery buffer and finish_reason=length synthetic-chunk
+// logic will not run. The aggregator.rs (non-streaming) half is parser-agnostic
+// and keeps working on both paths — only the streaming side needs porting.
 /// Tool-call families with a `dynamo-parsers-v2` parser wired into both the batch and
 /// the streaming path. Must stay a subset of the families
 /// `dynamo_parsers_v2::create_tool_parser_for_family` accepts; the strings match
