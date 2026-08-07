@@ -111,6 +111,18 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_REQUEST_PLANE`
 </ParamField>
 
+<ParamField path="DYN_REQUEST_PLANE_CODEC" type="string" default="msgpack">
+  Preferred payload codec advertised by every request-plane endpoint served by this process. Clients
+  select the codec independently for each destination endpoint. They use the destination's advertised
+  codec, or `json` when a legacy destination does not advertise one. Setting this variable does not
+  force the codec for outbound requests from the process.
+
+  Dynamo caches this process-wide value on its first codec lookup. Restart the process after changing
+  it.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
+</ParamField>
+
 <ParamField path="--event-plane" type="string" default="zmq">
   Event publishing transport. ZMQ is the default for every discovery backend; select `nats`
   explicitly to use NATS Core. See [Event Plane](../../developer-guide/knowledge-base/concepts/communication-planes/event-plane.md) for design details.
