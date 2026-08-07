@@ -1,10 +1,13 @@
-# Worker / Frontend Compatibility
+# N-1 Worker / Frontend Compatibility
 
-Dynamo is expected to support N-1 mixed-version operation between workers and
-frontends during rolling updates. Treat model deployment cards, discovery
-metadata, and worker/frontend wire formats owned by this crate as cross-process
-compatibility surfaces. Consider both directions: a previous-version worker
-with a current frontend and a current worker with a previous-version frontend.
+Assume N-1 mixed-version operation between workers and frontends during rolling
+updates: current-version components must interoperate with components from the
+immediately previous release. N-2 and older combinations are unsupported unless
+a narrower temporary exception is explicitly documented. Treat model deployment
+cards, discovery metadata, and worker/frontend wire formats owned by this crate
+as cross-process compatibility surfaces. Consider both directions: a
+previous-version worker with a current frontend and a current worker with a
+previous-version frontend.
 
 - Normal, default deployment paths should remain operable across the N-1
   boundary. Unconditional parsing or discovery failures on those paths are
