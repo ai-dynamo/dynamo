@@ -326,7 +326,9 @@ def _prefix_cache_hits(engine) -> int:
     for line in response.text.splitlines():
         if line.startswith("#") or "prefix_cache_hits" not in line:
             continue
-        name = line.split(maxsplit=1)[0]
+        # Strip the label set before testing the suffix: a series is written
+        # ``name{label="v"} value``, so the bare name is everything before the brace.
+        name = line.split(maxsplit=1)[0].split("{", 1)[0]
         if name.endswith(("_created", "_sum", "_bucket")):
             continue
         total += float(line.rsplit(maxsplit=1)[-1])
