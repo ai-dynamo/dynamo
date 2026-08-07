@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -216,7 +216,7 @@ class EmbeddedVllmDecoder:
             raise InvalidArgument("EmbeddedVllmDecoder does not support logprobs")
 
         sampling_params = build_sampling_params(
-            request,
+            cast(dict[str, Any], request),
             self._default_sampling_params,
             model_max_len=None,
         )

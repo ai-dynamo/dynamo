@@ -9,12 +9,17 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from vllm.sampling_params import RequestOutputKind
 
 pytest.importorskip(
     "dynamo._core.backend",
     reason="dynamo._core.backend not built — run maturin develop first",
 )
+pytest.importorskip(
+    "vllm.engine.arg_utils",
+    reason="a full vLLM installation is required by the embedded decoder",
+)
+
+from vllm.sampling_params import RequestOutputKind  # noqa: E402
 
 from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
 from dynamo.vllm.embedded_decoder import EmbeddedVllmDecoder  # noqa: E402
