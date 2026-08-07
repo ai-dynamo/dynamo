@@ -1075,6 +1075,60 @@ class _FakeResponseFormatConsumingToolParser(_FakeAdjustRequestGrammarToolParser
         return super().adjust_request(request)
 
 
+class _FakeNativeSyntaxToolParser(_FakeGrammarToolParser):
+    # Mirrors parsers like Gemma4Engine/PoolsideV1 that emit native tool syntax
+    # and decline a forced JSON constraint for required/named choices.
+    supports_required_and_named = False
+
+
+class TestPreprocessRawRequestControls:
+    """Transport-only controls must survive the preprocess_chat_request boundary.
+
+    Regression: preprocess_chat_request passed the validated model into
+    _prepare_request, making its dict-only reads of chat_template_args and root
+    thinking unreachable. Direct _prepare_request tests do not cover this path.
+    """
+
+    @staticmethod
+    def _renderer():
+        return SimpleNamespace(
+            render_messages_async=AsyncMock(
+                return_value=(None, {"prompt_token_ids": [1]})
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_template_args_survive_preprocess(self, tokenizer):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            tool_parser_class=None,
+        )
+        assert result.chat_template_kwargs.get("enable_thinking") is False
+
+    @pytest.mark.asyncio
+    async def test_root_thinking_suppresses_deployment_default(self, tokenizer):
+        # An explicit root thinking control must block the deployment default
+        # from injecting its own thinking_mode.
+        result = await prepost_module.preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": True,
+            },
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+        assert "thinking_mode" not in result.chat_template_kwargs
+
+
 class TestToolCallGuidedDecoding:
     def _request(self, tokenizer, **overrides):
         raw_request = {**TOOL_REQUEST, "tool_choice": "auto", **overrides}
@@ -1119,6 +1173,25 @@ class TestToolCallGuidedDecoding:
         assert guided is not None
         assert set(guided) == {"json"}
         assert parser.requests == []
+
+    # Parsers that require native tool syntax must not get a forced JSON schema.
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+    )
+    def test_forced_choice_skips_json_for_native_syntax_parser(
+        self, tokenizer, tool_choice
+    ):
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice=tool_choice),
+            _FakeNativeSyntaxToolParser(),
+            structural_tag_mode="off",
+        )
+
+        assert guided is None
 
     def test_strict_schema_uses_copy(self, tokenizer):
         request = self._request(tokenizer)

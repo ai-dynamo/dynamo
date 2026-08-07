@@ -22,6 +22,7 @@ from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -146,8 +147,15 @@ def build_tool_call_guided_decoding(
 
     tool_choice = request.tool_choice or "auto"
     if _is_forced_tool_choice(tool_choice):
-        from vllm.tool_parsers.utils import get_json_schema_from_tools
-
+        # Parsers that require native tool syntax (e.g. Gemma4Engine, PoolsideV1)
+        # leave structured_outputs unset for required/named choices on purpose;
+        # forcing a JSON schema conflicts with their wire format and can crash
+        # EngineCore under speculative decoding. Only fall back for parsers that
+        # advertise JSON support (or when no parser is active).
+        if tool_parser is not None and not getattr(
+            tool_parser, "supports_required_and_named", True
+        ):
+            return None
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
             return {"json": json_schema}
@@ -280,8 +288,16 @@ def _prepare_request(
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
+    validated_request: ChatCompletionRequest | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
+
+    Args:
+        request: The raw request. Keep it as the caller received it (a dict on
+            the pythonized path) so transport-only aliases below are readable.
+        validated_request: A pre-validated model when the caller already built
+            one (avoids re-validating); semantic fields are read from it while
+            transport-only aliases still come from the raw ``request`` dict.
 
     Returns:
         request_for_sampling: Validated ChatCompletionRequest.
@@ -290,7 +306,11 @@ def _prepare_request(
         messages_for_render: Messages to pass as first arg to render_messages.
         chat_params: ChatParams for render_messages / render_messages_async.
     """
-    request_for_sampling = _validate_chat_completion_request(request)
+    request_for_sampling = (
+        validated_request
+        if validated_request is not None
+        else _validate_chat_completion_request(request)
+    )
 
     tool_parser: ToolParser | None = None
     # With enable_auto_tool_choice the model may emit tool calls even when the
@@ -407,13 +427,14 @@ async def preprocess_chat_request(
         messages,
         chat_params,
     ) = _prepare_request(
-        validated_request,
+        request,
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
+        validated_request=validated_request,
     )
 
     adjusted_structured_guidance = _guided_decoding_from_structured_outputs(
