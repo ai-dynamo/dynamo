@@ -76,16 +76,6 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         return normalized
 
     async def _resolve_pooling_task(self, requested_task: str | None) -> str:
-        """Resolve the pooling task for one request, honouring ``task`` if set.
-
-        This deliberately diverges from upstream vLLM's ``/pooling``, which
-        pins every request to the engine's configured ``pooling_task`` even when
-        the model supports others. Dynamo forwards the requested task instead,
-        so one pooling worker can serve every task its model supports (for
-        example ``embed`` and ``token_classify``) rather than requiring a
-        separate deployment per task. With no ``task`` in the request the
-        engine's default is resolved once and cached, which matches upstream.
-        """
         if requested_task is not None:
             return requested_task
         if self._default_pooling_task is not None:
