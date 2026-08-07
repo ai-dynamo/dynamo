@@ -14,6 +14,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+    selector::WorkerSelector,
 };
 use tokio::sync::oneshot;
 
@@ -1246,6 +1247,37 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
+        self.kv_chooser_for_with_selector(
+            endpoint,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn kv_chooser_for_with_selector<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
         let client = endpoint.client().await?;
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -1271,8 +1303,6 @@ impl ModelManager {
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
-
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
@@ -3285,7 +3315,6 @@ mod tests {
             .and_then(|model| model.get_worker_set("decode-a"))
             .and_then(|worker_set| worker_set.prefill_router.clone())
             .expect("decode router");
-        router.mark_active_for_test();
 
         mm.add_worker_set(
             "llama",
