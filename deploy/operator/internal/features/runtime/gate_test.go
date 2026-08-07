@@ -60,8 +60,8 @@ func TestCanaryHealthChecksThreshold(t *testing.T) {
 	t.Log("inspect the central canary health-check feature gate")
 	got := CanaryHealthChecks.MinRuntimeVersion.String()
 
-	t.Log("verify canary health checks are introduced by runtime 1.4.0")
-	if got != "1.4.0" {
-		t.Fatalf("MinRuntimeVersion = %s, want 1.4.0", got)
+	t.Log("verify canary health checks are introduced by runtime 1.5.0")
+	if got != "1.5.0" {
+		t.Fatalf("MinRuntimeVersion = %s, want 1.5.0", got)
 	}
 }

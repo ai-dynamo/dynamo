@@ -37,6 +37,7 @@ func TestVersionCompare(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
+	t.Log("define explicit runtime version parsing cases")
 	tests := []struct {
 		name    string
 		value   string
@@ -62,7 +63,10 @@ func TestParse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("parse the explicit runtime version")
 			got, err := Parse(tt.value)
+
+			t.Log("verify the parsed version or expected error")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Parse(%q) error = %v, wantErr %t", tt.value, err, tt.wantErr)
 			}
@@ -74,6 +78,7 @@ func TestParse(t *testing.T) {
 }
 
 func TestParseImageVersion(t *testing.T) {
+	t.Log("define runtime image tag parsing cases")
 	tests := []struct {
 		name    string
 		image   string
@@ -94,12 +99,58 @@ func TestParseImageVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("parse the runtime version from the image tag")
 			got, err := ParseImageVersion(tt.image)
+
+			t.Log("verify the parsed version or expected error")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseImageVersion(%q) error = %v, wantErr %t", tt.image, err, tt.wantErr)
 			}
 			if !tt.wantErr && got != tt.want {
 				t.Fatalf("ParseImageVersion(%q) = %+v, want %+v", tt.image, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolve(t *testing.T) {
+	t.Log("define runtime version resolution cases")
+	tests := []struct {
+		name     string
+		image    string
+		override string
+		want     Version
+		wantErr  bool
+	}{
+		{
+			name:  "uses the image tag when the override is empty",
+			image: "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			want:  Version{Major: 1, Minor: 5, Patch: 0},
+		},
+		{
+			name:     "the override is authoritative",
+			image:    "nvcr.io/nvidia/ai-dynamo/runtime:1.5.0",
+			override: "1.4.0",
+			want:     Version{Major: 1, Minor: 4, Patch: 0},
+		},
+		{
+			name:    "returns an error when the image tag is not a semantic version",
+			image:   "nvcr.io/nvidia/ai-dynamo/runtime:latest",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("resolve the runtime version from the override or image")
+			got, err := Resolve(tt.image, tt.override)
+
+			t.Log("verify the resolved version or expected error")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Resolve(%q, %q) error = %v, wantErr %t", tt.image, tt.override, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("Resolve(%q, %q) = %+v, want %+v", tt.image, tt.override, got, tt.want)
 			}
 		})
 	}
