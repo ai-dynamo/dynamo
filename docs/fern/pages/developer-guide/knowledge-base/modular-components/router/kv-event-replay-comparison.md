@@ -2,21 +2,38 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: KV Event Replay — Dynamo vs vLLM
-subtitle: How the two systems handle gap detection, replay, and recovery for KV cache events
+subtitle: How vLLM replay and Dynamo worker-local recovery protect different KV event hops
 ---
 
 ## Overview
 
-Both Dynamo and vLLM publish KV cache events (block stored, block removed, etc.) over a fire-and-forget transport (ZMQ PUB/SUB). Because PUB/SUB is lossy, both systems need a mechanism for consumers to detect missed messages and recover. This document compares the two approaches.
+vLLM's replay buffer and Dynamo's worker-local indexer protect different parts of the KV event
+path. vLLM can offer replay to a consumer of its raw ZMQ engine stream. Dynamo consumes and
+normalizes that engine stream inside the worker. It then uses its worker-local indexer to recover
+routers that miss events on Dynamo's separate worker-to-router event plane.
+
+Dynamo's vLLM integration subscribes to the raw PUB stream. It does not use the vLLM replay socket.
+A worker-local snapshot restores all cache state that the Dynamo worker indexed. It cannot
+reconstruct a raw engine event that did not reach the worker.
 
 ## The Problem
 
-A KV event consumer (router, cache coordinator) subscribes to a live stream of block events from workers. Events carry monotonically increasing sequence numbers. When the consumer detects a gap in the sequence (e.g., received seq 42 then seq 45), it needs to recover the missed events or it will have a stale, incorrect view of the worker's KV cache state.
+There are two possible loss boundaries:
+
+1. **Engine to Dynamo worker:** The engine publishes raw events over ZMQ. Dynamo normalizes accepted
+   events and assigns its own event IDs. The listener reads the engine sequence number for logs.
+   It does not use the engine replay socket. Therefore, the Dynamo worker-local indexer cannot
+   recover a lost raw message.
+2. **Dynamo worker to router:** The worker updates its worker-local indexer before it publishes
+   normalized events over Dynamo's event plane. If the router detects a sequence gap, it can query
+   the worker.
+   The worker returns retained events or a current tree snapshot.
 
 ## Architecture Comparison
 
 | | vLLM Replay Buffer | Dynamo Local Indexer |
 |---|---|---|
+| **Recovery boundary** | Raw vLLM publisher to a replay-aware consumer | Dynamo worker to router |
 | **Core buffer** | `collections.deque[tuple[int, bytes]]` with `maxlen` | `VecDeque<RouterEvent>` with `max_buffer_size` |
 | **Buffer semantics** | FIFO ring, old entries silently dropped | FIFO ring, old entries silently dropped |
 | **Event ordering** | Monotonic sequence number (8-byte int) | Monotonic `event_id` with consecutive-ID validation |
@@ -30,7 +47,7 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
 | **Thread model** | Background thread with queue | Single-threaded tokio runtime on dedicated OS thread |
-| **Delivery guarantee** | Fire-and-forget live delivery; replay is bounded by retained history | Fire-and-forget live delivery; recovery can return retained events or a snapshot |
+| **Delivery guarantee** | Live delivery is fire-and-forget. Replay retains a bounded history. | Recovery can return retained normalized events or a snapshot. It does not repair engine-to-worker loss. |
 | **Duplicate/stale events** | Consumer filters by sequence number | Router filters stale event IDs and coordinates per-rank recovery |
 
 ## How Each System Works
@@ -53,7 +70,10 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 
 ### Dynamo: Buffer + Indexer with Tree Dump Fallback
 
-Dynamo's `LocalKvIndexer` (in `lib/kv-router/src/indexer/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
+After the Dynamo worker accepts and normalizes an engine event, it applies the resulting state
+update to `LocalKvIndexer`. It does this before publication over Dynamo's event plane.
+`LocalKvIndexer` (in `lib/kv-router/src/indexer/local.rs`) wraps a `KvIndexer` (backed by a
+`RadixTree`) with a circular event buffer:
 
 ```text
 LocalKvIndexer
@@ -77,7 +97,9 @@ The snapshot fallback makes an evicted replay range recoverable while the worker
 
 ## Gap Detection
 
-Both systems detect gaps the same way: the consumer tracks the last sequence/event ID it processed and compares it against the next one received.
+Both recovery mechanisms use increasing IDs, but they operate on different sequences. A
+replay-aware vLLM consumer tracks the engine publisher sequence. The Dynamo router tracks IDs that
+the worker assigns after it accepts and normalizes raw events.
 
 **vLLM** (from `examples/online_serving/kv_events_subscriber.py`):
 ```python
@@ -92,6 +114,9 @@ The router tracks an admission cursor per worker and data-parallel rank. Discove
 
 On success, the router transactionally replaces the rank from `TreeDump`, advances to the worker's real-event watermark, then drains buffered live events. If snapshot construction or transport fails, the router resets or fences the affected rank as appropriate and continues with degraded live-event processing. A later gap or source change can trigger another recovery.
 
+The Dynamo worker assigns this sequence after raw-event filtering. Therefore, its gap detection
+does not reveal an engine ZMQ message that was lost before ingestion.
+
 ## When to Use Which
 
 **vLLM's built-in replay** is a good fit when:
@@ -104,13 +129,19 @@ On success, the router transactionally replaces the rank from `TreeDump`, advanc
 - You are running multiple router replicas that may start at different times and should independently rebuild cache state from workers.
 - You want dedup and recovery handled by the infrastructure rather than implementing it in each consumer.
 
-The two approaches share the same core idea — a FIFO ring buffer for catching up on small, transient gaps. Dynamo adds a RadixTree underneath, which enables a current-state snapshot fallback at the cost of additional memory and complexity. vLLM keeps replay history in the buffer, which is sufficient when consumers are stable and gaps remain inside the retained window.
+Both approaches use a FIFO ring buffer to recover small, temporary gaps. They are not
+interchangeable. vLLM replay can protect the raw engine hop for consumers that use its replay
+socket. Dynamo adds a RadixTree after engine ingestion. This tree provides current-state snapshots
+for routers on the second hop.
 
-For deployments using Dynamo's KV-aware routing, the local indexer is used automatically. For standalone vLLM deployments where you want to build your own event consumer, vLLM's replay buffer provides a lightweight starting point.
+For Dynamo KV-aware routing, Dynamo enables the worker-local indexer after the worker has a KV event
+publisher. vLLM and SGLang still require `--kv-events-config` to feed that publisher. For standalone
+vLLM deployments, the replay buffer provides a lightweight base for a custom event consumer.
 
 ## See Also
 
 - **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals
 - **[Router Guide](router-guide.md)**: Deployment modes and quick start for KV-aware routing
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and tuning details
-- **[Router Design](router-design.md)**: Architecture details and event transport modes
+- **[Router Design](router-design.md#event-flow-and-recovery)**: Engine-to-worker ingestion,
+  worker-local indexing, and router recovery

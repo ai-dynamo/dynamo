@@ -53,11 +53,13 @@ export PYTHONHASHSEED=0
 DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --block-size 64 \
+  --stream-interval 20 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
 DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --block-size 64 \
+  --stream-interval 20 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 ```
 

@@ -173,50 +173,50 @@ In distributed deployments with multiple routers, each router initially sees onl
 
 Each event carries a unique router ID to prevent self-event processing. Publication is fire-and-forget and the bounded outbound publisher queue drops the newest event when full. These events improve cross-replica active-load estimates; they do not synchronize prefix-cache state or guarantee identical routing decisions. Output-block growth is tracked locally rather than published as a lifecycle event. Routers periodically force-expire stale synchronized requests; configure the safety timeout with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds).
 
-## Event Transport Modes
+## Event Flow and Recovery
 
-KV cache events use fire-and-forget pub/sub through the configured event plane. Workers maintain local radix trees, and routers rebuild state by querying workers on startup. The event plane supports both NATS Core and ZMQ.
+KV event delivery has two distinct hops. vLLM and SGLang first publish raw engine events over the
+ZMQ endpoint configured by `--kv-events-config`. A Dynamo worker subscribes to that endpoint. It
+normalizes and coalesces the engine events into router state updates. It applies each accepted
+update to its worker-local indexer. It then publishes the same update over Dynamo's event plane.
+Router replicas subscribe to this second hop.
 
-### Event Plane with Local Indexers
-
-By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
-
-- **Best for**: Low-latency event delivery, multi-router deployments, and deployments without NATS (using the ZMQ event plane)
-- **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
+Dynamo enables worker-local indexing after it creates a KV event publisher. The indexer is not an
+independent engine event listener. This default does not create an engine event source. Therefore,
+vLLM and SGLang workers need `--kv-events-config` to feed engine events to the worker.
 
 ```mermaid
-graph TD
-    subgraph Engines
-        E1[Engine 1<br/>LocalKvIndexer]
-        E2[Engine 2<br/>LocalKvIndexer]
-        E3[Engine 3<br/>LocalKvIndexer]
+flowchart LR
+    subgraph Engine
+        E["vLLM or SGLang<br/>KV cache events"]
     end
 
-    subgraph "Event Plane (NATS / ZMQ)"
-        NC[KV Events Pub/Sub<br/>- Block created<br/>- Block removed]
+    subgraph "Dynamo worker"
+        N["Event listener and normalizer"]
+        L["Worker-local indexer"]
+        P["Event-plane publisher"]
     end
 
-    subgraph "Router Replicas"
-        R1[Router 1<br/>KVIndexer]
-        R2[Router 2<br/>KVIndexer]
+    subgraph "Dynamo event plane"
+        EP["KV state updates"]
     end
 
-    E1 -->|Publish Events| NC
-    E2 -->|Publish Events| NC
-    E3 -->|Publish Events| NC
+    R["Router<br/>KV indexer"]
 
-    NC -->|Subscribe| R1
-    NC -->|Subscribe| R2
-
-    style NC fill:#e1f5fe,stroke:#333,color:#333
-    style E1 fill:#f3e5f5,stroke:#333,color:#333
-    style E2 fill:#f3e5f5,stroke:#333,color:#333
-    style E3 fill:#f3e5f5,stroke:#333,color:#333
-    style R1 fill:#2e8b57,stroke:#333,color:#fff
-    style R2 fill:#2e8b57,stroke:#333,color:#fff
-
-    linkStyle 0,1,2,3,4 stroke:#2196f3,stroke-width:2px
+    E -->|"Raw events over configured ZMQ endpoint"| N
+    N -->|"Accepted, normalized updates"| L
+    N -->|"Same updates"| P
+    P --> EP
+    EP --> R
+    R -.->|"Startup and gap recovery"| L
 ```
+
+The worker-local indexer receives each accepted state update before Dynamo publishes it to the
+router. It does not retain a one-to-one log of raw engine events. Dynamo can filter unsupported
+events and coalesce compatible updates. The engine-to-worker ZMQ hop is also best effort. If a raw
+engine message does not reach the Dynamo worker, the worker-local indexer cannot recover it. Worker
+queries recover startup state and gaps on the worker-to-router hop. They do not make the first hop
+lossless.
 
 **How gap detection works:**
 1. Each worker assigns monotonically increasing event IDs starting from 0
@@ -230,7 +230,8 @@ graph TD
 - When a worker is removed, the router removes all its blocks from the global radix tree
 
 > [!NOTE]
-> Workers enable their local indexer by default so routers can recover missed events and rebuild state after a restart.
+> Dynamo enables the worker-local indexer after it creates a KV event publisher. vLLM and SGLang
+> still require `--kv-events-config` to create the engine event source that feeds the indexer.
 
 ### Local Active Block Management with Replica Sync
 

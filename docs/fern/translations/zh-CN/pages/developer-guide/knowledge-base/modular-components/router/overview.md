@@ -8,13 +8,52 @@ Dynamo KV Router 通过评估不同 worker 上的计算成本来智能地路由�
 
 ## 快速开始
 
-我们可以通过 Dynamo frontend 使用 KV Router：
+事件驱动的 KV 路由需要同时配置 frontend 和 router 所跟踪 cache 状态的 backend worker。
 
-```bash
-python -m dynamo.frontend --router-mode kv --http-port 8000
-```
+> [!IMPORTANT]
+> 事件驱动的 KV 路由必须同时完成下面两项配置。`--router-mode kv` 只会在 frontend 上启用
+> worker 选择，不会启用 vLLM 或 SGLang 的 KV 事件发布。如果未在发布事件的 worker 上设置
+> `--kv-events-config`，engine 事件就不会进入 worker-local indexer 或 router。
 
-对于 Kubernetes，请在 Frontend service 上设置 `DYN_ROUTER_MODE=kv`。对于事件驱动的 KV 状态，请使用 [Router Operations](../../../../../../../pages/developer-guide/knowledge-base/modular-components/router/router-operations.md#additional-notes) 中描述的后端专用 flag，配置 backend worker 发布 KV cache 事件。仅当你希望使用近似的 cache 状态预测时，才使用 `--no-router-kv-events`。
+1. 启动 frontend 并启用 KV router：
+
+   ```bash
+   python -m dynamo.frontend --router-mode kv --http-port 8000
+   ```
+
+2. 对每个 aggregated worker，或标准 disaggregated 部署中的每个 prefill worker，启用 engine
+   KV 事件发布。
+
+   对于 vLLM：
+
+   ```bash
+   python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+   ```
+
+   对于 SGLang：
+
+   ```bash
+   python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+   ```
+
+   对于 vLLM，JSON 必须设置 `"enable_kv_cache_events":true`；省略其他字段时，vLLM 可以推断
+   ZMQ publisher 并使用默认 endpoint。对于 SGLang，JSON 必须同时包含
+   `"publisher":"zmq"` 和 `"endpoint"`；`"topic"` 是可选字段。不要将仅适用于 vLLM 的
+   `{"enable_kv_cache_events":true}` 配置用于 SGLang。
+
+共享网络命名空间的 worker 必须使用不同的事件 endpoint 端口。`--kv-events-config` 配置第一段
+事件传输，即从 engine 到对应的 Dynamo worker。worker 会对这些事件进行标准化，将其应用到本地
+indexer，然后通过单独配置的 Dynamo event plane 发布给 router。有关完整的数据路径和恢复边界，
+请参阅 [Router Design](../../../../../../../pages/developer-guide/knowledge-base/modular-components/router/router-design.md#event-flow-and-recovery)。
+
+如果未设置 worker flag，router 不会自动切换到近似预测模式。如果 worker 不发布事件，
+请使用 `--no-router-kv-events` 启用近似 cache 预测，或使用 `--load-aware` 仅按负载路由。
+
+对于 Kubernetes，请在 Frontend service 上设置 `DYN_ROUTER_MODE=kv`，并将上述 backend
+事件参数添加到相应的 worker。完整的 `DynamoGraphDeployment` 片段请参阅
+[Using the Dynamo Frontend](../../../../../../../pages/kubernetes/kv-aware-routing/dynamo-frontend.md)。
 
 | 参数 | 默认值 | 描述 |
 |----------|---------|-------------|
@@ -22,7 +61,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 | `--load-aware` | disabled | 使用 KV 活动负载路由，不使用 cache 复用信号；在 frontend 上隐含启用 `--router-mode kv` |
 | `--router-kv-overlap-score-credit` | `1.0` | 设备本地 prefix 重叠的 credit 乘数，范围从 0.0 到 1.0 |
 | `--router-prefill-load-scale` | `1.0` | 在加入 decode block 之前，对调整后的 prompt 侧 prefill 负载进行缩放 |
-| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | 消费 worker KV 事件，或在没有事件时回退到近似路由 |
+| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | 消费 worker KV 事件；使用 `--no-router-kv-events` 可显式切换到近似路由 |
 | `--router-queue-threshold` | disabled | 背压队列阈值；设置数值后启用队列，`nvext.agent_hints.priority` 会对等待中的请求重新排序 |
 | `--router-queue-policy` | `fcfs` | 队列调度策略：`fcfs`（尾部 TTFT）、`wspt`（平均 TTFT）或 `lcfs`（仅用于比较的反向排序） |
 | `--no-router-track-prefill-tokens` | disabled | 在 router 负载统计中忽略 prompt 侧 prefill token；适用于仅 decode 的路由路径 |

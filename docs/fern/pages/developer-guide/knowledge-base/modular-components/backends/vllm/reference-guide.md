@@ -25,6 +25,46 @@ The `--help` output is organized into the following groups:
 - **Dynamo vLLM Options** — Disaggregation mode, tokenizer selection, sleep mode, multimodal flags, vLLM-Omni pipeline configuration, headless mode, and ModelExpress. These use `DYN_VLLM_*` env vars. See [vLLM Configuration](../../../../../reference/backends/vllm-configuration.mdx) for the full field reference.
 - **vLLM Engine Options** — All native vLLM arguments (`--model`, `--tensor-parallel-size`, `--kv-transfer-config`, `--kv-events-config`, `--enable-prefix-caching`, etc.). See the [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
+### KV Event Publication for KV Routing
+
+`--router-mode kv` configures the frontend router but does not enable vLLM's KV event publisher.
+For event-driven KV routing, pass `--kv-events-config` to every aggregated worker. In a standard
+disaggregated deployment, pass it to every prefill worker:
+
+```bash
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
+The vLLM JSON must set `"enable_kv_cache_events":true`. If a worker uses vLLM's default ZMQ
+endpoint, `--kv-events-config '{"enable_kv_cache_events":true}'` is sufficient. The complete form
+makes the transport, topic, and endpoint explicit. It also lets colocated workers use unique ports.
+
+Without `--kv-events-config`, vLLM does not publish KV events. The configuration makes vLLM emit
+raw cache events over ZMQ to its Dynamo worker. Dynamo normalizes and coalesces the events. It then
+updates the worker-local indexer and republishes the state updates to the router. This publication
+uses Dynamo's event plane. Dynamo enables the worker-local indexer after it creates the publisher.
+The worker-local indexer does not enable the vLLM event source.
+
+In standard disaggregated serving, Dynamo routes decode workers by load. These workers do not need
+`--kv-events-config`. The experimental conditional-disaggregation path also evaluates decode-cache
+overlap. Its decode workers must expose KV events. For workers that share a network namespace, use
+a unique ZMQ endpoint port.
+
+For approximate routing without engine events, omit `--kv-events-config` from all workers. Start
+the frontend with `--no-router-kv-events`. You can instead set `DYN_ROUTER_USE_KV_EVENTS=false`.
+
+### Recommended Stream Interval
+
+Start with `--stream-interval 20` on vLLM workers. The default interval of `1` can produce one
+engine output for each generated token. An interval of `20` reduces host-side output processing
+and Dynamo bridge crossings under load. The tradeoff is coarser stream updates after the first chunk.
+
+Dynamo publishes the worker interval in runtime metadata. The vLLM frontend processor uses this
+value. To override the worker value, set `DYN_VLLM_STREAM_INTERVAL` on the frontend. When
+fine-grained stream updates are more important than host efficiency, use a lower interval.
+
 ### Tool and Reasoning Parsers
 
 Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).

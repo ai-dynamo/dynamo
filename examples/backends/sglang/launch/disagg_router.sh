@@ -67,6 +67,7 @@ OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-80
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
@@ -83,6 +84,7 @@ OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-80
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
@@ -99,12 +101,12 @@ OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-808
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
   --host 0.0.0.0 \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   --disable-piecewise-cuda-graph \
@@ -115,12 +117,12 @@ OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-808
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
   --host 0.0.0.0 \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   --disable-piecewise-cuda-graph \
