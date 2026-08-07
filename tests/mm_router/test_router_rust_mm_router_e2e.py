@@ -61,7 +61,11 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
     pytest.mark.requested_vllm_kv_cache_bytes(1_719_075_000),
-    pytest.mark.profiled_vram_gib(18.7),
+    # Measured solo peak, which is what profiled_vram_gib means. The KV cap
+    # above pins the footprint, so this matches test_vllm_mm_router_e2e.py --
+    # same model, same cap, same 7.6 GiB. The previous 18.7 exceeded the
+    # multi-process budget, which made every test in this file exclusive.
+    pytest.mark.profiled_vram_gib(7.6),
 ]
 
 
