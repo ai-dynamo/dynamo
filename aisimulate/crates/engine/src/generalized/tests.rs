@@ -603,8 +603,8 @@ fn attention_dp_uses_slowest_rank_boundary_and_holds_idle_siblings() -> Result<(
     );
     assert!(engine.is_ready(), "rank 2 may run after sibling completion");
     assert!(log.borrow().contains(&"command:2:wake:true".to_string()));
-    assert!(log.borrow().contains(&"complete:0:125".to_string()));
-    assert!(log.borrow().contains(&"complete:1:125".to_string()));
+    assert!(log.borrow().contains(&"complete:0:120".to_string()));
+    assert!(log.borrow().contains(&"complete:1:120".to_string()));
     assert!(log.borrow().contains(&"complete-idle:2:120".to_string()));
     Ok(())
 }

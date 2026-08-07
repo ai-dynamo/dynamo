@@ -698,14 +698,17 @@ where
                 .engine
                 .try_remove_drained()
                 .context("failed to remove drained aggregated workers")?;
+            let mut released = Vec::new();
             for worker_id in &removed {
-                self.placement.worker_removed(
+                let placements = self.placement.worker_removed(
                     WorkerTopology {
                         worker_id: *worker_id,
                         scheduler_ids: Vec::new(),
                     },
                     self.now_ms,
                 )?;
+                released.extend(placements.iter().map(|placement| placement.request_id));
+                self.dispatch_placements(placements)?;
             }
             if !removed.is_empty() {
                 let origin = common_origin(removed.iter().filter_map(|worker_id| {
@@ -733,7 +736,7 @@ where
                     origin,
                     transitions,
                     state,
-                    Vec::new(),
+                    released,
                 );
             }
             changed |= !removed.is_empty();
@@ -863,6 +866,7 @@ where
                 format!("failed to apply aggregated worker target {target_workers}")
             })?;
         let startup_delay_ms = self.engine.startup_time_ms();
+        let mut released = Vec::new();
 
         for &id in &added {
             match startup_delay_ms {
@@ -885,6 +889,7 @@ where
                         .worker_topology(id)
                         .ok_or_else(|| anyhow::anyhow!("new worker {id} has no engine topology"))?;
                     let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                    released.extend(placements.iter().map(|placement| placement.request_id));
                     self.dispatch_placements(placements)?;
                 }
             }
@@ -896,6 +901,7 @@ where
                 scheduler_ids: Vec::new(),
             });
             let placements = self.placement.worker_draining(topology, self.now_ms)?;
+            released.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_placements(placements)?;
         }
         for &id in &removed {
@@ -906,13 +912,11 @@ where
                 },
                 self.now_ms,
             )?;
+            released.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_placements(placements)?;
         }
         let placements = self.placement.topology_settled(self.now_ms)?;
-        let released = placements
-            .iter()
-            .map(|placement| placement.request_id)
-            .collect();
+        released.extend(placements.iter().map(|placement| placement.request_id));
         self.dispatch_placements(placements)?;
         self.record_scale_lifecycle(
             &added,

@@ -24,8 +24,11 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::engine::{LiveEngineScheduler, create_engine_with_event_sender};
+#[cfg(test)]
+use crate::grouped_scheduler::CompletionBoundaryTestControl;
 use crate::grouped_scheduler::{
-    GroupedSchedulerRankEventSinks, GroupedSchedulers, create_grouped_scheduler_with_event_senders,
+    CompletionBoundaryDrain, GroupedSchedulerRankEventSinks, GroupedSchedulers,
+    create_grouped_scheduler_with_event_senders,
 };
 use crate::scheduler::{
     LiveEngineEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
@@ -144,14 +147,20 @@ struct LiveEngineGroup {
     cancel: CancellationToken,
     actor: Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>,
     shutdown: Mutex<Option<SharedShutdown>>,
+    completion_drain: CompletionBoundaryDrain,
 }
 
 impl LiveEngineGroup {
-    fn new(cancel: CancellationToken, actor: tokio::task::JoinHandle<anyhow::Result<()>>) -> Self {
+    fn new(
+        cancel: CancellationToken,
+        actor: tokio::task::JoinHandle<anyhow::Result<()>>,
+        completion_drain: CompletionBoundaryDrain,
+    ) -> Self {
         Self {
             cancel,
             actor: Mutex::new(Some(actor)),
             shutdown: Mutex::new(None),
+            completion_drain,
         }
     }
 
@@ -266,9 +275,12 @@ impl LiveEngine {
             event_receivers.push(event_rx);
         }
 
-        let GroupedSchedulers { schedulers, actor } =
-            create_grouped_scheduler_with_event_senders(args, rank_sinks, Some(cancel.clone()))?;
-        let group = Arc::new(LiveEngineGroup::new(cancel, actor));
+        let GroupedSchedulers {
+            schedulers,
+            actor,
+            completion_drain,
+        } = create_grouped_scheduler_with_event_senders(args, rank_sinks, Some(cancel.clone()))?;
+        let group = Arc::new(LiveEngineGroup::new(cancel, actor, completion_drain));
         schedulers
             .into_iter()
             .zip(event_receivers)
@@ -332,6 +344,7 @@ impl LiveEngine {
         let LiveEngineScheduler {
             handle: scheduler,
             actor: scheduler_actor,
+            completion_drain,
         } = create_engine_with_event_sender(
             args,
             dp_rank,
@@ -343,7 +356,11 @@ impl LiveEngine {
             Some(group_cancel.clone()),
             options.fpm_publisher.clone(),
         )?;
-        let group = Arc::new(LiveEngineGroup::new(group_cancel, scheduler_actor));
+        let group = Arc::new(LiveEngineGroup::new(
+            group_cancel,
+            scheduler_actor,
+            completion_drain,
+        ));
         Self::from_scheduler(runtime, scheduler, group, event_rx, options, output_gate)
     }
 
@@ -564,6 +581,20 @@ impl LiveEngine {
     /// Number of response streams currently registered with the dispatcher.
     pub fn active_request_count(&self) -> usize {
         self.inner.routes.by_client.len()
+    }
+
+    pub(crate) async fn drain_completion_boundary(&self) -> anyhow::Result<()> {
+        self.inner.group.completion_drain.wait().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_completion_boundary_before_finish(&self) -> CompletionBoundaryTestControl {
+        self.inner.group.completion_drain.pause_before_finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_is_cancelled(&self) -> bool {
+        self.inner.group.cancel.is_cancelled()
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {

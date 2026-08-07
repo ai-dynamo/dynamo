@@ -981,8 +981,7 @@ mod tests {
         assert_eq!(disabled.page_metadata_len(), 0);
 
         let sink = Arc::new(MockSink::new());
-        let enabled =
-            SglangKvManager::new(64, 4, KvEventPublishers::new(Some(sink)), 0);
+        let enabled = SglangKvManager::new(64, 4, KvEventPublishers::new(Some(sink)), 0);
         assert_eq!(enabled.page_metadata_len(), 16);
     }
 
@@ -1293,8 +1292,7 @@ mod tests {
     #[test]
     fn reused_physical_page_replaces_dense_event_metadata() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(1, 1, KvEventPublishers::new(Some(sink.clone())), 0);
+        let mut mgr = SglangKvManager::new(1, 1, KvEventPublishers::new(Some(sink.clone())), 0);
 
         let first = mgr.allocate_for_request(&[1]).unwrap();
         let page = first.lease.pages()[0];

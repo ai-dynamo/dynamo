@@ -197,6 +197,7 @@ impl RankEngine for SchedulerRank {
             same_timestamp_retry,
             start_effects,
             pending: PendingPass {
+                started_at_ms: now_ms,
                 effects: completion_effects,
             },
         })
@@ -205,7 +206,7 @@ impl RankEngine for SchedulerRank {
     fn complete_pass(
         &mut self,
         mut pending: Self::PendingPass,
-        _end_ms: f64,
+        end_ms: f64,
     ) -> Result<Self::PassCompletionEffects> {
         // The preserved scheduler retries deferred destination reservations
         // when a forward pass releases capacity. Keep that wakeup at the
@@ -221,6 +222,8 @@ impl RankEngine for SchedulerRank {
         let completion_kv_events = self.core.drain_kv_events();
         pending.effects.kv_events.extend(completion_kv_events);
         pending.effects.metrics = self.metrics();
+        pending.effects.forward_pass_metrics.duration_ms =
+            (end_ms - pending.started_at_ms).max(0.0);
         for output in &pending.effects.outputs {
             if output.completed {
                 self.handoff_requests

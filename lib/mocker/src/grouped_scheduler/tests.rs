@@ -204,8 +204,9 @@ async fn two_rank_handles_share_one_group_boundary_and_publish_rank_effects() {
         })
         .collect();
     let cancel = CancellationToken::new();
-    let GroupedSchedulers { schedulers, actor } =
-        create_grouped_scheduler(args(2), sinks, Some(cancel.clone())).unwrap();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(args(2), sinks, Some(cancel.clone())).unwrap();
 
     schedulers[0]
         .request_sender()
@@ -235,7 +236,9 @@ async fn two_rank_handles_share_one_group_boundary_and_publish_rank_effects() {
 async fn same_rank_receive_burst_is_batched_into_one_native_pass() {
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    let GroupedSchedulers { schedulers, actor } = create_grouped_scheduler(
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
         args(1),
         vec![GroupedSchedulerRankSinks {
             output_tx: Some(output_tx),
@@ -276,6 +279,7 @@ async fn command_ack_and_handoff_lifecycle_round_trip_dynamo_uuid() {
     let GroupedSchedulers {
         mut schedulers,
         actor,
+        ..
     } = create_grouped_scheduler(
         {
             let mut args = args(1);
@@ -331,7 +335,9 @@ async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
     slow_args.speedup_ratio = 0.001;
     let (event_tx, mut event_rx) = mpsc::channel(8);
     let cancel = CancellationToken::new();
-    let GroupedSchedulers { schedulers, actor } = create_grouped_scheduler_with_event_senders(
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler_with_event_senders(
         slow_args,
         vec![GroupedSchedulerRankEventSinks {
             event_tx: Some(SchedulerEventSender::Ordered {
@@ -408,7 +414,9 @@ async fn midpass_cancel_ack_precedes_completion_router_effects() {
     slow_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(SlowDecode)));
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    let GroupedSchedulers { schedulers, actor } = create_grouped_scheduler(
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
         slow_args,
         vec![GroupedSchedulerRankSinks {
             output_tx: Some(output_tx),
@@ -723,7 +731,9 @@ async fn closed_output_receiver_cancels_request_and_releases_native_kv() {
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     drop(output_rx);
     let cancel = CancellationToken::new();
-    let GroupedSchedulers { schedulers, actor } = create_grouped_scheduler(
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
         slow_args,
         vec![GroupedSchedulerRankSinks {
             output_tx: Some(output_tx),

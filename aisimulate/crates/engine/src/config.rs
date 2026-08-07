@@ -440,6 +440,21 @@ impl EngineConfig {
                 "aic_nextn_accept_rates requires aic_nextn"
             );
         }
+        if self.backend == Backend::Sglang {
+            ensure!(
+                !self.emit_kv_token_ids,
+                "emit_kv_token_ids=true is not supported for backend=sglang"
+            );
+            ensure!(
+                self.enable_prefix_caching,
+                "enable_prefix_caching=false is not supported for backend=sglang"
+            );
+            ensure!(
+                self.enable_chunked_prefill,
+                "enable_chunked_prefill=false is not supported for backend=sglang"
+            );
+            self.sglang.validate()?;
+        }
         ensure!(
             !self.emit_kv_token_ids || self.emit_kv_events,
             "emit_kv_token_ids requires emit_kv_events"
@@ -453,9 +468,6 @@ impl EngineConfig {
                 .is_none_or(|bandwidth| bandwidth.is_finite() && bandwidth >= 0.0),
             "kv_transfer_bandwidth must be finite and non-negative"
         );
-        if self.backend == Backend::Sglang {
-            self.sglang.validate()?;
-        }
         match &self.timing_model {
             TimingModelConfig::Polynomial => {}
             TimingModelConfig::Fixed {
@@ -613,6 +625,31 @@ mod tests {
                 .to_string()
                 .contains("schedule_conservativeness")
         );
+    }
+
+    #[test]
+    fn sglang_rejects_unsupported_generic_controls_at_validation_and_factory_boundaries() {
+        let cases = [
+            ("emit_kv_token_ids", true, true, true),
+            ("enable_prefix_caching", false, false, true),
+            ("enable_chunked_prefill", false, true, false),
+        ];
+
+        for (field, emit_kv_token_ids, enable_prefix_caching, enable_chunked_prefill) in cases {
+            let config = EngineConfig {
+                emit_kv_events: emit_kv_token_ids,
+                emit_kv_token_ids,
+                enable_prefix_caching,
+                enable_chunked_prefill,
+                ..EngineConfig::for_backend(Backend::Sglang)
+            };
+            assert!(config.validate().unwrap_err().to_string().contains(field));
+            let error = match crate::EngineFactory::new(config) {
+                Ok(_) => panic!("expected EngineFactory to reject {field}"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(field));
+        }
     }
 
     #[test]

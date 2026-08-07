@@ -22,7 +22,10 @@ use crate::disagg::DisaggRuntimeImpl;
 use crate::error::runtime_error;
 use crate::protocol::DirectRequest;
 use crate::replay::OfflineDisaggReplayConfig;
-use crate::{ReplayError, ReplayResult, ReplaySpec, Replayer, TraceSimulationReport, WorkerStage};
+use crate::{
+    ReplayError, ReplayResult, ReplaySpec, ReplayTopology, Replayer, TraceSimulationReport,
+    WorkerStage,
+};
 
 fn default_dp_size() -> u32 {
     1
@@ -114,6 +117,25 @@ impl ReplayEngineConfig {
             WorkerStage::Decode => WorkerType::Decode,
         };
         role
+    }
+
+    pub(crate) fn validate_topology(&self, topology: &ReplayTopology) -> ReplayResult<()> {
+        if matches!(topology, ReplayTopology::Disaggregated { .. }) {
+            for stage in [WorkerStage::Prefill, WorkerStage::Decode] {
+                let role = self.role(stage);
+                if role.dp_size != 1 {
+                    let role_name = match stage {
+                        WorkerStage::Prefill => "prefill",
+                        WorkerStage::Decode => "decode",
+                        WorkerStage::Aggregated => unreachable!(),
+                    };
+                    return Err(ReplayError::InvalidSpec(format!(
+                        "disaggregated replay requires {role_name} dp_size=1; attention-DP handoff identity is not implemented"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
