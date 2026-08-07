@@ -61,7 +61,7 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 /// half-broken peer from parking the connection indefinitely.
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-use super::{RouteDoc, error::SanitizedError, service_v2};
+use super::{RouteDoc, error::INTERNAL_ERROR_MESSAGE, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
@@ -169,10 +169,7 @@ async fn handle_socket(
         Ok(s) => s,
         Err(err) => {
             tracing::error!(%err, "/v1/realtime engine.generate() failed");
-            *close_reason.lock() = Some(close_message(
-                close_code::ERROR,
-                &SanitizedError::Internal.to_string(),
-            ));
+            *close_reason.lock() = Some(close_message(close_code::ERROR, INTERNAL_ERROR_MESSAGE));
             return;
         }
     };
@@ -190,13 +187,12 @@ async fn handle_socket(
                 event
             } else if let Some(err) = annotated.error {
                 tracing::error!("/v1/realtime engine error: {err}");
-                let sanitized = SanitizedError::Internal;
                 RealtimeServerEvent::Error(RealtimeServerEventError {
                     event_id: format!("event_{}", Uuid::new_v4()),
                     error: RealtimeAPIError {
                         r#type: "server_error".to_string(),
                         code: None,
-                        message: sanitized.to_string(),
+                        message: INTERNAL_ERROR_MESSAGE.to_string(),
                         param: None,
                         event_id: None,
                     },
@@ -485,7 +481,7 @@ where
                 send_error_event(
                     ws_tx,
                     "server_error",
-                    &SanitizedError::Internal.to_string(),
+                    INTERNAL_ERROR_MESSAGE,
                     Some(model_param),
                 )
                 .await;
