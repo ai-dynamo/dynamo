@@ -111,3 +111,160 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
 	assert.Equal(t, 1, podCliqueReads)
 }
+
+func TestStampGroveCheckpointBindings(t *testing.T) {
+	t.Log("Build engine and unrelated cliques with stale whole-map copies")
+	desired := groveBindingPCS(
+		`stale`,
+		groveBindingClique("engine-a", "checkpoint-a", "uid-a/1"),
+		&grovev1alpha1.PodCliqueTemplateSpec{
+			Name: "gms",
+			Annotations: map[string]string{
+				consts.GroveCheckpointBindingsAnnotation: "stale",
+			},
+		},
+	)
+
+	t.Log("Stamp only the canonical top-level checkpoint map")
+	require.NoError(t, stampGroveCheckpointBindings(desired, map[string]string{
+		"checkpoint-b": "uid-b/2",
+		"checkpoint-a": "uid-a/1",
+	}))
+
+	assert.Equal(t,
+		`{"checkpoint-a":"uid-a/1","checkpoint-b":"uid-b/2"}`,
+		desired.Annotations[consts.GroveCheckpointBindingsAnnotation],
+	)
+	assert.Equal(t, "checkpoint-a",
+		desired.Spec.Template.Cliques[0].Annotations[consts.CheckpointNameAnnotation],
+	)
+	assert.Equal(t, "uid-a/1",
+		desired.Spec.Template.Cliques[0].Annotations[consts.CheckpointBindingAnnotation],
+	)
+	for _, clique := range desired.Spec.Template.Cliques {
+		assert.NotContains(t, clique.Annotations, consts.GroveCheckpointBindingsAnnotation)
+	}
+	assert.NotContains(t, desired.Spec.Template.Cliques[1].Annotations, consts.CheckpointNameAnnotation)
+	assert.NotContains(t, desired.Spec.Template.Cliques[1].Annotations, consts.CheckpointBindingAnnotation)
+}
+
+func TestValidateGroveCheckpointBindings(t *testing.T) {
+	matching := groveBindingPCS(
+		`{"checkpoint-a":"uid-a/1"}`,
+		groveBindingClique("engine", "checkpoint-a", "uid-a/1"),
+	)
+	newClique := groveBindingPCS(
+		`{"checkpoint-a":"uid-a/1","checkpoint-b":"uid-b/1"}`,
+		groveBindingClique("engine", "checkpoint-a", "uid-a/1"),
+		groveBindingClique("engine-new", "checkpoint-b", "uid-b/1"),
+	)
+
+	tests := []struct {
+		name     string
+		existing *grovev1alpha1.PodCliqueSet
+		desired  *grovev1alpha1.PodCliqueSet
+		wantErr  string
+	}{
+		{name: "new workload", desired: matching},
+		{name: "steady reconcile", existing: matching, desired: matching},
+		{
+			name: "existing clique without binding copies fails closed",
+			existing: groveBindingPCS(
+				`{"checkpoint-a":"uid-a/1"}`,
+				&grovev1alpha1.PodCliqueTemplateSpec{Name: "engine"},
+			),
+			desired: matching,
+			wantErr: "copies are required",
+		},
+		{
+			name: "missing PCS map fails closed",
+			existing: groveBindingPCS(
+				"",
+				groveBindingClique("engine", "checkpoint-a", "uid-a/1"),
+			),
+			desired: matching,
+			wantErr: "copies disagree",
+		},
+		{
+			name: "divergent clique and PCS copies fail",
+			existing: groveBindingPCS(
+				`{"checkpoint-a":"uid-a/1"}`,
+				groveBindingClique("engine", "checkpoint-a", "other/1"),
+			),
+			desired: matching,
+			wantErr: "copies disagree",
+		},
+		{
+			name:     "same-name replacement fails",
+			existing: matching,
+			desired: groveBindingPCS(
+				`{"checkpoint-a":"replacement/1"}`,
+				groveBindingClique("engine", "checkpoint-a", "replacement/1"),
+			),
+			wantErr: "is immutable",
+		},
+		{
+			name:     "missing map entry does not make checkpoint new",
+			existing: matching,
+			desired: groveBindingPCS(
+				`{"checkpoint-b":"uid-b/1"}`,
+				groveBindingClique("engine", "checkpoint-b", "uid-b/1"),
+			),
+			wantErr: "is immutable",
+		},
+		{
+			name:     "new checkpoint on new rollout clique is allowed",
+			existing: matching,
+			desired:  newClique,
+		},
+		{
+			name:     "explicit checkpoints remain unbound",
+			existing: matching,
+			desired:  groveBindingPCS("", &grovev1alpha1.PodCliqueTemplateSpec{Name: "engine"}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Validate PCS and same-named clique binding copies")
+			err := validateGroveCheckpointBindings(tt.existing, tt.desired)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func groveBindingPCS(
+	bindings string,
+	cliques ...*grovev1alpha1.PodCliqueTemplateSpec,
+) *grovev1alpha1.PodCliqueSet {
+	annotations := map[string]string{}
+	if bindings != "" {
+		annotations[consts.GroveCheckpointBindingsAnnotation] = bindings
+	}
+	return &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "graph",
+			Namespace:   "default",
+			Annotations: annotations,
+		},
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: cliques,
+			},
+		},
+	}
+}
+
+func groveBindingClique(name, checkpointName, binding string) *grovev1alpha1.PodCliqueTemplateSpec {
+	return &grovev1alpha1.PodCliqueTemplateSpec{
+		Name: name,
+		Annotations: map[string]string{
+			consts.CheckpointNameAnnotation:    checkpointName,
+			consts.CheckpointBindingAnnotation: binding,
+		},
+	}
+}

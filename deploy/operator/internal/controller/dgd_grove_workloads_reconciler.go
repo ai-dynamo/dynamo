@@ -24,6 +24,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -90,7 +91,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
-
 	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
@@ -119,12 +119,20 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	_, synced, err := commoncontroller.SyncResource(
+	_, synced, err := commoncontroller.SyncResourceWithOptions(
 		ctx,
 		&r.syncer,
 		dgd,
 		func(context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 			return desired, false, nil
+		},
+		commoncontroller.SyncResourceOptions[*grovev1alpha1.PodCliqueSet]{
+			OwnedAnnotationKeys: []string{commonconsts.GroveCheckpointBindingsAnnotation},
+			ValidateCurrentAgainstDesired: func(
+				current, desired *grovev1alpha1.PodCliqueSet,
+			) error {
+				return validateGroveCheckpointBindings(current, desired)
+			},
 		},
 	)
 	if err != nil {

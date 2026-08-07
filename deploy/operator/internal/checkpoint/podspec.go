@@ -88,6 +88,17 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 		delete(annotations, commonconsts.CheckpointNameAnnotation)
 		delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
+		delete(annotations, commonconsts.CheckpointBindingAnnotation)
+
+		// Preserve the verified automatic checkpoint identity on shaped restore targets.
+		if checkpointInfo != nil &&
+			checkpointInfo.Enabled &&
+			checkpointInfo.Exists &&
+			checkpointInfo.CheckpointName != "" &&
+			checkpointInfo.AutoBinding != "" {
+			annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
+			annotations[commonconsts.CheckpointBindingAnnotation] = checkpointInfo.AutoBinding
+		}
 	}
 	if !enabled {
 		return nil
@@ -120,6 +131,7 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
 	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
+	delete(annotations, commonconsts.CheckpointBindingAnnotation)
 	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
 		return nil
@@ -131,6 +143,9 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	}
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
 	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
+	if checkpointInfo.AutoBinding != "" {
+		annotations[commonconsts.CheckpointBindingAnnotation] = checkpointInfo.AutoBinding
+	}
 	startupPolicy := checkpointInfo.StartupPolicy
 	if startupPolicy == "" {
 		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate

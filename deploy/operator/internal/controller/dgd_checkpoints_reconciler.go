@@ -163,6 +163,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		result.Infos[componentName] = info
 
 		if !hasCheckpointRef {
+			info.Automatic = true
 			if !info.Exists {
 				logger.Info("Creating DGD-managed DynamoCheckpoint CR", "component", componentName)
 			}
@@ -181,6 +182,16 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
 			}
 			info.Ready = ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady
+			if ckpt.UID != "" && ckpt.Generation > 0 {
+				info.AutoBinding, err = checkpoint.AutomaticCheckpointBinding(ckpt)
+				if err != nil {
+					return dgdCheckpointsResult{}, fmt.Errorf(
+						"failed to bind automatic checkpoint for component %s: %w",
+						componentName,
+						err,
+					)
+				}
+			}
 		}
 
 		result.Statuses[componentName] = nvidiacomv1beta1.ComponentCheckpointStatus{

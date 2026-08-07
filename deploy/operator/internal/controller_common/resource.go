@@ -59,8 +59,36 @@ type Reconciler interface {
 // if the resource should be deleted, the returned resource must contain the necessary information to delete it (name and namespace)
 type ResourceGenerator[T client.Object] func(ctx context.Context) (T, bool, error)
 
+// SyncResourceOptions controls metadata owned by the caller in addition to the
+// resource content managed by SyncResource.
+type SyncResourceOptions[T client.Object] struct {
+	// OwnedAnnotationKeys is the complete set of annotation keys synchronized
+	// from the desired object. All other live annotations are preserved.
+	OwnedAnnotationKeys []string
+	// ValidateCurrentAgainstDesired validates immutable semantics on the exact
+	// live object whose resourceVersion will be used by Update.
+	ValidateCurrentAgainstDesired func(current, desired T) error
+}
+
 //nolint:nakedret
 func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T]) (modified bool, res T, err error) {
+	return SyncResourceWithOptions(
+		ctx,
+		r,
+		parentResource,
+		generateResource,
+		SyncResourceOptions[T]{},
+	)
+}
+
+//nolint:nakedret
+func SyncResourceWithOptions[T client.Object](
+	ctx context.Context,
+	r Reconciler,
+	parentResource client.Object,
+	generateResource ResourceGenerator[T],
+	options SyncResourceOptions[T],
+) (modified bool, res T, err error) {
 	logs := log.FromContext(ctx)
 
 	resource, toDelete, err := generateResource(ctx)
@@ -159,6 +187,12 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return
 		}
 
+		if options.ValidateCurrentAgainstDesired != nil {
+			if err = options.ValidateCurrentAgainstDesired(oldResource, resource); err != nil {
+				return
+			}
+		}
+
 		// Check if the Spec has changed and update if necessary
 		var changeResult SpecChangeResult
 		changeResult, err = GetSpecChangeResult(oldResource, resource)
@@ -167,7 +201,12 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
 		}
 
-		if !changeResult.NeedsUpdate {
+		annotationsNeedUpdate := ownedAnnotationsDiffer(
+			oldResource,
+			resource,
+			options.OwnedAnnotationKeys,
+		)
+		if !changeResult.NeedsUpdate && !annotationsNeedUpdate {
 			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
 			r.GetRecorder().Eventf(oldResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
 			res = oldResource
@@ -201,7 +240,10 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			logs.Info(fmt.Sprintf("%s spec is equivalent. Updating bookkeeping annotations only.", resourceType))
 		}
 
-		updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
+		if changeResult.NeedsUpdate {
+			updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
+		}
+		syncOwnedAnnotations(oldResource, resource, options.OwnedAnnotationKeys)
 
 		err = r.Update(ctx, oldResource)
 		if err != nil {
@@ -215,6 +257,38 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		res = oldResource
 	}
 	return
+}
+
+func ownedAnnotationsDiffer(current, desired client.Object, keys []string) bool {
+	currentAnnotations := current.GetAnnotations()
+	desiredAnnotations := desired.GetAnnotations()
+	for _, key := range keys {
+		currentValue, currentOK := currentAnnotations[key]
+		desiredValue, desiredOK := desiredAnnotations[key]
+		if currentOK != desiredOK || currentValue != desiredValue {
+			return true
+		}
+	}
+	return false
+}
+
+func syncOwnedAnnotations(current, desired client.Object, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	currentAnnotations := current.GetAnnotations()
+	if currentAnnotations == nil {
+		currentAnnotations = map[string]string{}
+	}
+	desiredAnnotations := desired.GetAnnotations()
+	for _, key := range keys {
+		if value, ok := desiredAnnotations[key]; ok {
+			currentAnnotations[key] = value
+		} else {
+			delete(currentAnnotations, key)
+		}
+	}
+	current.SetAnnotations(currentAnnotations)
 }
 
 // CopySpec copies only the Spec field from source to destination using Unstructured
