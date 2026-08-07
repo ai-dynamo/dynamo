@@ -115,7 +115,7 @@ uses three GPUs in total, one for each model.
 ### Prerequisites
 
 - A Kubernetes cluster with at least three NVIDIA GPUs and the
-  [Dynamo Kubernetes Platform](../../docs/fern/kubernetes/quickstart.mdx)
+  [Dynamo Kubernetes Platform](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
   installed.
 - Docker and `envsubst`, plus access to a registry that the cluster can pull
   from.

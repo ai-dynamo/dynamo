@@ -1,11 +1,11 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Topology-Aware KV Transfer
 subtitle: Keep disaggregated prefill and decode KV-cache transfers within a selected topology domain
 ---
 
-Topology-aware KV transfer lets a disaggregated Dynamo deployment route decode requests toward workers that share the selected prefill worker's topology domain, such as zone or rack. This reduces slow cross-domain KV-cache transfers when prefill and decode workers exchange KV data over NIXL.
+**Experimental.** Topology-aware KV transfer lets a disaggregated NVIDIA Dynamo deployment route decode requests toward workers that share the selected prefill worker's topology domain, such as zone or rack. This reduces slow cross-domain KV-cache transfers when prefill and decode workers exchange KV data over NIXL.
 
 Use this feature when:
 
@@ -20,20 +20,30 @@ For RDMA/NIXL transport setup, see [Disagg Communication](../kubernetes-operator
 
 ```mermaid
 flowchart LR
-    DGD["DGD spec.experimental.kvTransferPolicy"] --> Operator["Operator injects worker env + Downward API volume"]
-    Node["Node label"] --> Controller["Topology label controller"]
+    DGD["DGD spec.experimental.kvTransferPolicy"] --> Operator["Operator configures workers"]
+    Operator --> Source{"Topology source"}
+    Source --> Label["labelKey"]
+    Source --> Grove["clusterTopologyName"]
+    Label --> Controller["Topology label controller"]
+    Grove --> Controller
+    Node["Node topology labels"] --> Controller
     Controller --> Pod["Worker pod label"]
-    Pod --> Volume["/etc/dynamo/topology/<domain>"]
+    Pod --> Volume["/etc/dynamo/topology/<domain> files"]
     Volume --> Runtime["Worker publishes ModelRuntimeConfig topology metadata"]
     Runtime --> Prefill["Prefill router derives decode constraints"]
     Prefill --> Decode["Decode router selects same or preferred topology"]
 ```
 
-The operator configures worker pods from `spec.experimental.kvTransferPolicy`:
+Set exactly one topology source in `spec.experimental.kvTransferPolicy`:
 
-- Adds a `nvidia.com/topology-label-key` annotation to worker pods.
-- Runs a topology-label controller that copies the configured node label onto the worker pod after scheduling.
-- Projects that pod label into `/etc/dynamo/topology/<domain>` with a Downward API volume.
+- `labelKey` copies one Kubernetes node label onto the worker pod under the same key.
+- `clusterTopologyName` uses the domain-to-node-label mappings from a Grove topology resource. The controller copies every topology level onto the worker pod under `nvidia.com/dynamo-topology.<domain>` labels.
+
+For either source, the operator:
+
+- Annotates worker pods with the selected topology source.
+- Runs a topology-label controller that copies node topology values onto the worker pod after scheduling.
+- Projects the copied pod labels into `/etc/dynamo/topology/<domain>` files with a Downward API volume.
 - Injects worker environment variables that tell the backend runtime which topology domain and enforcement policy to publish.
 
 The frontend does not read this policy from its own environment. Workers publish the topology metadata in their `ModelRuntimeConfig`; the router reads it from runtime discovery.
@@ -44,7 +54,9 @@ The frontend does not read this policy from its own environment. Workers publish
 |-------------|---------|
 | Disaggregated serving | Separate prefill and decode worker services. |
 | KV router | The frontend should use `DYN_ROUTER_MODE=kv`. |
-| Node topology labels | Every node that can host a worker must carry the configured `labelKey`. |
+| Topology source | Set exactly one of `labelKey` or `clusterTopologyName`. |
+| Node topology labels | Every worker node must carry the configured `labelKey`, or every source label defined by the Grove topology resource. |
+| Grove pathway | Required only for `clusterTopologyName`. Install and enable Grove, and do not set `nvidia.com/enable-grove: "false"` on the DGD. See [Grove](grove.md). |
 | Dynamo operator | The operator must include topology-label controller and node-read RBAC. |
 | KV transfer transport | RDMA, EFA, or another NIXL-compatible transport should already be configured for production disaggregated deployments. |
 
@@ -119,6 +131,21 @@ spec:
 
 > [!IMPORTANT]
 > `required` is a decode-routing constraint, not a capacity planner. The `DynamoGraphDeployment` author or cluster administrator must ensure that every topology domain that can receive prefill workers also has sufficient same-domain decode capacity. If a domain has prefill workers but no matching decode workers, or too little decode capacity, the router cannot spill to another domain without violating the policy.
+
+### Use a Grove Topology Source
+
+To use topology levels defined by Grove, set `clusterTopologyName` instead of `labelKey`. The selected `domain` must exist in the referenced topology resource.
+
+```yaml
+spec:
+  experimental:
+    kvTransferPolicy:
+      clusterTopologyName: my-cluster-topology
+      domain: rack
+      enforcement: required
+```
+
+This path requires Grove to be enabled in the operator and for the DGD. The operator projects every topology level from the referenced resource, while the router uses only the selected `domain` for the KV-transfer constraint.
 
 ### Capacity Planning Across Domains
 
@@ -259,10 +286,14 @@ spec:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `labelKey` | Yes | Kubernetes node label key to copy onto worker pods, for example `topology.kubernetes.io/zone`. |
-| `domain` | Yes | Logical topology domain name published by workers, for example `zone` or `rack`. Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`. |
+| `labelKey` | One topology source | Kubernetes node label key to copy onto worker pods, for example `topology.kubernetes.io/zone`. Mutually exclusive with `clusterTopologyName`. |
+| `clusterTopologyName` | One topology source | Name of a Grove topology resource. Requires the Grove pathway and is mutually exclusive with `labelKey`. |
+| `domain` | Yes | Logical topology domain published by workers, for example `zone` or `rack`. Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`; with `clusterTopologyName`, it must name a level in the referenced resource. |
 | `enforcement` | No | `required` or `preferred`. Defaults to `required`. |
 | `preferredWeight` | Only with `preferred` | Bias weight from `0` to `1`; only valid with `enforcement: preferred`. |
+
+> [!IMPORTANT]
+> `kvTransferPolicy` is immutable after the DGD is created. To add, remove, or change the policy, delete and recreate the DGD.
 
 The runtime uses `domain`, not the Kubernetes label key, when creating routing constraints. For example, `labelKey: topology.kubernetes.io/zone` and `domain: zone` produce worker topology metadata like:
 
@@ -278,27 +309,50 @@ The runtime uses `domain`, not the Kubernetes label key, when creating routing c
 
 ## Verify the Deployment
 
-After the DGD creates worker pods, verify the operator pipeline from node label to runtime topology file.
+After the DGD creates worker pods, verify the operator pipeline from the selected topology source to the runtime topology files.
 
 ```bash
 export NAMESPACE=<namespace>
 export POD=<worker-pod>
+```
+
+For a `labelKey` source, verify the source annotation and copied label:
+
+```bash
+export LABEL_KEY=<label-key>
 
 kubectl get pod "$POD" -n "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.nvidia\.com/topology-label-key}{"\n"}'
 
 kubectl get pod "$POD" -n "$NAMESPACE" \
-  -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}'
+  -o go-template='{{ index .metadata.labels "'"$LABEL_KEY"'" }}{{ "\n" }}'
+```
 
+For a `clusterTopologyName` source, verify the source annotation and the canonical label for the selected domain:
+
+```bash
+export DOMAIN=<domain>
+TOPOLOGY_LABEL="nvidia.com/dynamo-topology.$DOMAIN"
+
+kubectl get pod "$POD" -n "$NAMESPACE" \
+  -o jsonpath='{.metadata.annotations.nvidia\.com/topology-cluster-topology-name}{"\n"}'
+
+kubectl get pod "$POD" -n "$NAMESPACE" \
+  -o go-template='{{ index .metadata.labels "'"$TOPOLOGY_LABEL"'" }}{{ "\n" }}'
+```
+
+For either source, inspect the projected topology files:
+
+```bash
 kubectl exec "$POD" -n "$NAMESPACE" -- \
   sh -c 'find /etc/dynamo/topology -maxdepth 1 -type f -print -exec cat {} \;'
 ```
 
 Expected results:
 
-- The annotation value is the configured `labelKey`.
-- The worker pod has the copied topology label.
-- `/etc/dynamo/topology/<domain>` exists and contains the topology value.
+- The source annotation contains the configured `labelKey` or `clusterTopologyName`.
+- The worker pod has the copied topology label or canonical Grove topology labels.
+- `/etc/dynamo/topology/<domain>` exists for the selected domain and contains the topology value. The Grove path also projects files for the other topology levels.
 
 Worker logs should include topology config during startup:
 
@@ -310,12 +364,16 @@ kubectl logs "$POD" -n "$NAMESPACE" | grep -i "Topology config"
 
 ### Pod Has No Copied Topology Label
 
-Check whether the node has the configured label:
+For a `labelKey` source, check whether the node has the configured label:
 
 ```bash
+export LABEL_KEY=<label-key>
 NODE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.nodeName}')
-kubectl get node "$NODE" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}'
+kubectl get node "$NODE" \
+  -o go-template='{{ index .metadata.labels "'"$LABEL_KEY"'" }}{{ "\n" }}'
 ```
+
+For a `clusterTopologyName` source, verify that the referenced Grove topology resource exists, contains the selected `domain`, and maps each domain to a label present on the node. Also verify that the DGD does not set `nvidia.com/enable-grove: "false"`.
 
 If the label is missing, the topology-label controller emits a warning event with reason `TopologyLabelMissing` and leaves topology metadata unavailable for that worker.
 
@@ -329,8 +387,8 @@ kubectl get events -n "$NAMESPACE" \
 When topology is enabled, the worker waits for the transfer-domain file to appear and contain data. If it stays empty, check:
 
 - `spec.experimental.kvTransferPolicy.domain` matches the projected file name.
-- `spec.experimental.kvTransferPolicy.labelKey` exists on the worker's node.
-- The worker pod has the `nvidia.com/topology-label-key` annotation.
+- The configured `labelKey`, or the source label for the selected Grove topology domain, exists on the worker's node.
+- The worker pod has the source annotation for `labelKey` or `clusterTopologyName`.
 - The topology-label controller is running and has node `get` RBAC.
 
 ### Required Policy Fails Requests

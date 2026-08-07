@@ -455,6 +455,15 @@ def artifact_table(data: dict) -> str:
     return md_table(["Category", "Name", "Description", "Meta", "Tags / install"], rows)
 
 
+def nightlies_table(data: dict) -> str:
+    """Recent pinned nightly wheel builds."""
+    rows = [
+        [b["version"], b["date"], ", ".join(b["packages"]), b.get("note")]
+        for b in data.get("NIGHTLY_BUILDS", [])
+    ]
+    return md_table(["Version", "Date", "Packages", "Notes"], rows)
+
+
 def known_issues_table(data: dict) -> str:
     """Known-artifact-issues table."""
     rows = [
@@ -695,6 +704,11 @@ def render_release_artifacts(data: dict) -> str:
     parts.append("**Known artifact issues**")
     parts.append(known_issues_table(data))
 
+    if data.get("NIGHTLY_BUILDS"):
+        parts.append("**Recent nightly wheel builds**")
+        parts.append(nightlies_table(data))
+        parts.append(data["NIGHTLIES_NOTE"])
+
     parts.append("**Crates: first published version on crates.io**")
     parts.append(crates_table(data))
 
@@ -903,6 +917,8 @@ def render_releases_data(data: dict) -> str:
     if data.get("NIGHTLIES_NOTE"):
         parts.append("## Nightlies")
         parts.append(data["NIGHTLIES_NOTE"])
+        if data.get("NIGHTLY_BUILDS"):
+            parts.append(nightlies_table(data))
 
     return "\n\n".join(parts)
 
@@ -929,6 +945,12 @@ def build_json(data: dict) -> str:
         out = dict(b)
         out["shippedIso"] = iso_date(b["shipped"])
         ea_builds.append(out)
+
+    nightly_builds = []
+    for b in data.get("NIGHTLY_BUILDS", []):
+        out = dict(b)
+        out["dateIso"] = iso_date(b["date"])
+        nightly_builds.append(out)
 
     if not any("dateIso" in r for r in releases):
         raise TSParseError("no dated RELEASES entries — cannot build releases.json")
@@ -957,6 +979,7 @@ def build_json(data: dict) -> str:
         "cratesFirstPublished": data["CRATES_FIRST_PUBLISHED"],
         "releaseStats": data["RELEASE_STATS"],
         "nightliesNote": data.get("NIGHTLIES_NOTE"),
+        "nightlyBuilds": nightly_builds,
     }
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 

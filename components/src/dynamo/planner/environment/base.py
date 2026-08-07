@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Optional
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.base import PlannerConnector, is_power_aware_connector
+from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
     PlannerEnvironment,
@@ -19,8 +21,9 @@ from dynamo.planner.environment.metrics_provider.interface import (
     FpmMetricsProvider,
     TrafficMetricsProvider,
 )
-from dynamo.planner.environment.state import DeploymentState
+from dynamo.planner.environment.state import ComponentState, DeploymentState
 from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -105,10 +108,23 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,
         )
-        await self.controller.wait_for_deployment_ready(include_planner=False)
+        # Block until one DGD snapshot is generation-caught-up and worker-stable,
+        # then permanently cache power caps from that same snapshot. Replica-count
+        # stability alone is not enough: an annotation-only edit bumps
+        # metadata.generation without changing desired replicas, so a Planner
+        # restart in the controller-status lag could otherwise cache a newer,
+        # lower cap while Pods still enforce the previous higher one.
+        deployment = await self._wait_for_startup_dgd_snapshot()
         if self.runtime_namespace_source is not None:
             await self.runtime_namespace_source.refresh_runtime_namespace()
-        await self._refresh_deployment_state()
+        await self._refresh_deployment_state(deployment=deployment)
+        self._load_static_power_caps_at_startup(deployment=deployment)
+        # FPM init can change the effective runtime namespace / discovery view;
+        # re-refresh replica/GPU/model state afterward so the first tick sees
+        # post-init truth. This second call intentionally omits the shared
+        # deployment snapshot (power caps stay startup-static) and may issue
+        # a separate DGD GET for GPU counts — that is expected, not a merge
+        # of the shared-GET path above.
         await self.fpm_provider.async_init(self._runtime_namespace_or_none())
         await self._refresh_deployment_state()
 
@@ -157,11 +173,79 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def shutdown(self) -> None:
         await self.fpm_provider.shutdown()
 
-    async def _refresh_deployment_state(self) -> None:
+    async def _refresh_deployment_state(
+        self, deployment: Optional[dict] = None
+    ) -> None:
         self._refresh_worker_info()
-        self._refresh_gpu_counts()
+        self._refresh_gpu_counts(deployment=deployment)
         await self._refresh_replica_counts()
         self._refresh_model_name()
+
+    def _shared_dgd_deployment(self) -> Optional[dict]:
+        """One DGD GET for GPU + power reads when power awareness is on.
+
+        Only connectors that implement ``PowerAwareConnector`` expose
+        ``get_graph_deployment``; others return ``None`` (no-op). Prefer
+        ``_wait_for_startup_dgd_snapshot`` at init so caps come from a
+        generation-observed, worker-stable snapshot.
+        """
+        if not self.config.enable_power_awareness:
+            return None
+        if not is_power_aware_connector(self.controller):
+            return None
+        return self.controller.get_graph_deployment()
+
+    async def _wait_for_startup_dgd_snapshot(self) -> Optional[dict]:
+        """Wait for readiness; when power is on, return a settled DGD snapshot.
+
+        The settled wait (observedGeneration + pod annotation convergence) is
+        only required to permanently cache DGD-owned power caps. Power-disabled
+        planners keep the standard ``wait_for_deployment_ready`` path.
+        """
+        if self.config.enable_power_awareness:
+            if not is_power_aware_connector(self.controller):
+                raise DeploymentValidationError(
+                    [
+                        "Power awareness requires a connector that implements "
+                        "PowerAwareConnector (get_graph_deployment, "
+                        "get_component_power_configs, "
+                        "wait_for_settled_graph_deployment, "
+                        "get_power_aware_worker_counts); "
+                        "this connector does not."
+                    ]
+                )
+            prefill_name, decode_name = self._power_component_names()
+            return await self.controller.wait_for_settled_graph_deployment(
+                include_planner=False,
+                require_prefill=self.require_prefill,
+                require_decode=self.require_decode,
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+        await self.controller.wait_for_deployment_ready(include_planner=False)
+        return self._shared_dgd_deployment()
+
+    @staticmethod
+    def _call_with_optional_deployment(method, *, deployment=None, **kwargs):
+        """Invoke a connector method, forwarding ``deployment`` when accepted.
+
+        Inspects the callable signature so a real ``TypeError`` raised inside
+        the connector (wrong arg types, ``None`` arithmetic, etc.) is not
+        swallowed by a retry without ``deployment``. Connectors that support
+        the shared-snapshot optimization must name the optional keyword exactly
+        ``deployment``; otherwise this deliberately falls back to the ordinary
+        connector call (and its own DGD GET).
+        """
+        if deployment is not None:
+            try:
+                params = inspect.signature(method).parameters
+            except (TypeError, ValueError):
+                # Builtins / C extensions without an inspectable signature —
+                # fall through to the no-deployment call rather than guess.
+                return method(**kwargs)
+            if "deployment" in params:
+                return method(**kwargs, deployment=deployment)
+        return method(**kwargs)
 
     def _refresh_worker_info(self) -> None:
         get_worker_info = getattr(self.controller, "get_worker_info", None)
@@ -211,10 +295,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             ):
                 setattr(component_state.info, field_name, fresh_val)
 
-    def _refresh_gpu_counts(self) -> None:
+    def _refresh_gpu_counts(self, deployment: Optional[dict] = None) -> None:
         state = self.deployment_state()
         try:
-            prefill_gpus, decode_gpus = self.controller.get_gpu_counts(
+            prefill_gpus, decode_gpus = self._call_with_optional_deployment(
+                self.controller.get_gpu_counts,
+                deployment=deployment,
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             )
@@ -249,6 +335,136 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if self.require_decode:
             state.decode.num_gpus = decode_gpus
 
+    def _load_static_power_caps_at_startup(
+        self, deployment: Optional[dict] = None
+    ) -> None:
+        """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
+
+        Caps are startup-static for the Planner lifetime. The operator's DGD
+        validating webhook makes a power-annotated component's cap, effective
+        NVIDIA GPU count, and node count immutable, and rejects DRA-backed
+        allocation for power-annotated components. Changing these inputs requires
+        deleting and recreating the DGD, then restarting Planner against the
+        settled deployment.
+        """
+        if not self.config.enable_power_awareness:
+            return
+
+        try:
+            prefill_cfg, decode_cfg = self._resolve_power_configs(deployment=deployment)
+        except Exception as exc:
+            raise DeploymentValidationError(
+                [f"Failed to resolve DGD-owned power caps at startup: {exc}"]
+            ) from exc
+
+        errors: list[str] = []
+        if self.require_prefill and prefill_cfg is None:
+            errors.append(
+                "Power awareness is on and prefill is required, but the connector "
+                "returned no prefill power config; cannot cache startup caps."
+            )
+        if self.require_decode and decode_cfg is None:
+            errors.append(
+                "Power awareness is on and decode is required, but the connector "
+                "returned no decode power config; cannot cache startup caps."
+            )
+        if errors:
+            raise DeploymentValidationError(errors)
+
+        state = self.deployment_state()
+        if self.require_prefill and prefill_cfg is not None:
+            self._adopt_power_config(state.prefill, prefill_cfg)
+        if self.require_decode and decode_cfg is not None:
+            self._adopt_power_config(state.decode, decode_cfg)
+        self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
+
+    def _resolve_power_configs(
+        self,
+        deployment: Optional[dict] = None,
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+        """Resolve DGD power configs with the same name/generic semantics as startup.
+
+        Uses ``get_component_power_configs`` (explicit backend names + unique
+        generic ``type: worker`` fallback). Called at startup only to adopt
+        static caps. Never called at runtime — caps are startup-static.
+        """
+        if not is_power_aware_connector(self.controller):
+            raise DeploymentValidationError(
+                [
+                    "Power awareness requires a connector that implements "
+                    "PowerAwareConnector (get_graph_deployment, "
+                    "get_component_power_configs, "
+                    "wait_for_settled_graph_deployment, "
+                    "get_power_aware_worker_counts); "
+                    "this connector does not."
+                ]
+            )
+
+        prefill_name, decode_name = self._power_component_names()
+        return self.controller.get_component_power_configs(
+            deployment=deployment,
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+            prefill_component_name=prefill_name,
+            decode_component_name=decode_name,
+        )
+
+    def _power_component_names(self) -> tuple[Optional[str], Optional[str]]:
+        """Backend-default component names used as explicit-name fallbacks.
+
+        Role resolution matches by ``type`` first (disagg) and by the unique
+        generic ``type: worker`` component (agg), so these names only matter
+        when the DGD renames a component; mirrors ``initialize()``.
+        """
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+        prefill_name = (
+            defaults.prefill_worker_k8s_name
+            if self.require_prefill and defaults
+            else None
+        )
+        decode_name = (
+            defaults.decode_worker_k8s_name
+            if self.require_decode and defaults
+            else None
+        )
+        return prefill_name, decode_name
+
+    @staticmethod
+    def _adopt_power_config(
+        component_state: ComponentState, cfg: ComponentPowerConfig
+    ) -> None:
+        component_state.power_gpu_limit_watts = cfg.gpu_power_limit_watts
+        component_state.power_watts_per_replica = cfg.watts_per_replica
+
+    def _validate_minimum_power_footprint(
+        self,
+        prefill_cfg: Optional[ComponentPowerConfig],
+        decode_cfg: Optional[ComponentPowerConfig],
+    ) -> None:
+        """Fail closed at startup if the minimum footprint can't fit the budget.
+
+        ``min_endpoint`` replicas of every required role must fit
+        ``total_gpu_power_limit``; otherwise the ceiling is unsatisfiable and
+        the planner must not start rather than clamp to an impossible target.
+        """
+        budget = self.config.total_gpu_power_limit
+        if budget is None:
+            return
+        p_watts = prefill_cfg.watts_per_replica if prefill_cfg else None
+        d_watts = decode_cfg.watts_per_replica if decode_cfg else None
+        if not minimum_power_footprint_fits(
+            budget, self.config.min_endpoint, p_watts, d_watts
+        ):
+            raise DeploymentValidationError(
+                [
+                    "Infeasible power budget: minimum footprint "
+                    f"(min_endpoint={self.config.min_endpoint} of "
+                    f"prefill={p_watts}W, decode={d_watts}W per replica) exceeds "
+                    f"total_gpu_power_limit={budget}W. Raise the budget or lower "
+                    "the per-GPU caps on the worker podTemplate annotations."
+                ]
+            )
+
     async def _refresh_replica_counts(self) -> None:
         prefill_name = (
             self._state.prefill.info.k8s_name
@@ -260,14 +476,28 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
-        (
-            prefill_count,
-            decode_count,
-            stable,
-        ) = await self.controller.get_actual_worker_counts(
-            prefill_component_name=prefill_name,
-            decode_component_name=decode_name,
-        )
+        if self.config.enable_power_awareness:
+            if not is_power_aware_connector(self.controller):
+                raise DeploymentValidationError(
+                    [
+                        "Power awareness requires a connector that implements "
+                        "PowerAwareConnector (get_graph_deployment, "
+                        "get_component_power_configs, "
+                        "wait_for_settled_graph_deployment, "
+                        "get_power_aware_worker_counts); "
+                        "this connector does not."
+                    ]
+                )
+            counts = await self.controller.get_power_aware_worker_counts(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+        else:
+            counts = await self.controller.get_actual_worker_counts(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+        prefill_count, decode_count, stable = counts
         if self.require_prefill:
             self._state.prefill.replicas.active = prefill_count
             self._state.prefill.replicas.expected = prefill_count if stable else None

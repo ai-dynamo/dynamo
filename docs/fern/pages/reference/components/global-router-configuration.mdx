@@ -130,13 +130,13 @@ The Global Router reads a JSON file at the path given to `--config`. There is no
 </ParamField>
 
 <ParamField path="--default-ttft-target-ms" type="number" default="null">
-  Default TTFT target in milliseconds for prefill pool selection. Applied to requests that carry no `ttft_target` in their `extra_args`. When unset, the prefill selection strategy falls back to the midpoint of its configured TTFT range. Replaces the deprecated `--default-ttft-target` flag.
+  Default TTFT target in milliseconds for prefill pool selection. Applied to requests that carry no `ttft_target` in the typed `router` field, which the frontend derives from `nvext.router`. When unset, the prefill selection strategy falls back to the midpoint of its configured TTFT range. Replaces the deprecated `--default-ttft-target` flag.
 
   Environment variable: `DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET_MS`
 </ParamField>
 
 <ParamField path="--default-itl-target-ms" type="number" default="null">
-  Default ITL target in milliseconds for decode pool selection. Applied to requests that carry no `itl_target` in their `extra_args`. When unset, the decode selection strategy falls back to the midpoint of its configured ITL range. Replaces the deprecated `--default-itl-target` flag.
+  Default ITL target in milliseconds for decode pool selection. Applied to requests that carry no `itl_target` in the typed `router` field, which the frontend derives from `nvext.router`. When unset, the decode selection strategy falls back to the midpoint of its configured ITL range. Replaces the deprecated `--default-itl-target` flag.
 
   Environment variable: `DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET_MS`
 </ParamField>
@@ -145,8 +145,8 @@ The Global Router reads a JSON file at the path given to `--config`. There is no
 
 The file passed to `--config` is a JSON object matching the `GlobalRouterConfig` schema. Two modes are supported:
 
-- **`disagg`** (default): separate prefill and decode pools. Prefill routing uses the grid `(ISL, TTFT target) → prefill pool index`; decode routing uses `(context length, ITL target) → decode pool index`.
-- **`agg`**: unified pools handling both prefill and decode (chunked-prefill topologies). Routing uses the grid `(TTFT target, ITL target) → agg pool index`.
+- **`disagg`** (default): separate prefill and decode pools. Prefill routing uses the grid `(ISL, TTFT target) → prefill pool index`; decode routing currently uses `(request token count, ITL target) → decode pool index` through the strategy's `context_length_*` fields.
+- **`agg`**: unified pools handling both prefill and decode. Routing uses `(TTFT target, ITL target) → agg pool index`, optionally extended with ISL as the leading dimension.
 
 Both modes support optional priority-based pool overrides and priority retry.
 
@@ -159,7 +159,9 @@ Both modes support optional priority-based pool overrides and priority retry.
 </ParamField>
 
 <ParamField path="enable_priority_retry" type="boolean" default="false">
-  When `true`, if the initially selected pool cannot accept a request, the router retries through progressively faster pools (lower `*_pool_priorities` values), from slowest to fastest. When `false`, only the grid-selected pool is attempted.
+  When `true`, if a pool attempt raises an exception before producing its first streamed output, the router retries through progressively faster pools (lower `*_pool_priorities` values), from slowest to fastest. Once an attempt has streamed output, later failures are returned without retry. When `false`, only the grid-selected pool is attempted.
+
+  In disaggregated mode, the router can attempt decode retries, but current Dynamo backends do not support them safely: a failed decode attempt may already have caused the prefill engine to retire or drop that request's KV cache.
 </ParamField>
 
 ### Disaggregated mode fields
@@ -195,7 +197,7 @@ The following fields are required when `mode` is `"disagg"` and are ignored in `
 </ParamField>
 
 <ParamField path="decode_pool_selection_strategy" type="DecodePoolSelectionStrategy" default="null">
-  Grid mapping `(context length, ITL target)` to a decode pool index. Required for `disagg` mode. See [DecodePoolSelectionStrategy](#decodepoolselectionstrategy).
+  Grid mapping `(request token count, ITL target)` to a decode pool index. Required for `disagg` mode. See [DecodePoolSelectionStrategy](#decodepoolselectionstrategy).
 </ParamField>
 
 ### Aggregated mode fields
@@ -215,7 +217,7 @@ The following fields are required when `mode` is `"agg"` and are ignored in `"di
 </ParamField>
 
 <ParamField path="agg_pool_selection_strategy" type="AggPoolSelectionStrategy" default="null">
-  Grid mapping `(TTFT target, ITL target)` to an agg pool index. Required for `agg` mode. See [AggPoolSelectionStrategy](#aggpoolselectionstrategy).
+  Grid mapping `(TTFT target, ITL target)` to an agg pool index, or `(ISL, TTFT target, ITL target)` when all three optional `isl_*` fields are set. Required for `agg` mode. See [AggPoolSelectionStrategy](#aggpoolselectionstrategy).
 </ParamField>
 
 ## Additional types
@@ -260,7 +262,7 @@ Routes a request to a prefill pool based on its input sequence length (ISL) and 
 
 ### DecodePoolSelectionStrategy
 
-Routes a request to a decode pool based on its context length (prompt + tokens generated so far) and ITL target. The routing space is a 2D grid of `context_length_resolution × itl_resolution` cells. `decode_pool_mapping[ctx_idx][itl_idx]` gives the pool index.
+Routes a request to a decode pool based on its `context_length` bucket and ITL target. The current handler computes `context_length` as the number of request `token_ids` at decode routing time; it does not add subsequently generated tokens. The routing space is a 2D grid of `context_length_resolution × itl_resolution` cells. `decode_pool_mapping[ctx_idx][itl_idx]` gives the pool index.
 
 <ParamField path="itl_min_ms" type="number" required={true}>
   Lower bound of the ITL target range, in milliseconds. Also accepts the deprecated key `itl_min`.
@@ -275,11 +277,11 @@ Routes a request to a decode pool based on its context length (prompt + tokens g
 </ParamField>
 
 <ParamField path="context_length_min" type="integer" required={true}>
-  Lower bound of the context length range (tokens). Requests shorter than this are clamped to the first row.
+  Lower bound of the request-token-count range used by the current handler as `context_length`. Smaller requests are clamped to the first row.
 </ParamField>
 
 <ParamField path="context_length_max" type="integer" required={true}>
-  Upper bound of the context length range (tokens). Must be strictly greater than `context_length_min`.
+  Upper bound of the request-token-count range used as `context_length`. Must be strictly greater than `context_length_min`.
 </ParamField>
 
 <ParamField path="context_length_resolution" type="integer" required={true}>
@@ -296,7 +298,7 @@ Routes a request to a decode pool based on its context length (prompt + tokens g
 
 ### AggPoolSelectionStrategy
 
-Routes a request to an aggregated pool based on both its TTFT and ITL targets. Used in `mode: "agg"` where each pool handles both prefill and decode. The routing space is a 2D grid of `ttft_resolution × itl_resolution` cells. `agg_pool_mapping[ttft_idx][itl_idx]` gives the pool index.
+Routes a request to an aggregated pool based on both its TTFT and ITL targets. Used in `mode: "agg"` where each pool handles both prefill and decode. By default, the routing space is a 2D grid of `ttft_resolution × itl_resolution` cells. Configuring all three optional `isl_*` fields adds a leading ISL dimension. This dimension works whether or not chunked prefill is enabled.
 
 <ParamField path="ttft_min_ms" type="number" required={true}>
   Lower bound of the TTFT target range, in milliseconds. Also accepts the deprecated key `ttft_min`.
@@ -322,8 +324,20 @@ Routes a request to an aggregated pool based on both its TTFT and ITL targets. U
   Number of ITL grid columns (the second dimension of `agg_pool_mapping`). Must be a positive integer.
 </ParamField>
 
-<ParamField path="agg_pool_mapping" type="[][]integer" required={true}>
-  2D array of pool indices with shape `[ttft_resolution][itl_resolution]`. Each entry is a zero-based agg pool index in `[0, num_agg_pools)`. Row `i` covers the `i`-th TTFT bucket; column `j` covers the `j`-th ITL bucket.
+<ParamField path="isl_min" type="integer" default="null">
+  Optional lower bound for aggregated-mode input sequence length. Set this together with `isl_max` and `isl_resolution` to enable 3D selection.
+</ParamField>
+
+<ParamField path="isl_max" type="integer" default="null">
+  Optional upper bound for aggregated-mode input sequence length. Must be greater than `isl_min` when ISL selection is enabled.
+</ParamField>
+
+<ParamField path="isl_resolution" type="integer" default="null">
+  Optional number of aggregated-mode ISL buckets. Must be a positive integer when ISL selection is enabled.
+</ParamField>
+
+<ParamField path="agg_pool_mapping" type="[][]integer | [][][]integer" required={true}>
+  Without `isl_*`, a 2D array with shape `[ttft_resolution][itl_resolution]`. With all three `isl_*` fields, a 3D array with shape `[isl_resolution][ttft_resolution][itl_resolution]`. Each entry is a zero-based agg pool index in `[0, num_agg_pools)`. ISL, TTFT, and ITL values outside their configured ranges are clamped to the nearest bucket.
 </ParamField>
 
 <ParamField path="priority_overrides" type="[]PriorityPoolOverride" default="[]">
@@ -359,7 +373,8 @@ The router validates the configuration at startup and exits if any rule is viola
 - All `*_resolution` values must be positive integers.
 - `prefill_pool_mapping` must have exactly `isl_resolution` rows, each of length `ttft_resolution`; all pool indices must be in `[0, num_prefill_pools)`.
 - `decode_pool_mapping` must have exactly `context_length_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_decode_pools)`.
-- `agg_pool_mapping` must have exactly `ttft_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_agg_pools)`.
+- Without aggregated `isl_*` fields, `agg_pool_mapping` must have exactly `ttft_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_agg_pools)`.
+- For aggregated selection, `isl_min`, `isl_max`, and `isl_resolution` must be omitted together or set together. When set, `isl_min < isl_max`, `isl_resolution` is positive, and `agg_pool_mapping` must have shape `[isl_resolution][ttft_resolution][itl_resolution]` instead of the 2D shape above.
 - In each `priority_overrides` entry: `min_priority` must be ≤ `max_priority`, and `target_pool` must be a valid pool index for the enclosing strategy.
 
 ## Related pages
