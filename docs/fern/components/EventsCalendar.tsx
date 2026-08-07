@@ -12,8 +12,14 @@
 import {
   UPCOMING_EVENTS,
   PAST_EVENTS,
+  GENERATED_AT,
   type DynamoEvent,
 } from "./events.generated";
+
+// The generator labels every event day/month/year in Pacific time, so "today"
+// has to be resolved in the same zone -- a UTC today lands on the next day for
+// the last 16-17 hours of every Pacific date and would highlight the wrong cell.
+const CALENDAR_TZ = "America/Los_Angeles";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -36,6 +42,27 @@ const MONTHS = [
 const MONTH_INDEX = Object.fromEntries(
   MONTHS.map((month, index) => [month.slice(0, 3), index]),
 );
+
+/**
+ * Today's calendar date in {@link CALENDAR_TZ}, as of the last generator run.
+ *
+ * GENERATED_AT is refreshed every six hours by the fern-docs workflow, so the
+ * grid tracks the real month without any client-side date logic. The
+ * `new Date()` fallback only matters for a hand-run generator predating the
+ * export.
+ */
+function resolveToday() {
+  const now = GENERATED_AT ? new Date(GENERATED_AT) : new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: CALENDAR_TZ,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(now);
+  const part = (type: string) =>
+    Number(parts.find((entry) => entry.type === type)?.value);
+  return { year: part("year"), month: part("month") - 1, day: part("day") };
+}
 
 function buildMonthDays(year: number, month: number) {
   const leadingBlanks = new Date(Date.UTC(year, month, 1)).getUTCDay();
@@ -96,11 +123,22 @@ function UpcomingEvent({ event }: { event: DynamoEvent }) {
 }
 
 export function EventsCalendar() {
-  const focusEvent = UPCOMING_EVENTS[0] ?? PAST_EVENTS[0];
-  const year = Number(focusEvent?.year ?? new Date().getUTCFullYear());
-  const month = MONTH_INDEX[focusEvent?.month ?? "Jan"] ?? 0;
-  const selectedDay = Number(focusEvent?.day ?? 1);
+  // The grid follows the current month, not the next event. Keying it off
+  // UPCOMING_EVENTS[0] meant an empty calendar fell back to PAST_EVENTS[0] and
+  // sat on a month that had already gone by.
+  const { year, month, day: selectedDay } = resolveToday();
   const days = buildMonthDays(year, month);
+
+  // Days in the displayed month that have something scheduled, so the grid
+  // still carries event information now that the highlight marks today.
+  const eventDays = new Set(
+    [...UPCOMING_EVENTS, ...PAST_EVENTS]
+      .filter(
+        (event) =>
+          Number(event.year) === year && MONTH_INDEX[event.month] === month,
+      )
+      .map((event) => Number(event.day)),
+  );
 
   return (
     <section
@@ -142,7 +180,15 @@ export function EventsCalendar() {
               ) : (
                 <span
                   key={day}
-                  className={day === selectedDay ? "is-selected" : undefined}
+                  className={
+                    [
+                      day === selectedDay ? "is-selected" : "",
+                      eventDays.has(day) ? "has-event" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ") || undefined
+                  }
+                  aria-current={day === selectedDay ? "date" : undefined}
                 >
                   {day}
                 </span>

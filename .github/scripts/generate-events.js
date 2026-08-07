@@ -6,6 +6,11 @@
 // keeps the boundary fresh; the EventsCalendar
 // component renders the baked arrays as-is, so there is no client-side date logic
 // and no hydration mismatch.
+//
+// GENERATED_AT is emitted for the same reason: the month grid needs a "today"
+// to highlight, and reading the clock in the component would either be build
+// time (arbitrarily old) or client time (hydration mismatch). Pinning it to the
+// generation moment ties the grid to the six-hour refresh instead.
 
 const ical = require('node-ical');
 const fs = require('fs');
@@ -131,6 +136,8 @@ async function main() {
     '  locationUrl: string | null;\n' +
     '  addUrl: string;\n' +
     '}\n\n' +
+    '/** Generation moment, ISO 8601. The calendar grid treats this as "today". */\n' +
+    `export const GENERATED_AT = ${JSON.stringify(now.toISOString())};\n\n` +
     `export const UPCOMING_EVENTS: DynamoEvent[] = ${JSON.stringify(upcoming, null, 2)};\n\n` +
     `export const PAST_EVENTS: DynamoEvent[] = ${JSON.stringify(past, null, 2)};\n`;
 
