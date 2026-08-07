@@ -11,6 +11,7 @@ documentation** — shipped guidance lives under `docs/fern/pages/` and in
 
 | File | Contents |
 | --- | --- |
+| [benchmarking-procedure.md](benchmarking-procedure.md) | The procedure within a single benchmark: what to declare, accuracy as a gate, targets and constraints, which data source answers which question and how early each must be planned for, and how far analysis can be systematized. The most developed document here. |
 | [gaps.md](gaps.md) | Six gaps found in Dynamo's performance tooling, with evidence and severity. Each entry is written to be liftable into a GitHub issue as-is. |
 | [ab-testing-request-distributions.md](ab-testing-request-distributions.md) | Standalone explainer for items 3 and 4 — why the repository cannot currently tell a small performance win from noise, worked through the embedding-cache benchmark, with a concrete fix for the part that is fixable now. Start here if those items read as abstract. |
 | [overlap-review.md](overlap-review.md) | Whether the new front door duplicates the existing AIPerf benchmarking guide, and what to do about the two places it does. |

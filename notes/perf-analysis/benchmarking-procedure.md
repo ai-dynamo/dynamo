@@ -1,0 +1,167 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Procedure Within a Benchmark
+
+> **Status: working draft — not published guidance.**
+>
+> This document is tracked in a public repository so the work stays visible and reviewable,
+> not because it is finished. It has not been reviewed, is not part of the Dynamo
+> documentation site, and should not be cited as guidance or linked to as though it were.
+> Published documentation lives under `docs/fern/pages/`.
+>
+> Expect it to change or be withdrawn. One internal link from
+> [§4.1](#41-you-may-not-have-the-data-you-need-unless-you-configured-for-it) is held out of
+> this copy; see Open items.
+
+## 1. Running the benchmark
+
+A benchmark is defined by two halves, and both must be stated for a run to be reproducible or comparable.
+
+**Load generation** — the request arrival rate and the data driving it.
+
+**System under test** — the I/O contract, and the expected output used to validate accuracy.
+
+### 1.1 Accuracy is a gate
+
+Accuracy is a **pass/fail gate**, not a reported side metric. A run whose output fails validation is invalid, and its performance numbers do not count. The gate may be waived, but only explicitly.
+
+Today no gate is standardized — each benchmark improvises, and some have none at all. **Every benchmark must define its accuracy gate.** An unstated gate is a gap in the benchmark, not an implicit pass.
+
+## 2. Targets and constraints
+
+### 2.1 The target is a curve
+
+The two axes are **concurrency** (horizontal) and **latency** (vertical). A benchmark's output is normally the curve traced across them, not a single point, though the exact goal varies by benchmark.
+
+Point-by-point comparison between runs is an *analysis* technique — a way to localize where two curves diverge so you know which region to investigate. It is not the benchmark's output format.
+
+### 2.2 Utilization is an iterative loop
+
+Resource utilization is neither purely a target nor purely a constraint. It is the thing you drive in a cycle:
+
+1. **Maximize utilization** as far as it will go.
+2. Once maximized, **reduce utilization while holding other success metrics equal or better.**
+3. The freed headroom lets you maximize again.
+
+Each turn of that loop is a real gain. This is why utilization appears both as something we push toward 100% and as something we try to lower — those are two phases of one process, not a contradiction.
+
+Utilization has two forms:
+
+- **Hardware utilization** — CPU and GPU.
+- **Software utilization** — batch size and similar. A software ceiling is "virtual": hardware may saturate before the configured limit is ever reached.
+
+### 2.3 Restrictions
+
+A run is bounded by:
+
+- **SLA** — the latency and quality bounds that must hold throughout.
+- **A hard resource cap** — N CPU cores and M GPUs.
+
+The resource cap is a property of the deployment, not a knob the benchmark sweeps. A different cap implies a differently-optimized deployment, so results obtained under different caps are not directly comparable.
+
+### 2.4 Definition of good
+
+Following from the loop above, a change is good if it either **pushes utilization to its limit**, or **handles more load at the same or lower utilization**.
+
+## 3. Collecting data
+
+### 3.1 Three sources
+
+**Client-collected data.** What the load generator sees. Necessary, but too coarse to attribute cost to any stage — from outside, a request is one opaque interval. Client data is always **paired with SUT-collected data**: it is the outer bound you decompose into, never the whole picture.
+
+**SUT-collected data.** What the system emits about itself:
+
+- Prometheus
+- Trace — OTEL, NVTX
+- Log — the most flexible option
+
+**Supplementary data.** Externally injected capture: eBPF and sampling profilers. These require minimal or no change to benchmark or SUT code. The available tools are a small set — treat the named ones as a **starting point to extend**, not a fixed list.
+
+### 3.2 What each source can and cannot tell you
+
+Each source preserves some structure and destroys some. The properties that matter are **ordering** (is sequence and causality visible), **identity** (can a datum be tied to one request), **completeness** (exhaustive or sampled), and **reach** (on-CPU work, off-CPU blocking, or both). OS sampling is the clearest example: it gives a time distribution over call stacks but does not preserve ordering.
+
+| Source | What it gives you | Preserves | Loses / blind to | Decide by |
+|---|---|---|---|---|
+| **Client / load gen** | End-to-end per-request TTFT, ITL, throughput | Per-request identity, arrival order | Everything inside the SUT — one opaque interval | Run time |
+| **Prometheus** | Distributions and gauges over a window | Shape of the distribution, cheaply and continuously | Per-request identity — cannot ask "why was *that* request slow"; ordering; anything between scrape intervals | Launch |
+| **OTEL traces** | Per-request spans, parent/child, across process boundaries | Ordering *and* identity *and* causality — the only source with all three | Only what someone instrumented; sampling ratio drops requests | Launch (env) |
+| **NVTX** | Named ranges correlated with GPU activity | Ordering, GPU/CPU correlation | Nothing outside annotated ranges; Rust side needs a rebuild | **Compile** |
+| **Logs** | Whatever you chose to print | Ordering; arbitrary payload — most flexible | No aggregation; cost scales with volume; correlation is manual unless request IDs are threaded | Launch |
+| **On-CPU sampling** | Time distribution over call stacks | Where CPU time goes, no prior instrumentation needed | **Ordering** — a distribution, not a sequence; off-CPU time; per-request identity | Attach |
+| **Off-CPU sampling** | Kernel stacks of blocked threads, by duration | Why threads block — futex, epoll, timers | Ordering; identity; on-CPU cost | Attach |
+| **Kernel eBPF** | Scheduler, syscall, TCP behavior | Exhaustive per-event within scope; system-wide reach | Application semantics — knows threads and syscalls, not requests | Attach (needs privilege) |
+| **Nsight** | GPU timeline correlated with host | Ordering, GPU/CPU correlation | Heavy; short windows; needs a profiling build for useful names | **Compile** |
+
+Two consequences worth stating:
+
+**Only OTEL preserves ordering, identity, and causality simultaneously.** Everything else gives one or two. That makes span coverage the load-bearing dependency for reconciling component measurements against end-to-end numbers.
+
+**Sampling and tracing are complements, not substitutes**, along the ordering axis. Sampling answers "where does time go" with no prior instrumentation. Tracing answers "what happened, in what order, for this request" but only where instrumented. A bottleneck invisible to both is one that is neither hot nor instrumented — precisely the event-loop blocking case, which is why off-CPU capture had to be added separately.
+
+### 3.3 What eBPF actually costs
+
+Supplementary capture is genuinely non-invasive to the source, but it is not free at the deployment layer.
+
+- **Kernel-level eBPF requires no code change and no rebuild.** The bpftrace scripts under `benchmarks/frontend/scripts/bpf/` attach to kernel tracepoints and kprobes on a running process.
+- **The cost is privilege, not code.** Setup sets `perf_event_paranoid=-1` and `kptr_restrict=0` and grants `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN`, and `CAP_SYS_PTRACE`. Cheap on a bare-metal benchmark node, awkward in a container, an obstacle under Kubernetes.
+- **User-space symbols require a rebuild, not a code change.** Frame pointers are already forced globally for x86_64 and aarch64, so stack walking works even in release builds. Named Dynamo frames need the `profiling` profile (`debug = true`, `strip = false`).
+
+### 3.4 How early you must decide
+
+Instrumentation differs in how far ahead it must be planned. Anything above the attach tier cannot be added to a run already in progress — miss it and the run is lost.
+
+| Tier | Sources | Cost if unplanned |
+|---|---|---|
+| **Compile time** | NVTX ranges, user-space symbols | Full rebuild |
+| **Launch time** | OTEL export, Prometheus, eBPF capabilities | Restart |
+| **Attach time** | bpftrace, py-spy | None — attach to the live run |
+
+NVTX is opt-in on both sides: gated behind a cargo feature flag in Rust, and opt-in on the Python side. A stock build carries no NVTX ranges. OTEL, by contrast, is runtime env-gated — enabling it costs a restart, not a rebuild.
+
+## 4. Takeaways
+
+### 4.1 You may not have the data you need unless you configured for it
+
+Deployment configuration determines what is observable. Check the Dynamo docs and the internal benchmark perf-dashboard documentation (link held out of this public repository) and confirm the deployment is configured for the benchmark *before* running it.
+
+**Instrumentation may skew results.** More precisely, it skews the performance breakdown distribution rather than invalidating it. The working assumption is that the overhead is universal — applying roughly evenly across stages — so an instrumented run remains "close enough to find the bottleneck."
+
+**This is an assumption, not a measured fact.** Where the skew is suspected of being uneven, a **calibration measurement** — clean versus instrumented on the same workload — may be needed. But the default standard is close enough, and observability overhead is not a reason to avoid the tooling.
+
+**Runs are two-tier:**
+
+- A **clean run** produces the headline number. Every benchmark has one.
+- An **investigation run**, instrumented, produces the breakdown.
+
+The investigation run never substitutes for the clean number.
+
+### 4.2 You may not know what data you need
+
+Two distinct questions arise when the available data fails to expose a problem:
+
+**Do we need a new *category* of data?** With OS sampling, tracing, and aggregated metrics in place, we can likely capture most of what we need without inventing a new category. *This is a working hypothesis, not a settled conclusion* — hitting a wall is grounds to revisit it, not to work around it.
+
+**Are we missing data points *within* an existing category?** More likely — for example, insufficient breakdown detail in traces. These gaps surface during investigation.
+
+Either way: be deliberate about what is missing, and add what is needed back into the toolkit.
+
+## 5. Analysis
+
+Analysis covers visualization and the implications of different data sources. The open question is how much of it can be systematized rather than done case by case. The answer is all of it, in this order — each rung depends on the one below:
+
+1. **Programmatic** — deterministic transforms. Parse artifacts, join across sources, emit standard views. No judgment required.
+2. **Procedural** — a documented decision tree a human follows: symptom leads to check leads to next check.
+3. **Agent-runnable** — an agent selects tools, collects data, and identifies the bottleneck.
+
+An agent cannot run a procedure that has not been written down, and a procedure cannot be written until collection and transformation are deterministic.
+
+## Open items
+
+- **Load-generation spec is undefined.** §1 says "rate and data" but does not say what a load-gen specification must contain — rate schedule (constant, ramp, burst), ISL/OSL distribution, modality mix. That checklist does not exist yet.
+- **Overhead universality is unverified.** §4.1 rests on an assumption that has not been measured. Decide whether a one-time calibration run is worth doing.
+- **The visualizer dashboard needs a home.** §4.1 depends on a dashboard hosted in a personal internal namespace. The link is held out of this copy. A durable, referenceable location is needed before this document can cite it.
+- **§3.4 and the two consequences in §3.2 are synthesis**, not statements from the source notes. Confirm or cut.
