@@ -39,9 +39,9 @@ use super::{
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
-    AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
-    chat_completion_to_anthropic_response,
+    AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
+    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse,
+    AnthropicMessageContent, SystemContent, chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -56,9 +56,10 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
-use super::error::SanitizedError;
+use super::error::{SanitizedError, invalid_argument};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
+use crate::engines::ValidateRequest;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -132,6 +133,26 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // Handlers
 // ---------------------------------------------------------------------------
 
+fn validate_anthropic_content_blocks(
+    request: &AnthropicCreateMessageRequest,
+) -> Result<(), dynamo_runtime::error::DynamoError> {
+    for (message_index, message) in request.messages.iter().enumerate() {
+        let AnthropicMessageContent::Blocks { content } = &message.content else {
+            continue;
+        };
+        for (block_index, block) in content.iter().enumerate() {
+            if let AnthropicContentBlock::Other(value) = block
+                && !value.is_object()
+            {
+                return Err(invalid_argument(format!(
+                    "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
@@ -151,6 +172,13 @@ async fn handler_anthropic_messages(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "max_tokens: must be greater than 0",
+        ));
+    }
+    if let Err(error) = validate_anthropic_content_blocks(&request) {
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            error.message(),
         ));
     }
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
@@ -315,6 +343,14 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
+    if let Err(error) = chat_request.validate() {
+        let error = invalid_argument(error.to_string());
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            error.message(),
+        ));
+    }
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
