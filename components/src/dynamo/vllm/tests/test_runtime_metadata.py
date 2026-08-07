@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
 
 pytestmark = [
@@ -42,6 +45,22 @@ def test_metrics_model_name_falls_back_to_model():
     config = SimpleNamespace(model="meta-llama/Llama-3.1-8B", served_model_name=None)
 
     assert get_metrics_model_name(config) == "meta-llama/Llama-3.1-8B"
+
+
+def test_vllm_token_budget_matches_rejection_policy():
+    from dynamo.vllm.capacity import publish_vllm_token_budget
+
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    publish_vllm_token_budget(runtime_config, 4096)
+
+    runtime_config.set_engine_specific.assert_called_once()
+    key, value = runtime_config.set_engine_specific.call_args.args
+    assert key == TOKEN_BUDGET_RUNTIME_KEY
+    assert json.loads(value) == {
+        "combined_limit": 4096,
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": True,
+    }
 
 
 def test_spec_decode_runtime_data_falls_back_to_engine_args_json():

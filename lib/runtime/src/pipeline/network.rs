@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn request_control_message_defaults_missing_metadata() {
+    fn legacy_frontend_control_message_defaults_payload_codec_to_json() {
         let json = r#"{
             "id": "request-123",
             "request_type": "single_in",
@@ -535,6 +535,20 @@ mod tests {
         assert_eq!(message.connection_info.info, "{}");
         assert!(message.metadata.is_empty());
         assert!(message.frontend_send_ts_ns.is_none());
+
+        let payload = br#"{"id":7,"text":"legacy","tokens":[1,2]}"#;
+        let decoded: TestPayload = message
+            .payload_codec
+            .decode(payload)
+            .expect("worker should decode the legacy frontend's JSON payload");
+        assert_eq!(
+            decoded,
+            TestPayload {
+                id: 7,
+                text: "legacy".to_string(),
+                tokens: vec![1, 2],
+            }
+        );
     }
 
     #[test]
