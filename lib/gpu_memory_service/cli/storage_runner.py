@@ -24,6 +24,7 @@ import argparse
 import logging
 import sys
 
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.transfer import TransferBackendKind
 
@@ -64,6 +65,7 @@ def _run_save(args) -> None:
 
     _configure_logging(args.verbose)
     socket_path = _resolve_socket(args.device, args.socket_path)
+    cuda_utils.cuda_runtime_set_device(args.device)
 
     logger.info(
         "Saving GMS state: device=%s, socket=%s, output_dir=%s, "
@@ -102,6 +104,7 @@ def _run_load(args) -> None:
 
     _configure_logging(args.verbose)
     socket_path = _resolve_socket(args.device, args.socket_path)
+    cuda_utils.cuda_runtime_set_device(args.device)
 
     logger.info(
         "Loading GMS state: device=%s, socket=%s, input_dir=%s, "
