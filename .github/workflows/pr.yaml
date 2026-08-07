@@ -92,9 +92,46 @@ jobs:
             echo 'Repository variable `RUN_DEPLOY_TESTS` is set to `false`.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  multigpu-test-configuration:
+    name: Validate multi-GPU test configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate RUN_MULTIGPU_TESTS
+        env:
+          RUN_MULTIGPU_TESTS: ${{ vars.RUN_MULTIGPU_TESTS }}
+        run: |
+          case "$RUN_MULTIGPU_TESTS" in
+            true|false)
+              ;;
+            '')
+              echo "::error::Repository variable RUN_MULTIGPU_TESTS must be set to true or false."
+              exit 1
+              ;;
+            *)
+              echo "::error::Repository variable RUN_MULTIGPU_TESTS must be exactly true or false."
+              exit 1
+              ;;
+          esac
+
+  multigpu-tests-skipped:
+    name: Multi-GPU tests skipped (RUN_MULTIGPU_TESTS=false)
+    if: vars.RUN_MULTIGPU_TESTS == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why multi-GPU tests were skipped
+        run: |
+          echo "::notice title=Multi-GPU tests skipped::Repository variable RUN_MULTIGPU_TESTS is false."
+          {
+            echo '## Multi-GPU tests skipped'
+            echo
+            echo 'Repository variable `RUN_MULTIGPU_TESTS` is set to `false`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   backend-status-check:
     runs-on: ubuntu-latest
     needs:
+      - multigpu-test-configuration
+      - multigpu-tests-skipped
       - changed-files
       - operator
       - operator-integration
@@ -796,7 +833,11 @@ jobs:
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      vars.RUN_MULTIGPU_TESTS == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -835,7 +876,11 @@ jobs:
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      vars.RUN_MULTIGPU_TESTS == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -874,7 +919,11 @@ jobs:
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      vars.RUN_MULTIGPU_TESTS == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
