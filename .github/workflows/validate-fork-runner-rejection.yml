@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Validate fork runner rejection
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: prod-default-small-v2
+    timeout-minutes: 1
+    steps:
+      - name: Print validation canary
+        run: echo "fork canary reached a Dynamo runner"
