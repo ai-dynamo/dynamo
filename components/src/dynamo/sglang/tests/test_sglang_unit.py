@@ -1155,7 +1155,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
     async def fake_register_model(*args, **kwargs):
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
 
     server_args = SimpleNamespace(
@@ -1202,7 +1202,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         if args[3].startswith("s3://"):
             raise AssertionError("object-storage path used as a normal model_path")
 
-    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
 
     server_args = SimpleNamespace(
@@ -1280,6 +1280,9 @@ async def test_lora_registration_model_type_gate(
     model_type follows parse_endpoint_types and worker_type follows the serving
     mode.
     """
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
     from unittest.mock import AsyncMock, MagicMock
 
     from dynamo.sglang.request_handlers import handler_base
@@ -1291,6 +1294,18 @@ async def test_lora_registration_model_type_gate(
     async def fake_register_llm(**kw):
         captured.update(kw)
 
+    lora_runtime_config = SimpleNamespace(
+        runtime_data={
+            "token_budget": (
+                '{"combined_limit":4096,"reject_prompt_overflow":true,'
+                '"reject_total_overflow":true}'
+            )
+        }
+    )
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return lora_runtime_config
+
     # Fake LoRA manager that returns a successful download.
     fake_lora_manager = MagicMock()
     fake_lora_manager.download_lora = AsyncMock(
@@ -1300,6 +1315,7 @@ async def test_lora_registration_model_type_gate(
     monkeypatch.setattr(handler_base, "register_llm", fake_register_llm)
     monkeypatch.setattr(handler_base, "get_lora_manager", lambda: fake_lora_manager)
     monkeypatch.setattr(handler_base, "lora_name_to_id", lambda name: 12345)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
 
     # Fake SGLang engine — only the LoRA load path is exercised.
     fake_load_result = SimpleNamespace(success=True, error_message=None)
@@ -1345,3 +1361,5 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["runtime_config"] is lora_runtime_config
+    assert "token_budget" in captured["runtime_config"].runtime_data
