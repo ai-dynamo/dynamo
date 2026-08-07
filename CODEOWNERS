@@ -387,6 +387,7 @@
 
 # === rl  (@ai-dynamo/dynamo-rl-codeowners) ===
 /lib/rl/                                                                                                @ai-dynamo/dynamo-rl-codeowners
+/examples/rl/                                                                                           @ai-dynamo/dynamo-rl-codeowners
 
 # === performance  (@ai-dynamo/dynamo-performance-codeowners) ===
 /recipes/                                                                                               @ai-dynamo/dynamo-performance-codeowners

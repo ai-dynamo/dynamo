@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Each engine Service must select exactly one engine. Slime registers this
+# fixed pair at startup; do not increase either worker component's replica count.
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-rollout
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    dynamo.nvidia.com/slime-role: frontend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-engine-0
+spec:
+  ports:
+    - name: sglang-http
+      port: 30000
+      targetPort: 30000
+  selector:
+    dynamo.nvidia.com/slime-role: worker-0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-engine-1
+spec:
+  ports:
+    - name: sglang-http
+      port: 30000
+      targetPort: 30000
+  selector:
+    dynamo.nvidia.com/slime-role: worker-1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: slime-sglang
+spec:
+  backendFramework: sglang
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: ${DYNAMO_RUNTIME_VERSION}
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: frontend
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_FRONTEND_IMAGE}
+              env:
+                - name: DYN_SGLANG_ENABLE_GENERATE
+                  value: "1"
+    - name: worker-0
+      type: worker
+      replicas: 1
+      runtimeVersionOverride: ${DYNAMO_RUNTIME_VERSION}
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-0
+        spec:
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: ${SGLANG_RUNTIME_IMAGE}
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+                    optional: true
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - ${MODEL_PATH}
+                - --served-model-name
+                - ${MODEL_PATH}
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+    - name: worker-1
+      type: worker
+      replicas: 1
+      runtimeVersionOverride: ${DYNAMO_RUNTIME_VERSION}
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-1
+        spec:
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: ${SGLANG_RUNTIME_IMAGE}
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+                    optional: true
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - ${MODEL_PATH}
+                - --served-model-name
+                - ${MODEL_PATH}
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
