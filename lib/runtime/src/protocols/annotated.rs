@@ -284,4 +284,16 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("connection lost"));
     }
+
+    #[test]
+    fn test_into_result_error_takes_precedence_over_data() {
+        let mut annotated = Annotated::from_err(DynamoError::msg("terminal error"));
+        annotated.data = Some("partial data".to_string());
+
+        let error = annotated.into_result().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            "terminal error"
+        );
+    }
 }
