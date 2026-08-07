@@ -84,6 +84,17 @@ SPDX-License-Identifier: Apache-2.0
   #tip li{margin:2px 0}
   #tip .none{color:var(--muted);font-style:italic}
   #tip code{font-size:10.5px;background:var(--naT);padding:0 3px;border-radius:3px}
+  .cadence{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    border-radius:100px;padding:2px 10px;white-space:nowrap}
+  .cad-auto{background:var(--goodT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--good)}
+  .cad-partial{background:var(--warningT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--warning)}
+  .cad-manual{background:var(--criticalT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--critical)}
+  .run{margin-top:16px;border-top:1px solid var(--grid);padding-top:14px}
+  .run h4{font-size:12px;margin:0 0 8px;color:var(--ink2);letter-spacing:.03em;text-transform:uppercase}
+  .run pre{margin:0 0 10px;background:var(--naT);border:1px solid var(--ring);border-radius:6px;
+    padding:10px 12px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:11.5px;line-height:1.65;color:var(--ink)}
+  .run pre .c{color:var(--muted)}
   ul{margin:8px 0 0;padding-left:20px;color:var(--ink2)}
   li{margin:5px 0}
   li strong{color:var(--ink)}
@@ -103,7 +114,7 @@ SPDX-License-Identifier: Apache-2.0
   </section>
 
   <section>
-    <div class="tierhead"><h2><span class="n">§2</span>Tier 1 — End-to-end</h2><span class="pill">Primary · headline numbers</span></div>
+    <div class="tierhead"><h2><span class="n">§2</span>Tier 1 — End-to-end</h2><span class="pill">Primary · headline numbers</span><span class="cadence cad-manual">✕ On demand only</span></div>
     <p class="lede">Answers: what is the system doing now, and where does the time go?</p>
     <table>
       <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Status</th></tr></thead>
@@ -115,10 +126,21 @@ SPDX-License-Identifier: Apache-2.0
       </tbody>
     </table>
     <div class="note">Tracing and metrics are <strong>launch-time</strong> decisions. Miss them and the run is lost — and every recipe misses them by default, so each published number is an opaque interval with no server-side decomposition.</div>
+    <div class="run">
+      <h4>How to run — no workflow invokes AIPerf</h4>
+<pre><span class="c"># Kubernetes — one-time setup, then deploy and benchmark</span>
+deploy/utils/setup_benchmarking_resources.sh
+kubectl apply -f &lt;model&gt;/&lt;framework&gt;/&lt;mode&gt;/deploy.yaml -n $NAMESPACE
+kubectl apply -f &lt;model&gt;/&lt;framework&gt;/&lt;mode&gt;/perf.yaml  -n $NAMESPACE
+
+<span class="c"># Local endpoint</span>
+aiperf profile --model &lt;model&gt; --url http://localhost:8000 \
+  --endpoint-type chat --streaming --concurrency 10 --request-count 100</pre>
+    </div>
   </section>
 
   <section>
-    <div class="tierhead"><h2><span class="n">§3</span>Tier 2 — Subsystem</h2><span class="pill">Ceiling · isolation</span></div>
+    <div class="tierhead"><h2><span class="n">§3</span>Tier 2 — Subsystem</h2><span class="pill">Ceiling · isolation</span><span class="cadence cad-partial">▲ Functional in CI · timing on demand</span></div>
     <p class="lede">Answers: what is this part capable of, independent of what currently constrains it?</p>
     <table>
       <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Notes</th></tr></thead>
@@ -131,10 +153,24 @@ SPDX-License-Identifier: Apache-2.0
         <tr><td><code>benchmarks/multimodal/</code></td><td>Encode/prefill/decode, embedding transfer</td><td>Sweep harness + dataset generation</td></tr>
       </tbody>
     </table>
+    <div class="note"><strong>CI exercises the replay path for correctness, never for speed.</strong> <code>pre-merge.yml:198</code> asserts the G1→G2 offload lifecycle fires; <code>:199</code> checks trace replay still works; <code>:207-213</code> compile the feature-gated entrypoints. None produces a timing number.</div>
+    <div class="run">
+      <h4>How to run for timing</h4>
+<pre><span class="c"># Frontend sweep against mock workers</span>
+python benchmarks/frontend/scripts/sweep_runner.py --mode local --backend mocker \
+  --concurrency 64 --isl 4000 --osl 500
+
+<span class="c"># Offline replay of a trace</span>
+python -m dynamo.replay --trace-format mooncake --router-mode kv_router \
+  --num-workers 4 --report-json report.json
+
+<span class="c"># Interconnect ceiling</span>
+kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESPACE</pre>
+    </div>
   </section>
 
   <section>
-    <div class="tierhead"><h2><span class="n">§4</span>Tier 3 — Micro</h2><span class="pill">CI-gateable · attributable</span></div>
+    <div class="tierhead"><h2><span class="n">§4</span>Tier 3 — Micro</h2><span class="pill">CI-gateable · attributable</span><span class="cadence cad-partial">▲ Runs every PR · timings discarded</span></div>
     <p class="lede">Answers: what does this function cost? Ten criterion benches; nine have a single primary author.</p>
     <table>
       <thead><tr><th style="width:44%">Bench</th><th style="width:20%">Stage</th><th>Measures</th></tr></thead>
@@ -151,6 +187,19 @@ SPDX-License-Identifier: Apache-2.0
         <tr><td><code>llm/benches/request_trace_finish_metadata.rs</code></td><td>Postprocess</td><td>finish metadata, tool calls</td></tr>
       </tbody>
     </table>
+    <div class="note"><strong>All ten execute on every PR, and every timing is thrown away.</strong> <code>dynamo-pipeline.yml:169</code> runs <code>cargo test --all-targets</code>, which includes bench targets. Every <code>[[bench]]</code> sets <code>harness = false</code>, so criterion owns the binary, detects test mode, and runs each benchmark <em>once for validation</em> — no sampling, no timing, no comparison.<br><br><strong>This was not a decision.</strong> <code>--all-targets</code> arrived in a CI consolidation (#8525) where it means "compile and test everything"; the benches were swept in and criterion's test mode is its designed response. The only later commit touching that line (#11853) treats the benches purely as an obstacle to keeping the <em>test</em> command green. Whether to gate on performance was never posed. The accidental upside is real: a bench that panics or stops compiling fails the pipeline, so none can silently bit-rot.</div>
+    <div class="run">
+      <h4>How to get actual numbers</h4>
+<pre><span class="c"># Time one crate, or one bench</span>
+cargo bench -p dynamo-kv-router
+cargo bench -p dynamo-llm --bench tokenizer_simple
+
+<span class="c"># Criterion's built-in A/B — reports % change, bootstrap CI, p-value</span>
+cargo bench -p dynamo-kv-router -- --save-baseline before
+<span class="c"># ... make a change ...</span>
+cargo bench -p dynamo-kv-router -- --baseline before</pre>
+      <div class="note" style="margin-top:0"><strong>What blocks a gate is the environment, not the benchmarks.</strong> Criterion compares against <code>target/criterion/</code>, which is ephemeral in CI — only sccache is configured, so no baseline survives a run. And the workflow documents that "under 12x contention 3/3 parallel shards segfault," while <code>policy_queue.rs</code> already sets <code>.noise_threshold(0.03)</code>. <strong>First step is a measurement, not a proposal:</strong> run <code>cargo bench</code> twice on the same commit on the same runner. If variance exceeds 3%, the gate is not buildable on this infrastructure.</div>
+    </div>
   </section>
 
   <section>

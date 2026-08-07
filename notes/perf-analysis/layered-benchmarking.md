@@ -185,6 +185,124 @@ generation.
 possibly deleting: it is compile-gated in CI, so it costs build time while implying coverage
 that is not there. The `lib/kv-router/benches/` pair covers that ground.
 
+---
+
+## How each tier is run, and on what cadence
+
+Nothing measures performance automatically. One tier executes in CI but discards its timings;
+the other two run only when a person starts them.
+
+### Tier 1 — End-to-end · **on demand only**
+
+No workflow invokes AIPerf. Grepping `.github/workflows/` for `aiperf` returns nothing.
+
+```bash
+# Kubernetes — deploy the recipe first, then its benchmark job
+deploy/utils/setup_benchmarking_resources.sh          # one-time: PVCs, HF token secret
+kubectl apply -f <model>/<framework>/<mode>/deploy.yaml -n $NAMESPACE
+kubectl apply -f <model>/<framework>/<mode>/perf.yaml  -n $NAMESPACE
+
+# Local endpoint
+aiperf profile --model <model> --url http://localhost:8000 \
+  --endpoint-type chat --streaming --concurrency 10 --request-count 100
+```
+
+### Tier 2 — Subsystem · **on demand for timing; parts run functionally in CI**
+
+`pre-merge.yml` exercises the replay path, but for **correctness**, not speed:
+
+| Line | Command | What it checks |
+| --- | --- | --- |
+| 198 | `cargo test -p dynamo-mocker --features replay-bench,kvbm-offload replay_forces_g1_to_g2` | the G1 to G2 offload lifecycle fires |
+| 199 | `cargo test -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2` | trace replay still works |
+| 207-213 | `compile_bench <feature> --bench <target>` | the feature-gated entrypoints still build |
+
+None produces a timing number. For measurement, run them yourself:
+
+```bash
+# Frontend sweep against mock workers
+python benchmarks/frontend/scripts/sweep_runner.py --mode local --backend mocker \
+  --concurrency 64 --isl 4000 --osl 500
+
+# Offline replay of a trace
+python -m dynamo.replay --trace-format mooncake --router-mode kv_router \
+  --num-workers 4 --report-json report.json
+
+# Interconnect ceiling
+kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESPACE
+```
+
+### Tier 3 — Micro · **runs automatically every PR, with timing discarded**
+
+`dynamo-pipeline.yml:169` runs `cargo test --locked --all-targets ...`. `--all-targets`
+includes bench targets, so all ten criterion benches **execute on every pipeline run** — but
+every `[[bench]]` sets `harness = false`, so criterion owns the binary and detects test mode:
+each benchmark runs **once, for validation**, with no sampling, timing, or comparison.
+
+That the benches really are invoked (not merely compiled) is confirmed by the workflow's own
+comment, which explains that `--test-threads=1` had to move to an environment variable because
+under `--all-targets` the flag "is also handed to the criterion `--bench` targets, which reject
+it."
+
+To get actual numbers:
+
+```bash
+cargo bench -p dynamo-kv-router                     # every bench in one crate
+cargo bench -p dynamo-llm --bench tokenizer_simple  # one bench
+cargo bench -p dynamo-kv-router -- --save-baseline before
+# ... make a change ...
+cargo bench -p dynamo-kv-router -- --baseline before
+```
+
+The last pair is criterion's built-in A/B: it reports a percentage change with a bootstrap
+confidence interval and a p-value against the stored baseline.
+
+### Why the Tier 3 timings are discarded
+
+**Not a decision.** `--all-targets` entered this workflow in
+`ci: fold container-validation-dynamo into pr, post-merge, and nightly` (#8525, 2026-04-23), a
+CI consolidation where the flag means "compile and test everything." The benches were swept in
+by that flag, and criterion's test mode is criterion's designed response to it.
+
+The only later commit touching that line,
+`ci: run dynamo_llm rust-gpu tests single-threaded to fix teardown SIGSEGV` (#11853), treats
+the benches purely as an obstacle to keeping the **test** command green. Across both commits,
+benchmark results were never the subject. The question of whether to gate on performance was
+not answered — it was never posed.
+
+The accidental upside is real and worth keeping: a bench that panics or stops compiling fails
+the pipeline, so none of these can silently bit-rot.
+
+### What actually blocks a regression gate
+
+The instruments are finished; the environment for them does not exist.
+
+- **No baseline is retained.** Criterion compares against `target/criterion/`, which is
+  ephemeral in CI. Only sccache is configured — nothing persists criterion output between runs,
+  so there is nothing to compare against.
+- **The runners may not be able to produce a timing signal.** The workflow documents that
+  "under 12x contention 3/3 parallel shards segfault." `lib/kv-router/benches/policy_queue.rs`
+  already sets `.noise_threshold(0.03)`; if run-to-run variance on a shared runner exceeds 3%,
+  the gate is not buildable on this infrastructure.
+- **No threshold policy.** One bench sets a noise threshold; the other nine do not, and nothing
+  defines what a breach should do to a PR.
+
+**First step is a measurement, not a proposal:** run `cargo bench` twice on the same commit on
+the same runner and compare. That answers whether a gate is possible here at all, and it is
+cheap. Everything else is premature until it is answered.
+
+### The pattern across tiers
+
+| Level | A/B procedure available | Status |
+| --- | --- | --- |
+| Micro | Criterion change detection, bootstrap CIs | **Built in, never run** |
+| Offline replay | 60 pairs, randomized, distribution-free interval | **Fully specified, no runbook** |
+| Serving | — | **Does not exist** |
+
+The most rigorous procedure sits at the level with the least at stake and goes unused. The
+level where decisions are actually made — published serving numbers — has none. Someone
+hand-built at replay level what criterion already provides one layer down.
+
 ## Open
 
 - Confirm whether `kv_router_bench.rs` is dead and remove it if so.
@@ -193,3 +311,5 @@ that is not there. The `lib/kv-router/benches/` pair covers that ground.
   [benchmarking-procedure.md](benchmarking-procedure.md) §4.1).
 - Record, per harness, what e2e could not answer and what input distribution it assumes.
   Currently zero harnesses state either.
+- Run `cargo bench` twice on one commit on a CI runner and compare, to establish whether a
+  micro-level regression gate is buildable on this infrastructure.
