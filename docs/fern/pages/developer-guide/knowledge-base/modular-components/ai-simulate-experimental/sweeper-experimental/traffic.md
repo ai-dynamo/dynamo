@@ -5,6 +5,11 @@ title: Sweeper Traffic
 subtitle: Trace, request-rate, concurrency, and KV-load workload definitions
 ---
 
+<!--
+Generated from `aisimulate/docs/sweeper/traffic.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
+Edit the canonical source instead of this Fern copy.
+-->
+
 > [!WARNING]
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning. Its API, configuration schema, search results, and deployment output may change

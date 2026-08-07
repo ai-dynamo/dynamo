@@ -29,6 +29,11 @@ _RUN_SWEEP_PATH = (
     Path(__file__).resolve().parents[5]
     / "aisimulate/examples/sweeper/tools/run_sweep.py"
 )
+if not _RUN_SWEEP_PATH.is_file():
+    pytest.skip(
+        "AI Simulate example fixtures are not included in the ai-dynamo wheel",
+        allow_module_level=True,
+    )
 _RUN_SWEEP_SPEC = spec_from_file_location("dynamo_sweeper_example", _RUN_SWEEP_PATH)
 assert _RUN_SWEEP_SPEC is not None and _RUN_SWEEP_SPEC.loader is not None
 run_sweep_cli = module_from_spec(_RUN_SWEEP_SPEC)

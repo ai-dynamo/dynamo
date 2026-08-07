@@ -5,6 +5,11 @@ title: Sweeper Quickstart
 subtitle: Run a backend-neutral sweep with an injected replay runtime
 ---
 
+<!--
+Generated from `aisimulate/docs/sweeper/quickstart.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
+Edit the canonical source instead of this Fern copy.
+-->
+
 > [!WARNING]
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.

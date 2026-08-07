@@ -24,6 +24,7 @@ dependencies = [
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
+    "tqdm>=4.0.0",
 ]
 
 classifiers = [
@@ -375,10 +376,10 @@ module = ["dynamo.planner.manual.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-# AI Simulate is a separate, optional distribution. Check Dynamo's adapters,
-# but do not recursively analyze the standalone package from this mypy target.
+# AI Simulate is a separate, optional distribution. Load its types when it is
+# installed without reporting errors that originate inside that distribution.
 module = ["aisimulate", "aisimulate.*"]
-follow_imports = "skip"
+follow_imports = "silent"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

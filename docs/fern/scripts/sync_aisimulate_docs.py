@@ -36,6 +36,25 @@ DYNAMO_OWNED_DOCUMENTS = (
 )
 
 
+def _fern_content(name: str) -> str:
+    """Render a canonical document with an edit warning for its Fern copy."""
+    source_path = SOURCE_ROOT / name
+    content = source_path.read_text()
+    frontmatter, separator, body = content.partition("\n---\n")
+    if not content.startswith("---\n") or not separator:
+        raise ValueError(f"{source_path.relative_to(REPO_ROOT)} has no frontmatter")
+
+    source = source_path.relative_to(REPO_ROOT)
+    notice = (
+        "<!--\n"
+        f"Generated from `{source}` by "
+        "`docs/fern/scripts/sync_aisimulate_docs.py`.\n"
+        "Edit the canonical source instead of this Fern copy.\n"
+        "-->"
+    )
+    return f"{frontmatter}{separator}\n{notice}\n{body}"
+
+
 def _integrity_errors() -> list[str]:
     """Find canonical, Fern-copy, and navigation registration drift."""
     errors: list[str] = []
@@ -99,9 +118,8 @@ def main() -> int:
 
     stale = []
     for name in DOCUMENTS:
-        source = SOURCE_ROOT / name
         destination = DESTINATION_ROOT / name
-        content = source.read_text()
+        content = _fern_content(name)
         if destination.exists() and destination.read_text() == content:
             continue
         stale.append(destination.relative_to(REPO_ROOT))

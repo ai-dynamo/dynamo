@@ -84,7 +84,7 @@ repos:
       name: Check canonical AI Simulate docs are synced to Fern
       entry: python3 docs/fern/scripts/sync_aisimulate_docs.py --check
       language: system
-      files: ^(aisimulate/docs/sweeper/|docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/.*\.md$|docs/fern/(index\.yml|scripts/sync_aisimulate_docs\.py)$)
+      always_run: true
       pass_filenames: false
     - id: sync-site-css
       name: Check CustomFooter SITE_CSS mirrors main.css
