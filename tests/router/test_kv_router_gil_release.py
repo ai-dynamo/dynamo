@@ -11,9 +11,14 @@ whole interpreter: ``Thread.join(timeout=)`` could not resume, ``@pytest.mark.ti
 never fired, and only an external SIGKILL ended it. In CI that burned a full 4h
 GPU slot per occurrence.
 
-The scenario runs in a subprocess: it installs a SIGALRM handler and leaves a
-thread parked inside the router build, neither of which is safe to do in-process
-under pytest-timeout.
+Releasing the GIL makes that wait *supervisable*, not cancellable -- ``block_on``
+still runs to completion, so the builder thread stays parked for the life of the
+process. What changes is that everyone else can now run, which is the whole point.
+
+The scenario runs in a subprocess because a regression leaves a thread parked in
+the constructor holding the GIL -- which would wedge the pytest worker itself,
+uninterruptibly. Isolating it means a regression fails one test instead of
+hanging the run.
 """
 
 import subprocess
@@ -35,16 +40,10 @@ _SUBPROCESS_TIMEOUT_S = 90
 
 _SCENARIO = textwrap.dedent(
     """
-    import asyncio, os, signal, sys, threading, time
+    import asyncio, os, threading, time
 
     os.environ["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "1"
     from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
-
-    alarm_fired = threading.Event()
-
-    def on_alarm(signum, frame):
-        alarm_fired.set()
-        raise TimeoutError
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -53,15 +52,28 @@ _SCENARIO = textwrap.dedent(
     # Namespace with no registered workers, so the startup wait never completes.
     endpoint = runtime.endpoint("gilcheck.backend.generate")
 
+    # Surface constructor failures instead of swallowing them -- otherwise an
+    # unrelated break (API change, bad endpoint) exits the thread immediately and
+    # reports as a bogus GIL assertion below.
+    router_error = []
+
     def build_router():
         try:
             KvRouter(endpoint, 16, KvRouterConfig())
-        except BaseException:
-            pass
+        except BaseException as exc:
+            router_error.append(exc)
 
     t = threading.Thread(target=build_router, daemon=True)
     t.start()
     time.sleep(1.0)
+
+    # The premise is that the thread is parked inside the constructor. If it
+    # already returned, this run proves nothing either way.
+    if not t.is_alive():
+        raise AssertionError(
+            "router thread exited during setup, so the blocking path was never "
+            f"exercised; scenario is invalid. error={router_error!r}"
+        )
 
     # The interpreter must keep executing bytecode while the router thread blocks.
     ticks = 0
@@ -71,22 +83,20 @@ _SCENARIO = textwrap.dedent(
         time.sleep(0.001)
     assert ticks > 100, f"main thread starved ({ticks} ticks): GIL held across block_on"
 
-    # ...and a Python-level signal handler must still be reachable.
-    signal.signal(signal.SIGALRM, on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, 2)
-    try:
-        while t.is_alive():
-            t.join(timeout=2)
-    except TimeoutError:
-        pass
-    signal.setitimer(signal.ITIMER_REAL, 0)
-    assert alarm_fired.is_set(), "SIGALRM handler never ran: GIL held across block_on"
+    # A free GIL is the whole property: SIGALRM delivery, Thread.join(timeout=)
+    # returning, and pytest-timeout firing are all downstream of it, so asserting
+    # them separately would only re-prove the line above.
+
+    # A constructor failure would also free the main thread; report it rather than
+    # letting it pass as a successful run.
+    assert not router_error, f"router constructor raised: {router_error!r}"
 
     print("OK")
     """
 )
 
 
+@pytest.mark.timeout(120)  # outer bound; must exceed the child deadline above
 def test_kv_router_init_releases_gil():
     """A KvRouter that never finds workers must not wedge the interpreter."""
     try:
