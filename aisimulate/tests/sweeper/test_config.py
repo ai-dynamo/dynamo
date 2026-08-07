@@ -282,6 +282,7 @@ def test_trace_closed_loop_cap_and_synthetic_helpers():
     assert concurrency.effective_in_flight_cap(8) == 8
     assert concurrency.resolved_request_count() == 2560
     assert concurrency.resolved_request_count(8) == 80
+    assert concurrency.synthetic_arrival_interval_ms is None
     assert rate.synthetic_arrival_interval_ms == 40
     assert rate.resolved_request_count() == 100
 
