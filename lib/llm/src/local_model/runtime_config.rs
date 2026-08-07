@@ -20,6 +20,23 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
+/// Runtime-data key for an engine-published token-overflow contract.
+pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Describes which request-token overflows the frontend may reject early.
+///
+/// The combined limit already accounts for engine-reserved tokens. A false
+/// flag delegates that overflow dimension to the backend, which remains
+/// responsible for any clamping, truncation, or rejection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenBudget {
+    pub combined_limit: u32,
+    #[serde(default)]
+    pub reject_prompt_overflow: bool,
+    #[serde(default)]
+    pub reject_total_overflow: bool,
+}
+
 /// Canonical worker-taint form for topology metadata.
 ///
 /// A topology domain/value pair such as `zone=us-east-1a` becomes

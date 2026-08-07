@@ -675,7 +675,7 @@ func registerControllers(
 		}
 	}
 
-	if runtimeConfig.Gate.Enabled(features.GMSSnapshot) {
+	if runtimeConfig.Gate.Enabled(features.Checkpoint) {
 		if err := controller.SetupGMSPodReplacement(mgr, setupOptions); err != nil {
 			return err
 		}
@@ -701,14 +701,6 @@ func registerWebhookHandlers(
 		setupLog.Info("Detected operator principal from downward API", "principal", operatorPrincipal)
 	} else {
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
-	}
-
-	// Temporary internal gate for GMS + Snapshot.
-	if gate.Enabled(features.GMSSnapshot) {
-		setupLog.Info(
-			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
-			"envVar", features.GMSSnapshotEnvVar,
-		)
 	}
 
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
