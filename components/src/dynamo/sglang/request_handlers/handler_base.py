@@ -913,39 +913,32 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
-        if not isinstance(request_input, str):
-            self._validate_nvext_token_data(request, request_input)
+        self._validate_nvext_token_data(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
 
     @staticmethod
-    def _resolve_max_input_token_id(engine: sgl.Engine) -> int:
-        """Resolve the largest token ID accepted by the model or tokenizer.
+    def _resolve_max_input_token_id(engine: sgl.Engine) -> Optional[int]:
+        """Resolve the largest token ID accepted by the model embedding table."""
+        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+        model_config = getattr(tokenizer_manager, "model_config", None)
+        model_vocab_size: object = getattr(model_config, "vocab_size", None)
 
-        Model and tokenizer vocabularies can differ. Matching vLLM's input
-        validation, accept the larger bound so model-only tokens and tokenizer
-        additions remain usable while truly out-of-vocabulary IDs are rejected.
-        """
-        tokenizer_manager = engine.tokenizer_manager
-        model_vocab_size = tokenizer_manager.model_config.hf_text_config.vocab_size
-        tokenizer = tokenizer_manager.tokenizer
-        tokenizer_max_token_id = -1
+        # Compatibility fallback for SGLang model configs that expose the
+        # Hugging Face text config but not the derived vocab_size attribute.
+        if model_vocab_size is None:
+            hf_text_config = getattr(model_config, "hf_text_config", None)
+            model_vocab_size = getattr(hf_text_config, "vocab_size", None)
 
-        if tokenizer is not None:
-            tokenizer_max_token_id = getattr(tokenizer, "max_token_id", None)
-            if tokenizer_max_token_id is None:
-                get_vocab = getattr(tokenizer, "get_vocab", None)
-                if get_vocab is not None:
-                    tokenizer_max_token_id = max(
-                        get_vocab().values(),
-                        default=-1,
-                    )
-                else:
-                    tokenizer_max_token_id = tokenizer.vocab_size - 1
-
-        return max(model_vocab_size - 1, tokenizer_max_token_id)
+        if (
+            isinstance(model_vocab_size, bool)
+            or not isinstance(model_vocab_size, int)
+            or model_vocab_size <= 0
+        ):
+            return None
+        return model_vocab_size - 1
 
     def _validate_nvext_token_data(
         self,
@@ -962,15 +955,17 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         if not isinstance(token_ids, list):
             raise HttpError(400, "nvext.token_data must resolve to a token ID list")
-        if not token_ids:
-            return
+        if self._max_input_token_id is None:
+            raise HttpError(400, "Unable to validate nvext.token_data for this model")
 
-        max_input_id = max(token_ids)
-        if (
-            self._max_input_token_id is not None
-            and max_input_id > self._max_input_token_id
-        ):
-            raise HttpError(400, f"Token id {max_input_id} is out of vocabulary")
+        for index, token_id in enumerate(token_ids):
+            if isinstance(token_id, bool) or not isinstance(token_id, int):
+                raise HttpError(
+                    400,
+                    f"nvext.token_data[{index}] must be an integer token ID",
+                )
+            if token_id < 0 or token_id > self._max_input_token_id:
+                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 
     @staticmethod
     def _get_guided_decoding_params(

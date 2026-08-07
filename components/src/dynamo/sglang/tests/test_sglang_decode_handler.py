@@ -229,13 +229,13 @@ def _new_token_input_handler(maximum_input_token_id: int = 151935):
     return handler
 
 
-def test_resolve_max_input_token_id_uses_larger_model_vocabulary():
+def test_resolve_max_input_token_id_uses_model_vocabulary():
     tokenizer = SimpleNamespace(get_vocab=lambda: {"base": 0, "added": 151668})
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
             tokenizer=tokenizer,
             model_config=SimpleNamespace(
-                hf_text_config=SimpleNamespace(vocab_size=151936)
+                vocab_size=151936,
             ),
         )
     )
@@ -243,31 +243,31 @@ def test_resolve_max_input_token_id_uses_larger_model_vocabulary():
     assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
 
 
-def test_resolve_max_input_token_id_uses_larger_tokenizer_vocabulary():
+def test_resolve_max_input_token_id_rejects_tokenizer_only_vocabulary():
     tokenizer = SimpleNamespace(get_vocab=lambda: {"base": 0, "added": 151940})
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
             tokenizer=tokenizer,
             model_config=SimpleNamespace(
-                hf_text_config=SimpleNamespace(vocab_size=151936)
+                vocab_size=151936,
             ),
         )
     )
 
-    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151940
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
 
 
-def test_resolve_max_input_token_id_supports_tokenizer_vocab_size_fallback():
+def test_resolve_max_input_token_id_supports_hf_text_config_fallback():
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
-            tokenizer=SimpleNamespace(vocab_size=152000),
+            tokenizer=SimpleNamespace(),
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(vocab_size=151936)
             ),
         )
     )
 
-    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151999
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
 
 
 def test_resolve_max_input_token_id_supports_missing_tokenizer():
@@ -275,12 +275,35 @@ def test_resolve_max_input_token_id_supports_missing_tokenizer():
         tokenizer_manager=SimpleNamespace(
             tokenizer=None,
             model_config=SimpleNamespace(
-                hf_text_config=SimpleNamespace(vocab_size=151936)
+                vocab_size=151936,
             ),
         )
     )
 
     assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_tokenizer_metadata():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_model_metadata():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) is None
 
 
 def test_nvext_token_data_accepts_maximum_valid_token_id():
@@ -318,6 +341,53 @@ def test_nvext_token_data_accepts_empty_token_list():
     }
 
     assert handler._get_input_param(request) == {"input_ids": []}
+
+
+def test_nvext_token_data_rejects_marked_string_payload():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": "not-token-ids",
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(
+        HttpError,
+        match=r"nvext\.token_data must resolve to a token ID list",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_rejects_request_when_model_bound_is_unavailable():
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [1],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(
+        HttpError,
+        match=r"Unable to validate nvext\.token_data for this model",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+@pytest.mark.parametrize("invalid_token_id", [-1, True, 1.5, "1"])
+def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [invalid_token_id],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
 
 
 def test_nvext_token_data_validation_skips_ordinary_token_input():
