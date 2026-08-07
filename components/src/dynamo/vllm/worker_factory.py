@@ -21,6 +21,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.snapshot.lifecycle import EngineSnapshotController
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -65,6 +66,7 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+_SnapshotController = EngineSnapshotController[EngineSetupResult]
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -603,9 +605,13 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_controller: _SnapshotController | None = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
+        snapshot_engine = (
+            snapshot_controller.engine if snapshot_controller is not None else None
+        )
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -640,7 +646,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
+                snapshot_controller=snapshot_controller,
             )
         else:
             # AGGREGATED or DECODE
@@ -649,7 +655,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
+                snapshot_controller=snapshot_controller,
             )
         return
 
@@ -939,12 +945,17 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         failover_metrics=None,
+        restore_paused: bool = False,
     ) -> tuple[bool, Any | None]:
         """Pause, elect the active shadow, and wake it while retaining the lock."""
         if config.gms_shadow_mode is not True:
             return False, None
 
-        await pause_controller.pause(1)
+        if restore_paused:
+            if not pause_controller.is_paused:
+                raise RuntimeError("snapshot restore engine is not paused")
+        else:
+            await pause_controller.pause(1)
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
 
@@ -977,8 +988,8 @@ class WorkerFactory:
                 await lock.release()
             else:
                 # resume() can fail after partially waking vLLM. Keep the lock
-                # until process termination closes the fd; releasing it could
-                # let another engine wake concurrently.
+                # until process termination closes the fd;
+                # releasing here could let another engine wake concurrently.
                 logger.critical(
                     "[Shadow] Engine wake failed after lock acquisition; "
                     "terminating process while retaining the lock"
@@ -994,7 +1005,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_controller: _SnapshotController | None = None,
     ) -> None:
         """
         Instantiate and serve
@@ -1005,7 +1016,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
+                snapshot_controller=snapshot_controller,
                 lifecycle=lifecycle,
             )
 
@@ -1015,10 +1026,18 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult],
+        snapshot_controller: _SnapshotController | None,
         lifecycle: _WorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
+
+        snapshot_engine = (
+            snapshot_controller.engine if snapshot_controller is not None else None
+        )
+        restore_paused = (
+            snapshot_controller is not None
+            and snapshot_controller.snapshot_config.restore_paused
+        )
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -1102,9 +1121,18 @@ class WorkerFactory:
         if config.gms_shadow_mode is True:
             engine_monitor = VllmEngineMonitor(runtime, engine_client, shutdown_event)
             lifecycle.engine_monitor = engine_monitor
-        pause_controller = VllmEnginePauseController(engine_client)
+
+        if restore_paused:
+            assert snapshot_controller is not None
+            pause_controller = snapshot_controller.pause_controller
+        else:
+            pause_controller = VllmEnginePauseController(engine_client)
         was_failover, failover_lock = await self._wake_with_failover_lock(
-            pause_controller, runtime, config, failover_metrics
+            pause_controller,
+            runtime,
+            config,
+            failover_metrics,
+            restore_paused=restore_paused,
         )
         factory.enable_publication()
         await configure_kv_event_block_size(engine_client, vllm_config)
@@ -1326,7 +1354,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_controller: _SnapshotController | None = None,
     ) -> None:
         with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
             await self._run_prefill_worker(
@@ -1334,7 +1362,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
+                snapshot_controller=snapshot_controller,
                 lifecycle=lifecycle,
             )
 
@@ -1345,11 +1373,18 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         lifecycle: _WorkerLifecycle,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_controller: _SnapshotController | None = None,
     ) -> None:
         """
         Instantiate and serve
         """
+        snapshot_engine = (
+            snapshot_controller.engine if snapshot_controller is not None else None
+        )
+        restore_paused = (
+            snapshot_controller is not None
+            and snapshot_controller.snapshot_config.restore_paused
+        )
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -1407,9 +1442,17 @@ class WorkerFactory:
         if config.gms_shadow_mode is True:
             engine_monitor = VllmEngineMonitor(runtime, engine_client, shutdown_event)
             lifecycle.engine_monitor = engine_monitor
-        pause_controller = VllmEnginePauseController(engine_client)
+        if restore_paused:
+            assert snapshot_controller is not None
+            pause_controller = snapshot_controller.pause_controller
+        else:
+            pause_controller = VllmEnginePauseController(engine_client)
         was_failover, failover_lock = await self._wake_with_failover_lock(
-            pause_controller, runtime, config, failover_metrics
+            pause_controller,
+            runtime,
+            config,
+            failover_metrics,
+            restore_paused=restore_paused,
         )
         await configure_kv_event_block_size(engine_client, vllm_config)
 
