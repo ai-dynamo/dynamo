@@ -590,6 +590,16 @@ shared:
   - runtime
   - tokenspeed
   - xpu
+# areas.yaml is the routing decision itself, not a generated artifact, so it
+# does not get the wide list above: nothing stops a rule here from re-routing
+# review authority away from a team, and the strict gate only proves coverage,
+# not that the owner is the right one. Ops and process both hold repo-wide
+# process authority, and under "any one approves" either can unblock a routing
+# change without a third team having to weigh in on paths it does not own.
+- glob: .github/codeowners/areas.yaml
+  owners:
+  - ops
+  - process
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router
