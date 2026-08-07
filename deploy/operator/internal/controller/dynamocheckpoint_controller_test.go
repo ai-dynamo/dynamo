@@ -769,6 +769,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 	}
 
 	t.Run("creates cleanup job and keeps finalizer pending", func(t *testing.T) {
+		t.Log("creates cleanup job with service mesh injection disabled")
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
 		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
 		ckpt.Annotations = map[string]string{
@@ -787,6 +788,8 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			Namespace: testNamespace,
 		}, current))
 		assert.Equal(t, testHash, current.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Equal(t, "disabled", current.Spec.Template.Annotations["linkerd.io/inject"])
+		assert.Equal(t, "false", current.Spec.Template.Annotations["sidecar.istio.io/inject"])
 	})
 
 	t.Run("running cleanup job keeps finalizer pending", func(t *testing.T) {
