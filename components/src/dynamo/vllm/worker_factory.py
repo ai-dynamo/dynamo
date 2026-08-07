@@ -38,6 +38,7 @@ from .handlers import (
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
+    VllmEnginePauseController,
     get_dp_range_for_worker,
 )
 from .health_check import (
@@ -930,19 +931,18 @@ class WorkerFactory:
         failover_metrics.set_state("init")
         return failover_metrics
 
-    async def _maybe_wait_for_failover_lock(
+    async def _wake_with_failover_lock(
         self,
-        handler,
+        pause_controller,
         runtime: DistributedRuntime,
         config: Config,
         failover_metrics=None,
-    ) -> bool:
-        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
-        # (contended) failover, not the initial bootup.
+    ) -> tuple[bool, Any | None]:
+        """Pause, elect the active shadow, and wake it while retaining the lock."""
         if config.gms_shadow_mode is not True:
-            return False
+            return False, None
 
-        await handler._pause_controller.pause(1)
+        await pause_controller.pause(1)
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
 
@@ -959,16 +959,32 @@ class WorkerFactory:
         await lock.acquire(engine_id=f"engine-{engine_id}")
         was_failover = lock.was_contended
         logger.info("[Shadow] Lock acquired, waking engine")
-        if failover_metrics is not None:
-            failover_metrics.set_state("waking")
-            if was_failover:
-                # Only a contended acquire is a failover; a bootup is not a switch.
-                failover_metrics.record_switch_attempt()
+        resume_started = False
+        try:
+            if failover_metrics is not None:
+                failover_metrics.set_state("waking")
+                if was_failover:
+                    # Only a contended acquire is a failover; a bootup is not a switch.
+                    failover_metrics.record_switch_attempt()
 
-        await handler._pause_controller.resume()
-        handler._pause_controller.mark_resumed()
+            resume_started = True
+            await pause_controller.resume()
+            pause_controller.mark_resumed()
+        except BaseException:
+            if not resume_started:
+                await lock.release()
+            else:
+                # resume() can fail after partially waking vLLM. Keep the lock
+                # until process termination closes the fd; releasing it could
+                # let another engine wake concurrently.
+                logger.critical(
+                    "[Shadow] Engine wake failed after lock acquisition; "
+                    "terminating process while retaining the lock"
+                )
+                os._exit(1)
+            raise
         logger.info("[Shadow] Engine awake, registering with discovery")
-        return was_failover
+        return was_failover, lock
 
     async def _create_decode_worker(
         self,
@@ -1061,6 +1077,7 @@ class WorkerFactory:
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
                 component_gauges=component_gauges,
+                defer_publication=config.gms_shadow_mode is True,
             )
         else:
             # Factory is created without component_gauges; setup_vllm_engine() will
@@ -1068,6 +1085,7 @@ class WorkerFactory:
             # on the factory before vLLM calls create_stat_logger().
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
+                defer_publication=config.gms_shadow_mode is True,
             )
             (
                 engine_client,
@@ -1078,6 +1096,11 @@ class WorkerFactory:
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         lifecycle.engine_client = engine_client
         lifecycle.vllm_config = vllm_config
+        pause_controller = VllmEnginePauseController(engine_client)
+        was_failover, failover_lock = await self._wake_with_failover_lock(
+            pause_controller, runtime, config, failover_metrics
+        )
+        factory.enable_publication()
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -1111,6 +1134,9 @@ class WorkerFactory:
             encode_worker_client=encode_worker_client,
         )
         lifecycle.handler = handler
+        if config.gms_shadow_mode is True:
+            handler._pause_controller = pause_controller
+            handler._failover_lock = failover_lock
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -1155,9 +1181,6 @@ class WorkerFactory:
                 component_name=config.component,
             )
 
-        # Register engine routes
-        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
-
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
         logger.info(f"Registering model with endpoint types: {config.endpoint_types}")
@@ -1173,9 +1196,7 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1353,6 +1374,10 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+        pause_controller = VllmEnginePauseController(engine_client)
+        was_failover, failover_lock = await self._wake_with_failover_lock(
+            pause_controller, runtime, config, failover_metrics
+        )
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
@@ -1373,6 +1398,9 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        if config.gms_shadow_mode is True:
+            handler._pause_controller = pause_controller
+            handler._failover_lock = failover_lock
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -1420,10 +1448,6 @@ class WorkerFactory:
         # Register engine routes
         self.register_engine_routes(
             runtime, handler, lora_enabled=config.engine_args.enable_lora
-        )
-
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
         )
 
         # Wait for self-benchmark to complete before registering.
