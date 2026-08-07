@@ -9,7 +9,7 @@ use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
     InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
     Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
-    OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem,
+    OutputTextContent, OutputTokenDetails, PromptCacheRetention, ReasoningItem, ReasoningSummary,
     Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
     SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceOptions,
     ToolChoiceParam, Truncation,
@@ -37,6 +37,20 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
+/// Responses API reasoning controls.
+///
+/// The upstream Responses `Reasoning` type still uses async-openai's effort
+/// enum, which does not accept the model-defined `"max"` value. Dynamo's Chat
+/// protocol enum does, so own this small request field locally and use the same
+/// effort type across both API surfaces.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct Reasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ChatReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReasoningSummary>,
+}
+
 /// Request body for `POST /v1/responses`. Uses a plain
 /// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
 /// Dynamo-owning the input chain in `dynamo_protocols::types::responses`,
@@ -59,6 +73,12 @@ pub struct NvCreateResponse {
     #[serde(flatten)]
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::CreateResponse,
+
+    /// Shadows `CreateResponse.reasoning` so model-defined efforts such as
+    /// `"max"` do not deserialize through async-openai's narrower enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub reasoning: Option<Reasoning>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
@@ -86,13 +106,19 @@ pub struct NvResponse {
     pub frequency_penalty: f32,
     #[serde(default)]
     pub store: bool,
+
+    /// Request reasoning controls echoed on the response. Kept outside the
+    /// upstream `Response` because its effort enum cannot represent `"max"`.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub reasoning: Option<Reasoning>,
 }
 
 /// Patch an already-serialized `Response` JSON object to match the
 /// OpenResponses spec. Applied both to one-shot `NvResponse` serialization
 /// and to every `Response` embedded inside a streaming event payload.
 ///
-/// Reconciles two spec gaps between upstream async-openai's `Response` and
+/// Reconciles three spec gaps between upstream async-openai's `Response` and
 /// the OpenResponses spec:
 ///
 ///  1. Fields the spec requires as `T | null` that upstream marks
@@ -100,6 +126,8 @@ pub struct NvResponse {
 ///     silently dropped when None; the spec wants them present as null.
 ///  2. Fields the spec requires (`presence_penalty`, `frequency_penalty`,
 ///     `store`) that are absent from upstream `Response` entirely.
+///  3. Model-defined reasoning efforts such as `"max"` that upstream's enum
+///     cannot represent.
 ///
 /// Rather than fork the upstream output chain (which would cascade into
 /// `OutputItem`, streaming events, and a long tail of sub-types), we patch
@@ -111,6 +139,7 @@ pub(crate) fn patch_response_for_spec(
     presence_penalty: f32,
     frequency_penalty: f32,
     store: bool,
+    reasoning: serde_json::Value,
 ) {
     for key in dynamo_protocols::types::responses::SPEC_NULLABLE_REQUIRED_RESPONSE_FIELDS {
         obj.entry(*key).or_insert(serde_json::Value::Null);
@@ -125,6 +154,7 @@ pub(crate) fn patch_response_for_spec(
         serde_json::json!(frequency_penalty),
     );
     obj.insert("store".into(), serde_json::json!(store));
+    obj.insert("reasoning".into(), reasoning);
 }
 
 impl Serialize for NvResponse {
@@ -133,12 +163,14 @@ impl Serialize for NvResponse {
         let serde_json::Value::Object(obj) = &mut value else {
             return value.serialize(serializer);
         };
+        let reasoning = serde_json::to_value(&self.reasoning).map_err(serde::ser::Error::custom)?;
 
         patch_response_for_spec(
             obj,
             self.presence_penalty,
             self.frequency_penalty,
             self.store,
+            reasoning,
         );
 
         if let Some(nvext) = &self.nvext {
@@ -763,15 +795,9 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
 
-        // Map reasoning.effort to reasoning_effort. The upstream responses
-        // `effort` is the same `async_openai` enum the Chat field is built on,
-        // so the local `From` impl converts it directly and exhaustively.
-        let reasoning_effort = resp
-            .inner
-            .reasoning
-            .as_ref()
-            .and_then(|r| r.effort.clone())
-            .map(ChatReasoningEffort::from);
+        // Map Responses reasoning.effort to the equivalent Chat field without
+        // narrowing model-defined values such as `"max"`.
+        let reasoning_effort = resp.reasoning.as_ref().and_then(|r| r.effort.clone());
 
         // Map text.format to response_format
         let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
@@ -1161,7 +1187,10 @@ pub fn chat_completion_to_response(
         prompt: None,
         prompt_cache_key: params.prompt_cache_key.clone(),
         prompt_cache_retention: params.prompt_cache_retention,
-        reasoning: params.reasoning.clone(),
+        // `NvResponse` owns the wire reasoning field because the upstream
+        // response enum cannot represent model-defined efforts such as
+        // `"max"`.
+        reasoning: None,
         safety_identifier: params.safety_identifier.clone(),
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
         top_logprobs: Some(0),
@@ -1190,6 +1219,7 @@ pub fn chat_completion_to_response(
         presence_penalty: params.presence_penalty.unwrap_or(0.0),
         frequency_penalty: params.frequency_penalty.unwrap_or(0.0),
         store: params.store.unwrap_or(false),
+        reasoning: params.reasoning.clone(),
     })
 }
 
@@ -1220,6 +1250,7 @@ mod tests {
                 top_logprobs: Some(15),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: Some(NvExt {
                 annotations: Some(vec!["debug".into(), "trace".into()]),
                 ..Default::default()
@@ -1309,6 +1340,7 @@ mod tests {
                 instructions: Some("You are a helpful assistant.".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1353,6 +1385,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1432,6 +1465,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1473,6 +1507,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1516,6 +1551,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1564,6 +1600,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1603,6 +1640,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1637,6 +1675,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1679,6 +1718,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1740,6 +1780,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1812,6 +1853,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1869,6 +1911,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1924,6 +1967,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -1971,6 +2015,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -2036,6 +2081,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -2115,6 +2161,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -2188,6 +2235,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2257,6 +2305,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2323,6 +2372,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2380,6 +2430,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2419,6 +2470,7 @@ mod tests {
                 })]),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         };
 
@@ -2598,19 +2650,20 @@ thinking
 
     #[test]
     fn test_reasoning_effort_mapped_to_chat_completion() {
-        use dynamo_protocols::types::responses::Reasoning;
+        for (wire_value, expected) in [
+            ("medium", ChatReasoningEffort::Medium),
+            ("max", ChatReasoningEffort::Max),
+        ] {
+            let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+                "model": "moonshotai/Kimi-K3",
+                "input": "think hard",
+                "reasoning": {"effort": wire_value}
+            }))
+            .unwrap();
 
-        let mut req = make_response_with_input("think hard");
-        req.inner.reasoning = Some(Reasoning {
-            effort: Some(serde_json::from_value(serde_json::json!("medium")).unwrap()),
-            ..Default::default()
-        });
-
-        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert_eq!(
-            chat.inner.reasoning_effort,
-            Some(ChatReasoningEffort::Medium)
-        );
+            let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            assert_eq!(chat.inner.reasoning_effort, Some(expected));
+        }
     }
 
     #[test]
@@ -2704,36 +2757,34 @@ thinking
 
     #[test]
     fn test_response_echoes_reasoning() {
-        use dynamo_protocols::types::responses::Reasoning;
-
-        let params = ResponseParams {
-            reasoning: Some(Reasoning {
-                effort: Some(serde_json::from_value(serde_json::json!("high")).unwrap()),
+        for effort in [ChatReasoningEffort::High, ChatReasoningEffort::Max] {
+            let expected = serde_json::to_value(&effort).unwrap();
+            let params = ResponseParams {
+                reasoning: Some(Reasoning {
+                    effort: Some(effort),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
+            };
 
-        let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_protocols::types::CreateChatCompletionResponse {
-                choices: vec![],
-                created: 0,
-                id: "test".into(),
-                model: "m".into(),
-                service_tier: None,
-                system_fingerprint: None,
-                object: "chat.completion".into(),
-                usage: None,
-            },
-            nvext: None,
-        };
+            let chat_resp = NvCreateChatCompletionResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                    choices: vec![],
+                    created: 0,
+                    id: "test".into(),
+                    model: "m".into(),
+                    service_tier: None,
+                    system_fingerprint: None,
+                    object: "chat.completion".into(),
+                    usage: None,
+                },
+                nvext: None,
+            };
 
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
-        let reasoning = resp.inner.reasoning.unwrap();
-        assert_eq!(
-            serde_json::to_value(reasoning.effort).unwrap(),
-            serde_json::json!("high")
-        );
+            let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+            let wire = serde_json::to_value(resp).unwrap();
+            assert_eq!(wire["reasoning"]["effort"], expected);
+        }
     }
 
     #[test]
@@ -2962,7 +3013,7 @@ thinking
 
     #[test]
     fn test_reasoning_summary_requires_explicit_request() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
@@ -3180,7 +3231,7 @@ thinking
 
     #[test]
     fn test_length_finish_reason_preserves_completed_reasoning_status() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let mut chat_resp = make_chat_resp_with_reasoning("complete reasoning");
         chat_resp.inner.choices[0].finish_reason =
@@ -3209,7 +3260,7 @@ thinking
 
     #[test]
     fn test_length_finish_reason_marks_terminal_reasoning_incomplete() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let mut chat_resp = make_chat_resp_with_reasoning("partial reasoning");
         chat_resp.inner.choices[0].message.content = None;
