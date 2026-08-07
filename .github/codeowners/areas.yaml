@@ -666,14 +666,6 @@ shared:
   owners:
   - backend-trtllm
   - observability
-- glob: components/src/dynamo/vllm/logits_processing/
-  owners:
-  - backend-vllm
-  - frontend
-- glob: components/src/dynamo/sglang/logits_processing/
-  owners:
-  - backend-sglang
-  - frontend
 - glob: components/src/dynamo/trtllm/logits_processing/
   owners:
   - backend-trtllm

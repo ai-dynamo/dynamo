@@ -150,6 +150,36 @@ is extended here first.
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
 
+## Custom Logits Processors
+
+Override `LLMEngine.logits_processor_spec()` when an engine integration needs
+backend-neutral logits-processor activation data. The framework does not
+realize the entries automatically: resolve and cache the specification during
+startup, call `logits_processors_for_request()` for each request, and construct
+fresh inference-library processor instances from the returned entries.
+
+`LogitsProcessorSpec.generation_only=True` limits activation to aggregated and
+decode workers. `ForcedTokenSequenceSpec` can cross a JSON request boundary
+through `serialize_logits_processor_entries()` and
+`deserialize_logits_processor_entries()`. `PythonProcessorSpec` wraps an
+in-process factory and is intentionally not serializable.
+
+## Engine Management
+
+Engines opt into runtime management routes by advertising capability names:
+
+- Return lifecycle control names from `supported_controls()` and implement
+  `engine_control(name, body)`. The worker registers each name at
+  `POST /engine/control/<name>`.
+- Return asset update names from `supported_updates()` and implement
+  `engine_update(name, body)`. The worker registers each name at
+  `POST /engine/update/<name>`.
+
+Both sets are empty by default. Advertise only implemented operations and
+return a JSON object from each handler. The request body must also be a JSON
+object. Override `on_endpoint_ready(endpoint)` when later management operations
+need access to the serving endpoint; the worker invokes it once before serving.
+
 ## Request Cancellation
 
 `Worker.generate()` automatically monitors for client

@@ -362,6 +362,36 @@ Finish reason normalization (`"abort"` → `"cancelled"`, etc.) is
 handled by the Rust layer — emit whatever your engine uses
 natively.
 
+#### Python: Custom logits processors (optional)
+
+Override `logits_processor_spec()` to expose backend-neutral activation data.
+Resolve and cache the specification during startup, call
+`logits_processors_for_request()` for each request, and construct fresh
+inference-library processor instances from the returned entries. The worker
+does not realize these entries automatically.
+
+Import `LogitsProcessorSpec`, `ForcedTokenSequenceSpec`,
+`PythonProcessorSpec`, and the serialization helpers from
+`dynamo.common.backend.engine`. A generation-only specification runs on
+aggregated and decode workers but not prefill or encode workers.
+`ForcedTokenSequenceSpec` can cross a JSON request boundary;
+`PythonProcessorSpec` contains a live factory and cannot be serialized.
+
+#### Python: Engine management (optional)
+
+Advertise lifecycle operations with `supported_controls()` and implement each
+operation in `engine_control(name, body)`. The worker registers advertised
+names at `POST /engine/control/<name>`.
+
+Use the separate `supported_updates()` and `engine_update(name, body)` methods
+for operations that mutate engine-managed assets. These register at
+`POST /engine/update/<name>`. Both capability sets are empty by default, and
+request and response bodies are JSON objects.
+
+Override `on_endpoint_ready(endpoint)` when a later management operation needs
+the serving endpoint. The worker invokes this hook once after the endpoint
+exists and before discovery registration or request serving.
+
 #### Python: `abort(context)` — optional
 
 Called by the framework only when the client disconnects or the

@@ -671,14 +671,12 @@
 /components/src/dynamo/vllm/engine_monitor.py                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/encode_helper.py                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/components/src/dynamo/vllm/logits_processing/                               @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/sglang/init_diffusion.py                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/engine_monitor.py                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/operator/config/prometheus/monitor.yaml                              @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-observability-codeowners
 /dev/observability/grafana_dashboards/kvbm.json                              @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/backend/metrics.py                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/init_multimodal.py                             @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/components/src/dynamo/sglang/logits_processing/                             @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/trtllm/logits_processing/                             @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/frontend/scripts/sweep_k8s/metrics.py                            @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-observability-codeowners
