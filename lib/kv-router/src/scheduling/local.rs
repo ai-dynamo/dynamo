@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::cold_pool::periodic_recheck_interval;
 use super::config::RouterQueuePolicy;
 use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
@@ -183,6 +184,11 @@ where
         worker_type: &'static str,
         monitor_worker_configs: bool,
     ) -> Result<Self, KvSchedulerError> {
+        let recheck_interval = if profile.cold_pool_config().is_some() {
+            periodic_recheck_interval(recheck_interval)
+        } else {
+            recheck_interval
+        };
         let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
             Arc::clone(&slots),
             workers_with_configs.clone(),
