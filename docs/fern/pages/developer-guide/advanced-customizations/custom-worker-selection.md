@@ -124,6 +124,8 @@ Build and run that binary in the custom image. `python3 -m dynamo.frontend` star
 Build a `SelectionService` with the same factory and pass it to the standard EPP runner:
 
 ```rust
+use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+
 let service = SelectionServiceBuilder::new(kv_router_config)
     .worker_selection_policy_factory(active_request_policy)
     .build()
