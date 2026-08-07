@@ -38,8 +38,9 @@ The router distinguishes two failure classes:
   HTTP 529 by default.
 - **Unavailable** means no usable service path exists. The Frontend returns HTTP 503.
 
-`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. It is
-read once and cached; invalid or out-of-range values fall back to 529.
+`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. Values
+from 200 through 999 are accepted. Informational values from 100 through 199, invalid values, and
+out-of-range values fall back to 529. The value is read and cached on first use.
 
 ## Independently Enabled Signals
 

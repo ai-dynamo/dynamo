@@ -40,6 +40,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -48,6 +49,7 @@ import (
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -75,6 +77,115 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 
 func newTestDGDResourceSyncer(reconciler *DynamoGraphDeploymentReconciler) dgdResourceSyncer {
 	return newDGDResourceSyncer(reconciler.Client, reconciler.Recorder)
+}
+
+func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-dgd",
+			Namespace:  "default",
+			Generation: 7,
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "prefill",
+					Experimental: &v1beta1.ExperimentalSpec{
+						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+						Failover:         &v1beta1.FailoverSpec{},
+					},
+				},
+				{
+					ComponentName: "decode",
+					Experimental: &v1beta1.ExperimentalSpec{
+						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+						Failover:   &v1beta1.FailoverSpec{},
+					},
+				},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoGraphDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
+	require.False(t, controller_common.ContainsFinalizer(&stored))
+	require.Empty(t, stored.Annotations)
+	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, dgd.Generation, ready.ObservedGeneration)
+	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
+	require.Equal(t,
+		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
+			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
+			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+		ready.Message,
+	)
+	require.Zero(t, stored.Status.ObservedGeneration)
+}
+
+func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {
+	now := metav1.Now()
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-dgd",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover:   &v1beta1.FailoverSpec{},
+				},
+			}},
+		},
+	}
+	controller_common.AddFinalizer(dgd)
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoGraphDeployment
+	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored)
+	if !apierrors.IsNotFound(err) {
+		require.NoError(t, err)
+		require.False(t, controller_common.ContainsFinalizer(&stored))
+	}
 }
 
 func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
