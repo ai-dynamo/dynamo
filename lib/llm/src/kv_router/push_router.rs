@@ -851,7 +851,6 @@ mod tests {
             .expect("same-worker booking must be released before yielding the error");
         retry_guard.abort().await;
 
-        drop(monitored);
         drop(router);
         runtime.shutdown();
     }
