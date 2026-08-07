@@ -531,6 +531,10 @@ pub mod llm {
         /// `request_payload`, `tool`.
         pub const DYN_REQUEST_TRACE_RECORDS: &str = "DYN_REQUEST_TRACE_RECORDS";
 
+        /// Deterministic request trace sampling ratio. Agent records use the
+        /// session ID; other records use the request ID.
+        pub const DYN_REQUEST_TRACE_SAMPLE_RATIO: &str = "DYN_REQUEST_TRACE_SAMPLE_RATIO";
+
         /// NATS subject the request trace sink publishes to.
         pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
 
@@ -843,6 +847,7 @@ mod tests {
             logging::otlp::OTEL_SERVICE_NAME,
             logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
             logging::otlp::OTEL_TRACES_SAMPLE_RATIO,
+            llm::request_trace::DYN_REQUEST_TRACE_SAMPLE_RATIO,
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,

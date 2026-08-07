@@ -57,6 +57,7 @@ fn capture_http_headers_with_list(
 
 pub struct RequestPayloadHandle {
     requested_streaming: bool,
+    sampled: bool,
     request_id: String,
     model: String,
     event_time: SystemTime,
@@ -90,6 +91,7 @@ impl RequestPayloadHandle {
                 payload_drop_reason: None,
             },
             unix_time_ms(self.event_time),
+            self.sampled,
         );
     }
 }
@@ -98,6 +100,15 @@ pub fn create_handle(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+) -> Option<RequestPayloadHandle> {
+    create_handle_with_agent_session(req, request_id, http_request_headers, None)
+}
+
+pub(crate) fn create_handle_with_agent_session(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+    agent_session_id: Option<&str>,
 ) -> Option<RequestPayloadHandle> {
     let policy = super::policy();
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
@@ -109,6 +120,7 @@ pub fn create_handle(
         super::config::capture_enabled(),
         policy.emit_request_payload_records(),
         http_request_headers,
+        super::config::should_emit_payload(agent_session_id, request_id),
     )
 }
 
@@ -124,8 +136,9 @@ fn create_handle_with_config(
     enabled: bool,
     emit_request_payload: bool,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+    sampled: bool,
 ) -> Option<RequestPayloadHandle> {
-    if !enabled || !emit_request_payload {
+    if !enabled || !emit_request_payload || !sampled {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
@@ -133,6 +146,7 @@ fn create_handle_with_config(
 
     Some(RequestPayloadHandle {
         requested_streaming,
+        sampled,
         request_id: request_id.to_string(),
         model,
         // Snapshot the pristine inbound request (before the preprocessor
@@ -180,7 +194,7 @@ mod tests {
     #[test]
     fn request_payload_records_emit_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true, None);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None, true);
 
         assert!(
             handle.is_some(),
@@ -191,11 +205,22 @@ mod tests {
     #[test]
     fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
-        let handle = create_handle_with_config(&request, "test-id", true, false, None);
+        let handle = create_handle_with_config(&request, "test-id", true, false, None, true);
 
         assert!(
             handle.is_none(),
             "request_payload records disabled should skip payloads even with store=true"
+        );
+    }
+
+    #[test]
+    fn sampled_out_payloads_do_not_create_handles() {
+        let request = create_test_request("test-model", true);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None, false);
+
+        assert!(
+            handle.is_none(),
+            "sampled-out payloads should not be captured"
         );
     }
 
@@ -281,6 +306,7 @@ mod tests {
         pub(crate) fn for_test(request_id: &str, model: &str, streaming: bool) -> Self {
             Self {
                 requested_streaming: streaming,
+                sampled: true,
                 request_id: request_id.to_string(),
                 model: model.to_string(),
                 event_time: SystemTime::now(),
