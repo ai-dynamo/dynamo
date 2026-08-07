@@ -19,7 +19,7 @@ pub trait StreamAggregable: Sized {
 /// Aggregate a stream of [`Annotated<T>`] into a single `T`. The first error
 /// encountered short-circuits further merging and is returned; the remainder
 /// of the stream is dropped.
-pub async fn aggregate_stream<T, S>(stream: S) -> Result<T, String>
+pub async fn aggregate_stream<T, S>(stream: S) -> Result<T, DynamoError>
 where
     T: StreamAggregable,
     S: Stream<Item = Annotated<T>>,
@@ -28,41 +28,7 @@ where
     let mut response: Option<T> = None;
 
     while let Some(delta) = stream.next().await {
-        let delta = delta.ok()?;
-        if let Some(data) = delta.data {
-            match response.as_mut() {
-                Some(existing) => existing.merge(data),
-                None => response = Some(data),
-            }
-        }
-    }
-
-    Ok(response.unwrap_or_else(T::empty))
-}
-
-/// Aggregate a stream of [`Annotated<T>`] while preserving structured backend
-/// errors. Existing callers that expose string errors can continue to use
-/// [`aggregate_stream`].
-pub async fn aggregate_typed_stream<T, S>(stream: S) -> Result<T, DynamoError>
-where
-    T: StreamAggregable,
-    S: Stream<Item = Annotated<T>>,
-{
-    let mut stream = std::pin::pin!(stream);
-    let mut response: Option<T> = None;
-
-    while let Some(delta) = stream.next().await {
-        if delta.is_error() {
-            return Err(delta.error.unwrap_or_else(|| {
-                DynamoError::msg(
-                    delta
-                        .comment
-                        .map(|comments| comments.join(", "))
-                        .unwrap_or_else(|| "unknown error".to_string()),
-                )
-            }));
-        }
-        if let Some(data) = delta.data {
+        if let Some(data) = delta.into_data()? {
             match response.as_mut() {
                 Some(existing) => existing.merge(data),
                 None => response = Some(data),
