@@ -12,7 +12,7 @@ use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::{EncoderRouter, KvRouter, PrefillRouter},
+    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -56,15 +56,12 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
-    /// KV router for this set's workers (if KV mode)
-    pub(crate) kv_router: Option<Arc<KvRouter>>,
-
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
-    pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
+    pub(crate) prefill_router: Option<Arc<dyn PrefillRouterLifecycle>>,
 
     /// Optional multimodal encoder hop. Stored for discovery-driven
     /// deactivation/reactivation when Encode workers leave or rejoin.
@@ -93,7 +90,6 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            kv_router: None,
             worker_monitor: None,
             prefill_router: None,
             encoder_router: None,
