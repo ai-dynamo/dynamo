@@ -75,6 +75,44 @@ def pytest_ignore_collect(collection_path, config):
     return None
 
 
+@pytest.fixture
+def vllm_cpu_platform_when_no_accelerator():
+    """Pin vLLM's CpuPlatform on hosts with no accelerator.
+
+    Tests that build the vLLM engine argument parser hit
+    ``DeviceConfig.__post_init__``, which resolves ``current_platform`` when
+    ``device`` is left at ``"auto"``. On a host with no accelerator every
+    builtin platform plugin declines, ``resolve_current_platform_cls_qualname``
+    falls back to ``UnspecifiedPlatform`` (``device_type == ""``) and the
+    dataclass raises ``RuntimeError: Failed to infer device type``. The parser
+    instantiates each config dataclass to compute its argparse default, so this
+    fires while *building* the parser -- passing ``--device cpu`` cannot avoid
+    it.
+
+    ``vllm.platforms`` defines a module-level ``__setattr__`` whose whole job is
+    installing a platform object, so assigning through it is the supported way
+    in. Pin it only when torch reports no CUDA device, so GPU runners keep
+    exercising the real detection path. Save and restore the private
+    ``_current_platform`` rather than reading the public attribute, because
+    reading it would itself force lazy resolution and cache
+    ``UnspecifiedPlatform``; teardown then keeps a worker that ran these tests
+    from leaking a pinned platform into another module's tests.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        yield
+        return
+
+    import vllm.platforms as vllm_platforms
+    from vllm.platforms.cpu import CpuPlatform
+
+    previous = vllm_platforms._current_platform
+    vllm_platforms.current_platform = CpuPlatform()
+    yield
+    vllm_platforms.current_platform = previous
+
+
 def make_cli_args_fixture(module_name: str):
     """Create a pytest fixture for mocking CLI arguments for vllm backend."""
 

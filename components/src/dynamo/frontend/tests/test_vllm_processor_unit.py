@@ -42,11 +42,14 @@ def _resolve_qwen3_tool_parser_class():
         return Qwen3CoderToolParser
 
 
-# Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
+# Needs vllm packages, but never touches a GPU.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # Registers the tokenizer in the session predownload manifest (tests/conftest.py)
+    # so it stays fetchable after a worker's predownload test flips HF_HUB_OFFLINE.
+    pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
