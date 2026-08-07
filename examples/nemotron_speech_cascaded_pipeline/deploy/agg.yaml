@@ -43,7 +43,7 @@ spec:
                 - --nim-startup-timeout-s
                 - "3600"
                 - --commit-padding-ms
-                - "1000"
+                - "400"
                 - --model-name
                 - nemotron-asr-streaming
               resources:

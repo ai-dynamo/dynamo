@@ -111,6 +111,8 @@ Dynamo routing:
 The manifest creates a Dynamo frontend, a vLLM worker, and separate ASR and TTS
 worker pods. Each speech worker runs a Speech NIM as a sidecar. The deployment
 uses three GPUs in total, one for each model.
+The ASR worker appends 400 ms of PCM silence on explicit commits to flush short
+utterances, matching the direct pipeline endpointing window without a real-time wait.
 
 ### Prerequisites
 
