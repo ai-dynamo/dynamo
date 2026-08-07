@@ -27,6 +27,8 @@ docs:
   - 'docs/**'
   - 'fern/**'
   - '.github/workflows/fern-docs.yml'
+  # `**` skips dotfile directories, so the `**/*.md` rule above misses this one.
+  - '.github/FILTERS.md'
   - '**/*.md'
   - '**/*.txt'
   - '**/.gitignore'
