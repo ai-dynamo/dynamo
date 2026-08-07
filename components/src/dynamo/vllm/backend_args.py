@@ -437,12 +437,14 @@ class DynamoVllmArgGroup(ArgGroup):
             g,
             flag_name="--benchmark-imbalance-repeats",
             env_var="DYN_BENCHMARK_IMBALANCE_REPEATS",
-            default=5,
+            default=1,
             arg_type=int,
             help=(
-                "Repeats per constructed shape (default: 5). The label is a "
-                "difference between two measured batches, so its noise is the "
-                "pair's rather than one run's."
+                "Passes over the constructed sweep (default: 1, matching the "
+                "generated grid, which measures every coordinate once). The "
+                "label is a difference between two measured batches, so its "
+                "noise is the pair's rather than one run's; raise this for a "
+                "dedicated calibration run."
             ),
         )
         add_argument(
