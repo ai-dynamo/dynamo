@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/imdario/mergo"
 	corev1 "k8s.io/api/core/v1"
@@ -419,6 +420,13 @@ func prepareCheckpointGMSPodTemplate(
 	if err != nil {
 		return err
 	}
+
+	// Reject client names that no rendered checkpoint Job container declares so the
+	// Job never runs with GMS wiring silently missing from a requested client.
+	if err := checkpointGMSClientContainersError(gmsSpec.ExtraClientContainers, podTemplate.Spec.Containers); err != nil {
+		return err
+	}
+
 	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
 	checkpoint.EnsureIntraPodGPUMemoryService(
 		&podTemplate.Spec,
@@ -426,6 +434,36 @@ func prepareCheckpointGMSPodTemplate(
 		gmsSpec.ExtraClientContainers,
 	)
 	return nil
+}
+
+// checkpointGMSClientContainersError returns a deterministic error naming every
+// checkpoint.job.gmsClientContainers entry that no rendered Job container declares.
+func checkpointGMSClientContainersError(clientContainers []string, containers []corev1.Container) error {
+	if len(clientContainers) == 0 {
+		return nil
+	}
+
+	// Index rendered container names for constant-time client lookup.
+	containerNames := make(map[string]struct{}, len(containers))
+	for i := range containers {
+		containerNames[containers[i].Name] = struct{}{}
+	}
+
+	missingClients := make([]string, 0, len(clientContainers))
+	for _, name := range clientContainers {
+		if _, exists := containerNames[name]; !exists {
+			missingClients = append(missingClients, name)
+		}
+	}
+	if len(missingClients) == 0 {
+		return nil
+	}
+	slices.Sort(missingClients)
+
+	return fmt.Errorf(
+		"checkpoint.job.gmsClientContainers references unknown containers %q; every name must match a container in the rendered checkpoint job pod",
+		missingClients,
+	)
 }
 
 func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
