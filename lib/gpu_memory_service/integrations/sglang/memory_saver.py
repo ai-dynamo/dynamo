@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 # Published weights must come back RO, while KV cache always resumes in a fresh
 # RW epoch so the restored engine can rebuild mutable cache state.
 _TAG_LOCK_TYPES = {"weights": RequestedLockType.RO, "kv_cache": RequestedLockType.RW}
+_gms_memory_saver_impl: Optional["GMSMemorySaverImpl"] = None
+_gms_hook_mode_registered = False
 
 
 def _pause_resume_tags(tag: Optional[str]) -> tuple[str, ...]:
@@ -51,13 +53,45 @@ def _pause_resume_tags(tag: Optional[str]) -> tuple[str, ...]:
 
 
 def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
-    """Get the GMS memory saver impl from the torch_memory_saver singleton."""
-    try:
-        import torch_memory_saver
+    """Get the process-local GMS memory saver implementation."""
+    return _gms_memory_saver_impl
 
-        return torch_memory_saver.torch_memory_saver.gms_impl
-    except (ImportError, AttributeError):
-        return None
+
+def _create_gms_memory_saver_impl() -> "GMSMemorySaverImpl":
+    import json
+
+    from gpu_memory_service.integrations.common.utils import (
+        get_gms_lock_mode,
+        get_gms_ro_connect_timeout_ms,
+    )
+    from sglang.srt.runtime_context import get_server_args
+
+    extra = getattr(get_server_args(), "model_loader_extra_config", None)
+    if isinstance(extra, str):
+        extra = json.loads(extra) if extra else {}
+    extra = extra or {}
+
+    impl = GMSMemorySaverImpl(
+        device_index=torch.cuda.current_device(),
+        mode=get_gms_lock_mode(extra),
+        ro_connect_timeout_ms=get_gms_ro_connect_timeout_ms(extra),
+    )
+
+    global _gms_memory_saver_impl
+    _gms_memory_saver_impl = impl
+    return impl
+
+
+def register_gms_hook_mode() -> None:
+    """Register the GMS backend with torch_memory_saver in this process."""
+    global _gms_hook_mode_registered
+    if _gms_hook_mode_registered:
+        return
+
+    from torch_memory_saver import register_hook_mode
+
+    register_hook_mode("gms", _create_gms_memory_saver_impl, uses_preload=False)
+    _gms_hook_mode_registered = True
 
 
 class GMSMemorySaverImpl:
