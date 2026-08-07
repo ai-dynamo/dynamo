@@ -7,7 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{
-    DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, validate_event_source_reregistration,
+    DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, ModelCardInstanceId,
+    model_with_updated_taints, validate_event_source_reregistration,
 };
 
 /// Deserializes a JSON `null` or missing field as `T::default()`.
@@ -96,6 +97,25 @@ impl DiscoveryMetadata {
                 anyhow::bail!("Cannot register EventSource instance as model card")
             }
         }
+    }
+
+    /// Update one authoritative model card while the caller holds the metadata lock.
+    pub fn update_model_taints(
+        &mut self,
+        id: &ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<bool> {
+        let path = id.to_path();
+        let existing = self
+            .model_cards
+            .get_mut(&path)
+            .ok_or_else(|| anyhow::anyhow!("model discovery record {path} is not registered"))?;
+        let candidate = model_with_updated_taints(existing, taints)?;
+        if candidate == *existing {
+            return Ok(false);
+        }
+        *existing = candidate;
+        Ok(true)
     }
 
     /// Unregister an endpoint instance
@@ -481,6 +501,51 @@ mod tests {
     use super::*;
     use crate::component::{Instance, TransportType};
     use crate::discovery::{EventChannelQuery, EventSourceQuery};
+
+    #[test]
+    fn authoritative_model_taint_updates_do_not_read_stale_snapshots() {
+        let mut metadata = DiscoveryMetadata::new();
+        let model = DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            card_json: serde_json::json!({
+                "runtime_config": {"taints": ["a"]}
+            }),
+            model_suffix: None,
+        };
+        let DiscoveryInstanceId::Model(id) = model.id() else {
+            unreachable!()
+        };
+        metadata.register_model_card(model.clone()).unwrap();
+
+        assert!(
+            metadata
+                .update_model_taints(&id, HashSet::from(["b".to_string()]))
+                .unwrap()
+        );
+        assert!(
+            metadata
+                .update_model_taints(&id, HashSet::from(["a".to_string()]))
+                .unwrap()
+        );
+
+        let stored = metadata.get_all_model_cards().pop().unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["a"])
+        );
+
+        metadata.unregister_model_card(&model).unwrap();
+        let error = metadata
+            .update_model_taints(&id, HashSet::from(["b".to_string()]))
+            .unwrap_err();
+        assert!(error.to_string().contains("is not registered"));
+    }
 
     #[test]
     fn test_metadata_serde() {

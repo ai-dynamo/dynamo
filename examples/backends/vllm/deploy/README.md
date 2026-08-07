@@ -221,6 +221,32 @@ After deployment, forward the frontend service to access the API:
 kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8000:8000
 ```
 
+### 6. Update worker routing taints
+
+The operator enables the worker system server on port `9090`. Select one vLLM worker pod and forward that port:
+
+```bash
+export WORKER_POD=$(kubectl get pods -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-component=VllmDecodeWorker \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n "$NAMESPACE" pod/"$WORKER_POD" 9090:9090
+```
+
+In another terminal, replace the caller-managed routing taints for that worker:
+
+```bash
+curl --fail-with-body \
+  -X POST http://localhost:9090/engine/update/model_taints \
+  -H 'Content-Type: application/json' \
+  -d '{"taints":["capacity/fast"]}'
+```
+
+The `taints` array is a replacement, not a merge. Send an empty array to clear caller-managed taints. Dynamo preserves generated `dynamo.topology/` taints and rejects callers that use that reserved prefix. The request updates only the selected worker pod; repeat it for each target worker.
+
+Dynamic taint updates require every frontend/router consumer and the target worker to run a Dynamo version containing this API and the value-aware discovery watcher. Mixed-version operation is unsupported: an older frontend/router can retain stale taints even after the worker reports a successful update. For a safe rollout, upgrade all frontends/routers first, then upgrade workers, and only then enable taint updates.
+
+The system endpoint has no user-facing authentication layer. Keep port `9090` on a trusted control network or use `kubectl port-forward`; do not expose it publicly.
+
 ## Configuration Options
 
 ### Environment Variables

@@ -2279,6 +2279,17 @@ async def unregister_model(
     """
     ...
 
+async def update_model_taints(
+    endpoint: Endpoint,
+    taints: Set[str],
+) -> None:
+    """Replace caller-managed taints on this worker's registered model.
+
+    Reserved 'dynamo.topology/' taints are derived from the model's topology
+    metadata and cannot be supplied by callers.
+    """
+    ...
+
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
