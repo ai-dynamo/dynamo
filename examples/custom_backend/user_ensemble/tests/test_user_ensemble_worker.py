@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -60,12 +59,23 @@ class _FakeDecoder:
         self.abort_ids: list[str] = []
         self.shutdown_calls = 0
 
-    async def generate(self, prompt, sampling_params, request_id):
+    async def generate_final(
+        self,
+        request: dict[str, Any],
+        prompt: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
         self.started.set()
-        yield SimpleNamespace(
-            prompt_token_ids=prompt["prompt_token_ids"],
-            outputs=[SimpleNamespace(index=0, token_ids=[4, 2], finish_reason="stop")],
-        )
+        return {
+            "token_ids": [4, 2],
+            "index": 0,
+            "finish_reason": "stop",
+            "completion_usage": {
+                "prompt_tokens": len(prompt["prompt_token_ids"]),
+                "completion_tokens": 2,
+                "total_tokens": len(prompt["prompt_token_ids"]) + 2,
+            },
+        }
 
     async def abort(self, request_id: str) -> None:
         self.abort_ids.append(request_id)
@@ -90,8 +100,6 @@ def _engine(classifier=None):
     engine.model_name = "test-model"
     engine.served_model_name = "test-model"
     engine._classifier = classifier or _RecordingClassifier()
-    engine._default_sampling_params = {}
-    engine._model_max_len = 128
     engine._encoder = None
     engine._adapter = None
     engine._decoder = None
@@ -189,15 +197,24 @@ async def test_classifier_and_decoder_run_concurrently():
             return "joined"
 
     class BarrierDecoder(_FakeDecoder):
-        async def generate(self, prompt, sampling_params, request_id):
+        async def generate_final(
+            self,
+            request: dict[str, Any],
+            prompt: dict[str, Any],
+            request_id: str,
+        ) -> dict[str, Any]:
             decoder_started.set()
             await asyncio.wait_for(classifier_started.wait(), timeout=1)
-            yield SimpleNamespace(
-                prompt_token_ids=prompt["prompt_token_ids"],
-                outputs=[
-                    SimpleNamespace(index=0, token_ids=[42], finish_reason="stop")
-                ],
-            )
+            return {
+                "token_ids": [42],
+                "index": 0,
+                "finish_reason": "stop",
+                "completion_usage": {
+                    "prompt_tokens": len(prompt["prompt_token_ids"]),
+                    "completion_tokens": 1,
+                    "total_tokens": len(prompt["prompt_token_ids"]) + 1,
+                },
+            }
 
     engine = _engine(BarrierClassifier())
     engine._encoder = _FakeEncoder([object()])
@@ -218,10 +235,17 @@ async def test_classifier_failure_cancels_and_aborts_decoder():
             raise RuntimeError("classifier failed")
 
     class BlockingDecoder(_FakeDecoder):
-        async def generate(self, prompt, sampling_params, request_id):
-            decoder_started.set()
-            await asyncio.Future()
-            yield
+        async def generate_final(
+            self,
+            request: dict[str, Any],
+            prompt: dict[str, Any],
+            request_id: str,
+        ) -> dict[str, Any]:
+            try:
+                decoder_started.set()
+                await asyncio.Future()
+            finally:
+                await self.abort(request_id)
 
     decoder = BlockingDecoder()
     engine = _engine(FailingClassifier())
@@ -246,31 +270,6 @@ async def test_rejects_non_single_image_requests(image_count: int):
 
     with pytest.raises(InvalidArgument, match="exactly one image"):
         await _collect(engine, _request(image_count))
-
-
-async def test_rejects_multiple_choices():
-    engine = _engine()
-    engine._encoder = _FakeEncoder([object()])
-    engine._adapter = _FakeAdapter()
-    engine._decoder = _FakeDecoder()
-    request = _request()
-    request["sampling_options"]["n"] = 2
-
-    with pytest.raises(InvalidArgument, match="exactly one choice"):
-        await _collect(engine, request)
-
-
-async def test_accepts_null_choice_count_as_single_choice():
-    engine = _engine()
-    engine._encoder = _FakeEncoder([object()])
-    engine._adapter = _FakeAdapter()
-    engine._decoder = _FakeDecoder()
-    request = _request()
-    request["sampling_options"]["n"] = None
-
-    chunks = await _collect(engine, request)
-
-    assert chunks[-1]["finish_reason"] == "stop"
 
 
 async def test_abort_and_cleanup_delegate_and_cleanup_is_idempotent():

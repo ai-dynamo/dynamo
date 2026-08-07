@@ -12,7 +12,9 @@ UserEnsembleEngine
        v
 AsyncVisionEncoder -- shared artifacts --> classifier
        |                                  |
-       +---- adapter --> vLLM decoder ----+
+       +---- adapter --> EmbeddedVllmDecoder
+                          |               |
+                          +-- AsyncLLM ---+
                                           |
                                           v
                                   terminal response join
@@ -23,6 +25,12 @@ encoder tensors. The user worker runs the encoder once, passes the same
 in-process artifact objects to the classifier and decoder adapter, waits for
 both branches, and returns one terminal response. Classifier data is attached
 to `nvext.engine_data`; clients must request that optional field.
+
+`EmbeddedVllmDecoder` is a library component, not another serving endpoint. It
+owns native vLLM initialization, request translation, final-output
+normalization, abort, shutdown, and registration metadata. The frontend still
+listens on the only HTTP inference port, and `UserEnsembleEngine` remains the
+only Dynamo backend endpoint for this chain.
 
 The supplied classifier deliberately returns `dummy-classification`. Replace
 `DummyClassifier` with application logic that consumes the encoder artifact.
