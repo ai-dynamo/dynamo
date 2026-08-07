@@ -75,42 +75,54 @@ def pytest_ignore_collect(collection_path, config):
     return None
 
 
+_PLATFORM_UNSET = object()
+
+
 @pytest.fixture
 def vllm_cpu_platform_when_no_accelerator():
-    """Pin vLLM's CpuPlatform on hosts with no accelerator.
+    """Pin vLLM's CpuPlatform on hosts where vLLM recognizes no accelerator.
 
-    Tests that build the vLLM engine argument parser hit
+    Tests that build the vLLM engine argument parser reach
     ``DeviceConfig.__post_init__``, which resolves ``current_platform`` when
-    ``device`` is left at ``"auto"``. On a host with no accelerator every
-    builtin platform plugin declines, ``resolve_current_platform_cls_qualname``
-    falls back to ``UnspecifiedPlatform`` (``device_type == ""``) and the
-    dataclass raises ``RuntimeError: Failed to infer device type``. The parser
-    instantiates each config dataclass to compute its argparse default, so this
-    fires while *building* the parser -- passing ``--device cpu`` cannot avoid
-    it.
+    ``device`` is left at ``"auto"`` and raises ``RuntimeError: Failed to infer
+    device type`` if the resolved platform has an empty ``device_type``. With no
+    accelerator every builtin platform plugin declines and the resolver falls
+    back to ``UnspecifiedPlatform``, whose ``device_type`` is exactly that. The
+    parser instantiates each config dataclass to compute its argparse default,
+    so this fires while *building* the parser -- passing ``--device cpu`` cannot
+    avoid it.
 
-    ``vllm.platforms`` defines a module-level ``__setattr__`` whose whole job is
-    installing a platform object, so assigning through it is the supported way
-    in. Pin it only when torch reports no CUDA device, so GPU runners keep
-    exercising the real detection path. Save and restore the private
-    ``_current_platform`` rather than reading the public attribute, because
-    reading it would itself force lazy resolution and cache
-    ``UnspecifiedPlatform``; teardown then keeps a worker that ran these tests
-    from leaking a pinned platform into another module's tests.
+    Gating on ``device_type`` rather than on ``torch.cuda`` makes this a no-op
+    wherever vLLM already recognizes the hardware, so both CUDA and XPU runners
+    keep exercising real detection (these modules are also marked ``xpu_1``).
+
+    ``vllm.platforms`` resolves ``current_platform`` lazily through a module
+    ``__getattr__``, and assigning the name writes a real module-dict entry that
+    shadows the hook. That entry, not the ``__setattr__`` the module also
+    defines, is what makes the pin visible: the interpreter never calls a
+    module-level ``__setattr__``, since PEP 562 covers only ``__getattr__`` and
+    ``__dir__``. Teardown therefore *deletes* the entry to re-arm the lazy hook
+    -- assigning the previous value back would leave the resolver shadowed for
+    every later test on this xdist worker.
     """
-    import torch
+    import vllm.platforms as vllm_platforms
+    from vllm.platforms import current_platform
 
-    if torch.cuda.is_available():
+    if current_platform.device_type:
         yield
         return
 
-    import vllm.platforms as vllm_platforms
     from vllm.platforms.cpu import CpuPlatform
 
-    previous = vllm_platforms._current_platform
+    previous = vllm_platforms.__dict__.get("current_platform", _PLATFORM_UNSET)
     vllm_platforms.current_platform = CpuPlatform()
-    yield
-    vllm_platforms.current_platform = previous
+    try:
+        yield
+    finally:
+        if previous is _PLATFORM_UNSET:
+            del vllm_platforms.current_platform
+        else:
+            vllm_platforms.current_platform = previous
 
 
 def make_cli_args_fixture(module_name: str):

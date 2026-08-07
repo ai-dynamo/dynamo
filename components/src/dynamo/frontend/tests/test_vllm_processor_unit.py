@@ -47,8 +47,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
-    # Registers the tokenizer in the session predownload manifest (tests/conftest.py)
-    # so it stays fetchable after a worker's predownload test flips HF_HUB_OFFLINE.
+    # This file builds a real tokenizer. The marker declares it in the session
+    # predownload manifest (tests/conftest.py), which is what keeps it fetchable
+    # on a lane that predownloads and flips HF_HUB_OFFLINE; the CPU lane has no
+    # predownload consumer today, so there it is fetched live.
     pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
