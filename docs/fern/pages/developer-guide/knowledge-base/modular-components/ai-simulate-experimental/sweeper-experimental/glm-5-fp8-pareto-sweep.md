@@ -66,7 +66,7 @@ provide one config as a strict pin or several configs as a custom projection poo
 ## Configuration
 
 The reference configuration is
-`examples/aisimulate/sweeper/configs/glm5-disagg-pareto-frontier.yaml`:
+`aisimulate/examples/sweeper/configs/glm5-disagg-pareto-frontier.yaml`:
 
 ```yaml
 search_space:
@@ -152,8 +152,8 @@ database coverage for B200/SGLang/GLM-5-FP8 and on Replay behavior in the runtim
 ## Reproduce
 
 ```bash
-python examples/aisimulate/sweeper/tools/run_sweep.py \
-  --config examples/aisimulate/sweeper/configs/glm5-disagg-pareto-frontier.yaml
+python aisimulate/examples/sweeper/tools/run_sweep.py \
+  --config aisimulate/examples/sweeper/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
 The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo's attention-DP

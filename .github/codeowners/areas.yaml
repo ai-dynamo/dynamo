@@ -215,7 +215,6 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - aisimulate/
-  - examples/aisimulate/
   - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
@@ -558,6 +557,11 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 shared:
+- glob: aisimulate/
+  owners:
+  - planner
+  - '@jasonqinzhou'
+  - '@dreamtalen'
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router

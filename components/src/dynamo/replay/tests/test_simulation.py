@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import sys
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,10 +21,18 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import examples.aisimulate.sweeper.tools.run_sweep as run_sweep_cli
 from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
 from aisimulate.sweeper.replay import BackendDeploymentSpec, ReplaySpec
 from dynamo.replay import simulation
+
+_RUN_SWEEP_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "aisimulate/examples/sweeper/tools/run_sweep.py"
+)
+_RUN_SWEEP_SPEC = spec_from_file_location("dynamo_sweeper_example", _RUN_SWEEP_PATH)
+assert _RUN_SWEEP_SPEC is not None and _RUN_SWEEP_SPEC.loader is not None
+run_sweep_cli = module_from_spec(_RUN_SWEEP_SPEC)
+_RUN_SWEEP_SPEC.loader.exec_module(run_sweep_cli)
 
 pytestmark = [
     pytest.mark.pre_merge,

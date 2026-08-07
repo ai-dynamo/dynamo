@@ -35,8 +35,8 @@ full AI Simulate and Replay refactor has a supported distribution path.
 ## Run a Dynamo Sweep
 
 ```bash
-python examples/aisimulate/sweeper/tools/run_sweep.py \
-  --config examples/aisimulate/sweeper/configs/smart_sweep.yaml
+python aisimulate/examples/sweeper/tools/run_sweep.py \
+  --config aisimulate/examples/sweeper/configs/smart_sweep.yaml
 ```
 
 Or compose the runtime directly:

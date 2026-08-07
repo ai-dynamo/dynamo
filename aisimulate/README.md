@@ -54,6 +54,5 @@ by `Sweeper.run`.
 KVBM sweep fields have been removed; native G2 is their replacement.
 
 Read the canonical [Sweeper documentation](docs/sweeper/overview.md) for its configuration,
-search-space, and replay behavior. A backend-neutral example lives under
-[`aisimulate/examples/sweeper`](examples/sweeper/README.md); Dynamo integration examples live under
-[`examples/aisimulate/sweeper`](../examples/aisimulate/sweeper/README.md).
+search-space, and replay behavior. Backend-neutral and Dynamo integration examples live under
+[`aisimulate/examples/sweeper`](examples/sweeper/README.md).

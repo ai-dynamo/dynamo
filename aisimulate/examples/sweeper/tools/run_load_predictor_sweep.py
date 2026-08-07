@@ -5,7 +5,7 @@
 
 This utility supports the experimental Sweeper feature and may change with its configuration schema.
 
-python examples/aisimulate/sweeper/tools/run_load_predictor_sweep.py \
+python aisimulate/examples/sweeper/tools/run_load_predictor_sweep.py \
     --trace traffic.jsonl --policies throughput_180_5
 """
 
