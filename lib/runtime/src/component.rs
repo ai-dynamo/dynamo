@@ -41,7 +41,9 @@ use crate::{
 
 use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
 
-use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
+use crate::pipeline::network::{
+    PushWorkHandler, RequestPlanePayloadCodec, ingress::push_endpoint::PushEndpoint,
+};
 use crate::protocols::EndpointId;
 use async_nats::{
     rustls::quic,
@@ -112,6 +114,10 @@ pub struct Instance {
     pub transport: TransportType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_type: Option<DeviceType>,
+    /// Payload codec accepted by this worker's request-plane endpoint.
+    /// Missing metadata identifies a legacy JSON-only worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_plane_codec: Option<RequestPlanePayloadCodec>,
 }
 
 impl Instance {

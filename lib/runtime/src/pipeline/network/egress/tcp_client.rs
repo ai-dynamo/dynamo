@@ -2725,6 +2725,7 @@ mod tests {
                 instance_id: 1,
                 transport: TransportType::Tcp(tcp_addr),
                 device_type: None,
+                request_plane_codec: None,
             }])
             .unwrap();
 
