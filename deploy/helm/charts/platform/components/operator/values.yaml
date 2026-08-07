@@ -22,13 +22,7 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
-featureGates:
-  # -- Temporary internal gate for GMS + Snapshot.
-  gmsSnapshot: false
-
 # Environment variables to pass to operator Deployment.
-#
-# Prefer featureGates.gmsSnapshot for the temporary GMS + Snapshot gate.
 env: []
 
 # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
