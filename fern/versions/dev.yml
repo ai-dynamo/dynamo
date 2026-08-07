@@ -751,8 +751,6 @@ navigation:
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
                       - page: Chat Processor
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md
-                      - page: Logits Processing
-                        path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/sglang/logits-processing.md
                       - page: Disaggregation
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/sglang/disaggregation.md
                       - page: HiCache
@@ -789,8 +787,6 @@ navigation:
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md
                       - page: Chat Processor
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md
-                      - page: Logits Processing
-                        path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/vllm/logits-processing.md
                       - page: KV Cache Offloading
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md
                       - page: Native KV Offloading
