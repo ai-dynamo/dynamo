@@ -12,9 +12,9 @@
 import {
   UPCOMING_EVENTS,
   PAST_EVENTS,
-  GENERATED_ON,
   type DynamoEvent,
 } from "./events.generated";
+import { resolveToday } from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -37,28 +37,6 @@ const MONTHS = [
 const MONTH_INDEX = Object.fromEntries(
   MONTHS.map((month, index) => [month.slice(0, 3), index]),
 );
-
-/**
- * Today, as of the last generator run.
- *
- * GENERATED_ON is a Pacific YYYY-MM-DD refreshed every six hours by
- * community-events-refresh.yml, so the grid tracks the real month with no
- * client-side date logic and no timezone work here -- the generator already
- * resolved the zone. Parsed field-wise rather than via `new Date(string)`,
- * which would read the date as UTC midnight and shift it a day west.
- */
-function resolveToday() {
-  const [year, month, day] = GENERATED_ON.split("-").map(Number);
-  if (!year || !month || !day) {
-    const fallback = new Date();
-    return {
-      year: fallback.getFullYear(),
-      month: fallback.getMonth(),
-      day: fallback.getDate(),
-    };
-  }
-  return { year, month: month - 1, day };
-}
 
 function buildMonthDays(year: number, month: number) {
   const leadingBlanks = new Date(Date.UTC(year, month, 1)).getUTCDay();
