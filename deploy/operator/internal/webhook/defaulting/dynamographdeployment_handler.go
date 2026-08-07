@@ -157,9 +157,6 @@ func (d *DGDDefaulter) defaultGroveWorkerHashSuffixForUpdate(
 	if err != nil {
 		return err
 	}
-	if oldDGD == nil {
-		return nil
-	}
 
 	oldGrovePathway := d.isGrovePathway(ctx, oldDGD)
 	d.defaultComponentFields(oldDGD, oldGrovePathway)
@@ -196,7 +193,7 @@ func (d *DGDDefaulter) defaultGroveWorkerHashSuffixForUpdate(
 
 func decodeOldDGD(req admission.Request) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
 	if len(req.OldObject.Raw) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("missing previous DynamoGraphDeployment in UPDATE admission request")
 	}
 
 	switch {

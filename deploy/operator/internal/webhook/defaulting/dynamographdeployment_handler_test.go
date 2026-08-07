@@ -131,7 +131,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			ctx: admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+				&nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"}}),
 			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -143,7 +144,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE preserves existing annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			ctx: admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+				&nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"}}),
 			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -310,6 +312,19 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 	}
 }
 
+func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUpdateWithoutOldDGD(t *testing.T) {
+	t.Parallel()
+
+	dgd := groveWorkerHashSuffixTestDGD()
+	ctx := admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	ctx = features.WithGate(ctx, features.Gates{Grove: true})
+
+	err := NewDGDDefaulter("0.9.0").Default(ctx, dgd)
+	if err == nil {
+		t.Fatal("Default() error = nil, want error for UPDATE without old DynamoGraphDeployment")
+	}
+}
+
 func groveWorkerHashSuffixTestDGD() *nvidiacomv1beta1.DynamoGraphDeployment {
 	component := func(name string, componentType nvidiacomv1beta1.ComponentType, image string) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 		return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
@@ -397,7 +412,11 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				},
 			}
 
-			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
+			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			if tt.op == admissionv1.Update {
+				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, dgd.DeepCopy())
+			}
+			if err := defaulter.Default(ctx, dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
@@ -567,6 +586,9 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				},
 			}
 			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			if tt.op == admissionv1.Update {
+				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, dgd.DeepCopy())
+			}
 			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
 
 			if err := defaulter.Default(ctx, dgd); err != nil {
