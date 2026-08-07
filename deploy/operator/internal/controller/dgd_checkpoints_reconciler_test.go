@@ -1637,3 +1637,125 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 		t.Fatalf("retained checkpoint should not keep DGD label after finalizer detach")
 	}
 }
+
+func TestDGDCheckpointsReconciler_RejectsUnresolvedCheckpointGMSClients(t *testing.T) {
+	tests := []struct {
+		name             string
+		clientContainers []string
+		jobContainers    []corev1.Container
+		wantErr          string
+		wantAbsentErr    string
+	}{
+		{
+			name:             "misspelled client is rejected",
+			clientContainers: []string{"gms-svaer"},
+			jobContainers: []corev1.Container{{
+				Name:  "gms-saver",
+				Image: "custom-saver:latest",
+			}},
+			wantErr:       `["gms-svaer"]`,
+			wantAbsentErr: "gms-saver",
+		},
+		{
+			name:             "client without any job pod template is rejected",
+			clientContainers: []string{"gms-saver"},
+			wantErr:          `["gms-saver"]`,
+		},
+		{
+			name:             "every unresolved client is named in sorted order",
+			clientContainers: []string{"z-client", "a-client"},
+			jobContainers: []corev1.Container{{
+				Name:  "gms-saver",
+				Image: "custom-saver:latest",
+			}},
+			wantErr: `["a-client" "z-client"]`,
+		},
+		{
+			name:             "target container is a resolvable client",
+			clientContainers: []string{commonconsts.MainContainerName},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a GMS checkpoint component whose job declares the listed containers")
+			ctx := context.Background()
+			testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+			deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(testScheme).
+					WithObjects(deviceClass).
+					Build(),
+				Config:   &configv1alpha1.OperatorConfiguration{},
+				Recorder: record.NewFakeRecorder(10),
+				RuntimeConfig: &controller_common.RuntimeConfig{
+					Gate: features.Gates{GMSSnapshot: true},
+				},
+			}
+			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+					UID:       types.UID("dgd-uid"),
+				},
+			})
+
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: string(commonconsts.ComponentTypeWorker),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    v1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Mode:    v1alpha1.CheckpointModeAuto,
+					Identity: &v1alpha1.DynamoCheckpointIdentity{
+						Model:                "meta-llama/Llama-2-7b-hf",
+						BackendFramework:     "vllm",
+						TensorParallelSize:   1,
+						PipelineParallelSize: 1,
+						ExtraParameters:      map[string]string{},
+					},
+					Job: &v1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: tt.clientContainers,
+					},
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: "checkpoint-writer:latest",
+					},
+				},
+			}
+			if tt.jobContainers != nil {
+				component.Checkpoint.Job.PodTemplate = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: tt.jobContainers},
+				}
+			}
+
+			t.Log("Create the GMS-backed checkpoint")
+			ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
+
+			if tt.wantErr == "" {
+				t.Log("Verify a resolvable client is wired instead of rejected")
+				require.NoError(t, err)
+				client := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, tt.clientContainers[0])
+				require.NotNil(t, client)
+				assert.Contains(t, client.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
+				return
+			}
+
+			t.Log("Verify the unresolved client fails checkpoint creation instead of being skipped")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "checkpoint.job.gmsClientContainers")
+			assert.Contains(t, err.Error(), tt.wantErr)
+			if tt.wantAbsentErr != "" {
+				assert.NotContains(t, err.Error(), tt.wantAbsentErr)
+			}
+		})
+	}
+}
