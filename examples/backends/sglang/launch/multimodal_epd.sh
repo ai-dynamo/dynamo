@@ -129,6 +129,11 @@ fi
 
 if [[ "$FRONTEND_DECODING" == "true" ]]; then
     ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --frontend-decoding"
+    # The frontend decodes media itself and ships pixels over NIXL RDMA, so it
+    # needs the NIXL wheel's native libs on the loader path. Without this the
+    # frontend cannot build the media pipeline, so it never adds the model and
+    # /v1/models stays empty.
+    export_nixl_wheel_libs
 fi
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
