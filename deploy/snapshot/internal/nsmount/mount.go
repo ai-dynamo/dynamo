@@ -83,43 +83,36 @@ type execMountRef struct {
 	dst        string
 	createdDst bool // true if the mount helper created dst; controls rmdir on cleanup
 	log        logr.Logger
-	mu         sync.Mutex
-	unmounted  bool
+	once       sync.Once
+	unmountErr error
 }
 
 func (h *execMountRef) TargetPath() string { return h.dst }
 
 func (h *execMountRef) Unmount(_ context.Context) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.unmounted {
-		return nil
-	}
-
-	// Fresh context with a hard timeout. The parent context is intentionally
-	// not forwarded: cleanup must complete even if the caller's context is
-	// already cancelled.
-	ctx, cancel := context.WithTimeout(context.Background(), unmountTimeout)
-	defer cancel()
-	// Pass the ns fd via ExtraFiles; it lands at fd nsFdChildNum in the child.
-	args := []string{"umount-fd", strconv.Itoa(nsFdChildNum), h.dst}
-	if h.createdDst {
-		args = append(args, "created")
-	}
-	cmd := exec.CommandContext(ctx, h.binaryPath, args...)
-	cmd.ExtraFiles = []*os.File{h.nsFd}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ns-bind-mount umount-fd %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
-	}
-
-	if err := h.nsFd.Close(); err != nil {
-		h.log.Error(err, "close ns fd", "dst", h.dst)
-	}
-	h.unmounted = true
-	h.log.Info("unmounted from namespace", "dst", h.dst)
-	return nil
+	h.once.Do(func() {
+		defer h.nsFd.Close()
+		// Fresh context with a hard timeout. The parent context is intentionally
+		// not forwarded: cleanup must complete even if the caller's context is
+		// already cancelled.
+		ctx, cancel := context.WithTimeout(context.Background(), unmountTimeout)
+		defer cancel()
+		// Pass the ns fd via ExtraFiles; it lands at fd nsFdChildNum in the child.
+		args := []string{"umount-fd", strconv.Itoa(nsFdChildNum), h.dst}
+		if h.createdDst {
+			args = append(args, "created")
+		}
+		cmd := exec.CommandContext(ctx, h.binaryPath, args...)
+		cmd.ExtraFiles = []*os.File{h.nsFd}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			h.log.Error(err, "failed to unmount from namespace", "dst", h.dst, "output", strings.TrimSpace(string(out)))
+			h.unmountErr = fmt.Errorf("ns-bind-mount umount-fd %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
+			return
+		}
+		h.log.Info("unmounted from namespace", "dst", h.dst)
+	})
+	return h.unmountErr
 }
 
 // Mount bind-mounts src (in the current namespace) to dst inside the mount
