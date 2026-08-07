@@ -32,8 +32,8 @@ pub mod validate;
 pub mod videos;
 
 use validate::{
-    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
-    TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
+    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MAX_STOP_SEQUENCES, MIN_P_RANGE, N_RANGE,
+    PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
 
 /// Side from which prompt tokens are truncated.
@@ -204,14 +204,20 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
-            && stop.len() > 4
+            && stop.len() > MAX_STOP_SEQUENCES
         {
-            anyhow::bail!("stop conditions must be less than 4")
+            anyhow::bail!(
+                "Maximum of {MAX_STOP_SEQUENCES} stop sequences allowed, got {}",
+                stop.len()
+            )
         }
         if let Some(stop_token_ids) = &stop_token_ids
-            && stop_token_ids.len() > 4
+            && stop_token_ids.len() > MAX_STOP_SEQUENCES
         {
-            anyhow::bail!("stop token IDs must be less than 4")
+            anyhow::bail!(
+                "Maximum of {MAX_STOP_SEQUENCES} stop token IDs allowed, got {}",
+                stop_token_ids.len()
+            )
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
