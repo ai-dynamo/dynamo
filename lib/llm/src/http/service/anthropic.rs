@@ -32,7 +32,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     metrics::{
-        CancellationLabels, Endpoint,
+        CancellationLabels, Endpoint, ErrorType, InflightGuard,
         process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     },
     service_v2,
@@ -40,7 +40,7 @@ use super::{
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
-    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse,
+    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
     AnthropicMessageContent, SystemContent, chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
@@ -59,7 +59,6 @@ use crate::types::Annotated;
 use super::error::{SanitizedError, invalid_argument};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
-use crate::engines::ValidateRequest;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -133,10 +132,16 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // Handlers
 // ---------------------------------------------------------------------------
 
-fn validate_anthropic_content_blocks(
-    request: &AnthropicCreateMessageRequest,
+const ANTHROPIC_MAX_TOOL_NAME_LENGTH: usize = 128;
+
+fn validate_anthropic_messages(
+    messages: &[AnthropicMessage],
 ) -> Result<(), dynamo_runtime::error::DynamoError> {
-    for (message_index, message) in request.messages.iter().enumerate() {
+    if messages.is_empty() {
+        return Err(invalid_argument("messages: field required"));
+    }
+
+    for (message_index, message) in messages.iter().enumerate() {
         let AnthropicMessageContent::Blocks { content } = &message.content else {
             continue;
         };
@@ -159,45 +164,47 @@ async fn handler_anthropic_messages(
     headers: HeaderMap,
     Json(mut request): Json<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
-    // Validate required fields
-    if request.messages.is_empty() {
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "messages: field required",
-        ));
-    }
-    if request.max_tokens == 0 {
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "max_tokens: must be greater than 0",
-        ));
-    }
-    if let Err(error) = validate_anthropic_content_blocks(&request) {
+    let request_id = get_or_create_request_id(&headers);
+    let streaming = request.stream;
+    let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        &request_id,
+    );
+
+    if let Err(error) = validate_anthropic_messages(&request.messages) {
+        inflight_guard.mark_error(ErrorType::Validation);
         return Err(anthropic_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             error.message(),
         ));
     }
+    if request.max_tokens == 0 {
+        inflight_guard.mark_error(ErrorType::Validation);
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "max_tokens: must be greater than 0",
+        ));
+    }
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
     // Create request context
-    let request_id = get_or_create_request_id(&headers);
-    let streaming = request.stream;
-    let resolved_model = resolve_request_model(&request.model, template.as_ref());
-    // Canonicalize alias → primary for the metric label (see anthropic_messages).
-    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&canonical_model)
-            .to_string(),
+        model: metric_model,
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
     let metadata = extract_metadata_from_http(&headers).map_err(|err| {
+        inflight_guard.mark_error(ErrorType::Validation);
         anthropic_error(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "invalid_request_error",
@@ -223,7 +230,15 @@ async fn handler_anthropic_messages(
     .await;
 
     let response = tokio::spawn(
-        anthropic_messages(state, template, request, headers, stream_handle).in_current_span(),
+        anthropic_messages(
+            state,
+            template,
+            request,
+            headers,
+            stream_handle,
+            inflight_guard,
+        )
+        .in_current_span(),
     )
     .await
     .map_err(|e| {
@@ -245,6 +260,7 @@ async fn anthropic_messages(
     mut request: Context<AnthropicCreateMessageRequest>,
     headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
+    mut inflight_guard: InflightGuard,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
@@ -292,16 +308,22 @@ async fn anthropic_messages(
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
             // canonical, customer-facing message so both APIs report the same
             // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                &super::openai::model_not_ready_message(&model),
-            ),
-            _ => anthropic_error(
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                &format!("Model '{}' not found", model),
-            ),
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                inflight_guard.mark_error(ErrorType::Unavailable);
+                anthropic_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "overloaded_error",
+                    &super::openai::model_not_ready_message(&model),
+                )
+            }
+            _ => {
+                inflight_guard.mark_error(ErrorType::NotFound);
+                anthropic_error(
+                    StatusCode::NOT_FOUND,
+                    "not_found_error",
+                    &format!("Model '{}' not found", model),
+                )
+            }
         })?;
 
     let (orig_request, context) = request.into_parts();
@@ -325,6 +347,7 @@ async fn anthropic_messages(
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        inflight_guard.mark_error(ErrorType::Validation);
         tracing::error!(
             request_id,
             error = %e,
@@ -343,7 +366,8 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
-    if let Err(error) = chat_request.validate() {
+    if let Err(error) = chat_request.validate_with_tool_name_limit(ANTHROPIC_MAX_TOOL_NAME_LENGTH) {
+        inflight_guard.mark_error(ErrorType::Validation);
         let error = invalid_argument(error.to_string());
         return Err(anthropic_error(
             StatusCode::BAD_REQUEST,
@@ -397,14 +421,6 @@ async fn anthropic_messages(
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
-
-    // Create inflight_guard early to ensure all errors are counted
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
-        Endpoint::AnthropicMessages,
-        streaming,
-        request.id(),
-    );
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
@@ -639,6 +655,13 @@ async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if let Err(error) = validate_anthropic_messages(&request.messages) {
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            error.message(),
+        ));
+    }
     if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
