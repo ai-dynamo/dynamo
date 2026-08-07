@@ -27,8 +27,9 @@
 #
 # All paths require every commit currently in the PR to have a signature that GitHub reports as
 # verified. If any commit is unsigned, the workflow does not post `/ok to test`. For PRs authored
-# by maintainers, it also explains which commits failed verification. Non-maintainer contributors
-# do not receive the unsigned-commit comment and instead wait for manual approval. Repository-
+# by maintainers, it explains which commits failed verification. Approved external contributors
+# receive guidance for either signing the commits or requesting manual approval. Other external
+# contributors wait for manual approval without receiving an unsigned-commit comment. Repository-
 # permission lookup failures fail closed for the maintainer paths, and malformed contributor-list
 # configuration fails closed for the approved-author path.
 #
@@ -91,21 +92,22 @@ jobs:
         id: author_permission_check
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
+          REPOSITORY: ${{ github.repository }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           # This checks effective repository permission, not organization membership.
           if ! author_permission=$(gh api \
-            "repos/$REPO_OWNER/$REPO_NAME/collaborators/$PR_AUTHOR/permission" \
+            "repos/$REPOSITORY/collaborators/$PR_AUTHOR/permission" \
             --jq '.permission' 2>/dev/null); then
             echo "Author $PR_AUTHOR does not have maintainer repository permission."
             echo "is_maintainer=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # The endpoint returns one legacy base permission. Maintain maps to "write", while
+          # admin remains "admin", so both returned values that grant write access are accepted.
           case "$author_permission" in
-            admin|maintain|write)
+            admin|write)
               echo "Author $PR_AUTHOR has $author_permission repository permission."
               echo "is_maintainer=true" >> "$GITHUB_OUTPUT"
               ;;
@@ -119,23 +121,24 @@ jobs:
         if: github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
+          REPOSITORY: ${{ github.repository }}
           TRIGGERING_ACTOR: ${{ github.actor }}
         run: |
           # This checks effective repository permission, not organization membership. GitHub's
           # collaborator-permission endpoint supports the repository-scoped GitHub App installation
           # token provided by github.token and requires only repository Metadata read access.
           if ! actor_permission=$(gh api \
-            "repos/$REPO_OWNER/$REPO_NAME/collaborators/$TRIGGERING_ACTOR/permission" \
+            "repos/$REPOSITORY/collaborators/$TRIGGERING_ACTOR/permission" \
             --jq '.permission'); then
             echo "Warning: Could not determine repository permission for $TRIGGERING_ACTOR." >&2
             echo "is_approved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # The endpoint returns one legacy base permission. Maintain maps to "write", while
+          # admin remains "admin", so both returned values that grant write access are accepted.
           case "$actor_permission" in
-            admin|maintain|write)
+            admin|write)
               echo "Actor $TRIGGERING_ACTOR has $actor_permission repository permission."
               echo "is_approved=true" >> "$GITHUB_OUTPUT"
               ;;
@@ -246,6 +249,31 @@ jobs:
           ${table}
 
           Please sign your commits and push again. See the [GitHub docs on commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for help."
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO_OWNER/$REPO_NAME" \
+            --body "$body"
+      - name: Comment unsigned commits for approved external contributor
+        if: steps.author_check.outputs.is_approved == 'true' && steps.author_permission_check.outputs.is_maintainer != 'true' && steps.signature_check.outputs.all_signed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
+        run: |
+          table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
+          body="<!-- dynamo-ext-contributor: unsigned -->
+          ## Automatic CI Approval Skipped
+
+          Automatic approval requires every commit to have a signature that GitHub reports as verified. The following commits do not meet that requirement:
+
+          | Commit | Reason |
+          |--------|--------|
+          ${table}
+
+          To use automatic approval, sign the listed commits and push again. Alternatively, a maintainer can review this head and comment \`/ok to test $PR_SHA\`; you do not need to rewrite the commits for that manual approval path."
 
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \
