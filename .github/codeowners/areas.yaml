@@ -557,6 +557,39 @@ required_owners:
   owners:
   - operator
 shared:
+# CODEOWNERS is a generated artifact, so co-ownership here is about who may
+# approve it, not who reviews its contents. Every area is listed because under
+# "any one approves" any single team satisfies the gate: without this, adding a
+# file in an uncovered location needs an areas.yaml edit (ops) AND the
+# regenerated CODEOWNERS (process), two approvals to land one file. The
+# artifact cannot drift from the reviewed source -- emit_codeowners.py is a
+# pure function of areas.yaml, and the workflow's regenerate-and-diff step
+# fails on any hand-edit -- so widening approval here costs no safety.
+- glob: CODEOWNERS
+  owners:
+  - process
+  - agents
+  - backend-sglang
+  - backend-trtllm
+  - backend-vllm
+  - diffusion
+  - docs
+  - epp
+  - fault-tolerance
+  - frontend
+  - gms
+  - kv-memory
+  - multimodal
+  - observability
+  - operator
+  - ops
+  - performance
+  - planner
+  - rl
+  - router
+  - runtime
+  - tokenspeed
+  - xpu
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router
