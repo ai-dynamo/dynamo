@@ -95,7 +95,7 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{SanitizedError, overload_status_code};
+use super::error::{BackendStatusAction, SanitizedError, overload_status_code};
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -349,6 +349,24 @@ impl ErrorMessage {
         )
     }
 
+    /// Answer 500, with the status the engine asserted in `details`.
+    ///
+    /// The number is all that crosses the boundary; the backend's own message
+    /// stays server-side, because a 5xx body may carry filesystem paths.
+    fn coerced_backend_error(
+        asserted: StatusCode,
+        details: impl std::fmt::Display,
+    ) -> ErrorResponse {
+        let (status, mut body) = ErrorMessage::sanitized_with_details(
+            SanitizedError::Internal,
+            format!("backend asserted status {}: {details}", asserted.as_u16()),
+        );
+        body.0.details = Some(Box::new(
+            serde_json::json!({ "backend_status": asserted.as_u16() }),
+        ));
+        (status, body)
+    }
+
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
@@ -449,31 +467,35 @@ impl ErrorMessage {
         }
     }
 
-    /// Implementers should only be able to throw 400-499 errors.
+    /// Convert a backend-supplied [`HttpError`] into a client response.
+    ///
+    /// Parse first, so a code outside the HTTP status space cannot reach the
+    /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
+    /// its own status only when it is 503 or the configured overload code,
+    /// which is what makes a deliberate load shed distinguishable from an
+    /// internal error. The body text is sanitized either way.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
-        // 499 is part of the 4xx range but its body can carry cancellation
-        // context (queue paths, context IDs) — sanitize separately.
-        if err.code == 499 {
-            return ErrorMessage::sanitized_with_details(SanitizedError::Cancelled, err.message);
-        }
-        // Backend-supplied messages are only forwarded for the documented 4xx
-        // range; for 5xx or codes outside the HTTP space the message may
-        // contain internal paths/details and is kept server-side only.
-        if err.code < 400 || err.code >= 500 {
+        let Ok(status) = StatusCode::from_u16(err.code) else {
             return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
-        }
-        match StatusCode::from_u16(err.code) {
-            Ok(code) => (
-                code,
+        };
+        match BackendStatusAction::triage(status) {
+            BackendStatusAction::Sanitize(variant) => {
+                ErrorMessage::sanitized_with_details(variant, err.message)
+            }
+            BackendStatusAction::CoerceToInternal(asserted) => {
+                ErrorMessage::coerced_backend_error(asserted, err.message)
+            }
+            // 4xx (non-499): forward the backend's own message.
+            BackendStatusAction::ForwardClientError => (
+                status,
                 Json(ErrorMessage {
                     message: err.message,
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
+                    error_type: map_error_code_to_error_type(status),
+                    code: status.as_u16(),
                     details: None,
                     metric_error_type: None,
                 }),
             ),
-            Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
         }
     }
 }
@@ -4798,11 +4820,21 @@ mod tests {
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         // Backend-supplied messages outside the 4xx range must NOT be
-        // forwarded to the client — they may include internal paths.
-        for code in [399u16, 500, 501] {
+        // forwarded to the client — they may include internal paths. 503 keeps
+        // its status, matching the streaming path
+        // (`test_check_for_backend_error_with_503_preserves_status`); the rest
+        // answer 500.
+        for (code, expected_status) in [
+            (399u16, 500u16),
+            (500, 500),
+            (501, 500),
+            (503, 503),
+            (507, 500),
+        ] {
             let err = http_error_from_engine(code).unwrap_err();
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.0.as_u16(), expected_status, "status for {code}");
+            assert_eq!(response.1.code, expected_status, "body code for {code}");
             assert_eq!(response.1.message, "Internal server error");
             assert!(
                 !response.1.message.contains("custom error message"),
@@ -4825,6 +4857,129 @@ mod tests {
         assert_eq!(response.1.message, "Request cancelled");
         assert!(!response.1.message.contains("abc-123"));
         assert!(!response.1.message.contains("/srv/queue.py"));
+    }
+
+    #[test]
+    fn test_from_http_error_preserves_529_overload_status() {
+        // A deliberate load shed must stay distinguishable from an internal
+        // error. The body is still sanitized: it may carry internal paths.
+        let err = HttpError {
+            code: 529,
+            message: "site overloaded at /srv/pool.py:12".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert!(
+            !response.1.message.contains("/srv/pool.py"),
+            "client response must not include the backend-supplied path"
+        );
+        assert!(
+            !response.1.message.contains("site overloaded"),
+            "client response must not include the backend-supplied HttpError message"
+        );
+    }
+
+    #[test]
+    fn test_from_http_error_529_classifies_as_overload_for_metrics() {
+        // Observability half of the same bug: the metric recorded Internal
+        // while the status was squashed, hiding load shedding.
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 529,
+            message: "site overloaded".to_string(),
+        });
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
+    }
+
+    #[test]
+    fn test_from_http_error_rejects_out_of_range_code() {
+        // Codes outside the HTTP status space fall back to a sanitized 500.
+        let err = HttpError {
+            code: 1000,
+            message: "bogus status from /srv/backend.py:7".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.code, 500);
+        assert_eq!(response.1.message, "Internal server error");
+        assert!(!response.1.message.contains("/srv/backend.py"));
+    }
+
+    /// Read the tunnelled backend status out of an error response body.
+    fn tunnelled_backend_status(response: &ErrorResponse) -> Option<u64> {
+        response.1.details.as_ref()?.get("backend_status")?.as_u64()
+    }
+
+    #[test]
+    fn test_from_http_error_coerces_unlisted_5xx_and_tunnels_status() {
+        // The client sees a generic 500 while the asserted status survives in
+        // `details`. 507 is a WebDAV code no Dynamo component emits; 501 is
+        // what the previous blanket pass-through forwarded verbatim.
+        for code in [501u16, 502, 504, 507] {
+            let response = ErrorMessage::from_http_error(HttpError {
+                code,
+                message: format!("engine failure {code} at /srv/pool.py:12"),
+            });
+            assert_eq!(
+                response.0,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {code}"
+            );
+            assert_eq!(response.1.code, 500, "body code {code}");
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                tunnelled_backend_status(&response),
+                Some(u64::from(code)),
+                "asserted status must be tunnelled for {code}"
+            );
+            // `details` carries a number, never the backend's prose.
+            let serialized = serde_json::to_string(&response.1.0).unwrap();
+            assert!(
+                !serialized.contains("/srv/pool.py"),
+                "serialized body must not include the backend-supplied path for {code}"
+            );
+            assert!(
+                !serialized.contains("engine failure"),
+                "serialized body must not include the backend-supplied message for {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_http_error_preserves_retryable_5xx_without_tunnel() {
+        // These two survive on the status line, so nothing lands in `details`.
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+            let response = ErrorMessage::from_http_error(HttpError {
+                code: status.as_u16(),
+                message: "shedding load at /srv/pool.py:12".to_string(),
+            });
+            assert_eq!(response.0, status);
+            assert_eq!(response.1.code, status.as_u16());
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                tunnelled_backend_status(&response),
+                None,
+                "a preserved status must not also be tunnelled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_http_error_forwards_4xx_verbatim() {
+        // The 5xx allowlist leaves 4xx alone: the backend's own description is
+        // what the caller needs (e.g. the in-tree 415 from image loading).
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 415,
+            message: "Unsupported Media Type: image/tiff".to_string(),
+        });
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported Media Type: image/tiff");
+        assert_eq!(tunnelled_backend_status(&response), None);
     }
 
     #[test]
