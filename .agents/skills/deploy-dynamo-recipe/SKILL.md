@@ -104,6 +104,12 @@ Review the assigned DGD and any support manifests explicitly included in the han
 Stop before mutation if required namespace, CRDs, PVC prerequisites, secret names, storage class, images, or GPU
 capacity are missing.
 
+When checking GPU capacity, count every pod that is bound to a node (`spec.nodeName` set) and not in a terminal phase
+(`Succeeded`/`Failed`) as holding its full GPU request. Do not filter on `phase == Running`: pods in
+`ImagePullBackOff`, `ContainerCreating`, or init hold their reservations. Exclude nodes carrying taints beyond the
+standard GPU taint (tenant reservations) from schedulable capacity, and never add tolerations for them. Report free
+capacity as the largest schedulable per-node block, not a cluster-wide sum: a 4-GPU pod needs 4 free GPUs on one node.
+
 If a manifest must change only to work with the target cluster, such as resolving a storage class placeholder or adding
 a required node-taint toleration, update only the copy under `applied_manifests/`. Preserve the handed-off source
 and record the exact change and reason in `deployment_ledger.json`. Do not change performance knobs.
