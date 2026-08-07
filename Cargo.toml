@@ -33,6 +33,7 @@ members = [
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
 ]
+exclude = ["lib/router-plugins/catalog"]
 resolver = "3"
 
 [workspace.package]

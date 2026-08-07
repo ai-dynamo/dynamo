@@ -878,7 +878,7 @@ navigation:
           - page: Building from Source
             path: pages/developer-guide/advanced-customizations/building-from-source.md
           - page: Custom Worker Selection
-            path: pages/developer-guide/advanced-customizations/custom-worker-selection.md
+            path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: pages/developer-guide/advanced-customizations/custom-vision-encoders.md

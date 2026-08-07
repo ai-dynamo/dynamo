@@ -15,7 +15,7 @@ use crate::services::common::replica_sync::{
 };
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerPolicyFactory};
+use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -23,6 +23,7 @@ use super::types::{
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
+use crate::WorkerSelectionPolicyFactory;
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -31,7 +32,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
-    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 impl SelectionServiceBuilder {
@@ -79,7 +80,7 @@ impl SelectionServiceBuilder {
             + Sync
             + 'static,
     {
-        self.worker_selection_policy_factory = Some(Box::new(factory));
+        self.worker_selection_policy_factory = Some(Arc::new(factory));
         self
     }
 
