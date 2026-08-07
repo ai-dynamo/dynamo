@@ -11,12 +11,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import TransferRequest
-from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     Modality,
     MultimodalEncodeWorkerHandler,
@@ -65,6 +65,7 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
 
     handler.set_token_ids_for_test = _set_token_ids_for_test
     handler.set_token_ids_for_test(151655, 151656)
+    handler._max_input_token_id = 151654
     handler._missing_video_cache_key_config_warned = False
     handler._decoded_content_hash_warning_emitted = False
     handler._image_loader = None

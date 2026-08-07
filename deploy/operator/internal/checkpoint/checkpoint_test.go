@@ -25,7 +25,6 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
@@ -433,7 +432,7 @@ func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyH
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil, features.Defaults())
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
@@ -447,7 +446,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil, features.Defaults())
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
@@ -461,12 +460,12 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	assert.True(t, commonController.ContainsFinalizer(stored))
 }
 
-func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
+func TestCreateOrGetAutoCheckpointAcceptsGMSCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	_, err := CreateOrGetAutoCheckpoint(
+	ckpt, err := CreateOrGetAutoCheckpoint(
 		ctx,
 		c,
 		testNamespace,
@@ -477,10 +476,10 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		"",
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 		nil,
-		features.Gates{},
 	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
+	require.NoError(t, err)
+	require.NotNil(t, ckpt.Spec.GPUMemoryService)
+	assert.True(t, ckpt.Spec.GPUMemoryService.Enabled)
 }
 
 func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
@@ -506,7 +505,6 @@ func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
 		nvidiacomv1alpha1.CheckpointDeletionPolicyRetain,
 		nil,
 		owner,
-		features.Defaults(),
 	)
 	require.NoError(t, err)
 
@@ -552,7 +550,6 @@ func TestCreateOrGetAutoCheckpointUpdatesExistingDeletionPolicyAndFinalizer(t *t
 		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete,
 		nil,
 		owner,
-		features.Defaults(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
@@ -769,7 +766,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 	t.Run("nil or disabled config returns disabled", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		for _, cfg := range []*nvidiacomv1alpha1.ServiceCheckpointConfig{nil, {Enabled: false}} {
-			info, err := ResolveCheckpointForService(ctx, c, testNamespace, cfg, features.Defaults())
+			info, err := ResolveCheckpointForService(ctx, c, testNamespace, cfg)
 			require.NoError(t, err)
 			assert.False(t, info.Enabled)
 		}
@@ -780,7 +777,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
 			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
-		}, features.Defaults())
+		})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)
@@ -788,7 +785,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 	t.Run("config without ref or identity resolves enabled without error", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true}, features.Defaults())
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)
@@ -813,7 +810,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
-		}, features.Gates{GMSSnapshot: true})
+		})
 		require.NoError(t, err)
 		assert.True(t, info.Exists)
 		assert.True(t, info.Ready)
@@ -821,30 +818,6 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Equal(t, hash, info.CheckpointName)
 		require.NotNil(t, info.GPUMemoryService)
 		assert.True(t, info.GPUMemoryService.Enabled)
-	})
-
-	t.Run("checkpointRef rejects GMS checkpoint when gate is disabled", func(t *testing.T) {
-		hash, err := ComputeIdentityHash(testIdentity())
-		require.NoError(t, err)
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
-			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-				Identity:         testIdentity(),
-				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
-			},
-			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
-				IdentityHash: hash,
-			},
-		}
-		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
-		ref := hash
-
-		_, err = ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
-			Enabled: true, CheckpointRef: &ref,
-		}, features.Gates{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {
@@ -860,7 +833,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
-		}, features.Defaults())
+		})
 		require.NoError(t, err)
 		assert.True(t, info.Exists)
 		assert.False(t, info.Ready)
@@ -871,7 +844,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		ref := "nonexistent"
 		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
-		}, features.Defaults())
+		})
 		assert.ErrorContains(t, err, "nonexistent")
 	})
 
@@ -890,7 +863,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, CheckpointRef: &ref,
-		}, features.Defaults())
+		})
 		require.NoError(t, err)
 		assert.Equal(t, "not-the-hash", info.CheckpointName)
 		assert.Equal(t, hash, info.Hash)
@@ -913,7 +886,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, Identity: &identity,
-		}, features.Defaults())
+		})
 		require.NoError(t, err)
 		assert.True(t, info.Exists)
 		assert.True(t, info.Ready)
@@ -938,7 +911,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, Identity: &identity,
-		}, features.Defaults())
+		})
 		require.NoError(t, err)
 		assert.True(t, info.Exists)
 		assert.False(t, info.Ready)
@@ -950,7 +923,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		identity := testIdentity()
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true, Identity: &identity,
-		}, features.Defaults())
+		})
 		require.NoError(t, err)
 		assert.False(t, info.Exists)
 		assert.False(t, info.Ready)
@@ -959,7 +932,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 	t.Run("enabled without ref or identity waits for auto-created checkpoint", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true}, features.Defaults())
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)
