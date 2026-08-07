@@ -16,7 +16,11 @@ on:
   # all artifacts (containers/wheels/crates/helm=all). REVERT before merge.
   push:
     branches:
-      - pvijayakrish/on-demand-release
+      # copy-pr-bot's reviewed-copy branch. Velonix job admission only admits
+      # push on main, release/*, and pull-request/N, so the test loop runs off
+      # the PR copy: comment `/ok to test <sha>` to refresh it. Same filter
+      # fern-docs.yml uses.
+      - pull-request/[0-9]+
   workflow_dispatch:
     inputs:
       source_ref:
