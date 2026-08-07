@@ -301,10 +301,11 @@ echo "  winner cold out='${REF_OUT}' | winner hot out='${WH_OUT}'"
 
 # ---- Phase 4c (optional): eviction pressure ----
 # EVICTION_PRESSURE=1 (pair with a small KV_BLOCKS) sends a SECOND distinct long prompt so
-# the pool must reclaim blocks the warm prefix had cached. That exercises the tombstone
-# path: the primary evicts, logs DELs, and the standby's replay must NOT resurrect those
-# retired mappings. Correct behaviour post-failover is a MISS with correct output -- a HIT
-# here would mean reading bytes that were overwritten.
+# the pool must reclaim blocks the warm prefix had cached. That exercises the veto: the
+# reclaimed blocks are handed out again, which bumps their generation, and the standby's
+# replay must NOT resurrect records the snapshot still names. Correct behaviour
+# post-failover is partial reuse with correct output -- a full HIT would mean reading
+# bytes that were overwritten.
 if [ "${EVICTION_PRESSURE:-0}" = "1" ]; then
     echo ""; echo "=== Phase 4c: Eviction pressure (second distinct long prompt) ==="
     PRESSURE_PROMPT=""
