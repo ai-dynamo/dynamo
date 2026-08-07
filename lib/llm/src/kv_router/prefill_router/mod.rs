@@ -9,8 +9,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints, scheduling::QueueRejection,
+    PrefillLoadEstimator,
+    conditional_disagg::ConditionalDisaggPolicy,
+    config::RouterConfigOverride,
+    protocols::RoutingConstraints,
+    scheduling::QueueRejection,
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     pipeline::{
@@ -23,6 +27,8 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
+    kv_router::WorkerSelectorFactory,
+    local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -170,11 +176,15 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// Client-visible logprobs should not be placed in `disaggregated_params`,
 /// which is an engine-owned KV handoff contract rather than a public response
 /// channel.
-pub struct PrefillRouter {
-    prefill_router: OnceLock<InnerPrefillRouter>,
+pub struct PrefillRouter<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    prefill_router: OnceLock<InnerPrefillRouter<Sel>>,
     /// Reference to the decode-side `KvRouter` so conditional disagg can peek
     /// the cache-hot decode worker. `None` for non-KV routing and disabled routers.
-    decode_router: Option<Arc<super::KvRouter>>,
+    decode_router: Option<Arc<super::KvRouter<Sel>>>,
+    worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
     decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     endpoint_id: OnceLock<EndpointId>,
@@ -204,7 +214,33 @@ fn prepare_prefill_request(request: &PreprocessedRequest) -> PreprocessedRequest
     prefill_request
 }
 
-impl Drop for PrefillRouter {
+pub(crate) trait PrefillRouterLifecycle: Send + Sync {
+    fn deactivate(&self);
+    fn reactivate(&self);
+    fn is_deactivated(&self) -> bool;
+}
+
+impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn deactivate(&self) {
+        self.deactivate();
+    }
+
+    fn reactivate(&self) {
+        self.reactivate();
+    }
+
+    fn is_deactivated(&self) -> bool {
+        self.is_deactivated()
+    }
+}
+
+impl<Sel> Drop for PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn drop(&mut self) {
         tracing::debug!("Dropping PrefillRouter, cancelling background activation task");
         self.cancel_token.cancel();
@@ -212,13 +248,15 @@ impl Drop for PrefillRouter {
 }
 
 #[async_trait]
-impl
+impl<Sel>
     Operator<
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
-    > for PrefillRouter
+    > for PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     async fn generate(
         &self,
@@ -490,7 +528,10 @@ impl
     }
 }
 
-impl PrefillRouter {
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }

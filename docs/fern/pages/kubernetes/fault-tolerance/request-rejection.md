@@ -213,8 +213,9 @@ def send_with_retry(request, max_retries=5):
 ```
 
 If an existing client only understands 503 retry semantics, set
-`DYN_HTTP_OVERLOAD_STATUS_CODE=503` on the Frontend. The variable accepts any valid HTTP status code;
-an invalid value falls back to 529.
+`DYN_HTTP_OVERLOAD_STATUS_CODE=503` on the Frontend. The variable accepts values from 200 through
+999. Informational values from 100 through 199, invalid values, and out-of-range values fall back to
+529. The value is read and cached on first use.
 
 ## Related Documentation
 

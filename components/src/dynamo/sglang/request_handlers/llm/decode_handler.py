@@ -474,6 +474,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    include_native_metadata=native_request,
                 ):
                     yield out
             else:
@@ -555,6 +556,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    include_native_metadata=native_request,
                 ):
                     yield out
             else:
@@ -574,6 +576,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        include_native_metadata: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -646,8 +649,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                engine_data = {}
-                if metadata_uploader is None:
+                engine_data: dict[str, Any] = {}
+                if metadata_uploader is None and include_native_metadata:
                     engine_data["sglang_meta_info"] = dict(meta_info)
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:

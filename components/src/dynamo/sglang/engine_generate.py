@@ -11,6 +11,8 @@ from typing import Any
 from pydantic import TypeAdapter
 from sglang.srt.managers.io_struct import GenerateReqInput
 
+from dynamo.common.backend import logprobs as _shared_logprobs
+
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
 _PAYLOAD_KEY = "sglang_tito"
 _GENERATE_REQUEST_ADAPTER = TypeAdapter(GenerateReqInput)
@@ -76,7 +78,12 @@ def build_native_generate_request(
             }
         )
 
-    return _GENERATE_REQUEST_ADAPTER.validate_python(payload)
+    native_request = _GENERATE_REQUEST_ADAPTER.validate_python(payload)
+    _shared_logprobs.validate_sglang_top_logprobs(
+        native_request.top_logprobs_num,
+        allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+    )
+    return native_request
 
 
 def native_generate_stream(

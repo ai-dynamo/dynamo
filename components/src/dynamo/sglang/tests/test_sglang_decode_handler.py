@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -22,11 +21,11 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
-from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -295,6 +294,32 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         )
 
 
+def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
+        build_native_generate_request(
+            _engine_generate_request({"return_logprob": True, "top_logprobs_num": 1}),
+            input_ids=[1],
+            fallback_rid="request",
+            priority=None,
+        )
+
+
+def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+
+    native = build_native_generate_request(
+        _engine_generate_request({"return_logprob": True, "top_logprobs_num": 2}),
+        input_ids=[1],
+        fallback_rid="request",
+        priority=None,
+    )
+
+    assert native is not None
+    assert native.top_logprobs_num == 2
+
+
 async def _stream(items):
     for item in items:
         yield item
@@ -508,12 +533,12 @@ def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch)
 
 
 def test_extract_logprobs_formats_top_tokens_as_token_ids():
-    log_probs, top_logprobs, total = DecodeWorkerHandler._extract_logprobs(
+    log_probs, top_logprobs = DecodeWorkerHandler._extract_logprobs(
         {
             "output_token_logprobs": [(-0.1, 101, "a")],
             "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
         },
-        0,
+        1,
         return_tokens_as_token_ids=True,
     )
 
@@ -524,7 +549,6 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
             {"rank": 2, "token_id": 102, "token": "token_id:102", "logprob": -0.2},
         ]
     ]
-    assert total == 1
 
 
 def test_metadata_uploader_parses_extra_args_nvext():
@@ -687,55 +711,6 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_tracks_logprobs_per_choice_index():
-    handler = _new_decode_handler()
-
-    chunks = await _collect(
-        handler._process_token_stream(
-            _stream(
-                [
-                    {
-                        "index": 0,
-                        "output_ids": [101],
-                        "meta_info": {
-                            "id": "request-1",
-                            "finish_reason": None,
-                            "output_token_logprobs": [(-0.1, 101, "a")],
-                        },
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [201],
-                        "meta_info": {
-                            "id": "request-1",
-                            "finish_reason": None,
-                            "output_token_logprobs": [(-0.2, 201, "b")],
-                        },
-                    },
-                    {
-                        "index": 0,
-                        "output_ids": [102],
-                        "meta_info": {
-                            "id": "request-1",
-                            "finish_reason": None,
-                            "output_token_logprobs": [
-                                (-0.1, 101, "a"),
-                                (-0.3, 102, "c"),
-                            ],
-                        },
-                    },
-                ]
-            ),
-            _Context(),
-        )
-    )
-
-    assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
-    assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
-    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
-
-
-@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 
@@ -764,11 +739,16 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
                 ]
             ),
             _Context(),
+            include_native_metadata=True,
         )
     )
 
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
+    assert [
+        chunk["engine_data"]["sglang_meta_info"]["output_token_logprobs"]
+        for chunk in chunks
+    ] == [[(-0.1, 101, "a")], [(-0.3, 102, "c")]]
 
 
 @pytest.mark.asyncio
@@ -1068,53 +1048,6 @@ async def test_process_token_stream_suppresses_hidden_stop_token_reason():
     )
 
     assert "stop_reason" not in chunks[0]
-
-
-@pytest.mark.asyncio
-async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
-    chunks = await _collect(
-        StreamProcessor.process_sglang_stream(
-            _stream(
-                [
-                    {
-                        "index": 0,
-                        "output_ids": [101],
-                        "text": "a",
-                        "meta_info": {"finish_reason": None},
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [201],
-                        "text": "b",
-                        "meta_info": {"finish_reason": None},
-                    },
-                    {
-                        "index": 0,
-                        "output_ids": [],
-                        "text": "a",
-                        "meta_info": {"finish_reason": {"type": "stop"}},
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [],
-                        "text": "b",
-                        "meta_info": {"finish_reason": {"type": "stop"}},
-                    },
-                ]
-            )
-        )
-    )
-
-    outputs = [json.loads(chunk) for chunk in chunks]
-
-    assert [output["index"] for output in outputs] == [0, 1, 0, 1]
-    assert [output["finished"] for output in outputs] == [False, False, True, True]
-    assert [output.get("finish_reason") for output in outputs] == [
-        None,
-        None,
-        "stop",
-        "stop",
-    ]
 
 
 async def _collect(stream):

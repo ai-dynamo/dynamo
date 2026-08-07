@@ -41,6 +41,18 @@ const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
 pub(super) const DEFAULT_PATH: &str = "/generate";
 
+fn canonical_generate_models(
+    manager: &crate::discovery::ModelManager,
+    models: Vec<String>,
+) -> Vec<String> {
+    models
+        .into_iter()
+        .map(|model| manager.resolve_canonical_name(&model))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 #[derive(Debug)]
 struct RequestContext {
     request_id: String,
@@ -223,9 +235,12 @@ async fn handler(
         );
     }
 
-    let models = state
-        .manager()
-        .list_generate_models_for_capability(SGLANG_GENERATE_CAPABILITY);
+    let models = canonical_generate_models(
+        state.manager(),
+        state
+            .manager()
+            .list_generate_models_for_capability(SGLANG_GENERATE_CAPABILITY),
+    );
     let model = match models.len() {
         1 => models.into_iter().next().unwrap(),
         0 => {
@@ -401,4 +416,26 @@ async fn dispatch(
         response = response.keep_alive(KeepAlive::default().interval(keep_alive));
     }
     response.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_aliases_are_deduplicated_before_implicit_selection() {
+        let manager = crate::discovery::ModelManager::new();
+        assert!(manager.register_alias("alias", "primary"));
+
+        let models = canonical_generate_models(
+            &manager,
+            vec![
+                "primary".to_string(),
+                "alias".to_string(),
+                "other".to_string(),
+            ],
+        );
+
+        assert_eq!(models, vec!["other".to_string(), "primary".to_string()]);
+    }
 }

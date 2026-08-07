@@ -76,7 +76,11 @@ def extract_from_completion_output(
     by position, so emitting a shorter array would misalign every later
     token. Bail on the whole chunk instead.
     """
-    if getattr(output, "logprobs", None) is None:
+    # An empty list here means the client asked for no logprobs -- TRT-LLM leaves
+    # the field at `[]` rather than None. Testing `is None` would miss that case
+    # and run on to the `token_ids` copy below, which grows with the request and
+    # is discarded a few lines later.
+    if not getattr(output, "logprobs", None):
         return None, None
 
     token_ids = list(getattr(output, "token_ids", None) or [])
@@ -154,7 +158,7 @@ def extract_prompt_logprobs_from_completion_output(
     Returns ``None`` if the engine didn't compute prompt logprobs.
     """
     prompt_logprobs = getattr(output, "prompt_logprobs", None)
-    if prompt_logprobs is None:
+    if not prompt_logprobs:
         return None
 
     payload: list[Optional[dict[str, dict[str, Any]]]] = []
@@ -250,6 +254,17 @@ def sglang_top_logprobs_allowed() -> bool:
     )
 
 
+def validate_sglang_top_logprobs(
+    top_logprobs_num: Optional[int], *, allow_top_logprobs: bool
+) -> None:
+    """Reject expensive SGLang top-k logprobs unless explicitly enabled."""
+    if top_logprobs_num is None:
+        return
+    if top_logprobs_num < 1 or allow_top_logprobs:
+        return
+    raise ValueError(_SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG)
+
+
 def build_sglang_logprob_kwargs(
     output_options: dict[str, Any],
     *,
@@ -273,8 +288,7 @@ def build_sglang_logprob_kwargs(
         parsed = _parse_non_negative_int(value, name)
         if parsed is None:
             return None
-        if parsed >= 1 and not allow_top_logprobs:
-            raise ValueError(_SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG)
+        validate_sglang_top_logprobs(parsed, allow_top_logprobs=allow_top_logprobs)
         return parsed
 
     logprobs_value = output_options.get("logprobs")

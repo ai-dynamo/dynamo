@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
@@ -225,7 +226,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         await task
 
     async def _consume_results(
-        self, results: AsyncGenerator[Any, None], context: Context
+        self, results: AsyncIterator[Any], context: Context
     ) -> None:
         """Consume async generator results without processing.
 

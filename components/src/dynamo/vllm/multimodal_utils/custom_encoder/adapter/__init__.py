@@ -12,9 +12,13 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter.factory import (
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
     build_mixed_embeds,
 )
+from dynamo.vllm.multimodal_utils.custom_encoder.adapter.qwen3_vl import (
+    Qwen3VLImageEncoding,
+)
 
 __all__ = [
     "build_mixed_embeds",
     "CustomEncoderAdapter",
     "create_custom_encoder_adapter",
+    "Qwen3VLImageEncoding",
 ]
