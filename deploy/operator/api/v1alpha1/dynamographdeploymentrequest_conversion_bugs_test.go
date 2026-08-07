@@ -25,7 +25,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -234,6 +237,184 @@ func TestBugDGDRProfilingConfigPreservesUnprojectableTypedKeys(t *testing.T) {
 		t.Fatal("profilingConfig.config = nil, want preserved opaque JSON")
 	}
 	assertDGDRJSONEqual(t, config, restored.Spec.ProfilingConfig.Config.Raw)
+}
+
+func TestBugDGDRProfilingJobResourcesFollowContainerName(t *testing.T) {
+	sidecarResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+	}
+	profilerResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+	}
+	updatedProfilerResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+	tests := []struct {
+		name               string
+		containers         []corev1.Container
+		wantSpokeResources *corev1.ResourceRequirements
+		wantRestored       []corev1.Container
+	}{
+		{
+			name: "sidecar only",
+			containers: []corev1.Container{{
+				Name:      dgdrOutputCopierContainerName,
+				Resources: sidecarResources,
+			}},
+			wantRestored: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Resources: updatedProfilerResources},
+			},
+		},
+		{
+			name: "sidecar before profiler",
+			containers: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Name: dgdrProfilerContainerName, Resources: profilerResources},
+			},
+			wantSpokeResources: &profilerResources,
+			wantRestored: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+			},
+		},
+		{
+			name: "profiler before sidecar",
+			containers: []corev1.Container{
+				{Name: dgdrProfilerContainerName, Resources: profilerResources},
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+			},
+			wantSpokeResources: &profilerResources,
+			wantRestored: []corev1.Container{
+				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Convert named v1beta1 profiling overrides to v1alpha1")
+			hub := &v1beta1.DynamoGraphDeploymentRequest{
+				Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+					Overrides: &v1beta1.OverridesSpec{
+						ProfilingJob: &batchv1.JobSpec{
+							Template: corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: test.containers},
+							},
+						},
+					},
+				},
+			}
+			spoke := &DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertFrom(hub); err != nil {
+				t.Fatalf("ConvertFrom() error = %v", err)
+			}
+
+			t.Log("Verify only profiler resources are projected into the legacy field")
+			if diff := cmp.Diff(test.wantSpokeResources, spoke.Spec.ProfilingConfig.Resources); diff != "" {
+				t.Fatalf("profilingConfig.resources mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("Update legacy profiler resources and convert back to v1beta1")
+			spoke.Spec.ProfilingConfig.Resources = &updatedProfilerResources
+			restored := &v1beta1.DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertTo(restored); err != nil {
+				t.Fatalf("ConvertTo() error = %v", err)
+			}
+
+			t.Log("Verify resources remain attached to their named containers")
+			if restored.Spec.Overrides == nil || restored.Spec.Overrides.ProfilingJob == nil {
+				t.Fatal("profilingJob override = nil, want restored named containers")
+			}
+			got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
+			if diff := cmp.Diff(test.wantRestored, got); diff != "" {
+				t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBugDGDRProfilerFirstHubRoundTripPreservesOrder(t *testing.T) {
+	profilerResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+	}
+	sidecarResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+	}
+	wantContainers := []corev1.Container{
+		{Name: dgdrProfilerContainerName, Resources: profilerResources},
+		{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+	}
+
+	t.Log("Start from a profiler-first v1beta1 override list")
+	hub := &v1beta1.DynamoGraphDeploymentRequest{
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Overrides: &v1beta1.OverridesSpec{
+				ProfilingJob: &batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: wantContainers},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Convert hub → spoke → hub without changing alpha fields")
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Verify profiler-first ordering and resources survive the round trip")
+	if restored.Spec.Overrides == nil || restored.Spec.Overrides.ProfilingJob == nil {
+		t.Fatal("profilingJob override = nil, want profiler-first containers")
+	}
+	got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
+	if diff := cmp.Diff(wantContainers, got); diff != "" {
+		t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDGDRAlphaResourcesRoundTripOmitsPrivateAnnotation(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+
+	t.Log("Start from alpha-only profilingConfig.resources")
+	spoke := &DynamoGraphDeploymentRequest{
+		Spec: DynamoGraphDeploymentRequestSpec{
+			ProfilingConfig: ProfilingConfigSpec{
+				Resources: &resources,
+			},
+		},
+	}
+
+	t.Log("Convert spoke → hub → spoke")
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if _, ok := hub.Annotations[annDGDRSpec]; ok {
+		t.Fatalf("hub annotations[%q] = %q, want absent for alpha-only resources", annDGDRSpec, hub.Annotations[annDGDRSpec])
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	t.Log("Verify resources round-trip without introducing nvidia.com/dgdr-spec")
+	if diff := cmp.Diff(&resources, restored.Spec.ProfilingConfig.Resources); diff != "" {
+		t.Fatalf("profilingConfig.resources mismatch (-want +got):\n%s", diff)
+	}
+	if _, ok := restored.Annotations[annDGDRSpec]; ok {
+		t.Fatalf("spoke annotations[%q] present after round trip, want absent", annDGDRSpec)
+	}
 }
 
 func mustDGDRHubStatusAnnotation(t *testing.T, status v1beta1.DynamoGraphDeploymentRequestStatus) string {
