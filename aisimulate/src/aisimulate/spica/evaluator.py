@@ -115,7 +115,7 @@ class ReplayEvaluator:
 
     def _synthetic_kwargs(self, concurrency_override: int | None = None) -> dict:
         """The synthetic-workload params ``run_synthetic_trace_replay`` takes
-        (``arrival_interval_ms`` is ignored in closed-loop mode).
+        (``arrival_interval_ms`` is ``None`` in closed-loop mode).
 
         ``request_count`` is derived from ``num_request_ratio`` and the effective load
         (the per-trial KV-load-derived ``concurrency_override``, else the workload's fixed

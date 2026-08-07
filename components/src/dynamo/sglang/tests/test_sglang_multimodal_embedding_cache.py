@@ -56,6 +56,7 @@ def cache_handler() -> MultimodalEncodeWorkerHandler:
 
     handler.set_token_ids_for_test = _set_token_ids_for_test
     handler.set_token_ids_for_test(151655, 151656)
+    handler._max_input_token_id = 151654
     handler._missing_video_cache_key_config_warned = False
     handler._decoded_content_hash_warning_emitted = False
     handler._image_loader = None
