@@ -2231,6 +2231,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	shouldUseAdmissionRestore := checkpointEnabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
+		!p.checkpointInfo.RestorePaused &&
 		(p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
@@ -2529,8 +2530,9 @@ func GenerateGrovePodCliqueSet(
 		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
 		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
 			checkpointInfo != nil &&
-			checkpointInfo.StartupPolicy != "" &&
-			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
+			(checkpointInfo.RestorePaused ||
+				(checkpointInfo.StartupPolicy != "" &&
+					checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate)) {
 			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(
 				ctx,
 				reader,

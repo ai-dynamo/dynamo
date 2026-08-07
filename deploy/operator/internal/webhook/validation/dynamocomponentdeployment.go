@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -39,6 +40,7 @@ func NewDynamoComponentDeploymentValidator() *DynamoComponentDeploymentValidator
 // API values and derived traversal state remain explicit validator arguments.
 type dynamoComponentDeploymentValidation struct {
 	sharedValidation
+	checkpointCompatibilityContext checkpoint.CompatibilityContext
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoComponentDeployment.
@@ -55,6 +57,20 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validateGenerated(
+		ctx,
+		dcd,
+		runtimeVersionSource,
+		checkpoint.CompatibilityContextStandaloneDCD,
+	)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateGenerated(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	checkpointCompatibilityContext checkpoint.CompatibilityContext,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
@@ -62,6 +78,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 			requestVersionSource:               runtimeVersionSource,
 			allowMissingRuntimeVersionOverride: true,
 		},
+		checkpointCompatibilityContext: checkpointCompatibilityContext,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd)
@@ -83,6 +100,22 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validateUpdateGenerated(
+		ctx,
+		oldDCD,
+		newDCD,
+		runtimeVersionSource,
+		checkpoint.CompatibilityContextStandaloneDCD,
+	)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateUpdateGenerated(
+	ctx context.Context,
+	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	checkpointCompatibilityContext checkpoint.CompatibilityContext,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
@@ -90,6 +123,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 			requestVersionSource:               runtimeVersionSource,
 			allowMissingRuntimeVersionOverride: true,
 		},
+		checkpointCompatibilityContext: checkpointCompatibilityContext,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD)
@@ -121,27 +155,50 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	allErrs := v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
-	if v.requestVersionSource != runtimeVersionSourceV1Beta1 {
-		return allErrs
-	}
+	fldPath := field.NewPath("spec")
+	allErrs := v.validateDynamoComponentDeploymentSpec(&dcd.Spec, fldPath)
 	failover := failoverFor(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	if failover == nil {
-		return allErrs
+	if v.requestVersionSource == runtimeVersionSourceV1Beta1 &&
+		failover != nil &&
+		effectiveGMSMode(failover.Mode) == nvidiacomv1beta1.GMSModeIntraPod {
+		allErrs = append(allErrs, twoShadowIntraPodFailoverProfileErrors(
+			effectiveNumShadows(failover),
+			dynamo.GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+			dcd.Spec.GetNumberOfNodes(),
+			dcd.Spec.BackendFramework,
+			effectiveVLLMExecutorBackend(
+				dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+			),
+			fldPath.Child("experimental", "failover"),
+		)...)
 	}
-	if effectiveGMSMode(failover.Mode) != nvidiacomv1beta1.GMSModeIntraPod {
-		return allErrs
+
+	backendFramework := dcd.Spec.BackendFramework
+	if checkpoint.HasCheckpointEnabledFailover(
+		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+	) {
+		resolved, err := dynamo.GetBackendFrameworkFromDynamoComponent(dcd)
+		if err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("backendFramework"),
+				dcd.Spec.BackendFramework,
+				err.Error(),
+			))
+		} else {
+			backendFramework = string(resolved)
+		}
 	}
-	return append(allErrs, twoShadowIntraPodFailoverProfileErrors(
-		effectiveNumShadows(failover),
-		dynamo.GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
-		dcd.Spec.GetNumberOfNodes(),
-		dcd.Spec.BackendFramework,
-		effectiveVLLMExecutorBackend(
-			dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
-		),
-		field.NewPath("spec", "experimental", "failover"),
-	)...)
+	for _, err := range checkpoint.ValidateCheckpointCompatibility(
+		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+		backendFramework,
+		v.checkpointCompatibilityContext,
+	) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("experimental", "checkpoint"),
+			err.Error(),
+		))
+	}
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.

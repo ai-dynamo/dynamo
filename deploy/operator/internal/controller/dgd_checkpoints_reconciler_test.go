@@ -314,6 +314,11 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeIntraPod,
 		},
+		Failover: &v1alpha1.FailoverSpec{
+			Enabled:    true,
+			Mode:       v1alpha1.GMSModeIntraPod,
+			NumShadows: 2,
+		},
 		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
 			Mode:    v1alpha1.CheckpointModeAuto,
@@ -327,8 +332,10 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		},
 		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 			MainContainer: &corev1.Container{
-				Name:  commonconsts.MainContainerName,
-				Image: "checkpoint-writer:latest",
+				Name:    commonconsts.MainContainerName,
+				Image:   "checkpoint-writer:latest",
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm"},
 			},
 		},
 	}
@@ -370,6 +377,10 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	}
 	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
 	require.NotNil(t, main)
+	assert.Equal(t, commonconsts.MainContainerName, ckpt.Spec.Job.TargetContainerName)
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_SNAPSHOT_FAILOVER_SOURCE", Value: "1"})
+	assert.Nil(t, findEnv(main.Env, "DYN_FORWARDPASS_METRIC_PORT"))
+	assert.NotContains(t, ckpt.Spec.Job.PodTemplateSpec.Annotations, snapshotprotocol.TargetContainersAnnotation)
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))

@@ -19,6 +19,7 @@ package validation
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -26,15 +27,19 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 	handler := &dynamoComponentDeploymentV1Alpha1Handler{
-		handler: NewDynamoComponentDeploymentHandler(),
+		handler: NewDynamoComponentDeploymentHandler(""),
 	}
 	ctx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
 	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{
@@ -56,6 +61,73 @@ func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("ValidateCreate() warnings = %v, want none", warnings)
+	}
+}
+
+func TestDynamoComponentDeploymentHandlerCheckpointFailoverBoundary(t *testing.T) {
+	const principal = "system:serviceaccount:dynamo-system:dynamo-operator"
+	controller := true
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+				Kind:       "DynamoGraphDeployment",
+				Name:       "graph",
+				UID:        types.UID("graph-uid"),
+				Controller: &controller,
+			}},
+		},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:          "worker",
+				ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.1.0",
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  consts.MainContainerName,
+						Image: "registry.example/runtime:1.1.0",
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+						}},
+					}},
+				}},
+				Experimental: &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: ptr.To("checkpoint"),
+					},
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+						Mode: nvidiacomv1beta1.GMSModeIntraPod,
+					},
+					Failover: &nvidiacomv1beta1.FailoverSpec{
+						Mode:       nvidiacomv1beta1.GMSModeIntraPod,
+						NumShadows: 1,
+					},
+				},
+			},
+		},
+	}
+	gates := features.Defaults()
+	gates.Checkpoint = true
+	validate := func(username string) error {
+		ctx := dgdAdmissionContextWithUserInfo(
+			admissionv1.Create,
+			nvidiacomv1beta1.DynamoComponentDeploymentGVK,
+			&authenticationv1.UserInfo{Username: username},
+		)
+		ctx = features.WithGate(ctx, gates)
+		_, err := NewDynamoComponentDeploymentHandler(principal).ValidateCreate(ctx, dcd)
+		return err
+	}
+
+	if err := validate(principal); err != nil {
+		t.Fatalf("operator-generated DCD was rejected: %v", err)
+	}
+	if err := validate("user"); err == nil || !strings.Contains(err.Error(), "only supported for an operator-generated DCD") {
+		t.Fatalf("standalone DCD error = %v, want operator-generated rejection", err)
 	}
 }
 
@@ -103,7 +175,7 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoComponentDeploymentHandler()
+	handler := NewDynamoComponentDeploymentHandler("")
 	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}

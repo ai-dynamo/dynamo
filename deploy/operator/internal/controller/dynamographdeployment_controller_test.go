@@ -98,6 +98,7 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 				},
 				{
 					ComponentName: "decode",
+					Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						Failover:   &v1beta1.FailoverSpec{},
@@ -134,12 +135,10 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 	require.Equal(t, metav1.ConditionFalse, ready.Status)
 	require.Equal(t, dgd.Generation, ready.ObservedGeneration)
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
-	require.Equal(t,
-		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
-		ready.Message,
-	)
+	require.Contains(t, ready.Message, "component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported")
+	require.Contains(t, ready.Message, "component \"prefill\": Snapshot with active/passive failover requires an operator-managed automatic vLLM Worker checkpoint")
+	require.Contains(t, ready.Message, "component \"decode\": Snapshot with active/passive failover requires an operator-managed automatic vLLM Worker checkpoint")
+	require.Contains(t, ready.Message, "multinode/model-parallel worker topology is unsupported")
 	require.Zero(t, stored.Status.ObservedGeneration)
 }
 
