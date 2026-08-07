@@ -232,8 +232,8 @@ dynamo-operator:
     # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. Keep 'Fail' in every environment so requests cannot bypass Dynamo validation and defaulting. 'Ignore' is an emergency-only, short-lived bypass: pause Dynamo resource writes, restore 'Fail' immediately after recovery, and audit every resource changed during the bypass window.
     failurePolicy: Fail
 
-    # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.
-    podCheckpointRestoreFailurePolicy: Ignore
+    # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Keep Fail so bound restore Pods cannot bypass checkpoint revalidation. Ignore is an emergency-only bypass and also affects ordinary Pod creates.
+    podCheckpointRestoreFailurePolicy: Fail
 
     # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.
     timeoutSeconds: 10

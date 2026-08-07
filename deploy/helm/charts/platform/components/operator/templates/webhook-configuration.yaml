@@ -338,7 +338,7 @@ webhooks:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
       path: /mutate-core-v1-pod-checkpoint-restore
-  failurePolicy: {{ .Values.webhook.podCheckpointRestoreFailurePolicy | default "Ignore" }}
+  failurePolicy: {{ .Values.webhook.podCheckpointRestoreFailurePolicy | default "Fail" }}
   name: mpodcheckpointrestore.kb.io
   {{- if .Values.webhook.namespaceSelector }}
   namespaceSelector:

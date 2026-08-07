@@ -48,6 +48,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -65,9 +66,107 @@ const (
 )
 
 func init() {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		panic(err)
+	}
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
 		panic(err)
 	}
+}
+
+func TestDCDRendererRejectsMissingOrStaleAutomaticCheckpointBinding(t *testing.T) {
+	ckpt := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "checkpoint-worker",
+			Namespace:  "default",
+			UID:        types.UID("checkpoint-uid"),
+			Generation: 3,
+			Labels: map[string]string{
+				snapshotprotocol.CheckpointIDLabel: "checkpoint-id",
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
+			},
+		},
+	}
+	unmarked := ckpt.DeepCopy()
+	unmarked.Name = "unmarked-checkpoint"
+	delete(unmarked.Annotations, commonconsts.CheckpointAutoAnnotation)
+	staleGeneration := ckpt.DeepCopy()
+	staleGeneration.Generation--
+	staleGenerationBinding, err := checkpoint.AutomaticCheckpointBinding(staleGeneration)
+	require.NoError(t, err)
+	replaced := ckpt.DeepCopy()
+	replaced.UID = types.UID("old-uid")
+	replacedBinding, err := checkpoint.AutomaticCheckpointBinding(replaced)
+	require.NoError(t, err)
+	matchingBinding, err := checkpoint.AutomaticCheckpointBinding(ckpt)
+	require.NoError(t, err)
+	reader := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(ckpt, unmarked).
+		Build()
+	renderer := newDCDWorkloadRenderer(reader, nil, nil, nil)
+
+	for _, tt := range []struct {
+		name    string
+		binding string
+	}{
+		{name: "missing binding"},
+		{name: "stale generation", binding: staleGenerationBinding},
+		{name: "same-name replacement", binding: replacedBinding},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dcd := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "worker", Namespace: "default",
+					Annotations: map[string]string{
+						commonconsts.CheckpointBindingAnnotation: tt.binding,
+					},
+				},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+								commonconsts.CheckpointBindingAnnotation: tt.binding,
+							}},
+						},
+					},
+				},
+			}
+			err := renderer.verifyAutomaticCheckpointBinding(
+				context.Background(),
+				dcd,
+				&checkpoint.CheckpointInfo{
+					Enabled: true, CheckpointName: ckpt.Name, Automatic: true,
+				},
+			)
+			require.Error(t, err)
+		})
+	}
+
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker", Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.CheckpointBindingAnnotation: matchingBinding,
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.CheckpointBindingAnnotation: matchingBinding,
+					}},
+				},
+			},
+		},
+	}
+	require.ErrorContains(t, renderer.verifyAutomaticCheckpointBinding(
+		context.Background(),
+		dcd,
+		&checkpoint.CheckpointInfo{Enabled: true, CheckpointName: unmarked.Name},
+	), "not operator-managed")
 }
 
 func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {

@@ -110,7 +110,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
 	}
 
-	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), cfg)
+	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetAPIReader(), cfg)
 	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}

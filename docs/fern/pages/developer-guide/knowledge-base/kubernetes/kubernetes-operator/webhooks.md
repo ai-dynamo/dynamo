@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Webhooks
-subtitle: Dynamo operator admission webhooks that validate and default Dynamo custom resources before persistence.
+subtitle: Dynamo operator admission webhooks that validate and mutate resources before persistence.
 ---
 
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
 
 ## Overview
 
-The Dynamo Operator uses **Kubernetes admission webhooks** to provide real-time validation and mutation of custom resources. Currently, the operator implements **validation webhooks** that ensure invalid configurations are rejected immediately at the API server level, providing faster feedback to users compared to controller-based validation.
+The Dynamo Operator uses **Kubernetes admission webhooks** to provide real-time validation and mutation. Validation webhooks reject invalid configurations at the API server, and mutating webhooks apply defaults or checkpoint-restore configuration before persistence.
 
 All webhook types (validating, mutating, conversion, etc.) share the same **webhook server** and **TLS certificate infrastructure**, making certificate management consistent across all webhook operations.
 
@@ -26,10 +26,18 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 - **Validating Webhooks**: Validate custom resource specifications before persistence
   - `DynamoComponentDeployment` validation
   - `DynamoGraphDeployment` validation
+  - `DynamoCheckpoint` validation
   - `DynamoModel` validation
   - `DynamoGraphDeploymentRequest` validation
-- **Mutating Webhooks**: Apply default values to resources on creation
+- **Mutating Webhooks**: Apply defaults or checkpoint-restore configuration on creation
+  - `DynamoComponentDeployment` defaulting
   - `DynamoGraphDeployment` defaulting
+  - `DynamoGraphDeploymentRequest` defaulting
+  - Pod checkpoint-restore mutation
+
+The Pod checkpoint-restore handler runs on Pod `CREATE`. It uses the uncached API reader to
+revalidate an automatic checkpoint and its binding before applying restore metadata and pod
+configuration.
 
 **Note:** All webhook types use the same certificate infrastructure described in this document.
 
@@ -125,6 +133,7 @@ dynamo-operator:
 
     # Webhook behavior configuration
     failurePolicy: Fail        # Fail (reject on error) or Ignore (allow on error)
+    podCheckpointRestoreFailurePolicy: Fail # Failure policy for Pod checkpoint-restore mutation
     timeoutSeconds: 10         # Webhook timeout
 
     # User-configured namespace filtering is unsupported
@@ -133,18 +142,28 @@ dynamo-operator:
 
 #### Failure Policy
 
+| Setting | Default | Scope |
+|---|---|---|
+| `webhook.failurePolicy` | `Fail` | Dynamo resource validation and defaulting |
+| `webhook.podCheckpointRestoreFailurePolicy` | `Fail` | Pod `CREATE` checkpoint-restore mutation |
+
 ```yaml
 # Fail: Reject resources if webhook is unavailable (required for normal operation)
 webhook:
   failurePolicy: Fail
+  podCheckpointRestoreFailurePolicy: Fail
 
 # Ignore: Emergency-only bypass while the webhook is unavailable
 webhook:
   failurePolicy: Ignore
+  podCheckpointRestoreFailurePolicy: Ignore
 ```
 
-Use `Fail` in every environment. Fix webhook availability, certificate, or network failures instead
-of using `Ignore` for routine development or availability.
+Use `Fail` for both settings in every environment. In particular,
+`webhook.podCheckpointRestoreFailurePolicy` defaults to `Fail` so checkpoint-bound Pods cannot
+bypass checkpoint revalidation. Because its webhook matches Pod creates, setting it to `Ignore`
+also affects ordinary Pod creates. Fix webhook availability, certificate, or network failures
+instead of using `Ignore` for routine development or availability.
 
 > [!CAUTION]
 > `Ignore` bypasses the validating and mutating webhook handlers that use this policy. Kubernetes can

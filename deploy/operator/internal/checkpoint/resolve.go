@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,6 +39,11 @@ type CheckpointInfo struct {
 	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
+	// AutoBinding binds a generated workload to this checkpoint's exact object.
+	AutoBinding string
+	// Automatic marks a DGD-managed checkpoint even before the API server has
+	// assigned the UID and generation needed to construct AutoBinding.
+	Automatic bool
 	// RestorePaused keeps restored targets paused for owner election.
 	RestorePaused bool
 }
@@ -46,6 +52,14 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	hash, err := CheckpointID(ckpt)
 	if err != nil {
 		return nil, err
+	}
+	autoBinding := ""
+	automatic := ckpt.Annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue
+	if automatic && ckpt.UID != "" && ckpt.Generation > 0 {
+		autoBinding, err = AutomaticCheckpointBinding(ckpt)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &CheckpointInfo{
@@ -56,6 +70,8 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 		ArtifactVersion:  checkpointArtifactVersion(ckpt),
 		CheckpointName:   ckpt.Name,
 		Ready:            ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		AutoBinding:      autoBinding,
+		Automatic:        automatic,
 	}, nil
 }
 

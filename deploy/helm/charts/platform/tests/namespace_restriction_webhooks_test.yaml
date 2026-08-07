@@ -39,6 +39,14 @@ tests:
       - notExists:
           path: webhooks[3].namespaceSelector
         documentIndex: 1
+      - equal:
+          path: webhooks[3].name
+          value: mpodcheckpointrestore.kb.io
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].failurePolicy
+          value: Fail
+        documentIndex: 1
 
   - it: scopes namespace-restricted admission to the target namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml

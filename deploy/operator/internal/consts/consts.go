@@ -101,6 +101,12 @@ const (
 	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
+	// CheckpointBindingAnnotation binds an operator-generated DCD to the UID,
+	// generation, and capture provenance of its automatic checkpoint.
+	CheckpointBindingAnnotation = "nvidia.com/dynamo-checkpoint-binding"
+	// GroveCheckpointBindingsAnnotation binds each automatic checkpoint name in an
+	// operator-generated PodCliqueSet to its UID, generation, and capture provenance.
+	GroveCheckpointBindingsAnnotation = "nvidia.com/dynamo-checkpoint-bindings"
 
 	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
 	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the

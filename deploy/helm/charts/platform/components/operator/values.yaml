@@ -221,9 +221,9 @@ webhook:
   # immediately after recovery, and audit every resource changed during the bypass.
   failurePolicy: Fail
   # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook.
-  # Defaults to Ignore so a webhook outage falls back to cold-start instead of
-  # blocking workload Pods.
-  podCheckpointRestoreFailurePolicy: Ignore
+  # Keep Fail so bound restore Pods cannot bypass checkpoint revalidation.
+  # Ignore is an emergency-only bypass and also affects ordinary Pod creates.
+  podCheckpointRestoreFailurePolicy: Fail
 
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10

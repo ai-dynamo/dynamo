@@ -1176,14 +1176,19 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 	assert.Equal(t, checkpointID, checkpointStatuses["worker"].CheckpointID)
 	require.NotNil(t, checkpointInfos["worker"])
 	assert.True(t, checkpointInfos["worker"].Exists)
+	require.NotEmpty(t, checkpointInfos["worker"].AutoBinding)
 
-	t.Log("Verify strict direct ID, restore readiness, legacy identity, and lifecycle synchronization")
+	t.Log("Verify strict direct ID, binding, restore readiness, legacy identity, and lifecycle synchronization")
 	updated := &v1alpha1.DynamoCheckpoint{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: existing.Name, Namespace: "default"}, updated))
 	assert.Equal(t, checkpointID, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 	assert.Equal(t, checkpointID, checkpointStatuses["worker"].CheckpointID)
 	require.NotNil(t, updated.Spec.Identity)
 	assert.Equal(t, fmt.Sprintf("%s/%s", dgd.Namespace, dgd.Name), updated.Spec.Identity.Model)
+	assert.NoError(t, checkpoint.VerifyAutomaticCheckpointBinding(
+		updated,
+		checkpointInfos["worker"].AutoBinding,
+	))
 	refConfig := dynamo.ToAlphaCheckpointConfig(
 		dgd.Spec.Components[0].Experimental.Checkpoint,
 	)
@@ -1197,7 +1202,9 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, checkpointID, resolved.Hash)
 	assert.Equal(t, existing.Name, resolved.CheckpointName)
+	assert.True(t, resolved.Automatic)
 	assert.True(t, resolved.Ready)
+	assert.Equal(t, checkpointInfos["worker"].AutoBinding, resolved.AutoBinding)
 	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
 		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
 	require.Len(t, updated.OwnerReferences, 1)
