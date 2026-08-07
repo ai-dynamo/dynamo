@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for guided JSON schema validation."""
-
 import json
 
 import pytest
 
-from dynamo.common.utils.guided_json import validate_guided_json_schema
+from dynamo.common.utils.guided_json import reject_cyclic_guided_json_ref_chain
 from dynamo.llm import HttpError
 
 pytestmark = [
@@ -22,7 +20,6 @@ pytestmark = [
     [
         {"$ref": "#"},
         json.dumps({"$ref": "#"}),
-        {"$ref": "#", "type": "object"},
         {
             "$defs": {
                 "A": {"$ref": "#/$defs/B"},
@@ -32,18 +29,29 @@ pytestmark = [
         },
         {
             "$defs": {
-                "A": {"$ref": "#/$defs/B"},
-                "B": {"$ref": "#/$defs/C"},
-                "C": {"$ref": "#/$defs/A"},
+                "A": {"$id": "urn:example:A", "$ref": "#"},
             },
             "$ref": "#/$defs/A",
         },
         {
             "$defs": {
-                "A": {"allOf": [{"$ref": "#/$defs/A"}]},
+                "a/b": {"$ref": "#/$defs/c~0d"},
+                "c~d": {"$ref": "#/$defs/a~1b"},
             },
-            "$ref": "#/$defs/A",
+            "$ref": "#/$defs/a~1b",
         },
+    ],
+)
+def test_rejects_cyclic_root_ref_chains(schema):
+    with pytest.raises(HttpError, match=r"circular local \$ref chain") as error:
+        reject_cyclic_guided_json_ref_chain(schema)
+
+    assert error.value.code == 400
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
         {
             "type": "string",
             "$defs": {
@@ -51,107 +59,41 @@ pytestmark = [
                 "B": {"$ref": "#/$defs/A"},
             },
         },
-    ],
-    ids=[
-        "root-self-reference",
-        "serialized-root-self-reference",
-        "root-self-reference-with-sibling",
-        "two-definition-cycle",
-        "three-definition-cycle",
-        "cycle-through-all-of",
-        "unused-definition-cycle",
-    ],
-)
-def test_rejects_unproductive_local_reference_cycles(schema):
-    with pytest.raises(
-        HttpError,
-        match="unproductive circular.*ref",
-    ) as error:
-        validate_guided_json_schema(schema)
-
-    assert error.value.code == 400
-
-
-@pytest.mark.parametrize(
-    "schema",
-    [
-        {
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-        },
-        {
-            "$defs": {"Name": {"type": "string"}},
-            "$ref": "#/$defs/Name",
-        },
         {
             "$defs": {
                 "Node": {
                     "type": "object",
                     "properties": {
-                        "value": {"type": "string"},
                         "next": {"$ref": "#/$defs/Node"},
                     },
                 }
             },
             "$ref": "#/$defs/Node",
         },
+        {"anyOf": [{"type": "string"}, {"$ref": "#"}]},
         {
             "$defs": {
-                "Node": {
-                    "anyOf": [
-                        {"type": "null"},
-                        {
-                            "type": "array",
-                            "items": {"$ref": "#/$defs/Node"},
-                        },
-                    ]
+                "A": {
+                    "$id": "urn:example:A",
+                    "$defs": {"B": {"type": "string"}},
+                    "$ref": "#/$defs/B",
                 }
             },
-            "$ref": "#/$defs/Node",
+            "$ref": "#/$defs/A",
         },
-        {
-            "$defs": {"a/b~c": {"type": "integer"}},
-            "$ref": "#/$defs/a~1b~0c",
-        },
-        {
-            "type": "object",
-            "properties": {"$ref": {"type": "string"}},
-        },
-    ],
-    ids=[
-        "ordinary-object",
-        "acyclic-definition",
-        "recursive-object-property",
-        "recursive-array-items",
-        "escaped-json-pointer",
-        "property-named-ref",
     ],
 )
-def test_accepts_productive_or_acyclic_schemas(schema):
-    validate_guided_json_schema(schema)
+def test_allows_schemas_outside_cyclic_root_ref_chains(schema):
+    reject_cyclic_guided_json_ref_chain(schema)
 
 
 @pytest.mark.parametrize(
     "schema",
     [
         {"$ref": "#/$defs/Missing"},
-        {"$defs": {"A": {"type": "string"}}, "$ref": "#/$defs/A~2B"},
-        {"$defs": {"A": 1}, "$ref": "#/$defs/A"},
+        {"$ref": "https://example.com/schema.json"},
         {"$ref": 123},
     ],
-    ids=[
-        "missing-target",
-        "invalid-pointer-escape",
-        "non-schema-target",
-        "non-string-ref",
-    ],
 )
-def test_rejects_malformed_local_references(schema):
-    with pytest.raises(HttpError) as error:
-        validate_guided_json_schema(schema)
-
-    assert error.value.code == 400
-
-
-def test_leaves_external_references_to_the_backend():
-    validate_guided_json_schema({"$ref": "https://example.com/schema.json"})
+def test_leaves_unresolved_references_to_backend(schema):
+    reject_cyclic_guided_json_ref_chain(schema)

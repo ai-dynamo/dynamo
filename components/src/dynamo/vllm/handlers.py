@@ -64,7 +64,7 @@ from dynamo.common.rl import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.guided_json import validate_guided_json_schema
+from dynamo.common.utils.guided_json import reject_cyclic_guided_json_ref_chain
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
@@ -720,7 +720,7 @@ def build_sampling_params(
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         json_schema = guided_decoding.get("json")
         if json_schema is not None:
-            validate_guided_json_schema(json_schema)
+            reject_cyclic_guided_json_ref_chain(json_schema)
         sampling_params.structured_outputs = StructuredOutputsParams(
             json=json_schema,
             regex=guided_decoding.get("regex"),
