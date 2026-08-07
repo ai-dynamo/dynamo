@@ -43,7 +43,69 @@ jobs:
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+      run_deploy_tests: ${{ steps.deploy-test-configuration.outputs.enabled }}
+      run_multigpu_tests: ${{ steps.multigpu-test-configuration.outputs.enabled }}
     steps:
+      - name: Validate deploy test configuration
+        id: deploy-test-configuration
+        env:
+          RUN_DEPLOY_TESTS: ${{ vars.RUN_DEPLOY_TESTS }}
+        run: |
+          case "$RUN_DEPLOY_TESTS" in
+            true)
+              echo 'enabled=true' >> "$GITHUB_OUTPUT"
+              ;;
+            false)
+              echo 'enabled=false' >> "$GITHUB_OUTPUT"
+              ;;
+            '')
+              echo "::error::Repository variable RUN_DEPLOY_TESTS must be set to true or false."
+              exit 1
+              ;;
+            *)
+              echo "::error::Repository variable RUN_DEPLOY_TESTS must be exactly true or false."
+              exit 1
+              ;;
+          esac
+      - name: Deploy tests skipped (RUN_DEPLOY_TESTS=false)
+        if: steps.deploy-test-configuration.outputs.enabled == 'false'
+        run: |
+          echo "::notice title=Deploy tests skipped::Repository variable RUN_DEPLOY_TESTS is false."
+          {
+            echo '## Deploy tests skipped'
+            echo
+            echo 'Repository variable `RUN_DEPLOY_TESTS` is set to `false`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Validate multi-GPU test configuration
+        id: multigpu-test-configuration
+        env:
+          RUN_MULTIGPU_TESTS: ${{ vars.RUN_MULTIGPU_TESTS }}
+        run: |
+          case "$RUN_MULTIGPU_TESTS" in
+            true)
+              echo 'enabled=true' >> "$GITHUB_OUTPUT"
+              ;;
+            false)
+              echo 'enabled=false' >> "$GITHUB_OUTPUT"
+              ;;
+            '')
+              echo "::error::Repository variable RUN_MULTIGPU_TESTS must be set to true or false."
+              exit 1
+              ;;
+            *)
+              echo "::error::Repository variable RUN_MULTIGPU_TESTS must be exactly true or false."
+              exit 1
+              ;;
+          esac
+      - name: Multi-GPU tests skipped (RUN_MULTIGPU_TESTS=false)
+        if: steps.multigpu-test-configuration.outputs.enabled == 'false'
+        run: |
+          echo "::notice title=Multi-GPU tests skipped::Repository variable RUN_MULTIGPU_TESTS is false."
+          {
+            echo '## Multi-GPU tests skipped'
+            echo
+            echo 'Repository variable `RUN_MULTIGPU_TESTS` is set to `false`.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         # Do not use fetch-depth: 0 — changed-files now works with shallow clone
@@ -57,81 +119,9 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
-  deploy-test-configuration:
-    name: Validate deploy test configuration
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate RUN_DEPLOY_TESTS
-        env:
-          RUN_DEPLOY_TESTS: ${{ vars.RUN_DEPLOY_TESTS }}
-        run: |
-          case "$RUN_DEPLOY_TESTS" in
-            true|false)
-              ;;
-            '')
-              echo "::error::Repository variable RUN_DEPLOY_TESTS must be set to true or false."
-              exit 1
-              ;;
-            *)
-              echo "::error::Repository variable RUN_DEPLOY_TESTS must be exactly true or false."
-              exit 1
-              ;;
-          esac
-
-  deploy-tests-skipped:
-    name: Deploy tests skipped (RUN_DEPLOY_TESTS=false)
-    if: vars.RUN_DEPLOY_TESTS == 'false'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain why deploy tests were skipped
-        run: |
-          echo "::notice title=Deploy tests skipped::Repository variable RUN_DEPLOY_TESTS is false."
-          {
-            echo '## Deploy tests skipped'
-            echo
-            echo 'Repository variable `RUN_DEPLOY_TESTS` is set to `false`.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  multigpu-test-configuration:
-    name: Validate multi-GPU test configuration
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate RUN_MULTIGPU_TESTS
-        env:
-          RUN_MULTIGPU_TESTS: ${{ vars.RUN_MULTIGPU_TESTS }}
-        run: |
-          case "$RUN_MULTIGPU_TESTS" in
-            true|false)
-              ;;
-            '')
-              echo "::error::Repository variable RUN_MULTIGPU_TESTS must be set to true or false."
-              exit 1
-              ;;
-            *)
-              echo "::error::Repository variable RUN_MULTIGPU_TESTS must be exactly true or false."
-              exit 1
-              ;;
-          esac
-
-  multigpu-tests-skipped:
-    name: Multi-GPU tests skipped (RUN_MULTIGPU_TESTS=false)
-    if: vars.RUN_MULTIGPU_TESTS == 'false'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain why multi-GPU tests were skipped
-        run: |
-          echo "::notice title=Multi-GPU tests skipped::Repository variable RUN_MULTIGPU_TESTS is false."
-          {
-            echo '## Multi-GPU tests skipped'
-            echo
-            echo 'Repository variable `RUN_MULTIGPU_TESTS` is set to `false`.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
   backend-status-check:
     runs-on: ubuntu-latest
     needs:
-      - multigpu-test-configuration
-      - multigpu-tests-skipped
       - changed-files
       - operator
       - operator-integration
@@ -176,8 +166,7 @@ jobs:
   deploy-status-check:
     runs-on: ubuntu-latest
     needs:
-      - deploy-test-configuration
-      - deploy-tests-skipped
+      - changed-files
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang
@@ -834,7 +823,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: |
-      vars.RUN_MULTIGPU_TESTS == 'true' &&
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
@@ -877,7 +866,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: |
-      vars.RUN_MULTIGPU_TESTS == 'true' &&
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
@@ -920,7 +909,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: |
-      vars.RUN_MULTIGPU_TESTS == 'true' &&
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
@@ -1284,7 +1273,7 @@ jobs:
 
   deploy-operator:
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
@@ -1323,7 +1312,7 @@ jobs:
     name: vllm Deploy Test
     needs: [changed-files, deploy-operator, vllm-copy-to-acr]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
@@ -1342,7 +1331,7 @@ jobs:
     name: sglang Deploy Test
     needs: [changed-files, deploy-operator, sglang-copy-to-acr]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
@@ -1361,7 +1350,7 @@ jobs:
     name: trtllm Deploy Test
     needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
@@ -1379,7 +1368,7 @@ jobs:
   deploy-operator-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Operator Setup
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
@@ -1415,7 +1404,7 @@ jobs:
   deploy-operator-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Operator Setup
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
@@ -1451,7 +1440,7 @@ jobs:
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Operator Setup
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
@@ -1488,7 +1477,7 @@ jobs:
     name: vLLM DynamoCheckpoint Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-vllm, snapshot-agent]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
@@ -1541,7 +1530,7 @@ jobs:
     name: SGLang DynamoCheckpoint Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-sglang, snapshot-agent]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
@@ -1594,7 +1583,7 @@ jobs:
     name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-trtllm, snapshot-agent]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
@@ -1647,7 +1636,7 @@ jobs:
     name: vLLM DynamoCheckpoint Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
@@ -1721,7 +1710,7 @@ jobs:
     name: SGLang DynamoCheckpoint Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
@@ -1795,7 +1784,7 @@ jobs:
     name: TRTLLM DynamoCheckpoint Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
@@ -1867,9 +1856,9 @@ jobs:
 
   deploy-cleanup:
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1885,7 +1874,7 @@ jobs:
   deploy-cleanup-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Cleanup
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true')
@@ -1902,7 +1891,7 @@ jobs:
   deploy-cleanup-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Cleanup
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true')
@@ -1919,7 +1908,7 @@ jobs:
   deploy-cleanup-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Cleanup
     if: |
-      vars.RUN_DEPLOY_TESTS == 'true' &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true')
