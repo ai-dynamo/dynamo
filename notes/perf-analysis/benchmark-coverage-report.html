@@ -69,6 +69,21 @@ SPDX-License-Identifier: Apache-2.0
   .sw{width:12px;height:12px;border-radius:3px;display:inline-block}
   .note{font-size:12px;color:var(--ink2);background:var(--naT);border-left:2px solid var(--axis);padding:10px 14px;border-radius:0 6px 6px 0;margin:16px 0 0}
   .note strong{color:var(--ink)}
+  .matrix td[data-tools],.flow .step[data-tools]{cursor:help}
+  .matrix td[data-tools]:hover,.flow .step[data-tools]:hover,
+  .matrix td[data-tools]:focus-visible,.flow .step[data-tools]:focus-visible{
+    filter:brightness(1.04);outline:2px solid var(--ink);outline-offset:1px}
+  #tip{
+    position:fixed;z-index:50;max-width:340px;pointer-events:none;opacity:0;
+    transition:opacity .09s ease;background:var(--surface);color:var(--ink);
+    border:1px solid var(--axis);border-radius:8px;padding:10px 12px;
+    box-shadow:0 6px 22px rgba(0,0,0,.16);font-size:11.5px;line-height:1.5}
+  #tip.on{opacity:1}
+  #tip .th{font-weight:700;font-size:11.5px;margin-bottom:5px;letter-spacing:.01em}
+  #tip ul{margin:0;padding-left:15px;color:var(--ink2)}
+  #tip li{margin:2px 0}
+  #tip .none{color:var(--muted);font-style:italic}
+  #tip code{font-size:10.5px;background:var(--naT);padding:0 3px;border-radius:3px}
   ul{margin:8px 0 0;padding-left:20px;color:var(--ink2)}
   li{margin:5px 0}
   li strong{color:var(--ink)}
@@ -160,57 +175,57 @@ SPDX-License-Identifier: Apache-2.0
       <tbody>
         <tr>
           <th class="stage"><div class="stagecell">HTTP ingress<small>request parse, deserialization</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>inside client interval</small></td>
-          <td class="c-warning"><span class="glyph">▲</span>Partial<small>frontend harness, not isolated</small></td>
-          <td class="c-critical"><span class="glyph">✕</span>None<small>no bench</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Covered inside the client interval</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code></li><li>Benchmarking with AIPerf (CLI + Kubernetes)</li><li>Measures the whole request; ingress not separable</li></ul>"><span class="glyph">✔</span>Strong<small>inside client interval</small></td>
+          <td class="c-warning" tabindex="0" data-tools="<div class=&quot;th&quot;>Exercised but not isolated</div><ul><li><code>benchmarks/frontend/scripts/run_perf.sh</code></li><li><code>dynamo-frontend-benchmark</code> start.sh</li><li>Ingress runs under load, but is not separated from preprocess/route</li></ul>"><span class="glyph">▲</span>Partial<small>frontend harness, not isolated</small></td>
+          <td class="c-critical" tabindex="0" data-tools="<div class=&quot;th&quot;>No bench</div><ul><li class=&quot;none&quot;>NONE</li><li>No criterion bench for axum/hyper request parsing or OpenAI deserialization</li></ul>"><span class="glyph">✕</span>None<small>no bench</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">Preprocess<small>tokenize, template</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong</td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>frontend + mocker</small></td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>2 benches</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Covered inside the client interval</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code></li></ul>"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Frontend against mock workers</div><ul><li><code>benchmarks/frontend/scripts/sweep_runner.py</code></li><li><code>dynamo-frontend-benchmark</code> scripts</li><li>Tokenizer A/B via <code>DYN_TOKENIZER</code> (fastokens vs HF)</li></ul>"><span class="glyph">✔</span>Strong<small>frontend + mocker</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Two criterion benches</div><ul><li><code>lib/llm/benches/tokenizer_simple.rs</code> — encode/decode, HF + tiktoken</li><li><code>lib/llm/benches/tokenizer_dataset.rs</code> — sequential vs batched</li></ul>"><span class="glyph">✔</span>Strong<small>2 benches</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">Route<small>block hash, scheduling</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong</td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>replay + router harness</small></td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>2 live, 1 dead</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Covered, and A/B-ed in one published benchmark</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code></li><li><code>qwen3-32b-kv-routing</code> — KV router vs round-robin arms</li></ul>"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Two independent harnesses</div><ul><li><code>python -m dynamo.replay</code> — offline, runs the real router and scheduler</li><li><code>benchmarks/router/</code> — prefix_ratio, real_data, agent, priority</li><li><code>dynamo-kv-replay-parity</code> defines the parity + timing campaign</li></ul>"><span class="glyph">✔</span>Strong<small>replay + router harness</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Two live, one dead</div><ul><li><code>lib/kv-router/benches/tracking_hash.rs</code> — block hashing</li><li><code>lib/kv-router/benches/policy_queue.rs</code> — pop + drain</li><li><code>lib/llm/benches/kv_router_bench.rs</code> — no bench functions found</li></ul>"><span class="glyph">✔</span>Strong<small>2 live, 1 dead</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">Dispatch / egress<small>push router send path</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong</td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>frontend harness</small></td>
-          <td class="c-warning"><span class="glyph">▲</span>Partial<small>only via TCP codec</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Covered inside the client interval</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code></li></ul>"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Exercised under load</div><ul><li><code>benchmarks/frontend/scripts/run_perf.sh</code> — push router dispatching to mock workers</li></ul>"><span class="glyph">✔</span>Strong<small>frontend harness</small></td>
+          <td class="c-warning" tabindex="0" data-tools="<div class=&quot;th&quot;>Only indirectly</div><ul><li><code>lib/runtime/benches/tcp_codec_perf.rs</code> — encode/decode only</li><li>No bench of the push-router send path itself</li></ul>"><span class="glyph">▲</span>Partial<small>only via TCP codec</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">Transport<small>TCP, NIXL KV transfer</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong</td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>nixlbench</small></td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>2 benches</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Covered inside the client interval</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code></li></ul>"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Dedicated interconnect harness</div><ul><li><code>deploy/pre-deployment/nixl/nixlbench-deployment.yaml</code> — VRAM to VRAM ceiling</li><li><code>dynamo-interconnect-check</code> — validates the path before numbers are quoted</li></ul>"><span class="glyph">✔</span>Strong<small>nixlbench</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Two criterion benches</div><ul><li><code>lib/runtime/benches/tcp_codec_perf.rs</code> — request/response codec</li><li><code>lib/llm/benches/transfer_context_v2.rs</code> — blocking, async, concurrent</li></ul>"><span class="glyph">✔</span>Strong<small>2 benches</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">Engine / generation<small>forward pass</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>dominates e2e</small></td>
-          <td class="c-na"><span class="glyph">—</span>Simulated only<small>mocker replaces it</small></td>
-          <td class="c-na"><span class="glyph">—</span>Not Dynamo's<small>engine-owned</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Dominates the measurement</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code> — the engine is most of e2e latency</li></ul>"><span class="glyph">✔</span>Strong<small>dominates e2e</small></td>
+          <td class="c-na" tabindex="0" data-tools="<div class=&quot;th&quot;>Replaced, not measured</div><ul><li><code>python -m dynamo.mocker</code> simulates generation</li><li>Latency comes from an analytical cost model, not execution</li></ul>"><span class="glyph">—</span>Simulated only<small>mocker replaces it</small></td>
+          <td class="c-na" tabindex="0" data-tools="<div class=&quot;th&quot;>Out of scope</div><ul><li>Engine-owned — vLLM, SGLang, and TensorRT-LLM benchmark their own kernels</li></ul>"><span class="glyph">—</span>Not Dynamo's<small>engine-owned</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">KV management<small>blocks, offload tiers</small></div></th>
-          <td class="c-warning"><span class="glyph">▲</span>Partial<small>metrics exist, uncollected</small></td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>replay + KVBM lifecycle</small></td>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>block_manager</small></td>
+          <td class="c-warning" tabindex="0" data-tools="<div class=&quot;th&quot;>Instrumented but never collected</div><ul><li>Metrics exist — <code>kv_hit_rate</code>, <code>worker_active_decode_blocks</code></li><li>0 of 33 <code>perf.yaml</code> scrape them during a run</li></ul>"><span class="glyph">▲</span>Partial<small>metrics exist, uncollected</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Full lifecycle exercised</div><ul><li><code>python -m dynamo.replay</code> with KVBM offload — G1 to G2 eviction, G2 to G1 restore</li><li><code>dynamo-kv-replay-parity</code> requires evidence each path fired</li></ul>"><span class="glyph">✔</span>Strong<small>replay + KVBM lifecycle</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>One criterion bench</div><ul><li><code>lib/kvbm-logical/benches/block_manager.rs</code> — match active/inactive, bulk drop</li></ul>"><span class="glyph">✔</span>Strong<small>block_manager</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">Postprocess<small>detokenize, finish metadata</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong</td>
-          <td class="c-good"><span class="glyph">✔</span>Strong</td>
-          <td class="c-warning"><span class="glyph">▲</span>Partial<small>metadata only; no streaming decode</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Covered inside the client interval</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code> — inter-token latency reflects this</li></ul>"><span class="glyph">✔</span>Strong</td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>Exercised under load</div><ul><li><code>benchmarks/frontend/scripts/run_perf.sh</code> — detokenize + SSE relay under concurrency</li></ul>"><span class="glyph">✔</span>Strong</td>
+          <td class="c-warning" tabindex="0" data-tools="<div class=&quot;th&quot;>Metadata only</div><ul><li><code>lib/llm/benches/request_trace_finish_metadata.rs</code> — finish metadata, tool calls</li><li>No bench of per-token decode in a streaming response</li></ul>"><span class="glyph">▲</span>Partial<small>metadata only; no streaming decode</small></td>
         </tr>
         <tr>
           <th class="stage"><div class="stagecell">SSE relay<small>streaming response out</small></div></th>
-          <td class="c-good"><span class="glyph">✔</span>Strong<small>ITL is exactly this</small></td>
-          <td class="c-warning"><span class="glyph">▲</span>Partial<small>mocker output unrepresentative</small></td>
-          <td class="c-critical"><span class="glyph">✕</span>None<small>no bench</small></td>
+          <td class="c-good" tabindex="0" data-tools="<div class=&quot;th&quot;>This is what ITL measures</div><ul><li>AIPerf via <code>recipes/**/perf.yaml</code> — inter-token latency is the streaming relay</li></ul>"><span class="glyph">✔</span>Strong<small>ITL is exactly this</small></td>
+          <td class="c-warning" tabindex="0" data-tools="<div class=&quot;th&quot;>Exercised, but unrepresentative</div><ul><li><code>benchmarks/frontend/scripts/run_perf.sh</code></li><li>Mocker emits synthetic tokens, so relay behaviour differs from a real engine</li></ul>"><span class="glyph">▲</span>Partial<small>mocker output unrepresentative</small></td>
+          <td class="c-critical" tabindex="0" data-tools="<div class=&quot;th&quot;>No bench</div><ul><li class=&quot;none&quot;>NONE</li><li>No criterion bench for the SSE streaming path</li></ul>"><span class="glyph">✕</span>None<small>no bench</small></td>
         </tr>
       </tbody>
     </table>
@@ -236,5 +251,32 @@ SPDX-License-Identifier: Apache-2.0
   </section>
 
 </main>
+<div id="tip" role="tooltip" aria-hidden="true"></div>
+<script>
+(function(){
+  var tip=document.getElementById('tip'),cur=null;
+  function show(el){
+    if(cur===el)return; cur=el;
+    tip.innerHTML=el.getAttribute('data-tools');
+    tip.classList.add('on'); tip.setAttribute('aria-hidden','false'); place(el);
+  }
+  function place(el){
+    var r=el.getBoundingClientRect(),t=tip.getBoundingClientRect();
+    var x=r.left+r.width/2-t.width/2, y=r.top-t.height-8;
+    if(y<8) y=r.bottom+8;
+    x=Math.max(8,Math.min(x,window.innerWidth-t.width-8));
+    tip.style.left=x+'px'; tip.style.top=y+'px';
+  }
+  function hide(){ cur=null; tip.classList.remove('on'); tip.setAttribute('aria-hidden','true'); }
+  document.querySelectorAll('[data-tools]').forEach(function(el){
+    el.addEventListener('mouseenter',function(){show(el)});
+    el.addEventListener('mouseleave',hide);
+    el.addEventListener('focus',function(){show(el)});
+    el.addEventListener('blur',hide);
+  });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') hide(); });
+  window.addEventListener('scroll',function(){ if(cur) place(cur); },{passive:true});
+})();
+</script>
 </body>
 </html>
