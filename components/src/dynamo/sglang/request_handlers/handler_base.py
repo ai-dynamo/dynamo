@@ -985,9 +985,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     ) -> None:
         if not isinstance(token_ids, list):
             raise HttpError(400, "nvext.token_data must resolve to a token ID list")
-        if self._max_input_token_id is None:
-            return
 
+        max_input_token_id = self._max_input_token_id
         for index, token_id in enumerate(token_ids):
             if isinstance(token_id, bool) or not isinstance(token_id, int):
                 raise HttpError(
@@ -996,7 +995,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 )
             # Some models, such as Phi-3, use negative multimodal sentinel IDs.
             if (
-                token_id < 0 or token_id > self._max_input_token_id
+                token_id < 0
+                or (max_input_token_id is not None and token_id > max_input_token_id)
             ) and token_id not in allowed_oov_ids:
                 raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 

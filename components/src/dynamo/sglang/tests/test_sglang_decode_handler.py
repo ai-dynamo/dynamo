@@ -403,6 +403,23 @@ def test_nvext_token_data_skips_validation_when_model_bound_is_unavailable():
     assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
 
 
+@pytest.mark.parametrize("invalid_token_id", [-1, True])
+def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id(
+    invalid_token_id,
+):
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [invalid_token_id],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
 @pytest.mark.parametrize("invalid_token_id", [-1, True, 1.5, "1"])
 def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
     handler = _new_token_input_handler()
