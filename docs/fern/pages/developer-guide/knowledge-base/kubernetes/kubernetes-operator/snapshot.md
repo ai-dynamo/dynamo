@@ -656,4 +656,4 @@ If the manifest already carries snapshot target metadata, it must agree with the
 
 - [Installation Guide](../../../../kubernetes/installation/install-dynamo.md)
 - [Shadow Engine Failover](shadow-engine-failover.md)
-- [API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md)
+- [API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx)

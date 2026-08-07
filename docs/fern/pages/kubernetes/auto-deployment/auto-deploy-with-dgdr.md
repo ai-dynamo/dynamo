@@ -417,4 +417,4 @@ For the complete merge, metadata, and validation rules, see
 | Author the deployment by hand instead | [DGD Guide](../model-deployment/deploy-with-dgd.md) |
 | Profiling algorithms and modes | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |
 | Runtime autoscaling details | [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md) |
-| Full CRD reference | [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) |
+| Full CRD reference | [API Reference](../../reference/kubernetes-api/full-api-reference.mdx) |

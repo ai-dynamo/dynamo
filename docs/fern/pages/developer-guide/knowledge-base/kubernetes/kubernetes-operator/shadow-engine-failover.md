@@ -168,7 +168,7 @@ experimental:
     mode: IntraPod
 ```
 
-See the [API reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) for the exact schema supported by your
+See the [API reference](../../../../reference/kubernetes-api/full-api-reference.mdx) for the exact schema supported by your
 CRD version.
 
 ## Basic Shadow Engine Failover Example
@@ -254,7 +254,7 @@ Working GMS-only examples:
 ## Related Documentation
 
 - [Snapshot](snapshot.md)
-- [API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md)
+- [API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx)
 - [vLLM failover example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_failover.yaml)
 - [vLLM GMS example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_gms.yaml)
 - [SGLang GMS example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_gms.yaml)

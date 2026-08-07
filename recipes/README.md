@@ -337,7 +337,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 ## Related Documentation
 
 - **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** - Platform installation and concepts
-- **[API Reference](../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md)** - DynamoGraphDeployment CRD specification
+- **[API Reference](../docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx)** - DynamoGraphDeployment CRD specification
 - **[vLLM Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md)** - vLLM-specific features
 - **[SGLang Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md)** - SGLang-specific features
 - **[TensorRT-LLM Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md)** - TensorRT-LLM features

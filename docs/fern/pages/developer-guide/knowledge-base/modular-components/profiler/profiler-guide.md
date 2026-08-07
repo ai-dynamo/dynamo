@@ -761,4 +761,4 @@ Ensure image pull secrets are configured in your namespace for the container reg
 - [Profiler README](overview.md) — Quick overview and feature matrix
 - [Profiler Examples](profiler-examples.md) — Complete DGDR YAML examples
 - [Planner Guide](../planner/planner-guide.md) — PlannerConfig reference and scaling modes
-- [DGDR API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) — Full DGDR specification
+- [DGDR API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx) — Full DGDR specification
