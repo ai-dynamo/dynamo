@@ -66,11 +66,8 @@ preferences:
   mode: ""                         # agg, disagg
 
 resources:
-  gpu_floor: null                  # GPUs guaranteed available to this work
-  gpu_ceiling: null                # maximum GPUs the user authorizes, across all concurrent experiments
-  parallel_experiments: null      # user authorization for concurrent candidates (advisory until the loop supports slot isolation)
+  gpu_ceiling: null                # maximum total GPUs the user authorizes this run to hold at once
   pinned: []                       # configuration knobs the user forbids changing (e.g. ["mode", "precision"])
-  teardown_deadline: ""            # optional wall-clock bound by which all run resources must be gone
 
 objectives:
   ttft_ms_p95_max: null            # optional time to first token
@@ -100,8 +97,10 @@ created_at: ""
   `deployment.dgd_sha256` to match that file.
 - `kube_context` and `namespace` are required. The namespace must already exist.
 - Treat `resources.gpu_ceiling` as authorization, not entitlement: every GPU-consuming experiment still requires its
-  own evidence and adversarial review. Treat `resources.pinned` entries as hard constraints enforced at hypothesis
-  review and deploy preflight, not as style preferences.
+  own evidence and adversarial review. `hardware[]` describes what the workload serves on; `gpu_ceiling` bounds the
+  run's total concurrent GPU holdings and must be at least the assigned DGD's total request. When unset, the assigned
+  DGD's own footprint is the bound. `hypothesis-challenger` must reject candidates that change a `pinned` knob or
+  exceed `gpu_ceiling`; `deploy-dynamo-recipe` preflight must verify both before mutation.
 - `storage_class` is optional when the required PVC already exists or a suitable cluster default is known. If the run
   must create a PVC and no suitable class can be determined safely, return a focused question to the user.
 - Token lengths are optional customer-provided traffic hints, not required benchmark keys. Prefer real traces or

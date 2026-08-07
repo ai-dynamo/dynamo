@@ -68,14 +68,15 @@ a maintainer comments `/nvskills-ci` on the PR.
 
 ## Improving These Instructions
 
-If these skills or instructions misled you, blocked you, or contradicted what you verified live, file an issue on
-this repository with the `agent-reported` label. Rules:
+If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
+this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
+write and requires operator consent. Rules:
 
-1. Search existing `agent-reported` issues first; comment on a duplicate instead of filing a new one.
-2. File at most one issue per optimization session; batch findings into it.
+1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
+2. Prepare at most one issue per optimization session; batch findings into it.
 3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
 4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
-   credentials. Describe the instruction gap, not the engagement.
+   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
 
 ## Optimization Role Dispatch
 
