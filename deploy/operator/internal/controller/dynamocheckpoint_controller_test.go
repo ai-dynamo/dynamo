@@ -97,10 +97,11 @@ func makeCheckpointReconciler(s *runtime.Scheme, objs ...client.Object) *Checkpo
 func makeTestCheckpoint(phase nvidiacomv1alpha1.DynamoCheckpointPhase) *nvidiacomv1alpha1.DynamoCheckpoint {
 	runAsUser := int64(1234)
 	fsGroup := int64(4321)
+	identity := checkpointTestIdentity
 	return &nvidiacomv1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: testHash, Namespace: testNamespace},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: checkpointTestIdentity,
+			Identity: &identity,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				TargetContainerName: "main",
 				PodTemplateSpec: corev1.PodTemplateSpec{
@@ -245,6 +246,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 
 	// Deprecated identity fields no longer control checkpoint launch wrapping.
+	//nolint:staticcheck // SA1019: Verify deprecated identity is ignored by launch construction.
 	ckpt.Spec.Identity.TensorParallelSize = 2
 	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
@@ -574,6 +576,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		ckpt := makeTestCheckpoint("")
 		r := makeCheckpointReconciler(s, ckpt)
 
+		t.Log("Reconcile and verify no capture Job is created")
 		_, err := r.Reconcile(ctx, ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: testHash, Namespace: testNamespace},
 		})
@@ -650,6 +653,37 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Empty(t, jobs.Items)
 	})
 
+	t.Run("invalid deleting automatic claim skips cleanup and finalizes", func(t *testing.T) {
+		t.Log("Build a deleting marker-bearing claim without trustworthy cleanup identity")
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.Name = "invalid-deleting-automatic"
+		ckpt.UID = "invalid-deleting-uid"
+		ckpt.DeletionTimestamp = ptr.To(metav1.Now())
+		ckpt.Labels = nil
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation: "false",
+		}
+		commonController.AddFinalizer(ckpt)
+		r := makeCheckpointReconciler(s, ckpt)
+
+		t.Log("Reconcile deletion and verify no destructive cleanup work is created")
+		result, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+		jobs := &batchv1.JobList{}
+		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
+		assert.Empty(t, jobs.Items)
+
+		current := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		err = r.Get(ctx, client.ObjectKeyFromObject(ckpt), current)
+		if !apierrors.IsNotFound(err) {
+			require.NoError(t, err)
+			assert.False(t, commonController.ContainsFinalizer(current))
+		}
+	})
+
 	t.Run("disabled checkpoint gate does not block deletion", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
 		ckpt.DeletionTimestamp = ptr.To(metav1.Now())
@@ -697,6 +731,66 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
+	})
+
+	t.Run("automatic checkpoint without direct ID fails without backfill", func(t *testing.T) {
+		ckpt := makeTestCheckpoint("")
+		ckpt.Name = "automatic-missing-id"
+		ckpt.Labels = nil
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+		}
+		ckpt.Status.CheckpointID = "untrusted-status-id"
+		ckpt.Status.IdentityHash = "untrusted-identity-hash"
+		r := makeCheckpointReconciler(s, ckpt)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.ErrorContains(t, err, "ID label is missing")
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
+		assert.Empty(t, updated.Labels[snapshotprotocol.CheckpointIDLabel])
+	})
+
+	t.Run("automatic checkpoint with noncanonical marker fails before creating a Job", func(t *testing.T) {
+		t.Log("Build an object carrying a noncanonical automatic marker")
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:                      "false",
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+		}
+		r := makeCheckpointReconciler(s, ckpt)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.ErrorContains(t, err, "automatic checkpoint marker must be")
+
+		jobs := &batchv1.JobList{}
+		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
+		assert.Empty(t, jobs.Items)
+	})
+
+	t.Run("automatic checkpoint without artifact version fails before creating a Job", func(t *testing.T) {
+		t.Log("Build a canonical automatic marker without artifact version metadata")
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+		}
+		r := makeCheckpointReconciler(s, ckpt)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.ErrorContains(t, err, "artifact version annotation is missing")
+
+		jobs := &batchv1.JobList{}
+		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
+		assert.Empty(t, jobs.Items)
 	})
 
 	t.Run("unknown phase resets to Pending", func(t *testing.T) {
@@ -758,6 +852,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDelete(t *testing.T) {
 	ctx := context.Background()
 	s := checkpointTestScheme()
+	const checkpointUID = "checkpoint-uid"
 
 	cfg := checkpointTestConfig()
 	cfg.Checkpoint.Storage = configv1alpha1.CheckpointStorageConfiguration{
@@ -768,12 +863,29 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 		},
 	}
 
-	t.Run("creates cleanup job and keeps finalizer pending", func(t *testing.T) {
+	t.Run("valid automatic cleanup fails without operator configuration", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
 		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
 		ckpt.Annotations = map[string]string{
-			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
-			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+		}
+		r := makeCheckpointReconciler(s, ckpt)
+		r.Config = nil
+
+		err := r.FinalizeResource(ctx, ckpt)
+		require.ErrorContains(t, err, "cleanup requires operator configuration")
+	})
+
+	t.Run("creates cleanup job and keeps finalizer pending", func(t *testing.T) {
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+			consts.CheckpointDeletionPolicyAnnotation:            string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
 		}
 		r := makeCheckpointReconciler(s, ckpt)
 		r.Config = cfg
@@ -786,15 +898,25 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			Name:      "checkpoint-cleanup-" + testHash,
 			Namespace: testNamespace,
 		}, current))
+
+		t.Log("Then the Job has explicit canonical one-shot execution controls")
 		assert.Equal(t, testHash, current.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Equal(t, ptr.To[int32](1), current.Spec.Completions)
+		assert.Equal(t, ptr.To[int32](1), current.Spec.Parallelism)
+		assert.Equal(t, ptr.To(false), current.Spec.Suspend)
+		assert.Equal(t, ptr.To(false), current.Spec.ManualSelector)
+		assert.Equal(t, ptr.To(batchv1.NonIndexedCompletion), current.Spec.CompletionMode)
+		assert.Equal(t, ptr.To(batchv1.JobControllerName), current.Spec.ManagedBy)
 	})
 
 	t.Run("running cleanup job keeps finalizer pending", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
 		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
 		ckpt.Annotations = map[string]string{
-			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
-			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+			consts.CheckpointDeletionPolicyAnnotation:            string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
 		}
 		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
 			Type:     snapshotprotocol.StorageTypePVC,
@@ -811,10 +933,12 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 
 	t.Run("failed cleanup job is deleted for retry", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
 		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
 		ckpt.Annotations = map[string]string{
-			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
-			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+			consts.CheckpointDeletionPolicyAnnotation:            string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
 		}
 		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
 			Type:     snapshotprotocol.StorageTypePVC,
@@ -839,10 +963,12 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 
 	t.Run("completed cleanup job is removed and finalizer may finish", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
 		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
 		ckpt.Annotations = map[string]string{
-			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
-			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+			consts.CheckpointDeletionPolicyAnnotation:            string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
 		}
 		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
 			Type:     snapshotprotocol.StorageTypePVC,
@@ -862,6 +988,117 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 		err = r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, current)
 		require.True(t, apierrors.IsNotFound(err), "expected completed cleanup job to be removed, got %v", err)
 	})
+
+	t.Run("zero-completion completed cleanup job does not prove cleanup", func(t *testing.T) {
+		t.Log("Given an exactly owned cleanup Job that reports completion without executing a Pod")
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+		}
+		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+			Type:     snapshotprotocol.StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		})
+		require.NoError(t, err)
+		job.Spec.Completions = ptr.To[int32](0)
+		job.Status.Conditions = []batchv1.JobCondition{{
+			Type:   batchv1.JobComplete,
+			Status: corev1.ConditionTrue,
+		}}
+		r := makeCheckpointReconciler(s, ckpt, job)
+		r.Config = cfg
+
+		t.Log("When checkpoint finalization verifies the completed Job")
+		err = r.FinalizeResource(ctx, ckpt)
+
+		t.Log("Then the non-executing Job is rejected and finalization remains blocked")
+		require.ErrorContains(t, err, "job execution policy differs")
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{}))
+	})
+
+	t.Run("foreign completed cleanup job does not prove cleanup", func(t *testing.T) {
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = checkpointUID
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+		}
+		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+			Type:     snapshotprotocol.StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		})
+		require.NoError(t, err)
+		job.OwnerReferences = nil
+		job.Status.Conditions = []batchv1.JobCondition{{
+			Type:   batchv1.JobComplete,
+			Status: corev1.ConditionTrue,
+		}}
+		r := makeCheckpointReconciler(s, ckpt, job)
+		r.Config = cfg
+
+		err = r.FinalizeResource(ctx, ckpt)
+		require.ErrorContains(t, err, "controller owner does not match")
+		current := &batchv1.Job{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(job), current))
+	})
+}
+
+func TestVerifyCheckpointCleanupJobExecutionPolicy(t *testing.T) {
+	cfg := checkpointTestConfig()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+	ckpt.UID = "checkpoint-uid"
+	expected, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+		Type:     snapshotprotocol.StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	})
+	require.NoError(t, err)
+
+	t.Run("accepts API-equivalent omitted defaults", func(t *testing.T) {
+		t.Log("Given a cleanup Job with canonical execution controls represented by nil defaults")
+		actual := expected.DeepCopy()
+		actual.Spec.Completions = nil
+		actual.Spec.Parallelism = nil
+		actual.Spec.Suspend = nil
+		actual.Spec.ManualSelector = nil
+		actual.Spec.CompletionMode = nil
+		actual.Spec.ManagedBy = nil
+
+		t.Log("Then verification accepts the equivalent standard one-shot Job")
+		require.NoError(t, verifyCheckpointCleanupJob(actual, expected, ckpt))
+	})
+
+	zeroParallelism := expected.DeepCopy()
+	zeroParallelism.Spec.Parallelism = ptr.To[int32](0)
+	suspended := expected.DeepCopy()
+	suspended.Spec.Suspend = ptr.To(true)
+	manualSelector := expected.DeepCopy()
+	manualSelector.Spec.ManualSelector = ptr.To(true)
+	indexedCompletion := expected.DeepCopy()
+	indexedCompletion.Spec.CompletionMode = ptr.To(batchv1.IndexedCompletion)
+	externalController := expected.DeepCopy()
+	externalController.Spec.ManagedBy = ptr.To("example.com/job-controller")
+	tests := map[string]*batchv1.Job{
+		"zero parallelism":    zeroParallelism,
+		"suspended":           suspended,
+		"manual selector":     manualSelector,
+		"indexed completion":  indexedCompletion,
+		"external controller": externalController,
+	}
+	for name, actual := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Log("Given an otherwise exact cleanup Job with noncanonical execution control")
+
+			t.Log("Then verification rejects the Job")
+			require.ErrorContains(t, verifyCheckpointCleanupJob(actual, expected, ckpt), "job execution policy differs")
+		})
+	}
 }
 
 func TestCheckpointReconciler_HandleCreating(t *testing.T) {

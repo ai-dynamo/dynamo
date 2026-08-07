@@ -19,6 +19,7 @@ package checkpoint
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -32,11 +33,13 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -49,6 +52,330 @@ func testIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
 	}
+}
+
+func TestProjectAutoCheckpointCaptureInputsNormalizesVolumeDefaults(t *testing.T) {
+	falseValue := false
+	ext4 := "ext4"
+	tests := []struct {
+		name      string
+		omitted   corev1.VolumeSource
+		defaulted corev1.VolumeSource
+	}{
+		{
+			name: "AzureDisk",
+			omitted: corev1.VolumeSource{AzureDisk: &corev1.AzureDiskVolumeSource{
+				DiskName:    "checkpoint",
+				DataDiskURI: "https://example.invalid/checkpoint.vhd",
+			}},
+			defaulted: corev1.VolumeSource{AzureDisk: &corev1.AzureDiskVolumeSource{
+				DiskName:    "checkpoint",
+				DataDiskURI: "https://example.invalid/checkpoint.vhd",
+				FSType:      &ext4,
+				ReadOnly:    &falseValue,
+			}},
+		},
+		{
+			name: "iSCSI",
+			omitted: corev1.VolumeSource{ISCSI: &corev1.ISCSIVolumeSource{
+				TargetPortal: "10.0.0.1:3260",
+				IQN:          "iqn.2026-01.example:checkpoint",
+				Lun:          1,
+			}},
+			defaulted: corev1.VolumeSource{ISCSI: &corev1.ISCSIVolumeSource{
+				TargetPortal:   "10.0.0.1:3260",
+				IQN:            "iqn.2026-01.example:checkpoint",
+				Lun:            1,
+				ISCSIInterface: "default",
+			}},
+		},
+		{
+			name: "ScaleIO",
+			omitted: corev1.VolumeSource{ScaleIO: &corev1.ScaleIOVolumeSource{
+				Gateway:   "scaleio.example.invalid",
+				System:    "checkpoint",
+				SecretRef: &corev1.LocalObjectReference{Name: "scaleio"},
+			}},
+			defaulted: corev1.VolumeSource{ScaleIO: &corev1.ScaleIOVolumeSource{
+				Gateway:     "scaleio.example.invalid",
+				System:      "checkpoint",
+				SecretRef:   &corev1.LocalObjectReference{Name: "scaleio"},
+				FSType:      "xfs",
+				StorageMode: "ThinProvisioned",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := func(source corev1.VolumeSource) automaticCheckpointCaptureInputs {
+				return projectAutoCheckpointCaptureInputs(nvidiacomv1alpha1.DynamoCheckpointSpec{
+					Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+						PodTemplateSpec: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+								Name:         "checkpoint",
+								VolumeSource: source,
+							}}},
+						},
+					},
+				})
+			}
+
+			assert.True(t, equality.Semantic.DeepEqual(project(tt.omitted), project(tt.defaulted)))
+		})
+	}
+}
+
+func TestCheckpointID(t *testing.T) {
+	identity := testIdentity()
+	legacyHash, err := ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	t.Run("automatic direct label overrides legacy status", func(t *testing.T) {
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "automatic",
+				Labels: map[string]string{
+					snapshotprotocol.CheckpointIDLabel: "direct-a",
+				},
+				Annotations: map[string]string{
+					consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+				CheckpointID: "status-b",
+				IdentityHash: "identity-b",
+			},
+		}
+
+		got, err := CheckpointID(ckpt)
+		require.NoError(t, err)
+		assert.Equal(t, "direct-a", got)
+	})
+
+	t.Run("automatic checkpoint without direct label fails closed", func(t *testing.T) {
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "automatic",
+				Annotations: map[string]string{
+					consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: &identity},
+			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+				CheckpointID: "status-b",
+				IdentityHash: "identity-b",
+			},
+		}
+
+		_, err := CheckpointID(ckpt)
+		require.ErrorContains(t, err, "ID label is missing")
+	})
+
+	t.Run("standalone checkpoint retains identity fallback", func(t *testing.T) {
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "standalone"},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: &identity},
+		}
+
+		got, err := CheckpointID(ckpt)
+		require.NoError(t, err)
+		assert.Equal(t, legacyHash, got)
+	})
+}
+
+func TestCheckpointLookupDomains(t *testing.T) {
+	t.Log("Build automatic and standalone checkpoints with the same ID value")
+	ctx := context.Background()
+	s := testScheme()
+	identity := testIdentity()
+	hash, err := ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	automatic := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "automatic",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				snapshotprotocol.CheckpointIDLabel: hash,
+			},
+			Annotations: map[string]string{
+				consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+			},
+		},
+	}
+	standalone := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "standalone",
+			Namespace: testNamespace,
+		},
+		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: &identity},
+	}
+
+	t.Run("direct ID finds the canonical labeled automatic checkpoint", func(t *testing.T) {
+		t.Log("Look up the shared value in the artifact-ID domain")
+		c := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(automatic.DeepCopy(), standalone.DeepCopy()).
+			Build()
+
+		found, err := FindCheckpointByCheckpointID(
+			ctx,
+			c,
+			testNamespace,
+			hash,
+			"",
+		)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, automatic.Name, found.Name)
+	})
+
+	t.Run("semantic identity ignores the labeled automatic checkpoint", func(t *testing.T) {
+		t.Log("Look up the shared value in the standalone semantic domain")
+		c := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(automatic.DeepCopy(), standalone.DeepCopy()).
+			Build()
+
+		found, err := FindCheckpointByIdentityHash(
+			ctx,
+			c,
+			testNamespace,
+			hash,
+			"",
+		)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, standalone.Name, found.Name)
+	})
+
+	t.Run("semantic identity returns nil for an automatic-only match", func(t *testing.T) {
+		t.Log("Look up a value represented only by an automatic checkpoint")
+		c := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(automatic.DeepCopy()).
+			Build()
+
+		found, err := FindCheckpointByIdentityHash(
+			ctx,
+			c,
+			testNamespace,
+			hash,
+			"",
+		)
+		require.NoError(t, err)
+		assert.Nil(t, found)
+	})
+
+	t.Run("malformed automatic checkpoint does not poison semantic scan", func(t *testing.T) {
+		t.Log("Add an automatic checkpoint without its required direct ID")
+		malformed := automatic.DeepCopy()
+		malformed.Name = "malformed-automatic"
+		malformed.Labels = nil
+		c := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(malformed, standalone.DeepCopy()).
+			Build()
+
+		found, err := FindCheckpointByIdentityHash(
+			ctx,
+			c,
+			testNamespace,
+			hash,
+			"",
+		)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, standalone.Name, found.Name)
+	})
+
+	for _, tt := range []struct {
+		name   string
+		marker string
+		index  bool
+	}{
+		{name: "indexed false marker claim", marker: "false", index: true},
+		{name: "fallback empty marker claim", marker: "", index: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := automatic.DeepCopy()
+			claim.Name = "noncanonical-automatic"
+			claim.Annotations[consts.CheckpointAutoAnnotation] = tt.marker
+			//nolint:staticcheck // SA1019: Prove marker-bearing claims cannot enter legacy identity lookup.
+			claim.Spec.Identity = &identity
+			claim.Status.IdentityHash = hash
+			if !tt.index {
+				claim.Labels = nil
+			}
+			c := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(claim, standalone.DeepCopy()).
+				Build()
+
+			found, err := FindCheckpointByIdentityHash(
+				ctx,
+				c,
+				testNamespace,
+				hash,
+				"",
+			)
+			require.NoError(t, err)
+			require.NotNil(t, found)
+			assert.Equal(t, standalone.Name, found.Name)
+		})
+	}
+}
+
+func TestAutomaticCheckpointProvenanceSerializationExcludesLifecycleState(t *testing.T) {
+	t.Log("Build canonical automatic checkpoint provenance")
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-dgd", Namespace: testNamespace, UID: types.UID("dgd-uid"),
+	}}
+	ckpt := mustExpectedAutoCheckpoint(
+		t,
+		testScheme(),
+		corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: "worker:expected",
+			}},
+		}},
+		consts.MainContainerName,
+		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete,
+		nil,
+		owner,
+	)
+	serialized := func(candidate *nvidiacomv1alpha1.DynamoCheckpoint) []byte {
+		t.Helper()
+		provenance, err := automaticCheckpointProvenanceProjection(candidate)
+		require.NoError(t, err)
+		value, err := json.Marshal(provenance)
+		require.NoError(t, err)
+		return value
+	}
+
+	t.Log("Verify lifecycle-only deletion policy is absent from serialization")
+	baseline := serialized(ckpt)
+	lifecycleChanged := ckpt.DeepCopy()
+	lifecycleChanged.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+		string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+	assert.Equal(t, baseline, serialized(lifecycleChanged))
+	assert.NotContains(t, string(baseline), "deletionPolicy")
+
+	t.Log("Verify capture and source metadata remain binding inputs")
+	captureChanged := ckpt.DeepCopy()
+	captureChanged.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image = "worker:changed"
+	assert.NotEqual(t, baseline, serialized(captureChanged))
+
+	metadataChanged := ckpt.DeepCopy()
+	metadataChanged.Labels[consts.KubeLabelDynamoWorkerHash] = "changed-worker-hash"
+	assert.NotEqual(t, baseline, serialized(metadataChanged))
+}
+
+func testIdentityPointer() *nvidiacomv1alpha1.DynamoCheckpointIdentity {
+	identity := testIdentity()
+	return &identity
 }
 
 func assertRestoreStandbyMode(
@@ -88,6 +415,30 @@ func testScheme() *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	_ = appsv1.AddToScheme(s)
 	return s
+}
+
+func mustExpectedAutoCheckpoint(
+	t *testing.T,
+	scheme *runtime.Scheme,
+	podTemplate corev1.PodTemplateSpec,
+	targetContainerName string,
+	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
+	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+	owner client.Object,
+) *nvidiacomv1alpha1.DynamoCheckpoint {
+	t.Helper()
+	expected, err := ExpectedAutoCheckpoint(
+		scheme,
+		testNamespace,
+		testHash,
+		podTemplate,
+		targetContainerName,
+		deletionPolicy,
+		gpuMemoryService,
+		owner,
+	)
+	require.NoError(t, err)
+	return expected
 }
 
 func testInfo() *CheckpointInfo {
@@ -410,7 +761,7 @@ func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyH
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{},
 			},
@@ -433,7 +784,9 @@ func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyH
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil)
+	expected := mustExpectedAutoCheckpoint(t, s, corev1.PodTemplateSpec{}, "", "", nil, nil)
+	t.Log("Sync Delete lifecycle policy without restoring the controller owner")
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
 	require.NoError(t, err)
 	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
@@ -447,7 +800,8 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil)
+	expected := mustExpectedAutoCheckpoint(t, s, corev1.PodTemplateSpec{}, "", "", nil, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
@@ -459,6 +813,15 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}, stored))
 	assert.True(t, commonController.ContainsFinalizer(stored))
+	//nolint:staticcheck // SA1019: Verify new automatic checkpoints omit deprecated compatibility identity.
+	assert.Nil(t, stored.Spec.Identity)
+
+	serialized, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var object map[string]any
+	require.NoError(t, json.Unmarshal(serialized, &object))
+	spec := object["spec"].(map[string]any)
+	assert.NotContains(t, spec, "identity")
 }
 
 func TestCreateOrGetAutoCheckpointAcceptsGMSCheckpoint(t *testing.T) {
@@ -466,21 +829,143 @@ func TestCreateOrGetAutoCheckpointAcceptsGMSCheckpoint(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(
-		ctx,
-		c,
-		testNamespace,
-		testHash,
-		testIdentity(),
-		corev1.PodTemplateSpec{},
-		"",
-		"",
-		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		nil,
+	expected := mustExpectedAutoCheckpoint(
+		t, s, corev1.PodTemplateSpec{}, "", "",
+		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}, nil,
 	)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Spec.GPUMemoryService)
 	assert.True(t, ckpt.Spec.GPUMemoryService.Enabled)
+}
+
+func TestCreateOrGetAutoCheckpointValidatesCaptureSpec(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	owner := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: testNamespace,
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	podTemplate := corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:    consts.MainContainerName,
+			Image:   "worker:expected",
+			Command: []string{"python3"},
+			Args:    []string{"-m", "dynamo.vllm", "--load-format", "gms"},
+			Ports:   []corev1.ContainerPort{{Name: "system", ContainerPort: 9090}},
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/ready"}},
+				},
+			},
+		}},
+	}}
+	gmsSpec := &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+		Enabled: true,
+		Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+	}
+
+	for _, tt := range []struct {
+		name    string
+		mutate  func(*nvidiacomv1alpha1.DynamoCheckpoint)
+		wantErr string
+	}{
+		{
+			name: "poisoned image and command",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				main := &ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0]
+				main.Image = "worker:poisoned"
+				main.Command = []string{"steal-checkpoint"}
+			},
+			wantErr: "checkpoint capture inputs differ",
+		},
+		{
+			name: "poisoned executable probe",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].
+					LivenessProbe.Exec.Command = []string{"steal-checkpoint"}
+			},
+			wantErr: "checkpoint capture inputs differ",
+		},
+		{
+			name: "poisoned GMS spec",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				ckpt.Spec.GPUMemoryService.DeviceClassName = "poisoned.example/gpu"
+			},
+			wantErr: "checkpoint capture inputs differ",
+		},
+		{
+			name: "legacy automatic identity is ignored",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise a persisted legacy automatic checkpoint.
+				ckpt.Spec.Identity = &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+					Model:                "arbitrary/deprecated",
+					BackendFramework:     "sglang",
+					DynamoVersion:        "different",
+					TensorParallelSize:   8,
+					PipelineParallelSize: 4,
+					Dtype:                "fp8",
+					MaxModelLen:          1,
+					ExtraParameters:      map[string]string{"arbitrary": "value"},
+				}
+			},
+		},
+		{
+			name: "direct checkpoint ID label is required",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = "changed-checkpoint-id"
+				ckpt.Status.CheckpointID = testHash
+				ckpt.Status.IdentityHash = testHash
+			},
+			wantErr: "already exists with checkpoint ID changed-checkpoint-id",
+		},
+		{
+			name: "DGD source differs",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				ckpt.Labels[consts.KubeLabelDynamoComponent] = "other-worker"
+			},
+			wantErr: "checkpoint DGD source differs",
+		},
+		{
+			name: "DGD owner differs",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				ckpt.OwnerReferences[0].UID = types.UID("replacement-dgd")
+			},
+			wantErr: "checkpoint owner differs",
+		},
+		{
+			name: "status and omitted API defaults are harmless",
+			mutate: func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) {
+				ckpt.Spec.Job.TargetContainerName = ""
+				ckpt.Spec.Job.ActiveDeadlineSeconds = nil
+				ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Ports[0].Protocol = ""
+				ckpt.Spec.GPUMemoryService.Mode = ""
+				ckpt.Spec.GPUMemoryService.DeviceClassName = ""
+				ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
+				ckpt.Status.Message = "observed status is not capture provenance"
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			expected := mustExpectedAutoCheckpoint(
+				t, s, podTemplate, consts.MainContainerName,
+				nvidiacomv1alpha1.CheckpointDeletionPolicyDelete, gmsSpec, owner,
+			)
+			existing := expected.DeepCopy()
+			tt.mutate(existing)
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+
+			_, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
@@ -495,18 +980,11 @@ func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(owner).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(
-		ctx,
-		c,
-		testNamespace,
-		testHash,
-		testIdentity(),
-		corev1.PodTemplateSpec{},
-		"",
-		nvidiacomv1alpha1.CheckpointDeletionPolicyRetain,
-		nil,
-		owner,
+	expected := mustExpectedAutoCheckpoint(
+		t, s, corev1.PodTemplateSpec{}, "",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyRetain, nil, owner,
 	)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
 	require.NoError(t, err)
 
 	assert.Empty(t, ckpt.OwnerReferences)
@@ -523,40 +1001,96 @@ func TestCreateOrGetAutoCheckpointUpdatesExistingDeletionPolicyAndFinalizer(t *t
 			UID:       types.UID("dgd-uid"),
 		},
 	}
-	existing := &nvidiacomv1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "checkpoint-" + testHash,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				snapshotprotocol.CheckpointIDLabel: testHash,
-			},
-			Annotations: map[string]string{
-				consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: testIdentity(),
-		},
-	}
+	expected := mustExpectedAutoCheckpoint(
+		t, s, corev1.PodTemplateSpec{}, "",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete, nil, owner,
+	)
+	existing := expected.DeepCopy()
+	existing.Finalizers = nil
+	existing.OwnerReferences = nil
+	delete(existing.Annotations, consts.CheckpointDeletionPolicyAnnotation)
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(owner, existing).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(
-		ctx,
-		c,
-		testNamespace,
-		testHash,
-		testIdentity(),
-		corev1.PodTemplateSpec{},
-		"",
-		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete,
-		nil,
-		owner,
-	)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
 	require.NoError(t, err)
 	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
 	assert.True(t, commonController.ContainsFinalizer(ckpt))
-	require.Len(t, ckpt.OwnerReferences, 1)
-	assert.Equal(t, owner.UID, ckpt.OwnerReferences[0].UID)
+	assert.Empty(t, ckpt.OwnerReferences)
+}
+
+func TestCreateOrGetAutoCheckpointKeepsRetainedCheckpointDetachedWhenPolicyChanges(t *testing.T) {
+	t.Log("Build a previously retained automatic checkpoint without owner references")
+	ctx := context.Background()
+	s := testScheme()
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-dgd", Namespace: testNamespace, UID: types.UID("dgd-uid"),
+	}}
+	expected := mustExpectedAutoCheckpoint(
+		t, s, corev1.PodTemplateSpec{}, "",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete, nil, owner,
+	)
+	existing := expected.DeepCopy()
+	existing.OwnerReferences = nil
+	existing.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+		string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(owner, existing).Build()
+
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
+	require.NoError(t, err)
+	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete),
+		ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
+	assert.Empty(t, ckpt.OwnerReferences)
+}
+
+func TestCreateOrGetAutoCheckpointAdoptionUsesOptimisticLock(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-dgd", Namespace: testNamespace, UID: types.UID("dgd-uid"),
+	}}
+	expected := mustExpectedAutoCheckpoint(
+		t, s, corev1.PodTemplateSpec{}, "",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete, nil, owner,
+	)
+	existing := expected.DeepCopy()
+	existing.Finalizers = nil
+	existing.OwnerReferences = nil
+	delete(existing.Annotations, consts.CheckpointDeletionPolicyAnnotation)
+
+	mutated := false
+	c := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(owner, existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
+				if !mutated {
+					mutated = true
+					current := &nvidiacomv1alpha1.DynamoCheckpoint{}
+					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), current))
+					current.Spec.Job.TargetContainerName = "changed-after-verification"
+					require.NoError(t, c.Update(ctx, current))
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	_, err := CreateOrGetAutoCheckpoint(ctx, c, expected)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err), "expected optimistic-lock conflict, got %v", err)
+
+	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(expected), stored))
+	assert.Equal(t, "changed-after-verification", stored.Spec.Job.TargetContainerName)
+	assert.Empty(t, stored.Finalizers)
+	assert.Empty(t, stored.OwnerReferences)
+	assert.Empty(t, stored.Annotations[consts.CheckpointDeletionPolicyAnnotation])
 }
 
 // --- InjectCheckpointIntoPodSpec tests ---
@@ -838,7 +1372,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
 			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-				Identity:         testIdentity(),
+				Identity:         testIdentityPointer(),
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 			},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
@@ -866,7 +1400,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentityPointer()},
 			Status:     nvidiacomv1alpha1.DynamoCheckpointStatus{Phase: nvidiacomv1alpha1.DynamoCheckpointPhaseCreating},
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
@@ -894,7 +1428,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: "not-the-hash", Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentityPointer()},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				IdentityHash: hash,
 			},
@@ -917,7 +1451,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: "friendly-name", Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: &identity},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 				IdentityHash: hash,
@@ -942,7 +1476,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: "friendly-name", Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: &identity},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseCreating,
 				IdentityHash: hash,

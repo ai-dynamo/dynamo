@@ -104,5 +104,11 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// RuntimeVersionOverride has no rendered Pod effect yet.
 	spec.RuntimeVersionOverride = ""
 
+	// Deprecated checkpoint identity is not a worker launch input. Automatic
+	// checkpoints derive capture provenance from the rendered pod and GMS specs.
+	if spec.Experimental != nil && spec.Experimental.Checkpoint != nil {
+		spec.Experimental.Checkpoint.Identity = nil
+	}
+
 	return *spec
 }

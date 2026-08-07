@@ -24,11 +24,13 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -37,6 +39,9 @@ import (
 func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
 	if ckpt == nil {
 		return "", fmt.Errorf("checkpoint is nil")
+	}
+	if IsAutomaticCheckpoint(ckpt) {
+		return AutomaticCheckpointID(ckpt)
 	}
 	if ckpt.Status.CheckpointID != "" {
 		return ckpt.Status.CheckpointID, nil
@@ -48,7 +53,13 @@ func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
 		return ckpt.Labels[snapshotprotocol.CheckpointIDLabel], nil
 	}
 
-	hash, err := ComputeIdentityHash(ckpt.Spec.Identity)
+	// Standalone checkpoints retain semantic identity for upgrade compatibility.
+	//nolint:staticcheck // SA1019: Standalone checkpoints still require the deprecated compatibility identity.
+	identity := ckpt.Spec.Identity
+	if identity == nil {
+		return "", fmt.Errorf("checkpoint %s identity is missing", ckpt.Name)
+	}
+	hash, err := ComputeIdentityHash(*identity)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute checkpoint hash for %s: %w", ckpt.Name, err)
 	}
@@ -56,12 +67,98 @@ func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
 	return hash, nil
 }
 
+func IsAutomaticCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) bool {
+	return ckpt != nil &&
+		ckpt.Annotations != nil &&
+		ckpt.Annotations[commonconsts.CheckpointAutoAnnotation] == commonconsts.KubeLabelValueTrue
+}
+
+// ClaimsAutomaticCheckpointAuthority reports whether the automatic checkpoint
+// annotation key is present, regardless of its value.
+func ClaimsAutomaticCheckpointAuthority(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) bool {
+	if ckpt == nil || ckpt.Annotations == nil {
+		return false
+	}
+	_, claimed := ckpt.Annotations[commonconsts.CheckpointAutoAnnotation]
+	return claimed
+}
+
+// AutomaticCheckpointID returns the authoritative ID assigned directly to a
+// DGD-managed checkpoint. Status and legacy identity fields are never used.
+func AutomaticCheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
+	if ckpt == nil {
+		return "", fmt.Errorf("automatic checkpoint is nil")
+	}
+	if !IsAutomaticCheckpoint(ckpt) {
+		return "", fmt.Errorf("checkpoint %s is not marked automatic", ckpt.Name)
+	}
+	if ckpt.Labels == nil || ckpt.Labels[snapshotprotocol.CheckpointIDLabel] == "" {
+		return "", fmt.Errorf("automatic checkpoint %s ID label is missing", ckpt.Name)
+	}
+	return ckpt.Labels[snapshotprotocol.CheckpointIDLabel], nil
+}
+
+// ValidateAutomaticCheckpointClaim rejects objects that claim automatic
+// authority without the metadata needed to bind capture and artifact handling.
+func ValidateAutomaticCheckpointClaim(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+	if ckpt == nil {
+		return fmt.Errorf("checkpoint is nil")
+	}
+
+	// Treat any marker value as an automatic-authority claim.
+	if !ClaimsAutomaticCheckpointAuthority(ckpt) {
+		return nil
+	}
+	marker := ckpt.Annotations[commonconsts.CheckpointAutoAnnotation]
+	if marker != commonconsts.KubeLabelValueTrue {
+		return fmt.Errorf(
+			"checkpoint %s automatic checkpoint marker must be %q",
+			ckpt.Name,
+			commonconsts.KubeLabelValueTrue,
+		)
+	}
+
+	// Require the direct artifact ID and format version before controller use.
+	if _, err := AutomaticCheckpointID(ckpt); err != nil {
+		return err
+	}
+	if ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] == "" {
+		return fmt.Errorf("automatic checkpoint %s artifact version annotation is missing", ckpt.Name)
+	}
+	return nil
+}
+
+type checkpointLookupDomain uint8
+
+const (
+	checkpointArtifactIDLookup checkpointLookupDomain = iota
+	checkpointSemanticIdentityLookup
+)
+
 func FindCheckpointByCheckpointID(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
 	checkpointID string,
 	excludeName string,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	return findCheckpointByID(
+		ctx,
+		c,
+		namespace,
+		checkpointID,
+		excludeName,
+		checkpointArtifactIDLookup,
+	)
+}
+
+func findCheckpointByID(
+	ctx context.Context,
+	c client.Reader,
+	namespace string,
+	checkpointID string,
+	excludeName string,
+	domain checkpointLookupDomain,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpoints := &nvidiacomv1alpha1.DynamoCheckpointList{}
 	if err := c.List(
@@ -77,6 +174,9 @@ func FindCheckpointByCheckpointID(
 	for i := range checkpoints.Items {
 		ckpt := &checkpoints.Items[i]
 		if ckpt.Name == excludeName {
+			continue
+		}
+		if domain == checkpointSemanticIdentityLookup && ClaimsAutomaticCheckpointAuthority(ckpt) {
 			continue
 		}
 		existingCheckpointID, err := CheckpointID(ckpt)
@@ -106,6 +206,13 @@ func FindCheckpointByCheckpointID(
 		if ckpt.Name == excludeName {
 			continue
 		}
+		// Automatic checkpoints resolve only through their direct ID label.
+		// Marker-bearing malformed claims are also excluded from semantic lookup.
+		if IsAutomaticCheckpoint(ckpt) ||
+			(domain == checkpointSemanticIdentityLookup &&
+				ClaimsAutomaticCheckpointAuthority(ckpt)) {
+			continue
+		}
 		existingCheckpointID, err := CheckpointID(ckpt)
 		if err != nil {
 			return nil, err
@@ -129,32 +236,139 @@ func FindCheckpointByIdentityHash(
 	hash string,
 	excludeName string,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	return FindCheckpointByCheckpointID(ctx, c, namespace, hash, excludeName)
+	return findCheckpointByID(
+		ctx,
+		c,
+		namespace,
+		hash,
+		excludeName,
+		checkpointSemanticIdentityLookup,
+	)
 }
 
+// CreateOrGetAutoCheckpoint creates the expected automatic checkpoint or
+// verifies and adopts a same-name object with identical capture provenance.
 func CreateOrGetAutoCheckpoint(
 	ctx context.Context,
 	c client.Client,
+	expected *nvidiacomv1alpha1.DynamoCheckpoint,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	if expected == nil {
+		return nil, fmt.Errorf("expected automatic checkpoint is nil")
+	}
+	ckpt := expected.DeepCopy()
+	checkpointID, err := AutomaticCheckpointID(ckpt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid expected automatic checkpoint: %w", err)
+	}
+	namespace := ckpt.Namespace
+	deletionPolicy := nvidiacomv1alpha1.CheckpointDeletionPolicy(
+		ckpt.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation],
+	)
+	if deletionPolicy == "" {
+		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
+	}
+	expectedController := metav1.GetControllerOf(ckpt)
+	if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain {
+		ckpt.OwnerReferences = nil
+	}
+
+	if err := c.Create(ctx, ckpt); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("failed to create checkpoint %s: %w", ckpt.Name, err)
+		}
+		existing := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		key := types.NamespacedName{Name: ckpt.Name, Namespace: namespace}
+		if err := c.Get(ctx, key, existing); err != nil {
+			return nil, fmt.Errorf("failed to get checkpoint %s after already exists: %w", ckpt.Name, err)
+		}
+
+		existingCheckpointID, err := AutomaticCheckpointID(existing)
+		if err != nil {
+			return nil, fmt.Errorf("checkpoint %s automatic checkpoint mismatch: %w", ckpt.Name, err)
+		}
+		if existingCheckpointID != checkpointID {
+			return nil, fmt.Errorf("checkpoint %s already exists with checkpoint ID %s", ckpt.Name, existingCheckpointID)
+		}
+		verificationExpected := ckpt.DeepCopy()
+		// Deletion policy and ownership are lifecycle fields synchronized
+		// below, not capture provenance. Still verify any existing controller
+		// against the expected controller before adoption.
+		verificationExpected.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] =
+			existing.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation]
+		existingController := metav1.GetControllerOf(existing)
+		if existingController == nil {
+			verificationExpected.OwnerReferences = nil
+		} else {
+			if !sameControllerSource(existingController, expectedController) {
+				return nil, fmt.Errorf(
+					"checkpoint %s automatic checkpoint mismatch: checkpoint owner differs",
+					ckpt.Name,
+				)
+			}
+			verificationExpected.OwnerReferences = existing.OwnerReferences
+		}
+		if err := VerifyExpectedAutoCheckpoint(existing, verificationExpected); err != nil {
+			return nil, fmt.Errorf("checkpoint %s automatic checkpoint mismatch: %w", ckpt.Name, err)
+		}
+		original := existing.DeepCopy()
+		desiredDeletionPolicy := string(deletionPolicy)
+		desired := existing.DeepCopy()
+		if desired.Annotations == nil {
+			desired.Annotations = map[string]string{}
+		}
+		desired.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = desiredDeletionPolicy
+		commonController.AddFinalizer(desired)
+		if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain &&
+			existing.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] ==
+				string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
+			desired.OwnerReferences = nil
+		}
+		if !equality.Semantic.DeepEqual(original.Annotations, desired.Annotations) ||
+			!equality.Semantic.DeepEqual(original.OwnerReferences, desired.OwnerReferences) ||
+			!equality.Semantic.DeepEqual(original.Finalizers, desired.Finalizers) {
+			patch := client.MergeFromWithOptions(
+				original,
+				client.MergeFromWithOptimisticLock{},
+			)
+			if err := c.Patch(ctx, desired, patch); err != nil {
+				return nil, fmt.Errorf("failed to update checkpoint %s deletion policy: %w", ckpt.Name, err)
+			}
+			existing = desired
+		}
+
+		return existing, nil
+	}
+
+	return ckpt, nil
+}
+
+func sameControllerSource(actual, expected *metav1.OwnerReference) bool {
+	if actual == nil || expected == nil {
+		return actual == nil && expected == nil
+	}
+	return actual.APIVersion == expected.APIVersion &&
+		actual.Kind == expected.Kind &&
+		actual.Name == expected.Name &&
+		actual.UID == expected.UID &&
+		actual.Controller != nil &&
+		expected.Controller != nil &&
+		*actual.Controller &&
+		*expected.Controller
+}
+
+// ExpectedAutoCheckpoint returns the defaulted operator-owned checkpoint
+// object without reading or writing Kubernetes resources.
+func ExpectedAutoCheckpoint(
+	scheme *runtime.Scheme,
 	namespace string,
 	checkpointID string,
-	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
 	podTemplate corev1.PodTemplateSpec,
 	targetContainerName string,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 	owner client.Object,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	if targetContainerName == "" {
-		targetContainerName = commonconsts.MainContainerName
-	}
-
-	if checkpointID == "" {
-		var err error
-		checkpointID, err = NewCheckpointID()
-		if err != nil {
-			return nil, err
-		}
-	}
 	if deletionPolicy == "" {
 		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
 	}
@@ -184,7 +398,6 @@ func CreateOrGetAutoCheckpoint(
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity:         identity,
 			GPUMemoryService: gpuMemoryService,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec:     podTemplate,
@@ -192,60 +405,249 @@ func CreateOrGetAutoCheckpoint(
 			},
 		},
 	}
+	captureInputs := projectAutoCheckpointCaptureInputs(ckpt.Spec)
+	ckpt.Spec.Job = captureInputs.Job
+	ckpt.Spec.GPUMemoryService = captureInputs.GPUMemoryService
 	if owner != nil {
-		if err := controllerutil.SetControllerReference(owner, ckpt, c.Scheme()); err != nil {
+		if err := controllerutil.SetControllerReference(owner, ckpt, scheme); err != nil {
 			return nil, fmt.Errorf("failed to set checkpoint owner reference: %w", err)
 		}
 	}
-	if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain {
-		ckpt.OwnerReferences = nil
-	}
 	commonController.AddFinalizer(ckpt)
-
-	if err := c.Create(ctx, ckpt); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("failed to create checkpoint %s: %w", ckpt.Name, err)
-		}
-		existing := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		key := types.NamespacedName{Name: ckpt.Name, Namespace: namespace}
-		if err := c.Get(ctx, key, existing); err != nil {
-			return nil, fmt.Errorf("failed to get checkpoint %s after already exists: %w", ckpt.Name, err)
-		}
-
-		existingCheckpointID, err := CheckpointID(existing)
-		if err != nil {
-			return nil, err
-		}
-		if existingCheckpointID != checkpointID {
-			return nil, fmt.Errorf("checkpoint %s already exists with checkpoint ID %s", ckpt.Name, existingCheckpointID)
-		}
-		original := existing.DeepCopy()
-		desiredDeletionPolicy := string(deletionPolicy)
-		desired := existing.DeepCopy()
-		if desired.Annotations == nil {
-			desired.Annotations = map[string]string{}
-		}
-		desired.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = desiredDeletionPolicy
-		commonController.AddFinalizer(desired)
-		if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain {
-			desired.OwnerReferences = nil
-		} else if owner != nil {
-			if err := controllerutil.SetControllerReference(owner, desired, c.Scheme()); err != nil {
-				return nil, fmt.Errorf("failed to set checkpoint owner reference: %w", err)
-			}
-		}
-		if !equality.Semantic.DeepEqual(original.Annotations, desired.Annotations) ||
-			!equality.Semantic.DeepEqual(original.OwnerReferences, desired.OwnerReferences) ||
-			!equality.Semantic.DeepEqual(original.Finalizers, desired.Finalizers) {
-			patch := client.MergeFrom(original)
-			if err := c.Patch(ctx, desired, patch); err != nil {
-				return nil, fmt.Errorf("failed to update checkpoint %s deletion policy: %w", ckpt.Name, err)
-			}
-			existing = desired
-		}
-
-		return existing, nil
-	}
-
 	return ckpt, nil
+}
+
+type automaticCheckpointProvenance struct {
+	Name            string
+	Namespace       string
+	CheckpointID    string
+	AutomaticMarker string
+	ArtifactVersion string
+	Controller      *metav1.OwnerReference
+	DGDName         string
+	ComponentName   string
+	WorkerHash      string
+	CaptureInputs   automaticCheckpointCaptureInputs
+}
+
+// automaticCheckpointCaptureInputs contains only the rendered inputs that
+// determine an automatic checkpoint capture. Deprecated identity metadata is
+// not part of automatic provenance, including on objects created by older
+// operator versions.
+type automaticCheckpointCaptureInputs struct {
+	Job              nvidiacomv1alpha1.DynamoCheckpointJobConfig
+	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
+}
+
+func automaticCheckpointProvenanceProjection(
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) (automaticCheckpointProvenance, error) {
+	if ckpt == nil {
+		return automaticCheckpointProvenance{}, fmt.Errorf("automatic checkpoint is nil")
+	}
+	checkpointID, err := AutomaticCheckpointID(ckpt)
+	if err != nil {
+		return automaticCheckpointProvenance{}, err
+	}
+	return automaticCheckpointProvenance{
+		Name:            ckpt.Name,
+		Namespace:       ckpt.Namespace,
+		CheckpointID:    checkpointID,
+		AutomaticMarker: ckpt.Annotations[commonconsts.CheckpointAutoAnnotation],
+		ArtifactVersion: ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+		Controller:      metav1.GetControllerOf(ckpt),
+		DGDName:         ckpt.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName],
+		ComponentName:   ckpt.Labels[commonconsts.KubeLabelDynamoComponent],
+		WorkerHash:      ckpt.Labels[commonconsts.KubeLabelDynamoWorkerHash],
+		CaptureInputs:   projectAutoCheckpointCaptureInputs(ckpt.Spec),
+	}, nil
+}
+
+// VerifyExpectedAutoCheckpoint compares the canonical provenance that an
+// existing automatic checkpoint must retain.
+func VerifyExpectedAutoCheckpoint(
+	actual, expected *nvidiacomv1alpha1.DynamoCheckpoint,
+) error {
+	if actual == nil || expected == nil {
+		return fmt.Errorf("automatic checkpoint verification requires actual and expected objects")
+	}
+	actualProvenance, err := automaticCheckpointProvenanceProjection(actual)
+	if err != nil {
+		return err
+	}
+	expectedProvenance, err := automaticCheckpointProvenanceProjection(expected)
+	if err != nil {
+		return err
+	}
+	switch {
+	case actualProvenance.Name != expectedProvenance.Name ||
+		actualProvenance.Namespace != expectedProvenance.Namespace:
+		return fmt.Errorf("checkpoint object differs")
+	case actualProvenance.CheckpointID != expectedProvenance.CheckpointID:
+		return fmt.Errorf("checkpoint ID differs")
+	case actualProvenance.AutomaticMarker != expectedProvenance.AutomaticMarker:
+		return fmt.Errorf("automatic checkpoint marker differs")
+	case actualProvenance.ArtifactVersion != expectedProvenance.ArtifactVersion:
+		return fmt.Errorf("checkpoint artifact version differs")
+	case !equality.Semantic.DeepEqual(actualProvenance.Controller, expectedProvenance.Controller):
+		return fmt.Errorf("checkpoint owner differs")
+	case actualProvenance.DGDName != expectedProvenance.DGDName ||
+		actualProvenance.ComponentName != expectedProvenance.ComponentName ||
+		actualProvenance.WorkerHash != expectedProvenance.WorkerHash:
+		return fmt.Errorf("checkpoint DGD source differs")
+	case !equality.Semantic.DeepEqual(actualProvenance.CaptureInputs, expectedProvenance.CaptureInputs):
+		return fmt.Errorf("checkpoint capture inputs differ")
+	default:
+		return nil
+	}
+}
+
+func normalizeCaptureProbe(probe *corev1.Probe) {
+	if probe == nil || probe.GRPC == nil || probe.GRPC.Service == nil {
+		return
+	}
+	if *probe.GRPC.Service == "" {
+		probe.GRPC.Service = nil
+	}
+}
+
+// projectAutoCheckpointCaptureInputs returns the immutable Job and GMS inputs that
+// define the process and filesystem state captured by an automatic checkpoint.
+// It keeps pod metadata, scheduling, images, commands, args, env, resources,
+// mounts, devices, security context, probes, and volumes.
+func projectAutoCheckpointCaptureInputs(
+	spec nvidiacomv1alpha1.DynamoCheckpointSpec,
+) automaticCheckpointCaptureInputs {
+	inputs := automaticCheckpointCaptureInputs{
+		Job: *spec.Job.DeepCopy(),
+	}
+	if spec.GPUMemoryService != nil {
+		inputs.GPUMemoryService = spec.GPUMemoryService.DeepCopy()
+	}
+	if inputs.Job.TargetContainerName == "" {
+		inputs.Job.TargetContainerName = commonconsts.MainContainerName
+	}
+	if inputs.Job.ActiveDeadlineSeconds == nil {
+		defaultDeadline := int64(3600)
+		inputs.Job.ActiveDeadlineSeconds = &defaultDeadline
+	}
+	defaultAutoCheckpointGMS(inputs.GPUMemoryService)
+	pod := &inputs.Job.PodTemplateSpec.Spec
+	for _, containers := range [][]corev1.Container{
+		pod.InitContainers,
+		pod.Containers,
+	} {
+		for i := range containers {
+			normalizeCaptureContainer(&containers[i])
+		}
+	}
+	for i := range pod.EphemeralContainers {
+		container := (*corev1.Container)(&pod.EphemeralContainers[i].EphemeralContainerCommon)
+		normalizeCaptureContainer(container)
+	}
+	normalizeCaptureVolumes(pod.Volumes)
+	return inputs
+}
+
+func normalizeCaptureContainer(container *corev1.Container) {
+	normalizeCaptureProbe(container.LivenessProbe)
+	normalizeCaptureProbe(container.ReadinessProbe)
+	normalizeCaptureProbe(container.StartupProbe)
+	for i := range container.Ports {
+		if container.Ports[i].Protocol == "" {
+			container.Ports[i].Protocol = corev1.ProtocolTCP
+		}
+	}
+	for i := range container.Env {
+		if source := container.Env[i].ValueFrom; source != nil {
+			if ref := source.ConfigMapKeyRef; ref != nil {
+				normalizeFalsePointer(&ref.Optional)
+			}
+			if ref := source.SecretKeyRef; ref != nil {
+				normalizeFalsePointer(&ref.Optional)
+			}
+			if ref := source.FileKeyRef; ref != nil {
+				normalizeFalsePointer(&ref.Optional)
+			}
+		}
+	}
+	for i := range container.EnvFrom {
+		source := &container.EnvFrom[i]
+		if ref := source.ConfigMapRef; ref != nil {
+			normalizeFalsePointer(&ref.Optional)
+		}
+		if ref := source.SecretRef; ref != nil {
+			normalizeFalsePointer(&ref.Optional)
+		}
+	}
+}
+
+func normalizeCaptureVolumes(volumes []corev1.Volume) {
+	for i := range volumes {
+		source := &volumes[i].VolumeSource
+		if ref := source.ConfigMap; ref != nil {
+			normalizeFalsePointer(&ref.Optional)
+		}
+		if ref := source.Secret; ref != nil {
+			normalizeFalsePointer(&ref.Optional)
+		}
+		if projected := source.Projected; projected != nil {
+			for j := range projected.Sources {
+				projection := &projected.Sources[j]
+				if ref := projection.ConfigMap; ref != nil {
+					normalizeFalsePointer(&ref.Optional)
+				}
+				if ref := projection.Secret; ref != nil {
+					normalizeFalsePointer(&ref.Optional)
+				}
+			}
+		}
+		if rbd := source.RBD; rbd != nil {
+			if rbd.RBDPool == "" {
+				rbd.RBDPool = "rbd"
+			}
+			if rbd.RadosUser == "" {
+				rbd.RadosUser = "admin"
+			}
+			if rbd.Keyring == "" {
+				rbd.Keyring = "/etc/ceph/keyring"
+			}
+		}
+		if azureDisk := source.AzureDisk; azureDisk != nil {
+			if azureDisk.FSType == nil {
+				fsType := "ext4"
+				azureDisk.FSType = &fsType
+			}
+			normalizeFalsePointer(&azureDisk.ReadOnly)
+		}
+		if iscsi := source.ISCSI; iscsi != nil && iscsi.ISCSIInterface == "" {
+			iscsi.ISCSIInterface = "default"
+		}
+		if scaleIO := source.ScaleIO; scaleIO != nil {
+			if scaleIO.FSType == "" {
+				scaleIO.FSType = "xfs"
+			}
+			if scaleIO.StorageMode == "" {
+				scaleIO.StorageMode = "ThinProvisioned"
+			}
+		}
+	}
+}
+
+func normalizeFalsePointer(value **bool) {
+	if *value != nil && !**value {
+		*value = nil
+	}
+}
+
+func defaultAutoCheckpointGMS(spec *nvidiacomv1alpha1.GPUMemoryServiceSpec) {
+	if spec == nil {
+		return
+	}
+	if spec.Mode == "" {
+		spec.Mode = nvidiacomv1alpha1.GMSModeIntraPod
+	}
+	if spec.DeviceClassName == "" {
+		spec.DeviceClassName = dra.DefaultDeviceClassName
+	}
 }

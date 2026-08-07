@@ -16,11 +16,21 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
+)
+
+const (
+	changedAdmissionValue = "changed"
+	changedWorkerImage    = "worker:changed"
+	noncanonicalAutoValue = "false"
 )
 
 func TestDynamoCheckpointValidator_Validate(t *testing.T) {
@@ -43,13 +53,75 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint: dynamoCheckpointForAdmission(nil),
 		},
 		{
-			name:       "missing identity is rejected by source schema",
-			checkpoint: dynamoCheckpointForAdmission(nil),
-			mutateRequest: func(t *testing.T, request map[string]any) {
-				t.Helper()
-				delete(request["spec"].(map[string]any), "identity")
+			name: "standalone checkpoint requires identity",
+			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise the standalone compatibility requirement.
+				checkpoint.Spec.Identity = nil
+			}),
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
 			},
-			wantSchemaErr: "spec.identity: Required value",
+		},
+		{
+			name:       "automatic checkpoint omits identity",
+			checkpoint: automaticDynamoCheckpointForAdmission(nil),
+		},
+		{
+			name: "automatic checkpoint marker must be canonical",
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations[consts.CheckpointAutoAnnotation] = noncanonicalAutoValue
+			}),
+			wantWebhook: []string{
+				`metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Invalid value: "false": must be "true"`,
+			},
+		},
+		{
+			name: "empty automatic checkpoint marker is not standalone",
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations[consts.CheckpointAutoAnnotation] = ""
+			}),
+			wantWebhook: []string{
+				`metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Invalid value: "": must be "true"`,
+			},
+		},
+		{
+			name: "automatic checkpoint requires direct checkpoint ID",
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				delete(checkpoint.Labels, snapshotprotocol.CheckpointIDLabel)
+			}),
+			wantWebhook: []string{
+				"metadata.labels[nvidia.com/snapshot-checkpoint-id]: Required value: is required for a new DGD-managed automatic checkpoint",
+			},
+		},
+		{
+			name: "automatic checkpoint requires artifact version",
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				delete(checkpoint.Annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
+			}),
+			wantWebhook: []string{
+				"metadata.annotations[nvidia.com/snapshot-artifact-version]: Required value: is required for a new DGD-managed automatic checkpoint",
+			},
+		},
+		{
+			name: "automatic checkpoint rejects identity",
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				//nolint:staticcheck // SA1019: Exercise the automatic legacy-identity rejection.
+				checkpoint.Spec.Identity = &identity
+			}),
+			wantWebhook: []string{
+				"spec.identity: Forbidden: must be omitted for a new DGD-managed automatic checkpoint",
+			},
+		},
+		{
+			name:          "automatic checkpoint without identity cannot become standalone",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(nil),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				delete(checkpoint.Annotations, consts.CheckpointAutoAnnotation)
+			}),
+			wantWebhook: []string{
+				`metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Invalid value: "": ` + apivalidation.FieldImmutableErrorMsg,
+			},
 		},
 		{
 			name: "unsupported GMS mode is rejected by source schema",
@@ -170,6 +242,112 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint:    preparedDynamoCheckpointForAdmission(nil),
 		},
 		{
+			name: "unchanged legacy automatic identity update is accepted",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise a persisted legacy automatic checkpoint.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Preserve the persisted compatibility identity exactly.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+			}),
+		},
+		{
+			name:          "automatic checkpoint ID cannot be changed",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(nil),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Labels[snapshotprotocol.CheckpointIDLabel] = changedAdmissionValue
+			}),
+			wantWebhook: []string{
+				`metadata.labels[nvidia.com/snapshot-checkpoint-id]: Invalid value: "changed": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:          "automatic checkpoint ID cannot be removed",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(nil),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				delete(checkpoint.Labels, snapshotprotocol.CheckpointIDLabel)
+			}),
+			wantWebhook: []string{
+				`metadata.labels[nvidia.com/snapshot-checkpoint-id]: Invalid value: "": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name: "automatic marker cannot be removed from a legacy checkpoint",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise a persisted legacy automatic checkpoint.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Preserve the persisted legacy identity exactly.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+				delete(checkpoint.Annotations, consts.CheckpointAutoAnnotation)
+			}),
+			wantWebhook: []string{
+				`metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Invalid value: "": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:          "automatic marker value cannot be changed",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(nil),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations[consts.CheckpointAutoAnnotation] = noncanonicalAutoValue
+			}),
+			wantWebhook: []string{
+				`metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Invalid value: "false": ` + apivalidation.FieldImmutableErrorMsg,
+				`metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Invalid value: "false": must be "true"`,
+			},
+		},
+		{
+			name:          "automatic identity cannot be added on update",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(nil),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise automatic identity addition rejection.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+			}),
+			wantWebhook: []string{
+				"spec.identity: Forbidden: cannot be added to an existing DGD-managed automatic checkpoint",
+			},
+		},
+		{
+			name: "legacy automatic identity cannot be changed on update",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise a persisted legacy automatic checkpoint.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise legacy identity mutation rejection.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+				//nolint:staticcheck // SA1019: Exercise legacy identity mutation rejection.
+				checkpoint.Spec.Identity.Model = alternateAdmissionModel
+			}),
+			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
+		},
+		{
+			name: "legacy automatic identity cannot be removed on update",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise persisted legacy identity removal rejection.
+				checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(nil),
+			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
+		},
+		{
+			name:          "standalone checkpoint cannot become automatic",
+			oldCheckpoint: dynamoCheckpointForAdmission(nil),
+			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations = map[string]string{
+					consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+				}
+				checkpoint.Labels = map[string]string{
+					snapshotprotocol.CheckpointIDLabel: "checkpoint-id",
+				}
+			}),
+			wantWebhook: []string{
+				"metadata.annotations[nvidia.com/dynamo-auto-checkpoint]: Forbidden: cannot be added to an existing standalone checkpoint",
+			},
+		},
+		{
 			name:               "checkpoint feature gate applies on update",
 			oldCheckpoint:      dynamoCheckpointForAdmission(nil),
 			checkpoint:         dynamoCheckpointForAdmission(nil),
@@ -182,6 +360,7 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			name:          "identity immutability is enforced by source CEL",
 			oldCheckpoint: dynamoCheckpointForAdmission(nil),
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				//nolint:staticcheck // SA1019: Exercise standalone compatibility identity immutability.
 				checkpoint.Spec.Identity.Model = alternateAdmissionModel
 			}),
 			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
@@ -298,6 +477,239 @@ func TestDynamoCheckpointHandlerBoundaryErrorsRemainRegular(t *testing.T) {
 	}
 }
 
+func TestDynamoCheckpointHandlerAutomaticCaptureInputsAreImmutable(t *testing.T) {
+	ctx := features.WithGate(t.Context(), features.Gates{Checkpoint: true})
+	handler := NewDynamoCheckpointHandler()
+	base := canonicalAutomaticDynamoCheckpointForAdmission(nil)
+
+	tests := []struct {
+		name    string
+		mutate  func(*nvidiacomv1alpha1.DynamoCheckpoint)
+		wantErr string
+	}{
+		{
+			name: "image",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image = changedWorkerImage
+			},
+			wantErr: "spec.job",
+		},
+		{
+			name: "GMS field",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Spec.GPUMemoryService.DeviceClassName = "changed.example/gpu"
+			},
+			wantErr: "spec.gpuMemoryService",
+		},
+		{
+			name: "artifact version",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] = "2"
+			},
+			wantErr: snapshotprotocol.CheckpointArtifactVersionAnnotation,
+		},
+		{
+			name: "component label",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Labels[consts.KubeLabelDynamoComponent] = changedAdmissionValue
+			},
+			wantErr: consts.KubeLabelDynamoComponent,
+		},
+		{
+			name: "worker hash label",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Labels[consts.KubeLabelDynamoWorkerHash] = changedAdmissionValue
+			},
+			wantErr: consts.KubeLabelDynamoWorkerHash,
+		},
+		{
+			name: "DGD label",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Labels[consts.KubeLabelDynamoGraphDeploymentName] = changedAdmissionValue
+			},
+			wantErr: consts.KubeLabelDynamoGraphDeploymentName,
+		},
+		{
+			name: "owner replacement",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.OwnerReferences[0].UID = "replacement"
+			},
+			wantErr: "metadata.ownerReferences",
+		},
+		{
+			name: "owner removal without Retain",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.OwnerReferences = nil
+			},
+			wantErr: "metadata.ownerReferences",
+		},
+		{
+			name: "deletion policy",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+					string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+			},
+		},
+		{
+			name: "status and finalizer",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
+				checkpoint.Finalizers = nil
+			},
+		},
+		{
+			name: "Retain detach cannot hide a capture change",
+			mutate: func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+					string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+				checkpoint.OwnerReferences = nil
+				checkpoint.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image = changedWorkerImage
+			},
+			wantErr: "spec.job",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Apply one automatic checkpoint update mutation")
+			current := base.DeepCopy()
+			tt.mutate(current)
+
+			t.Log("Validate the update against immutable capture authority")
+			_, err := handler.ValidateUpdate(ctx, base.DeepCopy(), current)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	t.Run("Retain finalization atomically detaches owner and DGD label", func(t *testing.T) {
+		t.Log("Build the exact Retain detach emitted by DGD finalization")
+		oldCheckpoint := base.DeepCopy()
+		oldCheckpoint.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+			string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+		current := oldCheckpoint.DeepCopy()
+		current.OwnerReferences = nil
+		delete(current.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+
+		t.Log("Validate the atomic owner and DGD-label removal")
+		_, err := handler.ValidateUpdate(ctx, oldCheckpoint, current)
+		require.NoError(t, err)
+	})
+
+	t.Run("Retain to Delete cannot detach ownership", func(t *testing.T) {
+		t.Log("Build a policy flip combined with the finalization detach")
+		oldCheckpoint := base.DeepCopy()
+		oldCheckpoint.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+			string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+		current := oldCheckpoint.DeepCopy()
+		current.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+			string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete)
+		current.OwnerReferences = nil
+		delete(current.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+
+		_, err := handler.ValidateUpdate(ctx, oldCheckpoint, current)
+		require.ErrorContains(t, err, "metadata.ownerReferences")
+		require.ErrorContains(t, err, consts.KubeLabelDynamoGraphDeploymentName)
+	})
+
+	t.Run("Retain owner replacement remains forbidden", func(t *testing.T) {
+		t.Log("Build a retained checkpoint request that replaces its controller owner")
+		oldCheckpoint := base.DeepCopy()
+		oldCheckpoint.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+			string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+		current := oldCheckpoint.DeepCopy()
+		current.OwnerReferences[0].UID = "replacement"
+
+		_, err := handler.ValidateUpdate(ctx, oldCheckpoint, current)
+		require.ErrorContains(t, err, "metadata.ownerReferences")
+	})
+}
+
+func TestDynamoCheckpointHandlerTerminatingUpdatesEnforceAutomaticAuthority(t *testing.T) {
+	handler := NewDynamoCheckpointHandler()
+	disabledCtx := features.WithGate(t.Context(), features.Gates{})
+	terminating := func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+		checkpoint.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	}
+	legacy := canonicalAutomaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+		//nolint:staticcheck // SA1019: Build terminating persisted legacy automatic state.
+		checkpoint.Spec.Identity = ptr.To(admissionCheckpointIdentity())
+	})
+
+	tests := []struct {
+		name    string
+		old     *nvidiacomv1alpha1.DynamoCheckpoint
+		current *nvidiacomv1alpha1.DynamoCheckpoint
+		wantErr string
+	}{
+		{
+			name: "unchanged authority permits finalizer removal despite disabled gate and invalid shape",
+			old: canonicalAutomaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Finalizers = []string{"test.example/finalizer"}
+				checkpoint.Spec.GPUMemoryService.Enabled = true
+			}),
+			current: canonicalAutomaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				terminating(checkpoint)
+				checkpoint.Spec.GPUMemoryService.Enabled = true
+			}),
+		},
+		{
+			name: "marker change",
+			old:  canonicalAutomaticDynamoCheckpointForAdmission(nil),
+			current: canonicalAutomaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				terminating(checkpoint)
+				checkpoint.Annotations[consts.CheckpointAutoAnnotation] = noncanonicalAutoValue
+			}),
+			wantErr: consts.CheckpointAutoAnnotation,
+		},
+		{
+			name: "direct ID removal",
+			old:  canonicalAutomaticDynamoCheckpointForAdmission(nil),
+			current: canonicalAutomaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				terminating(checkpoint)
+				delete(checkpoint.Labels, snapshotprotocol.CheckpointIDLabel)
+			}),
+			wantErr: snapshotprotocol.CheckpointIDLabel,
+		},
+		{
+			name: "capture input change",
+			old:  canonicalAutomaticDynamoCheckpointForAdmission(nil),
+			current: canonicalAutomaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				terminating(checkpoint)
+				checkpoint.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image = changedWorkerImage
+			}),
+			wantErr: "spec.job",
+		},
+		{
+			name: "legacy identity change",
+			old:  legacy.DeepCopy(),
+			current: func() *nvidiacomv1alpha1.DynamoCheckpoint {
+				checkpoint := legacy.DeepCopy()
+				terminating(checkpoint)
+				//nolint:staticcheck // SA1019: Exercise terminating legacy identity mutation rejection.
+				checkpoint.Spec.Identity.Model = alternateAdmissionModel
+				return checkpoint
+			}(),
+			wantErr: "cannot be changed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Submit one terminating checkpoint update")
+			_, err := handler.ValidateUpdate(disabledCtx, tt.old, tt.current)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
 func dynamoCheckpointForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoCheckpoint),
 ) *nvidiacomv1alpha1.DynamoCheckpoint {
@@ -308,10 +720,7 @@ func dynamoCheckpointForAdmission(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "test-checkpoint", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:            "Qwen/Qwen3-0.6B",
-				BackendFramework: "vllm",
-			},
+			Identity: ptr.To(admissionCheckpointIdentity()),
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -322,6 +731,85 @@ func dynamoCheckpointForAdmission(
 			},
 		},
 	}
+	if mutate != nil {
+		mutate(checkpoint)
+	}
+	return checkpoint
+}
+
+func admissionCheckpointIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
+	return nvidiacomv1alpha1.DynamoCheckpointIdentity{
+		Model:            "Qwen/Qwen3-0.6B",
+		BackendFramework: "vllm",
+	}
+}
+
+func automaticDynamoCheckpointForAdmission(
+	mutate func(*nvidiacomv1alpha1.DynamoCheckpoint),
+) *nvidiacomv1alpha1.DynamoCheckpoint {
+	checkpoint := dynamoCheckpointForAdmission(nil)
+	checkpoint.Annotations = map[string]string{
+		consts.CheckpointAutoAnnotation:                      consts.KubeLabelValueTrue,
+		snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+	}
+	checkpoint.Labels = map[string]string{
+		snapshotprotocol.CheckpointIDLabel: "checkpoint-id",
+	}
+	//nolint:staticcheck // SA1019: Canonical automatic checkpoints omit compatibility identity.
+	checkpoint.Spec.Identity = nil
+	if mutate != nil {
+		mutate(checkpoint)
+	}
+	return checkpoint
+}
+
+func canonicalAutomaticDynamoCheckpointForAdmission(
+	mutate func(*nvidiacomv1alpha1.DynamoCheckpoint),
+) *nvidiacomv1alpha1.DynamoCheckpoint {
+	runAsUser := int64(1000)
+	checkpoint := automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+		checkpoint.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+			string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete)
+		checkpoint.Labels[consts.KubeLabelDynamoGraphDeploymentName] = "test-dgd"
+		checkpoint.Labels[consts.KubeLabelDynamoComponent] = "worker"
+		checkpoint.Labels[consts.KubeLabelDynamoWorkerHash] = "worker-hash"
+		checkpoint.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "nvidia.com/v1beta1",
+			Kind:       "DynamoGraphDeployment",
+			Name:       "test-dgd",
+			UID:        "dgd-uid",
+			Controller: ptr.To(true),
+		}}
+		checkpoint.Finalizers = []string{"nvidia.com/dynamocheckpoint"}
+		checkpoint.Spec.Job = nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+			TargetContainerName:   consts.MainContainerName,
+			ActiveDeadlineSeconds: ptr.To[int64](3600),
+			PodTemplateSpec: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					SecurityContext: &corev1.PodSecurityContext{RunAsUser: &runAsUser},
+					Containers: []corev1.Container{{
+						Name:         consts.MainContainerName,
+						Image:        "worker:expected",
+						Command:      []string{"python3"},
+						Args:         []string{"-m", "dynamo.vllm"},
+						Env:          []corev1.EnvVar{{Name: "MODE", Value: "checkpoint"}},
+						VolumeMounts: []corev1.VolumeMount{{Name: "runtime", MountPath: "/runtime"}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "runtime",
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						},
+					}},
+				},
+			},
+		}
+		checkpoint.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+			Enabled:         false,
+			Mode:            nvidiacomv1alpha1.GMSModeIntraPod,
+			DeviceClassName: "gpu.nvidia.com",
+		}
+	})
 	if mutate != nil {
 		mutate(checkpoint)
 	}

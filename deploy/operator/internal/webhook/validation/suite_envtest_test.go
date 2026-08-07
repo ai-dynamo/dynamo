@@ -186,6 +186,8 @@ func admissionResource(t *testing.T, kind string) string {
 	switch kind {
 	case "DynamoComponentDeployment":
 		return "dynamocomponentdeployments"
+	case "DynamoCheckpoint":
+		return "dynamocheckpoints"
 	case "DynamoGraphDeployment":
 		return "dynamographdeployments"
 	case "DynamoGraphDeploymentRequest":
@@ -202,6 +204,8 @@ func admissionGVK(t *testing.T, object runtime.Object) schema.GroupVersionKind {
 		return gvk
 	}
 	switch object.(type) {
+	case *nvidiacomv1alpha1.DynamoCheckpoint:
+		return nvidiacomv1alpha1.GroupVersion.WithKind("DynamoCheckpoint")
 	case *nvidiacomv1alpha1.DynamoComponentDeployment:
 		return nvidiacomv1alpha1.DynamoComponentDeploymentGVK
 	case *nvidiacomv1beta1.DynamoComponentDeployment:

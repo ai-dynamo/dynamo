@@ -6,6 +6,7 @@ package controller
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -13,6 +14,7 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
@@ -60,9 +62,15 @@ func buildCheckpointCleanupJob(
 			}},
 		},
 		Spec: batchv1.JobSpec{
+			Parallelism:             ptr.To[int32](1),
+			Completions:             ptr.To[int32](1),
 			BackoffLimit:            &backoffLimit,
 			ActiveDeadlineSeconds:   &activeDeadlineSeconds,
 			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
+			CompletionMode:          ptr.To(batchv1.NonIndexedCompletion),
+			Suspend:                 ptr.To(false),
+			ManualSelector:          ptr.To(false),
+			ManagedBy:               ptr.To(batchv1.JobControllerName),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -105,6 +113,63 @@ esac
 			},
 		},
 	}, nil
+}
+
+func verifyCheckpointCleanupJob(
+	actual, expected *batchv1.Job,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) error {
+	actualController := metav1.GetControllerOf(actual)
+	expectedController := metav1.GetControllerOf(expected)
+	if actualController == nil ||
+		expectedController == nil ||
+		actualController.UID != ckpt.UID ||
+		!metav1.IsControlledBy(actual, ckpt) ||
+		!equality.Semantic.DeepEqual(actualController, expectedController) {
+		return fmt.Errorf("controller owner does not match checkpoint UID %q", ckpt.UID)
+	}
+	if actual.Labels[snapshotprotocol.CheckpointIDLabel] !=
+		expected.Labels[snapshotprotocol.CheckpointIDLabel] ||
+		actual.Spec.Template.Labels[snapshotprotocol.CheckpointIDLabel] !=
+			expected.Spec.Template.Labels[snapshotprotocol.CheckpointIDLabel] {
+		return fmt.Errorf("checkpoint ID labels differ")
+	}
+	if !ptr.Equal(actual.Spec.BackoffLimit, expected.Spec.BackoffLimit) ||
+		!ptr.Equal(actual.Spec.ActiveDeadlineSeconds, expected.Spec.ActiveDeadlineSeconds) ||
+		ptr.Deref(actual.Spec.Completions, int32(1)) != 1 ||
+		ptr.Deref(actual.Spec.Parallelism, int32(1)) != 1 ||
+		ptr.Deref(actual.Spec.Suspend, false) ||
+		ptr.Deref(actual.Spec.ManualSelector, false) ||
+		ptr.Deref(actual.Spec.CompletionMode, batchv1.NonIndexedCompletion) != batchv1.NonIndexedCompletion ||
+		ptr.Deref(actual.Spec.ManagedBy, batchv1.JobControllerName) != batchv1.JobControllerName ||
+		actual.Spec.Template.Spec.RestartPolicy != expected.Spec.Template.Spec.RestartPolicy {
+		return fmt.Errorf("job execution policy differs")
+	}
+	if len(actual.Spec.Template.Spec.Volumes) != len(expected.Spec.Template.Spec.Volumes) ||
+		len(actual.Spec.Template.Spec.Containers) != len(expected.Spec.Template.Spec.Containers) {
+		return fmt.Errorf("cleanup pod shape differs")
+	}
+
+	actualVolume := actual.Spec.Template.Spec.Volumes[0]
+	expectedVolume := expected.Spec.Template.Spec.Volumes[0]
+	if actualVolume.Name != expectedVolume.Name ||
+		actualVolume.PersistentVolumeClaim == nil ||
+		expectedVolume.PersistentVolumeClaim == nil ||
+		*actualVolume.PersistentVolumeClaim != *expectedVolume.PersistentVolumeClaim {
+		return fmt.Errorf("cleanup PVC differs")
+	}
+
+	actualContainer := actual.Spec.Template.Spec.Containers[0]
+	expectedContainer := expected.Spec.Template.Spec.Containers[0]
+	if actualContainer.Name != expectedContainer.Name ||
+		actualContainer.Image != expectedContainer.Image ||
+		!slices.Equal(actualContainer.Command, expectedContainer.Command) ||
+		!slices.Equal(actualContainer.Args, expectedContainer.Args) ||
+		!slices.Equal(actualContainer.Env, expectedContainer.Env) ||
+		!slices.Equal(actualContainer.VolumeMounts, expectedContainer.VolumeMounts) {
+		return fmt.Errorf("cleanup command or target differs")
+	}
+	return nil
 }
 
 func validateCheckpointIDForCleanup(checkpointID string) error {

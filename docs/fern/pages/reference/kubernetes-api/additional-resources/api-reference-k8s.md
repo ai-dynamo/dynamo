@@ -268,9 +268,8 @@ It represents a container checkpoint that can be used to restore pods to a warm 
 
 
 
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: legacy identity metadata. Keep it only for standalone v1alpha1
+checkpoints; DGD-managed automatic checkpoints omit spec.identity.
 
 
 
@@ -344,7 +343,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: required by v1alpha1 for standalone checkpoints. Auto<br />checkpoints synthesize it; checkpointRef restores use the referenced CR. |  | Required: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: required for standalone v1alpha1 checkpoints and omitted for<br />DGD-managed automatic checkpoints. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService records checkpoint-time GPU Memory Service metadata for<br />a prepared checkpoint Job pod. The DynamoCheckpoint controller does not<br />inject GMS/DRA resources; auto-created checkpoints from<br />DynamoGraphDeployment prepare the pod template before creating this object.<br />Manual GMS-enabled checkpoints must provide the prepared pod template; the<br />controller fails the checkpoint if the required GMS/DRA wiring is missing.<br />This field is intentionally outside spec.identity, so it does not affect<br />the checkpoint identity hash or deduplication. |  | Optional: \{\} <br /> |
 | `job` _[DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)_ | Job defines the configuration for the checkpoint creation Job |  | Required: \{\} <br /> |
 

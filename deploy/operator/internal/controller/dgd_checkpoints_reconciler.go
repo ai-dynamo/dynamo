@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -172,9 +173,9 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			}
 			info.Exists = true
 			info.CheckpointName = ckpt.Name
-			info.Hash, err = checkpoint.CheckpointID(ckpt)
+			info.Hash, err = checkpoint.AutomaticCheckpointID(ckpt)
 			if err != nil {
-				return dgdCheckpointsResult{}, fmt.Errorf("failed to resolve checkpoint ID for component %s: %w", componentName, err)
+				return dgdCheckpointsResult{}, fmt.Errorf("failed to resolve automatic checkpoint ID for component %s: %w", componentName, err)
 			}
 			if info.GPUMemoryService == nil {
 				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
@@ -202,15 +203,74 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	componentName string,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	checkpointConfig := dynamo.GetCheckpoint(component)
-	if checkpointConfig == nil {
-		return nil, fmt.Errorf("checkpoint config is required")
+	expected, claimTemplateName, gpuCount, deviceClassName, err := r.expectedCheckpointCR(
+		r.Scheme(),
+		dynamoDeployment,
+		componentName,
+		component,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if expected.Spec.GPUMemoryService != nil && expected.Spec.GPUMemoryService.Enabled {
+		if err := r.syncCheckpointGMSResourceClaimTemplate(
+			ctx,
+			dynamoDeployment,
+			claimTemplateName,
+			gpuCount,
+			deviceClassName,
+		); err != nil {
+			return nil, err
+		}
 	}
 
+	ckpt, err := checkpoint.CreateOrGetAutoCheckpoint(ctx, r.Client, expected)
+	if err != nil {
+		return nil, err
+	}
+	if expected.Spec.GPUMemoryService != nil && expected.Spec.GPUMemoryService.Enabled {
+		if err := r.adoptCheckpointGMSResourceClaimTemplate(ctx, ckpt, claimTemplateName); err != nil {
+			return nil, err
+		}
+	}
+	return ckpt, nil
+}
+
+// expectedCheckpointCR constructs the operator-owned checkpoint object without
+// reading or writing Kubernetes resources.
+//
+//nolint:gocyclo
+func (r *dgdCheckpointsReconciler) expectedCheckpointCR(
+	scheme *runtime.Scheme,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, string, int, string, error) {
 	workerHash, err := checkpointWorkerHashForComponent(dynamoDeployment, componentName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+		return nil, "", 0, "", fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 	}
+	return r.expectedCheckpointCRForWorkerHash(
+		scheme,
+		dynamoDeployment,
+		componentName,
+		component,
+		workerHash,
+	)
+}
+
+func (r *dgdCheckpointsReconciler) expectedCheckpointCRForWorkerHash(
+	scheme *runtime.Scheme,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	workerHash string,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, string, int, string, error) {
+	checkpointConfig := dynamo.GetCheckpoint(component)
+	if checkpointConfig == nil {
+		return nil, "", 0, "", fmt.Errorf("checkpoint config is required")
+	}
+
 	checkpointID := checkpoint.DGDCheckpointID(
 		dynamoDeployment.Namespace,
 		dynamoDeployment.Name,
@@ -221,18 +281,10 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 
 	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
-	}
-	if (backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop) &&
-		checkpointConfig.Identity != nil &&
-		checkpointConfig.Identity.BackendFramework != "" {
-		backendFramework, err = dynamo.ParseBackendFramework(checkpointConfig.Identity.BackendFramework)
-		if err != nil {
-			return nil, fmt.Errorf("invalid legacy checkpoint identity backend framework for component %s: %w", componentName, err)
-		}
+		return nil, "", 0, "", fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 	}
 	if backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop {
-		return nil, fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
+		return nil, "", 0, "", fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
 	}
 
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
@@ -242,7 +294,7 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		backendFramework,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
+		return nil, "", 0, "", fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 	}
 	if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dynamoDeployment.Annotations) &&
 		podTemplate.Spec.ServiceAccountName == "" {
@@ -263,7 +315,7 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	}
 	targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 	if err != nil {
-		return nil, err
+		return nil, "", 0, "", err
 	}
 	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
@@ -274,27 +326,20 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		}
 	}
 	var checkpointGMSClaimTemplateName string
+	var checkpointGMSGPUCount int
+	var checkpointGMSDeviceClassName string
 	if gmsSpec != nil && gmsSpec.Enabled {
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
-		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
+		checkpointGMSGPUCount, err = dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {
-			return nil, fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
+			return nil, "", 0, "", fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
 		}
-		checkpointGMSDeviceClassName := gmsSpec.DeviceClassName
+		checkpointGMSDeviceClassName = gmsSpec.DeviceClassName
 		if checkpointGMSDeviceClassName == "" {
 			checkpointGMSDeviceClassName = dra.DefaultDeviceClassName
 		}
-		if err := r.syncCheckpointGMSResourceClaimTemplate(
-			ctx,
-			dynamoDeployment,
-			checkpointGMSClaimTemplateName,
-			checkpointGMSGPUCount,
-			checkpointGMSDeviceClassName,
-		); err != nil {
-			return nil, err
-		}
 		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, checkpointID, gmsSpec); err != nil {
-			return nil, err
+			return nil, "", 0, "", err
 		}
 	}
 	deletionPolicy := nvidiacomv1alpha1.CheckpointDeletionPolicy(checkpointConfig.DeletionPolicy)
@@ -302,20 +347,10 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
 	}
 
-	ckpt, err := checkpoint.CreateOrGetAutoCheckpoint(
-		ctx,
-		r.Client,
+	ckpt, err := checkpoint.ExpectedAutoCheckpoint(
+		scheme,
 		dynamoDeployment.Namespace,
 		checkpointID,
-		nvidiacomv1alpha1.DynamoCheckpointIdentity{
-			Model:            fmt.Sprintf("%s/%s", dynamoDeployment.Namespace, dynamoDeployment.Name),
-			BackendFramework: string(backendFramework),
-			ExtraParameters: map[string]string{
-				"dgdUID":       string(dynamoDeployment.UID),
-				"component":    componentName,
-				"checkpointID": checkpointID,
-			},
-		},
 		podTemplate,
 		targetContainerName,
 		deletionPolicy,
@@ -323,14 +358,9 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		dynamoDeployment,
 	)
 	if err != nil {
-		return nil, err
+		return nil, "", 0, "", err
 	}
-	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := r.adoptCheckpointGMSResourceClaimTemplate(ctx, ckpt, checkpointGMSClaimTemplateName); err != nil {
-			return nil, err
-		}
-	}
-	return ckpt, nil
+	return ckpt, checkpointGMSClaimTemplateName, checkpointGMSGPUCount, checkpointGMSDeviceClassName, nil
 }
 
 func checkpointGMSResourceClaimTemplateName(checkpointID string) string {
@@ -469,20 +499,139 @@ func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(
 	}
 	for i := range checkpoints.Items {
 		ckpt := &checkpoints.Items[i]
-		if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		if !checkpoint.ClaimsAutomaticCheckpointAuthority(ckpt) {
 			continue
 		}
-		if ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
+		deletionPolicy, err := currentDGDCheckpointDeletionPolicy(dgd, ckpt)
+		if err != nil {
+			return err
+		}
+		if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain {
+			ckpt, err = r.syncRetainedAutoCheckpointPolicy(ctx, ckpt)
+			if err != nil {
+				return err
+			}
+			if ckpt == nil {
+				continue
+			}
 			if err := r.detachRetainedAutoCheckpoint(ctx, ckpt); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := r.Delete(ctx, ckpt); err != nil && !apierrors.IsNotFound(err) {
+		uid := ckpt.UID
+		if err := r.Delete(
+			ctx,
+			ckpt,
+			client.Preconditions{UID: &uid},
+		); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
 		}
 	}
 	return nil
+}
+
+func currentDGDCheckpointDeletionPolicy(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) (nvidiacomv1alpha1.CheckpointDeletionPolicy, error) {
+	if err := checkpoint.ValidateAutomaticCheckpointClaim(ckpt); err != nil {
+		return "", fmt.Errorf(
+			"refuse to finalize automatic checkpoint %s/%s with invalid authority: %w",
+			ckpt.Namespace,
+			ckpt.Name,
+			err,
+		)
+	}
+	componentName := ckpt.Labels[consts.KubeLabelDynamoComponent]
+	component := dgd.GetComponentByName(componentName)
+	checkpointConfig := dynamo.GetCheckpoint(component)
+	if componentName == "" ||
+		checkpointConfig == nil ||
+		(checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != "") {
+		return "", fmt.Errorf(
+			"refuse to finalize automatic checkpoint %s/%s: component %q is missing or does not define an automatic checkpoint",
+			ckpt.Namespace,
+			ckpt.Name,
+			componentName,
+		)
+	}
+
+	workerHash := ckpt.Labels[consts.KubeLabelDynamoWorkerHash]
+	expectedID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		componentName,
+		workerHash,
+	)
+	checkpointID, err := checkpoint.AutomaticCheckpointID(ckpt)
+	if err != nil {
+		return "", err
+	}
+	if workerHash == "" ||
+		checkpointID != expectedID ||
+		ckpt.Name != "checkpoint-"+expectedID {
+		return "", fmt.Errorf(
+			"refuse to finalize automatic checkpoint %s/%s: source identity does not match DGD %s/%s component %q",
+			ckpt.Namespace,
+			ckpt.Name,
+			dgd.Namespace,
+			dgd.Name,
+			componentName,
+		)
+	}
+	if owner := metav1.GetControllerOf(ckpt); owner != nil &&
+		(owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() ||
+			owner.Kind != consts.ResourceTypeDynamoGraphDeployment ||
+			owner.Name != dgd.Name ||
+			owner.UID != dgd.UID) {
+		return "", fmt.Errorf(
+			"refuse to finalize automatic checkpoint %s/%s: controller owner does not match DGD %s/%s",
+			ckpt.Namespace,
+			ckpt.Name,
+			dgd.Namespace,
+			dgd.Name,
+		)
+	}
+
+	policy := nvidiacomv1alpha1.CheckpointDeletionPolicy(checkpointConfig.DeletionPolicy)
+	if policy == "" {
+		policy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
+	}
+	return policy, nil
+}
+
+func (r *dgdCheckpointsReconciler) syncRetainedAutoCheckpointPolicy(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	retainPolicy := string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+	if ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation] == retainPolicy {
+		return ckpt, nil
+	}
+
+	updated := ckpt.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = map[string]string{}
+	}
+	updated.Annotations[consts.CheckpointDeletionPolicyAnnotation] = retainPolicy
+	patch := client.MergeFromWithOptions(
+		ckpt,
+		client.MergeFromWithOptimisticLock{},
+	)
+	if err := r.Patch(ctx, updated, patch); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"synchronize retained auto checkpoint policy %s/%s: %w",
+			ckpt.Namespace,
+			ckpt.Name,
+			err,
+		)
+	}
+	return updated, nil
 }
 
 func (r *dgdCheckpointsReconciler) detachRetainedAutoCheckpoint(
@@ -498,7 +647,11 @@ func (r *dgdCheckpointsReconciler) detachRetainedAutoCheckpoint(
 		equality.Semantic.DeepEqual(ckpt.Labels, updated.Labels) {
 		return nil
 	}
-	if err := r.Patch(ctx, updated, client.MergeFrom(ckpt)); err != nil && !apierrors.IsNotFound(err) {
+	patch := client.MergeFromWithOptions(
+		ckpt,
+		client.MergeFromWithOptimisticLock{},
+	)
+	if err := r.Patch(ctx, updated, patch); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("detach retained auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
 	}
 	return nil
@@ -516,7 +669,49 @@ func checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 	if err != nil {
 		return "", err
 	}
-	return activeWorkerHashForDCDGeneration(dgd, desired), nil
+	rolloutWorkerHash := activeWorkerHashForDCDGeneration(dgd, desired)
+	return checkpointWorkerGenerationKey(dgd, rolloutWorkerHash)
+}
+
+// checkpointWorkerGenerationKey maps a rollout-facing worker hash to the
+// canonical v2 key for the same worker generation. Rollout metadata must keep
+// recognizing historical v1 hashes and the legacy sentinel so existing DCDs
+// retain their names and ownership. Checkpoint IDs must not use those aliases:
+// the v1 algorithm included deprecated checkpoint identity.
+func checkpointWorkerGenerationKey(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	rolloutWorkerHash string,
+) (string, error) {
+	desired, err := desiredWorkerHashes(dgd)
+	if err != nil {
+		return "", err
+	}
+	current := currentWorkerHashes(dgd)
+
+	switch {
+	case rolloutWorkerHash == desired.v2:
+		return desired.v2, nil
+	case current.v2 != "" && rolloutWorkerHash == current.v2:
+		return current.v2, nil
+	case current.v2 != "" && rolloutWorkerHash == current.v1:
+		// Existing dual annotations are aliases for one active generation.
+		// Check this before desired.v1: during a rollout desired.v1 can retain
+		// the old v1 alias while desired.v2 names the next generation.
+		return current.v2, nil
+	case rolloutWorkerHash == desired.v1:
+		return desired.v2, nil
+	case current.v1 == consts.LegacyWorkerHash &&
+		rolloutWorkerHash == consts.LegacyWorkerHash:
+		// The sentinel carries no digest to translate. The migration path
+		// renders the replacement generation from the current DGD spec, whose
+		// v2 hash is the identity-independent key.
+		return desired.v2, nil
+	default:
+		return "", fmt.Errorf(
+			"worker hash %q does not identify the current or generated worker generation",
+			rolloutWorkerHash,
+		)
+	}
 }
 
 // buildCheckpointJobPodTemplate builds a checkpoint job template from the same

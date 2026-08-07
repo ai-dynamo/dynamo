@@ -28,16 +28,9 @@ func buildCheckpointJob(
 	jobName string,
 ) (*batchv1.Job, error) {
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
-	hash := ckpt.Status.CheckpointID
-	if hash == "" {
-		hash = ckpt.Status.IdentityHash
-	}
-	if hash == "" {
-		var err error
-		hash, err = checkpoint.CheckpointID(ckpt)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
-		}
+	hash, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 	}
 
 	if podTemplate.Labels == nil {

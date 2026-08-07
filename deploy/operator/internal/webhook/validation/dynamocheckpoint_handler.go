@@ -61,9 +61,6 @@ func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, ne
 		return nil, err
 	}
 	logger.Info("validate update", "name", ckpt.Name, "namespace", ckpt.Namespace)
-	if !ckpt.DeletionTimestamp.IsZero() {
-		return nil, nil
-	}
 	oldCheckpoint, err := castToDynamoCheckpoint(oldObj)
 	if err != nil {
 		return nil, err

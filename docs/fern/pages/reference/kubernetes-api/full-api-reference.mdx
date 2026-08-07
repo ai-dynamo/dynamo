@@ -282,9 +282,8 @@ See [DynamoCheckpointStatus](#dynamocheckpointstatus).
 </Accordion>
 
 <Accordion id="dynamocheckpointidentity" title="DynamoCheckpointIdentity">
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: legacy identity metadata. Keep it only for standalone v1alpha1
+checkpoints; DGD-managed automatic checkpoints omit spec.identity.
 
 
 **Kind:** `type`
@@ -395,10 +394,10 @@ DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 **Kind:** `type`
 **Appears in:** [DynamoCheckpoint](#dynamocheckpoint)
 
-<ParamField path="identity" type="DynamoCheckpointIdentity" required={true}>
-Deprecated: required by v1alpha1 for standalone checkpoints. Auto&lt;br /&gt;checkpoints synthesize it; checkpointRef restores use the referenced CR.
+<ParamField path="identity" type="DynamoCheckpointIdentity">
+Deprecated: required for standalone v1alpha1 checkpoints and omitted for&lt;br /&gt;DGD-managed automatic checkpoints.
 See [DynamoCheckpointIdentity](#dynamocheckpointidentity).
-**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
 <ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">

@@ -91,19 +91,24 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("Reconciling DynamoCheckpoint", "name", ckpt.Name, "phase", ckpt.Status.Phase)
 
-	if ckpt.GetDeletionTimestamp().IsZero() {
-		if ckpt.Annotations != nil &&
-			ckpt.Annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue &&
-			!commonController.ContainsFinalizer(ckpt) {
-			commonController.AddFinalizer(ckpt)
-			if err := r.Update(ctx, ckpt); err != nil {
-				logger.Error(err, "Failed to add finalizer")
-				return ctrl.Result{}, err
-			}
-		}
-	} else {
+	if !ckpt.GetDeletionTimestamp().IsZero() {
 		if commonController.ContainsFinalizer(ckpt) {
-			if err := r.FinalizeResource(ctx, ckpt); err != nil {
+			claimErr := checkpoint.ValidateAutomaticCheckpointClaim(ckpt)
+			if claimErr != nil &&
+				checkpoint.ClaimsAutomaticCheckpointAuthority(ckpt) {
+				logger.Error(
+					claimErr,
+					"Skipping automatic checkpoint artifact cleanup because authority is invalid",
+				)
+				if r.Recorder != nil {
+					r.Recorder.Event(
+						ckpt,
+						corev1.EventTypeWarning,
+						"InvalidAutomaticCheckpointAuthority",
+						"Skipped artifact cleanup because automatic checkpoint authority is invalid",
+					)
+				}
+			} else if err := r.FinalizeResource(ctx, ckpt); err != nil {
 				if errors.Is(err, errCheckpointCleanupPending) {
 					logger.Info("Checkpoint cleanup pending", "reason", err.Error())
 					return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -120,22 +125,38 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	if err := checkpoint.ValidateAutomaticCheckpointClaim(ckpt); err != nil {
+		logger.Error(err, "Invalid automatic DynamoCheckpoint claim")
+		return ctrl.Result{}, fmt.Errorf("invalid automatic checkpoint claim: %w", err)
+	}
+
+	if checkpoint.IsAutomaticCheckpoint(ckpt) &&
+		!commonController.ContainsFinalizer(ckpt) {
+		commonController.AddFinalizer(ckpt)
+		if err := r.Update(ctx, ckpt); err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+	}
+
 	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
 		logger.Error(err, "Failed to resolve checkpoint ID")
 		return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 	}
 
-	if ckpt.Labels == nil {
-		ckpt.Labels = map[string]string{}
-	}
-	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
-		ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = checkpointID
-		if err := r.Update(ctx, ckpt); err != nil {
-			return ctrl.Result{}, err
+	if !checkpoint.IsAutomaticCheckpoint(ckpt) {
+		if ckpt.Labels == nil {
+			ckpt.Labels = map[string]string{}
 		}
-		if err := r.Get(ctx, req.NamespacedName, ckpt); err != nil {
-			return ctrl.Result{}, err
+		if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
+			ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = checkpointID
+			if err := r.Update(ctx, ckpt); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.Get(ctx, req.NamespacedName, ckpt); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -242,16 +263,9 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}
 
-	hash := ckpt.Status.CheckpointID
-	if hash == "" {
-		hash = ckpt.Status.IdentityHash
-	}
-	if hash == "" {
-		var err error
-		hash, err = checkpoint.CheckpointID(ckpt)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
-		}
+	hash, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 	}
 
 	jobName := snapshotprotocol.GetCheckpointJobName(
@@ -262,7 +276,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	// Older controllers could create the deterministic Job and crash before recording Creating.
 	// Recover an owned Job without syncing its immutable spec.
 	existingJob := &batchv1.Job{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: jobName}, existingJob)
+	err = r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: jobName}, existingJob)
 	interruptedCreate := err == nil && metav1.IsControlledBy(existingJob, ckpt)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
@@ -627,18 +641,22 @@ func checkpointJobComplete(job *batchv1.Job) bool {
 
 //nolint:gocyclo
 func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
-	logger := log.FromContext(ctx)
-	if ckpt == nil || ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+	if !checkpoint.ClaimsAutomaticCheckpointAuthority(ckpt) {
 		return nil
 	}
-	if r.Config == nil {
-		logger.Info("Automatic checkpoint artifact cleanup skipped because operator configuration is not available")
+	if err := checkpoint.ValidateAutomaticCheckpointClaim(ckpt); err != nil {
 		return nil
 	}
-
-	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	checkpointID, err := checkpoint.AutomaticCheckpointID(ckpt)
 	if err != nil {
 		return err
+	}
+	if r.Config == nil {
+		return fmt.Errorf(
+			"automatic checkpoint %s/%s cleanup requires operator configuration",
+			ckpt.Namespace,
+			ckpt.Name,
+		)
 	}
 
 	storage, ok, err := checkpoint.StorageFromConfig(r.Config.Checkpoint.Storage)
@@ -676,8 +694,13 @@ func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidi
 		}
 		return fmt.Errorf("%w: job %s/%s created", errCheckpointCleanupPending, job.Namespace, job.Name)
 	}
-	if current.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
-		return fmt.Errorf("checkpoint cleanup job %s/%s already exists for checkpoint ID %q", job.Namespace, job.Name, current.Labels[snapshotprotocol.CheckpointIDLabel])
+	if err := verifyCheckpointCleanupJob(current, job, ckpt); err != nil {
+		return fmt.Errorf(
+			"checkpoint cleanup job %s/%s does not prove the requested cleanup: %w",
+			job.Namespace,
+			job.Name,
+			err,
+		)
 	}
 
 	for _, condition := range current.Status.Conditions {
