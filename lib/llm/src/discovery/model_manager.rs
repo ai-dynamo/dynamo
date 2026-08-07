@@ -14,6 +14,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+    selector::WorkerSelector,
 };
 use tokio::sync::oneshot;
 
@@ -26,6 +27,7 @@ use super::{
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
     discovery::{Discovery, DiscoverySpec},
+    pipeline::network::RequestPlanePayloadCodec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
@@ -47,9 +49,10 @@ use crate::{
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
-            completions::OpenAICompletionsStreamingEngine,
+            classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
@@ -555,6 +558,22 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_classify_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_classify_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    pub fn list_pooling_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_pooling_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_tensor_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -628,6 +647,26 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_embeddings_engine()
+    }
+
+    pub fn get_classify_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_classify_engine()
+    }
+
+    pub fn get_pooling_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_pooling_engine()
     }
 
     pub fn get_completions_engine(
@@ -852,6 +891,48 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_classify_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIClassifyStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_classify_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_classify_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.classify_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
+    pub fn add_pooling_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIPoolingStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_pooling_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_pooling_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.pooling_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_tensor_model(
         &self,
         model: &str,
@@ -1036,6 +1117,20 @@ impl ModelManager {
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
     }
 
+    pub fn remove_classify_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_classify_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_pooling_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_pooling_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
     pub fn remove_images_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_images_{}", model);
         self.remove_worker_set(model, &namespace)
@@ -1153,6 +1248,37 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
+        self.kv_chooser_for_with_selector(
+            endpoint,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn kv_chooser_for_with_selector<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
         let client = endpoint.client().await?;
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -1172,14 +1298,13 @@ impl ModelManager {
             endpoint: router_endpoint_id.name.clone(),
             transport,
             device_type: None,
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
         discovery.register(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
-
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
@@ -3192,7 +3317,6 @@ mod tests {
             .and_then(|model| model.get_worker_set("decode-a"))
             .and_then(|worker_set| worker_set.prefill_router.clone())
             .expect("decode router");
-        router.mark_active_for_test();
 
         mm.add_worker_set(
             "llama",

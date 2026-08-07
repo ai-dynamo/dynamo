@@ -11,17 +11,22 @@ Loki workflow, see [Observe a Local Deployment](../../cli/operations/observabili
 
 ## Output Formats
 
-Set `DYN_LOGGING_JSONL=false` for readable text:
+Set `DYN_LOGGING_CONSOLE_FORMAT=readable` for readable text (the default):
 
 ```text
 2025-09-02T15:50:01.770028Z INFO main.init: VllmWorker for Qwen/Qwen3-0.6B has been initialized
 ```
 
-Set `DYN_LOGGING_JSONL=true` for structured output:
+Set `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for structured output:
 
 ```json
 {"time":"2025-10-31T21:06:45.397194Z","level":"DEBUG","target":"dynamo_runtime::pipeline::network::tcp::server","message":"Registering new TcpStream","span_name":"http-request","trace_id":"80196f3e3a6fdf06d23bb9ada3788518","span_id":"f7e487a9d2a6bf38","x_request_id":"test-trace-001"}
 ```
+
+`DYN_LOGGING_CONSOLE_FORMAT` accepts only `readable` or `jsonl`, ignoring surrounding whitespace.
+When it is unset or blank, Dynamo falls back to the legacy `DYN_LOGGING_JSONL` switch. The legacy
+switch also continues to enable local trace-context propagation for backward compatibility, even
+when the new setting explicitly selects readable output.
 
 Fields vary by event and active span. Common fields include:
 
@@ -64,11 +69,14 @@ export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 generic endpoint for both signals:
 
 ```bash
-export DYN_LOGGING_JSONL=true
+export DYN_LOGGING_CONSOLE_FORMAT=readable
 export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 ```
+
+Console formatting does not affect OTLP export; use `jsonl` instead if the local stderr stream also
+needs machine-readable records.
 
 Use `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` for signal-specific
 destinations. Signal-specific endpoints are used as-is. For a generic `http/protobuf` endpoint,
