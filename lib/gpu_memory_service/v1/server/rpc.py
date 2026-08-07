@@ -15,11 +15,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
 from gpu_memory_service.v1.protocol import (
+    CHECKPOINT_CONTROL_TYPES,
     REQUEST_TYPES,
     AbortRequest,
     AllocateRequest,
@@ -37,6 +39,9 @@ from gpu_memory_service.v1.protocol import (
     send_message,
 )
 from gpu_memory_service.v1.server.allocations import GMSAllocationManager
+
+if TYPE_CHECKING:
+    from gpu_memory_service.v1.checkpoint import GMSCheckpointLifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +72,34 @@ class ServerSession:
     mode: GrantedLockType
 
 
+@dataclass(frozen=True)
+class SessionSnapshot:
+    committed: bool
+    rw_sessions: int
+    ro_sessions: int
+    waiting_writers: int
+    writer_reserved: bool
+
+
 class GMSSessionManager:
     """Own lock admission, writer priority, publication, and crash cleanup."""
 
-    def __init__(self, clear_epoch: Callable[[], object]):
+    def __init__(
+        self,
+        clear_epoch: Callable[[], object],
+        *,
+        condition: threading.Condition | None = None,
+        admission_allowed: Callable[[], bool] | None = None,
+    ):
         self._clear_epoch = clear_epoch
-        self._condition = threading.Condition()
+        if (condition is None) != (admission_allowed is None):
+            raise ValueError(
+                "checkpoint condition and admission callback must be configured together"
+            )
+        self._condition = condition if condition is not None else threading.Condition()
+        self._admission_allowed = (
+            admission_allowed if admission_allowed is not None else lambda: True
+        )
         self._rw_session: ServerSession | None = None
         self._ro_sessions: set[ServerSession] = set()
         self._writer_reserved = False
@@ -88,10 +115,16 @@ class GMSSessionManager:
         deadline = monotonic() + timeout if timeout is not None else None
         if requested is RequestedLockType.RW:
             with self._condition:
+                self._require_admission()
                 self._waiting_writers += 1
                 try:
-                    if not self._wait_for(self._can_grant_rw, deadline, is_cancelled):
+                    if not self._wait_for(
+                        lambda: self._admission_allowed() and self._can_grant_rw(),
+                        deadline,
+                        is_cancelled,
+                    ):
                         return None
+                    self._require_admission()
                     if is_cancelled is not None and is_cancelled():
                         return None
                     self._reserve_writer()
@@ -101,14 +134,25 @@ class GMSSessionManager:
             return self._start_writer()
 
         with self._condition:
+            self._require_admission()
             if requested is RequestedLockType.RO:
-                if not self._wait_for(self._can_grant_ro, deadline, is_cancelled):
+                if not self._wait_for(
+                    lambda: self._admission_allowed() and self._can_grant_ro(),
+                    deadline,
+                    is_cancelled,
+                ):
                     return None
+                self._require_admission()
                 return self._start_reader()
             if requested is not RequestedLockType.RW_OR_RO:
                 raise RuntimeError(f"unsupported GMS lock type {requested.value}")
-            if not self._wait_for(self._can_grant_rw_or_ro, deadline, is_cancelled):
+            if not self._wait_for(
+                lambda: self._admission_allowed() and self._can_grant_rw_or_ro(),
+                deadline,
+                is_cancelled,
+            ):
                 return None
+            self._require_admission()
             if self._can_grant_ro():
                 return self._start_reader()
             if is_cancelled is not None and is_cancelled():
@@ -153,6 +197,20 @@ class GMSSessionManager:
     def is_active(self, session: ServerSession) -> bool:
         with self._condition:
             return session is self._rw_session or session in self._ro_sessions
+
+    def snapshot(self) -> SessionSnapshot:
+        with self._condition:
+            return SessionSnapshot(
+                committed=self._committed,
+                rw_sessions=int(self._rw_session is not None),
+                ro_sessions=len(self._ro_sessions),
+                waiting_writers=self._waiting_writers,
+                writer_reserved=self._writer_reserved,
+            )
+
+    def _require_admission(self) -> None:
+        if not self._admission_allowed():
+            raise RuntimeError("GMS admission is fenced for checkpoint")
 
     def _can_grant_rw(self) -> bool:
         return (
@@ -210,6 +268,7 @@ class GMSSessionManager:
         is_cancelled: Callable[[], bool] | None,
     ) -> bool:
         while True:
+            self._require_admission()
             if is_cancelled is not None and is_cancelled():
                 return False
             if predicate():
@@ -229,12 +288,24 @@ class GMSSessionManager:
 class GMSServerMemoryManager:
     """Own identity, lock admission, and physical allocations for one socket."""
 
-    def __init__(self, gpu_uuid: str, vmm: VMMDevice, device: int):
+    def __init__(
+        self,
+        gpu_uuid: str,
+        vmm: VMMDevice,
+        device: int,
+        *,
+        checkpoint_condition: threading.Condition | None = None,
+        checkpoint_admission_allowed: Callable[[], bool] | None = None,
+    ):
         if not gpu_uuid:
             raise ValueError("GPU UUID must not be empty")
         self._identity = (str(uuid4()), gpu_uuid)
         self._allocations = GMSAllocationManager(vmm, device)
-        self._sessions = GMSSessionManager(self._allocations.clear)
+        self._sessions = GMSSessionManager(
+            self._allocations.clear,
+            condition=checkpoint_condition,
+            admission_allowed=checkpoint_admission_allowed,
+        )
 
     @property
     def identity(self) -> tuple[str, str]:
@@ -274,6 +345,12 @@ class GMSServerMemoryManager:
     def close(self, session: ServerSession) -> None:
         self._sessions.close(session)
 
+    def session_snapshot(self) -> SessionSnapshot:
+        return self._sessions.snapshot()
+
+    def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
+        return self._allocations.snapshot()
+
     def _require_rw(self, session: ServerSession) -> None:
         if not self._sessions.is_writer(session):
             raise RuntimeError("operation requires an RW session")
@@ -290,6 +367,17 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
         session: ServerSession | None = None
         try:
             request = self._receive()
+            if isinstance(request, CHECKPOINT_CONTROL_TYPES):
+                lifecycle = self.server.checkpoint_lifecycle
+                if lifecycle is None:
+                    response = ErrorResponse("GMS checkpoint lifecycle is unavailable")
+                else:
+                    try:
+                        response = lifecycle.handle(request)
+                    except RuntimeError as exc:
+                        response = ErrorResponse(str(exc))
+                send_message(self.request, response)
+                return
             if not isinstance(request, HandshakeRequest):
                 raise RuntimeError("expected GMS handshake")
             manager = self.server.manager
@@ -302,10 +390,14 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                     ErrorResponse("GMS server incarnation or physical GPU changed"),
                 )
                 return
-            session = manager.acquire(
-                request.lock_type,
-                lambda: not _socket_is_alive(self.request),
-            )
+            try:
+                session = manager.acquire(
+                    request.lock_type,
+                    lambda: not _socket_is_alive(self.request),
+                )
+            except RuntimeError as exc:
+                send_message(self.request, ErrorResponse(str(exc)))
+                return
             if session is None:
                 return
             nonce, gpu_uuid = manager.identity
@@ -372,9 +464,16 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
 class GMSRPCServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
-    def __init__(self, path: str, manager: GMSServerMemoryManager):
+    def __init__(
+        self,
+        path: str,
+        manager: GMSServerMemoryManager,
+        *,
+        checkpoint_lifecycle: GMSCheckpointLifecycle | None = None,
+    ):
         self.path = path
         self.manager = manager
+        self.checkpoint_lifecycle = checkpoint_lifecycle
         self._prepare_socket_path()
         super().__init__(path, _GMSRequestHandler)
         os.chmod(path, 0o600)
