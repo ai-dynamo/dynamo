@@ -189,10 +189,9 @@ impl Indexer {
     /// peer's [`Self::apply_event_routed`].
     ///
     /// Returns the primary device-tier dump first, followed by every allocated
-    /// lower-tier indexer's dump with each event's `storage_tier` retagged to
-    /// the tier it lives in. The `LowerTierIndexer::dump_events` synthetic
-    /// events default `storage_tier` to `Device`, so without retagging a peer
-    /// would replay them into the wrong slot.
+    /// lower-tier indexer's dump. Each lower-tier event is retagged with the
+    /// storage tier of the indexer instance it came from before peer replay,
+    /// since a lower-tier indexer no longer records the tier per entry.
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>> {
         let (primary_events, lower_tier_entries) = match self {
             Indexer::Single {
