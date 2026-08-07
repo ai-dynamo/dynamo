@@ -26,7 +26,9 @@ A 10-second cooldown between launches avoids the vLLM profiling race
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -445,6 +447,37 @@ def _select_launches(
     return to_launch
 
 
+def _reap_running(running: dict[int, _RunningTest], reason: str) -> None:
+    """Kill every still-running child pytest and its GPU-holding engine tree.
+
+    Guards against orphaning engine trees (and pinning VRAM) when the
+    orchestrator exits early. Idempotent: clears ``running`` on completion.
+    """
+    if not running:
+        return
+    import psutil
+
+    from tests.utils.managed_process import terminate_process_tree
+
+    _print(f"[cleanup] terminating {len(running)} running test(s) — {reason}")
+    for w_id, run_info in list(running.items()):
+        # Walks parent->child links, which setsid() does not sever, so it reaches
+        # ManagedProcess workers in their own session. A process-group kill cannot:
+        # ManagedProcess starts each worker with start_new_session=True, so the
+        # child pytest's group contains only the child itself.
+        try:
+            terminate_process_tree(run_info.proc.pid, immediate_kill=True, timeout=5)
+        except (psutil.Error, OSError) as exc:  # keep reaping remaining tests
+            _print(f"[cleanup] w{w_id} tree kill error: {exc}")
+        try:
+            run_info.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _print(f"[cleanup] w{w_id} still alive after SIGKILL")
+        if run_info.reader_thread is not None:
+            run_info.reader_thread.join(timeout=2)
+    running.clear()
+
+
 def run_parallel(
     test_ids: list[str],
     meta: dict[str, dict],
@@ -745,6 +778,9 @@ def run_parallel(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Own session so a terminal Ctrl-C goes only to the orchestrator,
+            # which then reaps deliberately instead of racing every child.
+            start_new_session=True,
         )
         run_info = _RunningTest(proc=proc, test=test, start_time=time.monotonic())
         w_id = test.w_id
@@ -759,6 +795,24 @@ def run_parallel(
         return run_info
 
     env_base = os.environ.copy()
+
+    # Reap children on early exit. Signals cover timeout (SIGTERM) and Ctrl-C
+    # (SIGINT); atexit backstops normal/exception exit. (SIGKILL to us is
+    # uncatchable and would still orphan children.)
+    def _signal_reap(signum, _frame):
+        _reap_running(running, f"signal {signum}")
+        # Re-raise with default disposition so exit status reflects the signal.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    _prev_handlers: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                _prev_handlers[_sig] = signal.signal(_sig, _signal_reap)
+            except (ValueError, OSError):
+                pass
+    atexit.register(_reap_running, running, "interpreter exit")
 
     while pending or running:
         now = time.monotonic()
@@ -946,6 +1000,14 @@ def run_parallel(
 
         if running or pending:
             time.sleep(1.0)
+
+    # Drained cleanly: restore handlers and drop the atexit backstop.
+    for _sig, _handler in _prev_handlers.items():
+        try:
+            signal.signal(_sig, _handler)
+        except (ValueError, OSError):
+            pass
+    atexit.unregister(_reap_running)
 
     # Summary
     wall_time = time.monotonic() - t0
