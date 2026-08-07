@@ -955,8 +955,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         if not isinstance(mm_data, dict):
             return frozenset()
 
-        tokenizer_manager = self.engine.tokenizer_manager
-        mm_tokens = getattr(tokenizer_manager.mm_processor, "mm_tokens", None)
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+        mm_tokens = getattr(mm_processor, "mm_tokens", None)
         token_ids = set()
 
         if mm_tokens is not None:
@@ -970,7 +971,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         # Some processors, including LLaVA's wrapper, expose only the image
         # token on ModelConfig. LLaVA also represents video frames as images.
         if mm_data.get("image_url") or mm_data.get("video_url"):
-            image_token_id = tokenizer_manager.model_config.image_token_id
+            model_config = getattr(tokenizer_manager, "model_config", None)
+            image_token_id = getattr(model_config, "image_token_id", None)
             if isinstance(image_token_id, int) and not isinstance(image_token_id, bool):
                 token_ids.add(image_token_id)
 
@@ -984,7 +986,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         if not isinstance(token_ids, list):
             raise HttpError(400, "nvext.token_data must resolve to a token ID list")
         if self._max_input_token_id is None:
-            raise HttpError(400, "Unable to validate nvext.token_data for this model")
+            return
 
         for index, token_id in enumerate(token_ids):
             if isinstance(token_id, bool) or not isinstance(token_id, int):
@@ -992,9 +994,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     400,
                     f"nvext.token_data[{index}] must be an integer token ID",
                 )
-            if token_id < 0 or (
-                token_id > self._max_input_token_id and token_id not in allowed_oov_ids
-            ):
+            # Some models, such as Phi-3, use negative multimodal sentinel IDs.
+            if token_id > self._max_input_token_id and token_id not in allowed_oov_ids:
                 raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 
     def _validate_nvext_token_data(

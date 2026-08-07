@@ -294,7 +294,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             rank=0,
         )
         self._max_input_token_id = self._resolve_max_input_token_id_from_model_config(
-            self.encoder.model_config
+            getattr(self.encoder, "model_config", None)
         )
 
         # Let SGLang accept the NVDEC-backed decoder this handler builds, so it
