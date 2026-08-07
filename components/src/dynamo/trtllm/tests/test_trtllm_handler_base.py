@@ -779,22 +779,33 @@ class TestGenerateLocally:
 
     def _make_mock_generation_result(self, prompt_logprobs=None):
         """Mock GenerationResult that yields a single finished token."""
-        output = MagicMock()
-        output.token_ids = [42]
-        output.finish_reason = "stop"
-        output.stop_reason = None
-        output.request_perf_metrics = None
-        output.prompt_logprobs = prompt_logprobs
+        if prompt_logprobs is None:
+            prompt_logprobs = []
+        return self._make_mock_generation_result_sequence([prompt_logprobs])
 
-        res = MagicMock()
-        res.outputs = [output]
-        res.finished = True
+    def _make_mock_generation_result_sequence(self, prompt_logprobs_per_chunk):
+        """Mock GenerationResult with cumulative output across streaming chunks."""
+        results = []
+        last_index = len(prompt_logprobs_per_chunk) - 1
+        for index, prompt_logprobs in enumerate(prompt_logprobs_per_chunk):
+            output = MagicMock()
+            output.token_ids = list(range(42, 43 + index))
+            output.finish_reason = "stop" if index == last_index else None
+            output.stop_reason = None
+            output.request_perf_metrics = None
+            output.prompt_logprobs = prompt_logprobs
+
+            res = MagicMock()
+            res.outputs = [output]
+            res.finished = index == last_index
+            results.append(res)
 
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
 
         async def mock_aiter(self_mock):
-            yield res
+            for res in results:
+                yield res
 
         generation_result.__aiter__ = mock_aiter
         return generation_result
@@ -876,6 +887,61 @@ class TestGenerateLocally:
 
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["sampling_params"].prompt_logprobs == 0
+        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
+            None,
+            {
+                "2": {
+                    "logprob": -0.25,
+                    "rank": 1,
+                    "decoded_token": "two",
+                }
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_prompt_logprobs_is_not_returned(self):
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert "prompt_logprobs" not in chunks[-1].get("engine_data", {})
+
+    @pytest.mark.asyncio
+    async def test_prompt_logprobs_can_arrive_after_empty_streaming_chunk(self):
+        handler = self._make_handler()
+        prompt_logprob = MagicMock(
+            logprob=-0.25,
+            rank=1,
+            decoded_token="two",
+        )
+        generation_result = self._make_mock_generation_result_sequence(
+            [[], [None, {2: prompt_logprob}]]
+        )
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
         assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
             None,
             {
