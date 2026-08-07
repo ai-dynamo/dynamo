@@ -46,7 +46,7 @@ where
 
 impl<Sel, RF> KvScheduler<Sel, RF>
 where
-    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + 'static,
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 {
     /// Start the scheduler, optionally wiring an [`OverlapScoresRefresh`] into the queue so

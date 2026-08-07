@@ -45,6 +45,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -66,6 +67,98 @@ const (
 func init() {
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
 		panic(err)
+	}
+}
+
+func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+					Failover:         &v1beta1.FailoverSpec{},
+				},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoComponentDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored))
+	require.False(t, controller_common.ContainsFinalizer(&stored))
+	available := meta.FindStatusCondition(
+		stored.Status.Conditions,
+		v1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+	)
+	require.NotNil(t, available)
+	require.Equal(t, metav1.ConditionFalse, available.Status)
+	require.Equal(t, dcd.Generation, available.ObservedGeneration)
+	require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
+	require.Equal(t,
+		"Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
+			"Snapshot with active/passive failover is temporarily unsupported",
+		available.Message,
+	)
+	require.Zero(t, stored.Status.ObservedGeneration)
+}
+
+func TestDynamoComponentDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {
+	now := metav1.Now()
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "worker",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover:   &v1beta1.FailoverSpec{},
+				},
+			},
+		},
+	}
+	controller_common.AddFinalizer(dcd)
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:   kubeClient,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoComponentDeployment
+	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored)
+	if !k8serrors.IsNotFound(err) {
+		require.NoError(t, err)
+		require.False(t, controller_common.ContainsFinalizer(&stored))
 	}
 }
 
@@ -1837,7 +1930,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
@@ -1958,7 +2051,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
