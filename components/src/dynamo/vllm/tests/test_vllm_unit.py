@@ -1189,8 +1189,8 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
         {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
     ],
 )
-def test_kv_transfer_params_setter_preserves_router_hint_only(kv_transfer_params):
-    from dynamo.vllm.handlers import _set_kv_transfer_params_preserving_router_hint
+def test_update_kv_transfer_params_preserves_router_hint_only(kv_transfer_params):
+    from dynamo.vllm.handlers import _update_kv_transfer_params
 
     request_router_hint = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
@@ -1210,7 +1210,9 @@ def test_kv_transfer_params_setter_preserves_router_hint_only(kv_transfer_params
     )
     kv_transfer_params = {**kv_transfer_params, "router_hint": stale_router_hint}
 
-    _set_kv_transfer_params_preserving_router_hint(sampling_params, kv_transfer_params)
+    _update_kv_transfer_params(
+        sampling_params, kv_transfer_params, preserve_router_hint=True
+    )
 
     assert sampling_params.extra_args["kv_transfer_params"] == {
         **{
@@ -1222,8 +1224,26 @@ def test_kv_transfer_params_setter_preserves_router_hint_only(kv_transfer_params
     }
 
 
-def test_kv_transfer_params_setter_drops_replacement_router_hint():
-    from dynamo.vllm.handlers import _set_kv_transfer_params_preserving_router_hint
+def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
+    from dynamo.vllm.handlers import _update_kv_transfer_params
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    sampling_params = SimpleNamespace(
+        extra_args={"kv_transfer_params": {"router_hint": router_hint}}
+    )
+
+    _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
+
+    assert sampling_params.extra_args["kv_transfer_params"] == {
+        "transfer_id": "prefill-1"
+    }
+
+
+def test_update_kv_transfer_params_drops_replacement_router_hint():
+    from dynamo.vllm.handlers import _update_kv_transfer_params
 
     stale_router_hint = {
         "source_control_endpoint": "tcp://127.0.0.1:23281",
@@ -1231,7 +1251,7 @@ def test_kv_transfer_params_setter_drops_replacement_router_hint():
     }
     sampling_params = SimpleNamespace(extra_args={})
 
-    _set_kv_transfer_params_preserving_router_hint(
+    _update_kv_transfer_params(
         sampling_params,
         {
             "transfer_id": "prefill-1",
@@ -1244,8 +1264,8 @@ def test_kv_transfer_params_setter_drops_replacement_router_hint():
     }
 
 
-def test_kv_transfer_params_setter_copies_extra_args_before_mutating():
-    from dynamo.vllm.handlers import _set_kv_transfer_params_preserving_router_hint
+def test_update_kv_transfer_params_copies_extra_args_before_mutating():
+    from dynamo.vllm.handlers import _update_kv_transfer_params
 
     router_hint = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
@@ -1260,8 +1280,8 @@ def test_kv_transfer_params_setter_copies_extra_args_before_mutating():
     }
     sampling_params = SimpleNamespace(extra_args=shared_extra_args)
 
-    _set_kv_transfer_params_preserving_router_hint(
-        sampling_params, {"transfer_id": "prefill-1"}
+    _update_kv_transfer_params(
+        sampling_params, {"transfer_id": "prefill-1"}, preserve_router_hint=True
     )
 
     assert shared_extra_args == {

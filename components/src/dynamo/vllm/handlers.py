@@ -847,25 +847,43 @@ def build_sampling_params(
     return sampling_params
 
 
-def _set_kv_transfer_params_preserving_router_hint(
+def _update_kv_transfer_params(
     sampling_params: SamplingParams,
     kv_transfer_params: Mapping[str, Any],
+    *,
+    preserve_router_hint: bool = False,
 ) -> None:
-    safe_extra_args = (
+    """Set vLLM KV transfer params, optionally carrying Dynamo's router hint.
+
+    ``build_sampling_params`` may have copied ``router_hint`` from the Dynamo
+    request into ``sampling_params.extra_args["kv_transfer_params"]``. The new
+    ``kv_transfer_params`` value comes from vLLM's ``KVTransferConfig``
+    (``engine_client.vllm_config.kv_transfer_config``), via the connector
+    protocol selected in ``make_kv_connector_protocol``.
+
+    Prefill preserves the request hint when replacing the object with fresh
+    protocol params. Decode handoff uses prefill-produced params and should not
+    inherit a stale prefill-side hint.
+    """
+    extra_args = (
         dict(sampling_params.extra_args)
         if isinstance(sampling_params.extra_args, dict)
         else {}
     )
-    merged = {
-        key: value
-        for key, value in kv_transfer_params.items()
-        if key != _ROUTER_HINT_EXTRA_ARGS_KEY
-    }
-    existing = safe_extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-    if isinstance(existing, Mapping) and _ROUTER_HINT_EXTRA_ARGS_KEY in existing:
-        merged[_ROUTER_HINT_EXTRA_ARGS_KEY] = existing[_ROUTER_HINT_EXTRA_ARGS_KEY]
-    safe_extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = merged
-    sampling_params.extra_args = safe_extra_args
+    updated_params = dict(kv_transfer_params)
+    updated_params.pop(_ROUTER_HINT_EXTRA_ARGS_KEY, None)
+
+    existing_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+    router_hint = (
+        existing_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
+        if preserve_router_hint and isinstance(existing_params, Mapping)
+        else None
+    )
+    if isinstance(router_hint, Mapping):
+        updated_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
+
+    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = updated_params
+    sampling_params.extra_args = extra_args
 
 
 def build_sampling_params_openai(
@@ -3289,7 +3307,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         if kv_params is not None:
-            _set_kv_transfer_params_preserving_router_hint(sampling_params, kv_params)
+            _update_kv_transfer_params(sampling_params, kv_params)
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
@@ -3599,8 +3617,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
             self.engine_client.vllm_config
         )
-        _set_kv_transfer_params_preserving_router_hint(
-            sampling_params, kv_protocol.prefill_request_kv_transfer_params()
+        _update_kv_transfer_params(
+            sampling_params,
+            kv_protocol.prefill_request_kv_transfer_params(),
+            preserve_router_hint=True,
         )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
