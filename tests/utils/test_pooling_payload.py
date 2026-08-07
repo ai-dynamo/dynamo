@@ -156,3 +156,156 @@ def test_pooling_payload_validates_bytes_only_without_metadata():
     assert payload.process_response(response) == (
         "Pooled bytes_only response with 4 bytes"
     )
+
+
+def _token_wise_response(data, prompt_tokens: int = 2):
+    return _response(
+        json_body={
+            "object": "list",
+            "data": [{"index": 0, "object": "pooling", "data": data}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+                "completion_tokens": 0,
+            },
+        }
+    )
+
+
+def _token_wise_payload():
+    return pooling_payload(input_data="text", task="token_classify")
+
+
+def test_pooling_payload_accepts_token_wise_matrix():
+    payload = _token_wise_payload()
+    response = _token_wise_response([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3]])
+
+    assert payload.process_response(response) == "Pooled 1 inputs as float"
+
+
+def test_pooling_payload_rejects_flattened_token_wise_output():
+    """A flattened vector loses the token-by-class structure this case exists
+    to prove; validating only data[0] used to accept it."""
+    payload = _token_wise_payload()
+    response = _token_wise_response([0.1, 0.2, 0.7, 0.3, 0.4, 0.3])
+
+    with pytest.raises(AssertionError, match="must be a list of rows"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_ragged_token_wise_rows():
+    payload = _token_wise_payload()
+    response = _token_wise_response([[0.1, 0.2, 0.7], [0.3, 0.4]])
+
+    with pytest.raises(AssertionError, match="consistent width"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_empty_token_wise_rows():
+    payload = _token_wise_payload()
+    response = _token_wise_response([[], []])
+
+    with pytest.raises(AssertionError, match="non-empty"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_nonnumeric_token_wise_rows():
+    payload = _token_wise_payload()
+    response = _token_wise_response([[0.1, 0.2], [0.3, "oops"]])
+
+    with pytest.raises(AssertionError, match="non-numeric"):
+        payload.process_response(response)
+
+
+def _bytes_payload():
+    return pooling_payload(
+        input_data="text",
+        expected_response=["Pooled 1 binary tensors"],
+        extra_body={
+            "encoding_format": "bytes",
+            "embed_dtype": "float16",
+            "endianness": "big",
+        },
+    )
+
+
+def _bytes_response(entries, content: bytes):
+    return _response(
+        content=content,
+        headers={
+            "content-type": "application/octet-stream",
+            "metadata": json.dumps(
+                {"data": entries, "usage": {"prompt_tokens": 3, "total_tokens": 3}}
+            ),
+        },
+    )
+
+
+def test_pooling_payload_rejects_shape_span_mismatch():
+    """float16 with shape=[999] and a 2-byte span used to pass on bounds alone,
+    leaving clients unable to reconstruct the tensor."""
+    payload = _bytes_payload()
+    response = _bytes_response(
+        [
+            {
+                "index": 0,
+                "embed_dtype": "float16",
+                "endianness": "big",
+                "start": 0,
+                "end": 2,
+                "shape": [999],
+            }
+        ],
+        content=b"\x00\x01",
+    )
+
+    with pytest.raises(AssertionError, match="needs 1998"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_overlapping_spans():
+    payload = _bytes_payload()
+    response = _bytes_response(
+        [
+            {
+                "index": 0,
+                "embed_dtype": "float16",
+                "endianness": "big",
+                "start": 0,
+                "end": 4,
+                "shape": [2],
+            },
+            {
+                "index": 1,
+                "embed_dtype": "float16",
+                "endianness": "big",
+                "start": 2,
+                "end": 6,
+                "shape": [2],
+            },
+        ],
+        content=b"\x00\x01\x02\x03\x04\x05",
+    )
+
+    with pytest.raises(AssertionError, match="contiguous and non-overlapping"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_incomplete_body_coverage():
+    payload = _bytes_payload()
+    response = _bytes_response(
+        [
+            {
+                "index": 0,
+                "embed_dtype": "float16",
+                "endianness": "big",
+                "start": 0,
+                "end": 4,
+                "shape": [2],
+            }
+        ],
+        content=b"\x00\x01\x02\x03\x04\x05",
+    )
+
+    with pytest.raises(AssertionError, match="cover 4 bytes but the body is 6"):
+        payload.process_response(response)
