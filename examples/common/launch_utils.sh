@@ -260,7 +260,10 @@ export_nixl_wheel_libs() {
     local _libs
     _libs="$(python3 -c 'import nixl_cu13, os; print(os.path.join(os.path.dirname(os.path.dirname(nixl_cu13.__file__)), ".nixl_cu13.mesonpy.libs"))' 2>/dev/null || true)"
     if [ -d "$_libs" ]; then
-        export LD_LIBRARY_PATH="${_libs}:${_libs}/plugins:${LD_LIBRARY_PATH}"
+        # ${VAR:+:${VAR}} rather than a bare :${VAR}: an unset LD_LIBRARY_PATH
+        # would otherwise leave a trailing empty element, which the loader
+        # reads as the current directory.
+        export LD_LIBRARY_PATH="${_libs}:${_libs}/plugins${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
         export NIXL_PLUGIN_DIR="${NIXL_PLUGIN_DIR:-$_libs/plugins}"
     fi
 }

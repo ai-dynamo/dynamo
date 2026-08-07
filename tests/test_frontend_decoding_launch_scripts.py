@@ -32,19 +32,40 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EXAMPLES = _REPO_ROOT / "examples"
 _HELPER = "export_nixl_wheel_libs"
 
+# An uncommented call / definition. Matching bare text instead would accept a
+# commented-out call -- which is the likeliest way this regresses, and exactly
+# what this test exists to catch.
+_HELPER_CALL = re.compile(rf"^\s*{_HELPER}\b", re.MULTILINE)
+_HELPER_DEF = re.compile(rf"^\s*{_HELPER}\s*\(\)", re.MULTILINE)
+
+
+def _forwards_frontend_decoding(text: str) -> bool:
+    """Whether a script hands ``--frontend-decoding`` to a worker.
+
+    Skips the places the flag appears without being forwarded: comments, help
+    text, and the ``--frontend-decoding)`` case label (which parses the flag
+    rather than passing it on). A script that only documents the flag does not
+    launch a decoding frontend and so needs no library-path setup.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("#", "echo", "printf")):
+            continue
+        if "--frontend-decoding" not in stripped:
+            continue
+        if re.fullmatch(r"--frontend-decoding\)", stripped):
+            continue
+        return True
+    return False
+
 
 def _scripts_enabling_frontend_decoding() -> list[Path]:
-    """Launch scripts that hand ``--frontend-decoding`` to a worker.
-
-    Matches the flag only where a script actually passes it on, so the shared
-    helper's own documentation does not count as a user.
-    """
-    hits = []
-    for path in sorted(_EXAMPLES.rglob("*.sh")):
-        text = path.read_text(encoding="utf-8")
-        if re.search(r"^[^#\n]*--frontend-decoding", text, re.MULTILINE):
-            hits.append(path)
-    return hits
+    """Launch scripts that hand ``--frontend-decoding`` to a worker."""
+    return [
+        path
+        for path in sorted(_EXAMPLES.rglob("*.sh"))
+        if _forwards_frontend_decoding(path.read_text(encoding="utf-8"))
+    ]
 
 
 def test_frontend_decoding_scripts_export_nixl_wheel_libs():
@@ -56,7 +77,7 @@ def test_frontend_decoding_scripts_export_nixl_wheel_libs():
     missing = [
         str(p.relative_to(_REPO_ROOT))
         for p in scripts
-        if _HELPER not in p.read_text(encoding="utf-8")
+        if not _HELPER_CALL.search(p.read_text(encoding="utf-8"))
     ]
     assert not missing, (
         f"launch scripts enable --frontend-decoding without calling {_HELPER}(): "
@@ -70,4 +91,4 @@ def test_helper_is_defined_in_shared_launch_utils():
     there -- otherwise they call an undefined function and, under `set -e`,
     die at startup."""
     utils = (_EXAMPLES / "common" / "launch_utils.sh").read_text(encoding="utf-8")
-    assert f"{_HELPER}()" in utils
+    assert _HELPER_DEF.search(utils), f"{_HELPER}() is not defined in launch_utils.sh"
