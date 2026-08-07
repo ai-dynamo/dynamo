@@ -7,7 +7,6 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +17,7 @@ use std::{collections::HashMap, pin::Pin};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use fs4::fs_std::FileExt;
 use futures::StreamExt;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
@@ -205,44 +205,22 @@ pub struct Directory {
     owned_files: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
-struct DirectoryMutationLock(File);
+struct DirectoryMutationLock {
+    _file: File,
+}
 
 impl DirectoryMutationLock {
     fn acquire(path: &Path) -> Result<Self, StoreError> {
         let file = File::open(path).map_err(to_fs_err)?;
-        // SAFETY: `file` owns a valid descriptor for the lifetime of this guard.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if result != 0 {
-            return Err(to_fs_err(std::io::Error::last_os_error()));
-        }
-        Ok(Self(file))
+        FileExt::lock_exclusive(&file).map_err(to_fs_err)?;
+        Ok(Self { _file: file })
     }
 
     fn try_acquire(path: &Path) -> Result<Option<Self>, StoreError> {
         let file = File::open(path).map_err(to_fs_err)?;
-        // SAFETY: `file` owns a valid descriptor for the lifetime of this guard.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            return Ok(Some(Self(file)));
-        }
-
-        let error = std::io::Error::last_os_error();
-        if error.kind() == ErrorKind::WouldBlock {
-            return Ok(None);
-        }
-        Err(to_fs_err(error))
-    }
-}
-
-impl Drop for DirectoryMutationLock {
-    fn drop(&mut self) {
-        // SAFETY: the descriptor remains valid until after this `Drop` completes.
-        let result = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-        if result != 0 {
-            tracing::error!(
-                error = %std::io::Error::last_os_error(),
-                "Failed to release FileStore mutation lock"
-            );
+        match FileExt::try_lock_exclusive(&file).map_err(to_fs_err)? {
+            true => Ok(Some(Self { _file: file })),
+            false => Ok(None),
         }
     }
 }
