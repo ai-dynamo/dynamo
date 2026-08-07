@@ -868,8 +868,7 @@ impl PyEngineCore {
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
-                model_aliases: opt_attr::<Vec<String>>(bound, "model_aliases")?
-                    .unwrap_or_default(),
+                model_aliases: opt_attr::<Vec<String>>(bound, "model_aliases")?.unwrap_or_default(),
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     Ok(_) => HashMap::new(),
