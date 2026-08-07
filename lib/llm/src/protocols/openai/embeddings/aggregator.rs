@@ -6,10 +6,11 @@ use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
     convert_sse_stream,
-    openai::stream_aggregator::{StreamAggregable, aggregate_stream},
+    openai::stream_aggregator::{StreamAggregable, aggregate_typed_stream},
 };
 
 use dynamo_runtime::engine::DataStream;
+use dynamo_runtime::error::DynamoError;
 use futures::Stream;
 
 impl StreamAggregable for NvCreateEmbeddingResponse {
@@ -28,7 +29,7 @@ impl NvCreateEmbeddingResponse {
     /// Converts an SSE stream into a [`NvCreateEmbeddingResponse`].
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
-    ) -> Result<NvCreateEmbeddingResponse, String> {
+    ) -> Result<NvCreateEmbeddingResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateEmbeddingResponse>(stream);
         NvCreateEmbeddingResponse::from_annotated_stream(stream).await
     }
@@ -36,8 +37,8 @@ impl NvCreateEmbeddingResponse {
     /// Aggregates an annotated stream of embedding responses into a final response.
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateEmbeddingResponse>>,
-    ) -> Result<NvCreateEmbeddingResponse, String> {
-        aggregate_stream(stream).await
+    ) -> Result<NvCreateEmbeddingResponse, DynamoError> {
+        aggregate_typed_stream(stream).await
     }
 }
 
@@ -141,7 +142,7 @@ mod tests {
         let result = NvCreateEmbeddingResponse::from_annotated_stream(Box::pin(stream)).await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Test error"));
+        assert!(result.unwrap_err().to_string().contains("Test error"));
     }
 
     #[tokio::test]

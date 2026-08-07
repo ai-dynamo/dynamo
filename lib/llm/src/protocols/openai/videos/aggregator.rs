@@ -3,8 +3,9 @@
 
 use futures::Stream;
 
-use crate::protocols::openai::stream_aggregator::{StreamAggregable, aggregate_stream};
+use crate::protocols::openai::stream_aggregator::{StreamAggregable, aggregate_typed_stream};
 use crate::types::Annotated;
+use dynamo_runtime::error::DynamoError;
 
 use super::NvVideosResponse;
 
@@ -22,7 +23,7 @@ impl NvVideosResponse {
     /// Aggregates an annotated stream of video responses into a final response.
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvVideosResponse>>,
-    ) -> Result<NvVideosResponse, String> {
-        aggregate_stream(stream).await
+    ) -> Result<NvVideosResponse, DynamoError> {
+        aggregate_typed_stream(stream).await
     }
 }
