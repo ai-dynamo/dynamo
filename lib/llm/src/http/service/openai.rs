@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    error::HttpError,
+    error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -3063,15 +3063,9 @@ async fn responses(
     let (orig_request, context) = request.into_parts();
 
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
-        tracing::error!(
-            request_id,
-            error = %e,
-            "Failed to convert NvCreateResponse to UnifiedRequest",
-        );
-        let err_response = ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "Failed to convert responses request: "
-                + &e.to_string(),
+        let err_response = ErrorMessage::from_anyhow(
+            invalid_argument(format!("Failed to convert responses request: {e}")).into(),
+            "Failed to convert responses request",
         );
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -3082,6 +3076,14 @@ async fn responses(
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+    if let Err(error) = chat_request.validate() {
+        let err_response = ErrorMessage::from_anyhow(
+            invalid_argument(error.to_string()).into(),
+            "Invalid responses request",
+        );
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
