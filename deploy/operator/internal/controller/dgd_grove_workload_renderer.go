@@ -130,17 +130,6 @@ func applyGroveWorkerHashSuffix(
 		return nil
 	}
 
-	var hasWorker bool
-	for i := range renderDeployment.Spec.Components {
-		if dynamo.IsWorkerComponent(string(renderDeployment.Spec.Components[i].ComponentType)) {
-			hasWorker = true
-			break
-		}
-	}
-	if !hasWorker {
-		return nil
-	}
-
 	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(hashSource)
 	if err != nil {
 		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
