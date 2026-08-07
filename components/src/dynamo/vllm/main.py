@@ -65,6 +65,7 @@ from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.custom_encoder import prepare_custom_encoder
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
@@ -578,6 +579,15 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
+
+    # Validate user-provided CustomEncoder setup before AsyncLLM starts its
+    # EngineCore child process. The handler prepares its owned instance again
+    # at the existing load point so its lifecycle remains unchanged.
+    prepare_custom_encoder(
+        getattr(config, "custom_encoder_class", None),
+        vllm_config.model_config,
+        engine_args,
+    )
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None

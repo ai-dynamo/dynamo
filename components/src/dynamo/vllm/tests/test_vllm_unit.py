@@ -13,7 +13,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -550,6 +550,54 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
     assert default_sampling_params == {"temperature": 0.7}
+
+
+def test_setup_vllm_engine_preflights_custom_encoder_before_enginecore(monkeypatch):
+    vllm_main = _load_vllm_main()
+
+    class FakeModelConfig:
+        def get_diff_sampling_param(self):
+            return {}
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        model_config=FakeModelConfig(),
+    )
+
+    class FakeEngineArgs:
+        enable_lora = False
+        load_format = "auto"
+
+        def create_engine_config(self, usage_context):
+            return vllm_config
+
+    engine_start = Mock(side_effect=AssertionError("EngineCore must not start"))
+    reject_encoder = Mock(side_effect=ValueError("bad encoder"))
+    monkeypatch.setattr(vllm_main, "setup_multiprocess_prometheus", lambda: None)
+    monkeypatch.setattr(vllm_main, "LLMBackendMetrics", lambda **_kwargs: None)
+    monkeypatch.setattr(vllm_main, "prepare_custom_encoder", reject_encoder)
+    monkeypatch.setattr(vllm_main.AsyncLLM, "from_vllm_config", engine_start)
+
+    config = SimpleNamespace(
+        component="backend",
+        namespace="dynamo",
+        engine_args=FakeEngineArgs(),
+        gms_shadow_mode=False,
+        multimodal_embedding_cache_capacity_gb=0,
+        route_to_encoder=False,
+        served_model_name="model",
+        custom_encoder_class="encoder.Backend",
+    )
+
+    with pytest.raises(ValueError, match="bad encoder"):
+        vllm_main.setup_vllm_engine(config)
+
+    reject_encoder.assert_called_once_with(
+        "encoder.Backend",
+        vllm_config.model_config,
+        config.engine_args,
+    )
+    engine_start.assert_not_called()
 
 
 # --disaggregation-mode tests

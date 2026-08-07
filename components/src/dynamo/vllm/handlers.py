@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import functools
-import importlib
 import inspect
 import logging
 import math
@@ -94,8 +93,7 @@ from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     CustomEncoderAdapter,
-    VisionEncoderBackend,
-    create_custom_encoder_adapter,
+    prepare_custom_encoder,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
@@ -1128,28 +1126,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _load_custom_encoder(self, config: Config) -> None:
         """Import, instantiate, and load the --custom-encoder-class encoder."""
         custom_encoder_class = config.custom_encoder_class
-        if not custom_encoder_class:
+        prepared = prepare_custom_encoder(
+            custom_encoder_class,
+            self.model_config,
+            config.engine_args,
+        )
+        if prepared is None:
             return
-        module_path, _, class_name = custom_encoder_class.rpartition(".")
-        backend_cls = getattr(importlib.import_module(module_path), class_name)
-        if not (
-            isinstance(backend_cls, type)
-            and issubclass(backend_cls, VisionEncoderBackend)
-        ):
-            raise TypeError(
-                f"--custom-encoder-class {custom_encoder_class!r} must resolve to a "
-                f"VisionEncoderBackend subclass, got {backend_cls!r}."
-            )
         # The author writes the VisionEncoderBackend; Dynamo wraps it in the
         # AsyncVisionEncoder glue, which owns the preprocess pool and
         # ThreadedMicroBatcher actor thread. load() runs backend.build() there
         # (the backend picks its own device) and cleans that thread up on failure.
-        backend = backend_cls()
-        adapter = create_custom_encoder_adapter(
-            backend,
-            self.model_config,
-            config.engine_args,
-        )
+        backend = prepared.backend
+        adapter = prepared.adapter
         encoder = AsyncVisionEncoder(backend)
         encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
