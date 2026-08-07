@@ -30,6 +30,7 @@ from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import (
@@ -1025,6 +1026,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         if isinstance(guided_decoding, dict):
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
+                reject_nonprogressing_guided_json_ref_cycles(json_schema)
                 return {"json_schema": json.dumps(json_schema)}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
