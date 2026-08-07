@@ -1,0 +1,22 @@
+[features]
+multi_agent = true
+
+[agents.user_interviewer]
+description = "First optimization role: capture the user's DGD and synthesize the canonical workload contract."
+config_file = "agents/user-interviewer.toml"
+
+[agents.recipe_deployer]
+description = "Deploy one assigned Dynamo DGD and produce smoke-test evidence."
+config_file = "agents/recipe-deployer.toml"
+
+[agents.perf_analyzer]
+description = "Configure, run, validate, and analyze AIPerf for one deployed candidate."
+config_file = "agents/perf-analyzer.toml"
+
+[agents.hypothesis_generator]
+description = "Generate one evidence-backed Dynamo optimization proposal and challenger-ready DGD draft."
+config_file = "agents/hypothesis-generator.toml"
+
+[agents.hypothesis_challenger]
+description = "Adversarially review one generated Dynamo optimization candidate before GPU spend."
+config_file = "agents/hypothesis-challenger.toml"
