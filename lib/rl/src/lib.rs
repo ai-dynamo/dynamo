@@ -125,6 +125,17 @@ pub struct RlWorkersResponse {
     pub workers: Vec<RlWorkerInfo>,
 }
 
+impl RlWorkersResponse {
+    fn new(namespace: String, mut workers: Vec<RlWorkerInfo>) -> Self {
+        workers.retain(|worker| worker.model.is_some());
+        Self {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
+            namespace,
+            workers,
+        }
+    }
+}
+
 type EndpointKey = (String, String, String);
 
 #[derive(Clone)]
@@ -203,11 +214,10 @@ pub fn rl_router(state: RlDiscoveryState) -> Router {
 
 async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResponse {
     match list_workers(&state).await {
-        Ok(workers) => Json(RlWorkersResponse {
-            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
-            namespace: state.config.namespace.clone(),
+        Ok(workers) => Json(RlWorkersResponse::new(
+            state.config.namespace.clone(),
             workers,
-        })
+        ))
         .into_response(),
         Err(err) => {
             tracing::error!("failed to list RL workers: {err}");
@@ -617,14 +627,33 @@ mod tests {
     }
 
     #[test]
-    fn workers_response_advertises_protocol_version() {
-        let response = RlWorkersResponse {
-            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
+    fn workers_response_advertises_protocol_version_and_omits_unbound_workers() {
+        let bound = RlWorkerInfo {
             namespace: "dynamo".to_string(),
-            workers: Vec::new(),
+            component: "backend".to_string(),
+            endpoint: "rl".to_string(),
+            instance_id: 1,
+            transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+            request_plane_url: "dyn://dynamo.backend.rl".to_string(),
+            system_url: Some("http://worker:8181".to_string()),
+            admin_base_url: Some("http://worker:8120".to_string()),
+            world_size: Some(2),
+            model: Some("model".to_string()),
+            system_routes: Vec::new(),
+            routes: Vec::new(),
+            error: None,
         };
+        let unbound = RlWorkerInfo {
+            instance_id: 2,
+            model: None,
+            ..bound.clone()
+        };
+
+        let response = RlWorkersResponse::new("dynamo".to_string(), vec![unbound, bound]);
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["protocol_version"], json!(1));
+        assert_eq!(value["workers"].as_array().unwrap().len(), 1);
+        assert_eq!(value["workers"][0]["model"], json!("model"));
     }
 
     fn model_instance(
