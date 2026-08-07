@@ -3,13 +3,13 @@
 
 """Prefix-index snapshot/replay across a failover.
 
-The interesting cases are the two directions of staleness. A snapshot is a picture of
-the index at a moment; between that moment and the crash, blocks can be *added* to the
-cache (harmless -- they are simply missing, so those prefixes MISS and recompute) or
-*evicted and reused* (dangerous -- the snapshot still names them, and replaying that
-entry is a HIT on memory that has since been overwritten). Deletions are therefore
-streamed as they happen rather than waiting for the next snapshot, and most of what
-follows checks that asymmetry holds.
+A snapshot is a picture of the index at a moment, and between that moment and the crash
+the world moves. Blocks *cached* since then are merely absent, which costs a MISS. Blocks
+*reused* since then are still named by the snapshot, and replaying one is a HIT on memory
+that now belongs to someone else. A per-block generation counter, bumped whenever a block
+leaves the free queue, is what separates the two: the snapshot proposes a binding and the
+counter vetoes it. Most of what follows checks that the veto is in the right places, and
+that losing it installs nothing rather than everything.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 LAYOUT = "layout-aaaa|layout-bbbb"
 OTHER_LAYOUT = "layout-cccc|layout-dddd"
+N_BLOCKS = 64
 
 
 # --------------------------------------------------------------------------- fakes
@@ -42,7 +43,7 @@ class FakeBlock:
 
 
 class FakeFreeQueue:
-    """Only the two operations the requeue uses, plus visible order for assertions."""
+    """Only the operations replay uses, plus visible order for assertions."""
 
     def __init__(self, blocks):
         self.order = list(blocks)
@@ -55,7 +56,7 @@ class FakeFreeQueue:
 
 
 class FakeBlockPool:
-    def __init__(self, n_blocks: int = 64):
+    def __init__(self, n_blocks: int = N_BLOCKS):
         self.blocks = [FakeBlock(i) for i in range(n_blocks)]
         self.null_block = self.blocks[0]
         self.free_block_queue = FakeFreeQueue(self.blocks[1:])
@@ -67,27 +68,34 @@ class FakeBlockPool:
 
     # -- helpers the tests use to drive the pool ---------------------------------
     def cache(self, block_id: int, h: bytes, ntok: int = 16):
+        """Hash a block that is already held, as cache_full_blocks does."""
         blk = self.blocks[block_id]
         blk.block_hash = BlockHashWithGroupId(h)
         blk.block_hash_num_tokens = ntok
         return blk
 
     def evict(self, block_id: int):
-        """Reclaim a cached block, as get_new_blocks does when it pops a cached one."""
+        """Drop a block's hash. Removes a name; touches no bytes."""
         blk = self.blocks[block_id]
-        hashes = [bytes(blk.block_hash)] if blk.block_hash is not None else []
         blk.block_hash = None
         blk.block_hash_num_tokens = 0
-        kvi.append_deletions(hashes)
+
+    def hand_out(self, block_id: int):
+        """Pop a block off the free queue, which is what makes it writable again."""
+        kvi.bump([block_id])
 
 
 @pytest.fixture
 def idx(tmp_path, monkeypatch):
-    """Point the module at a scratch snapshot path and reset its module state."""
+    """Point the module at a scratch path and reset its module state."""
     path = str(tmp_path / "kv_index")
     monkeypatch.setenv("GMS_KV_INDEX_PATH", path)
     monkeypatch.setattr(kvi, "_log_path", None)
     monkeypatch.setattr(kvi, "_last_snapshot", 0.0)
+    monkeypatch.setattr(kvi, "_gen", None)
+    monkeypatch.setattr(kvi, "_gen_layout", None)
+    monkeypatch.setattr(kvi, "_gen_blind", False)
+    kvi.open_generations(N_BLOCKS, LAYOUT)
     return path
 
 
@@ -100,6 +108,7 @@ def h(n: int) -> bytes:
 
 def test_snapshot_round_trips(idx):
     pool = FakeBlockPool()
+    pool.hand_out(5)
     pool.cache(5, h(1), ntok=16)
     pool.cache(9, h(2), ntok=8)
 
@@ -107,7 +116,8 @@ def test_snapshot_round_trips(idx):
     layout_id, records = kvi.read_snapshot(idx)
 
     assert layout_id == LAYOUT
-    assert sorted(records) == sorted([(h(1), 5, 16), (h(2), 9, 8)])
+    # Block 5 was handed out once, block 9 never; the generation rides along.
+    assert sorted(records) == sorted([(h(1), 5, 16, 1), (h(2), 9, 8, 0)])
 
 
 def test_replay_installs_the_prior_index(idx):
@@ -128,27 +138,45 @@ def test_replay_refuses_a_snapshot_from_a_different_layout(idx):
     kvi.write_snapshot(src, LAYOUT, idx)
 
     dst = FakeBlockPool()
-    # The snapshot describes pages this engine did not adopt; replaying it would point
-    # hashes at memory that never held those prefixes.
+    # The snapshot describes pages this engine did not adopt. block_id indexes tensors of
+    # a particular shape, so the same number would name different bytes here.
     assert kvi.replay_index(dst, OTHER_LAYOUT) == 0
     assert dst.blocks[5].block_hash is None
 
 
-def test_block_evicted_after_the_snapshot_is_not_replayed(idx):
+def test_block_reused_after_the_snapshot_is_not_replayed(idx):
     """The dangerous direction of staleness: the snapshot still names a reused block."""
     src = FakeBlockPool()
     src.cache(5, h(1))
     src.cache(9, h(2))
     kvi.write_snapshot(src, LAYOUT, idx)
 
-    src.evict(5)  # reclaimed and overwritten with something else, then we crash
+    src.evict(5)
+    src.hand_out(5)  # reclaimed and refilled with something else, then we crash
 
     dst = FakeBlockPool()
     installed = kvi.replay_index(dst, LAYOUT)
 
     assert installed == 1
-    assert dst.blocks[5].block_hash is None, "evicted block must not be resurrected"
+    assert dst.blocks[5].block_hash is None, "reused block must not be resurrected"
     assert bytes(dst.blocks[9].block_hash) == h(2)
+
+
+def test_block_evicted_but_not_reused_is_still_replayed(idx):
+    """Eviction removes a name and touches no bytes, so the binding still holds.
+
+    This is what the counters buy over recording evictions: the block still contains the
+    prefix, so replaying it is correct and free.
+    """
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    src.evict(5)  # dropped from the index, never handed out again
+
+    dst = FakeBlockPool()
+    assert kvi.replay_index(dst, LAYOUT) == 1
+    assert bytes(dst.blocks[5].block_hash) == h(1)
 
 
 def test_block_cached_after_the_snapshot_is_simply_missing(idx):
@@ -165,23 +193,37 @@ def test_block_cached_after_the_snapshot_is_simply_missing(idx):
     assert dst.blocks[9].block_hash is None
 
 
-def test_a_later_snapshot_supersedes_earlier_deletions(idx):
-    """Deletions already reflected in a snapshot are dropped, not applied forever."""
+def test_a_later_snapshot_records_the_current_generation(idx):
+    """Reuse before a snapshot is absorbed by it, not carried forever."""
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    src.evict(5)
+    src.hand_out(5)
+    src.cache(5, h(3))  # same block, different prefix
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    dst = FakeBlockPool()
+    assert kvi.replay_index(dst, LAYOUT) == 1
+    assert bytes(dst.blocks[5].block_hash) == h(3)
+
+
+def test_resetting_the_prefix_cache_invalidates_every_record(idx):
+    """reset_prefix_cache drops the index without moving bytes, so counters must move.
+
+    Its purpose is to discard a cache computed under stale weights. Every counter would
+    otherwise still match and the snapshot would reinstate exactly what was discarded.
+    """
     src = FakeBlockPool()
     src.cache(5, h(1))
     src.cache(9, h(2))
     kvi.write_snapshot(src, LAYOUT, idx)
-    src.evict(5)
 
-    # Second snapshot: block 5 has no hash, so its absence is already recorded. The
-    # deletion list is cleared, and block 5 being cached again afterwards must survive.
-    kvi.maybe_snapshot(_FakeScheduler(src, LAYOUT))
-    src.cache(5, h(3))
-    kvi.maybe_snapshot(_FakeScheduler(src, LAYOUT, force=True))
+    kvi.bump_all()
 
     dst = FakeBlockPool()
-    kvi.replay_index(dst, LAYOUT)
-    assert bytes(dst.blocks[5].block_hash) == h(3)
+    assert kvi.replay_index(dst, LAYOUT) == 0
 
 
 def test_replay_never_disturbs_a_block_this_engine_is_using(idx):
@@ -212,20 +254,58 @@ def test_replayed_blocks_move_to_the_free_queue_tail(idx):
     assert order[-3:] == [7, 6, 5]
 
 
-def test_a_torn_deletion_tail_does_not_lose_the_rest(idx):
+def test_losing_the_counters_installs_nothing(idx, monkeypatch):
+    """Fail closed. Without the veto there is no evidence any record still holds."""
     src = FakeBlockPool()
     src.cache(5, h(1))
-    src.cache(9, h(2))
     kvi.write_snapshot(src, LAYOUT, idx)
-    src.evict(5)
 
-    with open(kvi._del_path(), "ab") as f:  # crash mid-append
-        f.write(b"\x20\x00partial")
+    monkeypatch.setattr(kvi, "_gen", None)
+    assert kvi.replay_index(FakeBlockPool(), LAYOUT) == 0
 
-    dst = FakeBlockPool()
-    kvi.replay_index(dst, LAYOUT)
-    assert dst.blocks[5].block_hash is None, "the complete deletion still applies"
-    assert bytes(dst.blocks[9].block_hash) == h(2)
+
+def test_a_handout_the_counters_missed_installs_nothing(idx, monkeypatch):
+    """A block handed out while the array was unavailable makes every record suspect."""
+    src = FakeBlockPool()
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    monkeypatch.setattr(kvi, "_gen", None)
+    kvi.bump([5])  # missed
+    kvi.open_generations(N_BLOCKS, LAYOUT)
+    assert kvi._gen_blind is False, "reopening clears the flag"
+
+    monkeypatch.setattr(kvi, "_gen_blind", True)
+    assert kvi.replay_index(FakeBlockPool(), LAYOUT) == 0
+
+
+def test_counters_from_another_layout_are_reset_not_reinterpreted(idx):
+    """Values only mean something within one lineage of the same pages."""
+    src = FakeBlockPool()
+    src.hand_out(5)
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    kvi.open_generations(N_BLOCKS, OTHER_LAYOUT)
+    assert int(kvi._gen[5]) == 0, "counters must not carry across layouts"
+    assert kvi.replay_index(FakeBlockPool(), OTHER_LAYOUT) == 0
+
+
+def test_counters_survive_a_takeover(idx):
+    """The array is adopted with the pages, not reset with the process."""
+    src = FakeBlockPool()
+    src.hand_out(5)
+    src.cache(5, h(1))
+    kvi.write_snapshot(src, LAYOUT, idx)
+
+    # Standby: fresh module state, same files.
+    kvi._gen = None
+    kvi._gen_layout = None
+    kvi.open_generations(N_BLOCKS)
+    kvi.bind_generations(LAYOUT)
+
+    assert int(kvi._gen[5]) == 1
+    assert kvi.replay_index(FakeBlockPool(), LAYOUT) == 1
 
 
 def test_disabled_without_the_env_var(tmp_path, monkeypatch):
@@ -237,11 +317,3 @@ def test_disabled_without_the_env_var(tmp_path, monkeypatch):
 
 def test_missing_snapshot_is_not_an_error(idx):
     assert kvi.replay_index(FakeBlockPool(), LAYOUT) == 0
-
-
-class _FakeScheduler:
-    def __init__(self, pool, layout_id, force: bool = False):
-        self.kv_cache_manager = type("M", (), {"block_pool": pool})()
-        self._gms_kv_layout_id = layout_id
-        if force:
-            kvi._last_snapshot = 0.0
