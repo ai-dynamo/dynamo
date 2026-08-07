@@ -5,7 +5,14 @@ use std::sync::LazyLock;
 
 use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
+use serde_json::Value;
 use thiserror::Error;
+
+use super::metrics::ErrorType as MetricErrorType;
+use crate::types::Annotated;
+
+pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";
 
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
     let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
@@ -19,7 +26,7 @@ fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
 /// Overload / admission-control rejection status. Reads
 /// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
 /// environment is fixed at runtime and this is on the rejection path.
-pub(crate) fn overload_status_code() -> StatusCode {
+pub fn overload_status_code() -> StatusCode {
     static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
         let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
         parse_overload_status_code(value.as_deref())
@@ -37,129 +44,442 @@ pub struct HttpError {
     pub message: String,
 }
 
-/// Canonical sanitized error responses returned at the HTTP boundary.
-///
-/// Each variant fixes the `(status, public message, protocol error_type)`
-/// triple so call sites stop duplicating literals. The protocol-specific
-/// mappings (OpenAI `error_type` string, Anthropic `error_type`) and the
-/// `Display` impl that produces the user-safe message all live on this
-/// enum — clients see exactly what the enum says, never a backend error
-/// chain, file path, or panic stack.
+/// Compatibility model used by endpoint handlers that have not yet migrated
+/// to the shared classifier. The next PR in the stack removes this once every
+/// HTTP surface uses the shared classifier.
 #[derive(Debug, Clone, Copy)]
 pub enum SanitizedError {
-    /// 499 Client Closed Request.
     Cancelled,
-    /// 529 Site Is Overloaded.
     Overloaded,
-    /// 503 Service Unavailable.
     Unavailable,
-    /// 500 Internal Server Error.
     Internal,
-    /// Preserve a backend-reported 5xx status code while replacing the
-    /// body with the generic internal-error message. Clients still see
-    /// the original status (so 503 retry semantics survive); only the
-    /// payload is sanitized.
-    ///
-    /// Invariant: the inner status MUST be in the 500–599 range. Construct
-    /// via [`SanitizedError::for_backend_status`] to enforce this.
     PreserveServerError(StatusCode),
 }
 
 impl SanitizedError {
-    /// Classify a backend-supplied HTTP status into the right sanitized
-    /// variant. Returns `None` to mean "forward this 4xx (non-499)
-    /// message as-is" — that case is the protocol contract for client
-    /// errors and is the caller's responsibility to handle.
-    ///
-    /// The single source of truth for the status → variant mapping;
-    /// every site that triages a backend status code should call this
-    /// instead of inlining the if-chain.
     pub fn for_backend_status(status: StatusCode) -> Option<Self> {
         if status.as_u16() == 499 {
-            Some(SanitizedError::Cancelled)
+            Some(Self::Cancelled)
         } else if status.is_client_error() {
-            // 4xx (non-499) is the protocol contract; caller forwards.
             None
         } else if status.is_server_error() {
-            Some(SanitizedError::PreserveServerError(status))
+            Some(Self::PreserveServerError(status))
         } else {
-            // 1xx/2xx/3xx asserted by a backend payload — coerce to 500.
-            Some(SanitizedError::Internal)
+            Some(Self::Internal)
         }
     }
 
     pub fn status(self) -> StatusCode {
         match self {
-            // 499 is not IANA-registered but is widely used (nginx).
-            SanitizedError::Cancelled => StatusCode::from_u16(499).unwrap(),
-            SanitizedError::Overloaded => overload_status_code(),
-            SanitizedError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            SanitizedError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-            SanitizedError::PreserveServerError(code) => {
-                debug_assert!(
-                    code.is_server_error(),
-                    "PreserveServerError requires a 5xx status; got {code}"
-                );
-                code
-            }
+            Self::Cancelled => StatusCode::from_u16(499).expect("499 is a valid status code"),
+            Self::Overloaded => overload_status_code(),
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::PreserveServerError(code) => code,
         }
     }
 
-    /// Anthropic `error.type` for this category. For `PreserveServerError`
-    /// the inner status is consulted so a backend 503/529 is reported as
-    /// `overloaded_error` (matching the Anthropic spec) rather than the
-    /// generic `api_error`.
     pub fn anthropic_type(self) -> &'static str {
         match self {
-            SanitizedError::Cancelled => "request_cancelled",
-            SanitizedError::Overloaded => "overloaded_error",
-            SanitizedError::Unavailable => "overloaded_error",
-            SanitizedError::Internal => "api_error",
-            SanitizedError::PreserveServerError(status) => match status.as_u16() {
-                503 | 529 => "overloaded_error",
-                _ => "api_error",
-            },
+            Self::Cancelled => "request_cancelled",
+            Self::Overloaded | Self::Unavailable => "overloaded_error",
+            Self::PreserveServerError(status) if matches!(status.as_u16(), 503 | 529) => {
+                "overloaded_error"
+            }
+            Self::Internal | Self::PreserveServerError(_) => "api_error",
         }
     }
 
-    /// OpenAI-style snake_case `type` field used in inline error frames.
     pub fn openai_type_slug(self) -> &'static str {
         match self {
-            SanitizedError::Cancelled => "request_cancelled",
-            SanitizedError::Overloaded => "service_unavailable",
-            SanitizedError::Unavailable => "service_unavailable",
-            SanitizedError::Internal => "internal_server_error",
-            SanitizedError::PreserveServerError(status) => match status.as_u16() {
-                503 | 529 => "service_unavailable",
-                _ => "internal_server_error",
-            },
+            Self::Cancelled => "request_cancelled",
+            Self::Overloaded | Self::Unavailable => "service_unavailable",
+            Self::PreserveServerError(status) if matches!(status.as_u16(), 503 | 529) => {
+                "service_unavailable"
+            }
+            Self::Internal | Self::PreserveServerError(_) => "internal_server_error",
         }
     }
 
-    /// Whether to log this category at `error!` (true) or `debug!` (false).
-    /// Cancellations are client-driven and routinely fire on disconnect, so
-    /// they stay at debug to avoid drowning real errors.
     pub fn log_as_error(self) -> bool {
-        !matches!(self, SanitizedError::Cancelled)
+        !matches!(self, Self::Cancelled)
     }
 }
 
 impl std::fmt::Display for SanitizedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SanitizedError::Cancelled => f.write_str("Request cancelled"),
-            SanitizedError::Overloaded => f.write_str("Service temporarily overloaded"),
-            SanitizedError::Unavailable => f.write_str("Service temporarily unavailable"),
-            SanitizedError::Internal | SanitizedError::PreserveServerError(_) => {
-                f.write_str("Internal server error")
-            }
+            Self::Cancelled => f.write_str("Request cancelled"),
+            Self::Overloaded => f.write_str("Service temporarily overloaded"),
+            Self::Unavailable => f.write_str("Service temporarily unavailable"),
+            Self::Internal | Self::PreserveServerError(_) => f.write_str(INTERNAL_ERROR_MESSAGE),
         }
     }
+}
+
+/// Protocol-neutral error categories used for metrics and protocol rendering.
+#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HttpProblemKind {
+    Validation,
+    Authentication,
+    Permission,
+    NotFound,
+    RateLimit,
+    Cancelled,
+    Overloaded,
+    Unavailable,
+    NotImplemented,
+    Internal,
+}
+
+/// A fully classified HTTP failure.
+///
+/// Classification owns the status, public message, metrics category, and
+/// diagnostic. Protocol modules only translate this model into their wire
+/// envelope; they do not re-classify errors.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+pub(crate) struct HttpProblem {
+    kind: HttpProblemKind,
+    status: StatusCode,
+    message: String,
+    diagnostic: String,
+    details: Option<Box<Value>>,
+}
+
+/// Construct a typed invalid-argument error for validation performed at an
+/// HTTP protocol adapter boundary.
+#[allow(dead_code)] // Used by the protocol-validation PR later in this stack.
+pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message(message)
+        .build()
+}
+
+#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+impl HttpProblem {
+    pub(crate) fn from_error(
+        err: &(dyn std::error::Error + 'static),
+        internal_message: &str,
+    ) -> Self {
+        let diagnostic = format_error_chain(err);
+        let mut current = Some(err);
+        while let Some(error) = current {
+            if let Some(rejection) =
+                error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            {
+                return Self {
+                    kind: HttpProblemKind::Overloaded,
+                    status: overload_status_code(),
+                    message: rejection.to_string(),
+                    diagnostic,
+                    details: serde_json::to_value(rejection).ok().map(Box::new),
+                };
+            }
+            current = error.source();
+        }
+
+        // For typed failures, the outermost category owns classification; an
+        // invalid-argument cause must not downgrade an outer unavailable error.
+        let mut current = Some(err);
+        while let Some(error) = current {
+            if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
+                return Self::from_dynamo_error(dynamo_error, internal_message, diagnostic);
+            }
+            if let Some(http_error) = error.downcast_ref::<HttpError>() {
+                return Self::from_explicit_http_error(http_error, diagnostic);
+            }
+            current = error.source();
+        }
+
+        Self::internal(internal_message, diagnostic)
+    }
+
+    /// Classify a backend stream event without exposing server-side details.
+    pub(crate) fn from_annotated<T>(event: &Annotated<T>) -> Option<Self> {
+        #[derive(serde::Deserialize)]
+        struct ErrorPayload {
+            message: Option<String>,
+            code: Option<u16>,
+        }
+
+        if event.is_error() {
+            // A typed error is authoritative. Its message is data, not another
+            // envelope to inspect: parsing JSON-looking text here could leak an
+            // unknown failure as a client error or override InvalidArgument.
+            if let Some(error) = event.error.as_ref() {
+                return Some(Self::from_dynamo_error(
+                    error,
+                    INTERNAL_ERROR_MESSAGE,
+                    format_error_chain(error),
+                ));
+            }
+
+            let diagnostic = event
+                .comment
+                .as_ref()
+                .map(|comments| comments.join(", "))
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_else(|| "unspecified error".to_string());
+
+            // Compatibility for legacy error events that carried a JSON body
+            // in their comment instead of the structured `error` field.
+            if let Ok(payload) = serde_json::from_str::<ErrorPayload>(&diagnostic) {
+                let status = payload
+                    .code
+                    .and_then(|code| StatusCode::from_u16(code).ok())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let message = payload.message.unwrap_or_else(|| diagnostic.clone());
+                return Some(Self::from_backend_status(status, message, diagnostic));
+            }
+
+            return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
+        }
+
+        // Legacy backends used a comment-only, otherwise empty annotation as
+        // an error marker. Preserve that signal, but never expose or interpret
+        // the untyped comment as a client-safe status/message.
+        if event.data.is_none()
+            && event.event.is_none()
+            && let Some(comments) = event.comment.as_ref()
+            && !comments.is_empty()
+        {
+            return Some(Self::internal(INTERNAL_ERROR_MESSAGE, comments.join(", ")));
+        }
+
+        None
+    }
+
+    pub(crate) fn from_backend_status(
+        status: StatusCode,
+        message: impl Into<String>,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        let diagnostic = diagnostic.into();
+        match status {
+            status if status.as_u16() == 499 => Self::classified(
+                HttpProblemKind::Cancelled,
+                status,
+                "Request cancelled",
+                diagnostic,
+            ),
+            status if status.is_client_error() => Self {
+                kind: kind_for_status(status),
+                status,
+                message,
+                diagnostic,
+                details: None,
+            },
+            status if status.is_server_error() => Self::classified(
+                kind_for_status(status),
+                status,
+                INTERNAL_ERROR_MESSAGE,
+                diagnostic,
+            ),
+            _ => Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic),
+        }
+    }
+
+    pub(crate) fn internal(message: impl Into<String>, diagnostic: impl Into<String>) -> Self {
+        Self {
+            kind: HttpProblemKind::Internal,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+            diagnostic: diagnostic.into(),
+            details: None,
+        }
+    }
+
+    fn from_dynamo_error(error: &DynamoError, internal_message: &str, diagnostic: String) -> Self {
+        match error.error_type() {
+            DynamoErrorType::InvalidArgument
+            | DynamoErrorType::Backend(BackendError::InvalidArgument) => Self {
+                kind: HttpProblemKind::Validation,
+                status: StatusCode::BAD_REQUEST,
+                message: error.message().to_string(),
+                diagnostic,
+                details: None,
+            },
+            DynamoErrorType::ResourceExhausted => Self::classified(
+                HttpProblemKind::Overloaded,
+                overload_status_code(),
+                "Service temporarily overloaded",
+                diagnostic,
+            ),
+            DynamoErrorType::Unavailable => Self::classified(
+                HttpProblemKind::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable",
+                diagnostic,
+            ),
+            DynamoErrorType::Cancelled | DynamoErrorType::Backend(BackendError::Cancelled) => {
+                Self::classified(
+                    HttpProblemKind::Cancelled,
+                    StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
+                    "Request cancelled",
+                    diagnostic,
+                )
+            }
+            _ => Self::internal(internal_message, diagnostic),
+        }
+    }
+
+    fn from_explicit_http_error(error: &HttpError, diagnostic: String) -> Self {
+        let Ok(status) = StatusCode::from_u16(error.code) else {
+            return Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic);
+        };
+        if status.as_u16() == 499 {
+            Self::classified(
+                HttpProblemKind::Cancelled,
+                status,
+                "Request cancelled",
+                diagnostic,
+            )
+        } else if status.is_client_error() {
+            Self {
+                kind: kind_for_status(status),
+                status,
+                message: error.message.clone(),
+                diagnostic,
+                details: None,
+            }
+        } else {
+            Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic)
+        }
+    }
+
+    fn classified(
+        kind: HttpProblemKind,
+        status: StatusCode,
+        message: impl Into<String>,
+        diagnostic: String,
+    ) -> Self {
+        Self {
+            kind,
+            status,
+            message: message.into(),
+            diagnostic,
+            details: None,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> HttpProblemKind {
+        self.kind
+    }
+
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn diagnostic(&self) -> &str {
+        &self.diagnostic
+    }
+
+    pub(crate) fn details(&self) -> Option<Box<Value>> {
+        self.details.clone()
+    }
+
+    pub(crate) fn metric_type(&self) -> MetricErrorType {
+        metric_type_for_kind(self.kind)
+    }
+
+    pub(crate) fn metric_type_for_status(status: StatusCode) -> MetricErrorType {
+        metric_type_for_kind(kind_for_status(status))
+    }
+}
+
+#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+fn metric_type_for_kind(kind: HttpProblemKind) -> MetricErrorType {
+    match kind {
+        HttpProblemKind::Validation
+        | HttpProblemKind::Authentication
+        | HttpProblemKind::Permission => MetricErrorType::Validation,
+        HttpProblemKind::NotFound => MetricErrorType::NotFound,
+        HttpProblemKind::RateLimit | HttpProblemKind::Overloaded => MetricErrorType::Overload,
+        HttpProblemKind::Unavailable => MetricErrorType::Unavailable,
+        HttpProblemKind::Cancelled => MetricErrorType::Cancelled,
+        HttpProblemKind::NotImplemented => MetricErrorType::NotImplemented,
+        HttpProblemKind::Internal => MetricErrorType::Internal,
+    }
+}
+
+impl std::fmt::Display for HttpProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HttpProblem {}
+
+#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+fn kind_for_status(status: StatusCode) -> HttpProblemKind {
+    match status {
+        StatusCode::UNAUTHORIZED => HttpProblemKind::Authentication,
+        StatusCode::FORBIDDEN => HttpProblemKind::Permission,
+        StatusCode::NOT_FOUND => HttpProblemKind::NotFound,
+        StatusCode::TOO_MANY_REQUESTS => HttpProblemKind::RateLimit,
+        StatusCode::NOT_IMPLEMENTED => HttpProblemKind::NotImplemented,
+        StatusCode::SERVICE_UNAVAILABLE => HttpProblemKind::Unavailable,
+        status if status.as_u16() == 499 => HttpProblemKind::Cancelled,
+        status if status.as_u16() == 529 => HttpProblemKind::Overloaded,
+        status if status.is_client_error() => HttpProblemKind::Validation,
+        _ => HttpProblemKind::Internal,
+    }
+}
+
+#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = Vec::new();
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>() {
+            parts.push(error.message().to_string());
+        } else {
+            parts.push(error.to_string());
+        }
+        current = error.source();
+    }
+    parts.join(": ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+    #[test]
+    fn typed_validation_is_safe_and_unknown_errors_are_sanitized() {
+        for error_type in [
+            DynamoErrorType::InvalidArgument,
+            DynamoErrorType::Backend(BackendError::InvalidArgument),
+        ] {
+            let error = DynamoError::builder()
+                .error_type(error_type)
+                .message("temperature must be between 0 and 2")
+                .build();
+            let problem = HttpProblem::from_error(&error, "request failed");
+            assert_eq!(problem.kind(), HttpProblemKind::Validation);
+            assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(problem.message(), "temperature must be between 0 and 2");
+        }
+
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::Unknown))
+            .message("panic at /srv/worker.py:42")
+            .build();
+        let problem = HttpProblem::from_error(&error, "request failed");
+        assert_eq!(problem.kind(), HttpProblemKind::Internal);
+        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(problem.message(), "request failed");
+        assert!(!problem.message().contains("/srv/worker.py"));
+    }
 
     #[test]
     fn parses_configured_overload_status_code() {
@@ -191,55 +511,108 @@ mod tests {
 
     #[test]
     fn local_statuses_distinguish_overload_from_unavailable() {
-        assert_eq!(SanitizedError::Overloaded.status().as_u16(), 529);
-        assert_eq!(
-            SanitizedError::Unavailable.status(),
-            StatusCode::SERVICE_UNAVAILABLE
+        let overloaded = HttpProblem::from_dynamo_error(
+            &DynamoError::builder()
+                .error_type(DynamoErrorType::ResourceExhausted)
+                .message("busy")
+                .build(),
+            INTERNAL_ERROR_MESSAGE,
+            "busy".to_string(),
         );
+        assert_eq!(overloaded.status().as_u16(), 529);
+        assert_eq!(overloaded.kind(), HttpProblemKind::Overloaded);
+        let unavailable = HttpProblem::from_dynamo_error(
+            &DynamoError::builder()
+                .error_type(DynamoErrorType::Unavailable)
+                .message("down")
+                .build(),
+            INTERNAL_ERROR_MESSAGE,
+            "down".to_string(),
+        );
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable.kind(), HttpProblemKind::Unavailable);
     }
 
     #[test]
-    fn preserve_server_error_503_maps_to_overload_types() {
-        // Backend-asserted 503 must surface as the spec-correct overload
-        // type on both protocols, not as a generic api_error /
-        // internal_server_error.
-        let err = SanitizedError::PreserveServerError(StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(err.anthropic_type(), "overloaded_error");
-        assert_eq!(err.openai_type_slug(), "service_unavailable");
+    fn backend_statuses_forward_client_messages_and_sanitize_everything_else() {
+        let client =
+            HttpProblem::from_backend_status(StatusCode::BAD_REQUEST, "bad prompt", "bad prompt");
+        assert_eq!(client.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(client.message(), "bad prompt");
+
+        let server = HttpProblem::from_backend_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "worker host leaked",
+            "worker host leaked",
+        );
+        assert_eq!(server.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(server.message(), INTERNAL_ERROR_MESSAGE);
+
+        let invalid_status = HttpProblem::from_backend_status(
+            StatusCode::from_u16(399).unwrap(),
+            "not an error",
+            "not an error",
+        );
+        assert_eq!(invalid_status.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(invalid_status.message(), INTERNAL_ERROR_MESSAGE);
     }
 
     #[test]
-    fn preserve_server_error_529_maps_to_overload_types() {
-        // Anthropic uses 529 as an alternative overload signal; mirror
-        // the 503 mapping so clients can apply the same backoff.
-        let err = SanitizedError::PreserveServerError(StatusCode::from_u16(529).unwrap());
-        assert_eq!(err.anthropic_type(), "overloaded_error");
-        assert_eq!(err.openai_type_slug(), "service_unavailable");
+    fn typed_annotated_errors_ignore_json_shaped_messages() {
+        let invalid = DynamoError::builder()
+            .error_type(DynamoErrorType::InvalidArgument)
+            .message(r#"{"code":500,"message":"wrong"}"#)
+            .build();
+        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(invalid)).unwrap();
+        assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(problem.message(), r#"{"code":500,"message":"wrong"}"#);
+
+        let unknown = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::Unknown))
+            .message(r#"{"code":400,"message":"secret /srv/worker"}"#)
+            .build();
+        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(unknown)).unwrap();
+        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
     }
 
     #[test]
-    fn preserve_server_error_500_remains_generic() {
-        let err = SanitizedError::PreserveServerError(StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(err.anthropic_type(), "api_error");
-        assert_eq!(err.openai_type_slug(), "internal_server_error");
+    fn legacy_server_statuses_keep_protocol_error_types() {
+        for (status, anthropic_type, openai_type) in [
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                "service_unavailable",
+            ),
+            (
+                StatusCode::from_u16(529).unwrap(),
+                "overloaded_error",
+                "service_unavailable",
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "internal_server_error",
+            ),
+        ] {
+            let error = SanitizedError::PreserveServerError(status);
+            assert_eq!(error.anthropic_type(), anthropic_type);
+            assert_eq!(error.openai_type_slug(), openai_type);
+        }
     }
 
     #[test]
-    fn for_backend_status_classifies_correctly() {
-        // 499 → Cancelled
+    fn legacy_backend_status_classification_remains_compatible() {
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::from_u16(499).unwrap()),
             Some(SanitizedError::Cancelled)
         ));
-        // 5xx → PreserveServerError preserving the code
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::SERVICE_UNAVAILABLE),
-            Some(SanitizedError::PreserveServerError(s)) if s == StatusCode::SERVICE_UNAVAILABLE
+            Some(SanitizedError::PreserveServerError(status))
+                if status == StatusCode::SERVICE_UNAVAILABLE
         ));
-        // Non-499 4xx → None (forward as-is)
         assert!(SanitizedError::for_backend_status(StatusCode::BAD_REQUEST).is_none());
-        assert!(SanitizedError::for_backend_status(StatusCode::NOT_FOUND).is_none());
-        // 1xx/2xx/3xx asserted by backend → Internal
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::from_u16(399).unwrap()),
             Some(SanitizedError::Internal)
