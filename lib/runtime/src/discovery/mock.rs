@@ -322,6 +322,7 @@ mod tests {
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
+            request_plane_codec: None,
         };
 
         let query = DiscoveryQuery::Endpoint {

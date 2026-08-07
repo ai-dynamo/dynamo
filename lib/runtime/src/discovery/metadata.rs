@@ -494,6 +494,7 @@ mod tests {
             instance_id: 123,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
             device_type: None,
+            request_plane_codec: None,
         });
 
         metadata.register_endpoint(instance).unwrap();
@@ -521,6 +522,7 @@ mod tests {
                 instance_id: i,
                 transport: TransportType::Nats("nats://localhost:4222".to_string()),
                 device_type: None,
+                request_plane_codec: None,
             });
             metadata.register_endpoint(instance).unwrap();
         }
@@ -693,6 +695,7 @@ mod tests {
             instance_id: 1,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
             device_type: None,
+            request_plane_codec: None,
         });
         metadata.register_endpoint(endpoint).unwrap();
 
