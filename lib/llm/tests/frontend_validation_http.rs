@@ -106,7 +106,7 @@ async fn completions_backend_validation_is_400_for_unary_and_streaming() {
                 .post(format!("{}/v1/completions", svc.base_url))
                 .json(&json!({
                     "model": MODEL,
-                    "prompt": "hello",
+                    "prompt": "test",
                     "max_tokens": 2147483647_u32,
                     "stream": stream
                 }))
@@ -155,7 +155,12 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
             let response = svc
                 .client
                 .post(format!("{}/v1/responses", svc.base_url))
-                .json(&json!({"model": MODEL, "input": [], "stream": stream}))
+                .json(&json!({
+                    "model": MODEL,
+                    "input": [],
+                    "max_tokens": 10,
+                    "stream": stream
+                }))
                 .send()
                 .await
                 .unwrap();
@@ -184,7 +189,7 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
                 .post(format!("{}/v1/messages", svc.base_url))
                 .json(&json!({
                     "model": MODEL,
-                    "max_tokens": 16,
+                    "max_tokens": 10,
                     "stream": stream,
                     "messages": [{"role": "user", "content": ["hello"]}]
                 }))
