@@ -1146,7 +1146,13 @@ class SglangStreamingPostProcessor:
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
+            raw_token_count = len(token_ids)
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            retained_token_count = len(token_ids)
+            if log_probs is not None and len(log_probs) == raw_token_count:
+                log_probs = log_probs[:retained_token_count]
+            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
+                top_logprobs = top_logprobs[:retained_token_count]
 
         delta_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
