@@ -56,6 +56,30 @@ class AbortRequest(msgspec.Struct, tag="abort_request", forbid_unknown_fields=Tr
     pass
 
 
+class PrepareCheckpointRequest(
+    msgspec.Struct, tag="prepare_checkpoint_request", forbid_unknown_fields=True
+):
+    pass
+
+
+class AbortCheckpointRequest(
+    msgspec.Struct, tag="abort_checkpoint_request", forbid_unknown_fields=True
+):
+    token: str
+
+
+class CompleteRestoreRequest(
+    msgspec.Struct, tag="complete_restore_request", forbid_unknown_fields=True
+):
+    token: str
+
+
+class GetCheckpointStateRequest(
+    msgspec.Struct, tag="get_checkpoint_state_request", forbid_unknown_fields=True
+):
+    pass
+
+
 class SuccessResponse(
     msgspec.Struct, tag="success_response", forbid_unknown_fields=True
 ):
@@ -66,6 +90,23 @@ class ExportResponse(msgspec.Struct, tag="export_response", forbid_unknown_field
     pass
 
 
+class CheckpointDomainState(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    name: str
+    server_nonce: str
+    gpu_uuid: str
+    allocation_count: int
+    allocation_digest: str
+
+
+class CheckpointStateResponse(
+    msgspec.Struct, tag="checkpoint_state_response", forbid_unknown_fields=True
+):
+    state: str
+    generation: int
+    token: str | None
+    domains: tuple[CheckpointDomainState, ...]
+
+
 class ErrorResponse(msgspec.Struct, tag="error_response", forbid_unknown_fields=True):
     message: str
     out_of_memory: bool = False
@@ -74,11 +115,18 @@ class ErrorResponse(msgspec.Struct, tag="error_response", forbid_unknown_fields=
 Request: TypeAlias = (
     AllocateRequest | ExportRequest | FreeRequest | CommitRequest | AbortRequest
 )
+CheckpointControlRequest: TypeAlias = (
+    PrepareCheckpointRequest
+    | AbortCheckpointRequest
+    | CompleteRestoreRequest
+    | GetCheckpointStateRequest
+)
 Message: TypeAlias = (
     HandshakeRequest
     | HandshakeResponse
     | Request
-    | (SuccessResponse | ExportResponse | ErrorResponse)
+    | CheckpointControlRequest
+    | (SuccessResponse | ExportResponse | CheckpointStateResponse | ErrorResponse)
 )
 REQUEST_TYPES = (
     AllocateRequest,
@@ -86,6 +134,12 @@ REQUEST_TYPES = (
     FreeRequest,
     CommitRequest,
     AbortRequest,
+)
+CHECKPOINT_CONTROL_TYPES = (
+    PrepareCheckpointRequest,
+    AbortCheckpointRequest,
+    CompleteRestoreRequest,
+    GetCheckpointStateRequest,
 )
 
 _encoder = msgspec.msgpack.Encoder()
