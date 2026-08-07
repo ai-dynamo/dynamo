@@ -39,6 +39,7 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    DistinctRouterWorkersPayload,
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     LoraTestChatPayload,
@@ -331,7 +332,12 @@ vllm_configs = {
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            router_selection_chat_payload_default(),
+            # 10 requests keeps the random-tie-break flake probability of not
+            # hitting both replicas at ~2 * 0.5**10 (< 0.2%).
+            router_selection_chat_payload_default(
+                repeat_count=10,
+                payload_cls=DistinctRouterWorkersPayload,
+            ),
             kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
         env={},
