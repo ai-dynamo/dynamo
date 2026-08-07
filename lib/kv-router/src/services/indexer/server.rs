@@ -540,9 +540,9 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse
     state.registry.refresh_metrics();
     let encoder = prometheus::TextEncoder::new();
     let mut buf = Vec::new();
-    encoder
-        .encode(&state.prom_registry.gather(), &mut buf)
-        .unwrap();
+    let mut metric_families = state.prom_registry.gather();
+    dynamo_runtime::metrics::inject_env_const_labels(&mut metric_families);
+    encoder.encode(&metric_families, &mut buf).unwrap();
     (
         StatusCode::OK,
         [(
