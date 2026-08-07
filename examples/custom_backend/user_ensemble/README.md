@@ -45,12 +45,6 @@ From the repository root:
 ./examples/custom_backend/user_ensemble/launch.sh
 ```
 
-For cross-request encoder coalescing, pass the existing Dynamo batcher policy
-through the user worker, for example
-`--custom-encoder-max-queue-delay-us 1000`. The default is zero (dispatch
-immediately); batch cost, item caps, and preprocess concurrency remain encoder
-backend policy.
-
 When the decoder shares a GPU with a substantial encoder, reserve room for the
 encoder with `DYN_VLLM_GPU_MEMORY_UTILIZATION` (for example, `0.4`). The default
 is `0.8`, suitable only when the colocated encoder has enough remaining memory.

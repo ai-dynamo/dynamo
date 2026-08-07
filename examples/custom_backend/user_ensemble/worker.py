@@ -128,16 +128,12 @@ class UserEnsembleEngine(LLMEngine):
         served_model_name: str,
         engine_args: AsyncEngineArgs,
         encoder_backend_type: type[VisionEncoderBackend[Any, Any, Any]],
-        custom_encoder_max_queue_delay_us: int = 0,
         classifier: Classifier | None = None,
     ) -> None:
-        if custom_encoder_max_queue_delay_us < 0:
-            raise ValueError("custom encoder queue delay must be non-negative")
         self.model_name = model_name
         self.served_model_name = served_model_name
         self._engine_args = engine_args
         self._encoder_backend_type = encoder_backend_type
-        self._custom_encoder_max_queue_delay_us = custom_encoder_max_queue_delay_us
         self._classifier = classifier or DummyClassifier()
 
         self._decoder: Decoder | None = None
@@ -165,7 +161,6 @@ class UserEnsembleEngine(LLMEngine):
         parser.add_argument("--event-plane", choices=("nats", "zmq"), default=None)
         parser.add_argument("--custom-jinja-template", default=None)
         parser.add_argument("--encoder-class", required=True)
-        parser.add_argument("--custom-encoder-max-queue-delay-us", type=int, default=0)
         parser.add_argument("--disable-kv-routing", action="store_true")
         AsyncEngineArgs.add_cli_args(parser, async_args_only=False)
         args = parser.parse_args(argv)
@@ -193,7 +188,6 @@ class UserEnsembleEngine(LLMEngine):
             served_model_name=served_model_name,
             engine_args=engine_args,
             encoder_backend_type=backend_type,
-            custom_encoder_max_queue_delay_us=(args.custom_encoder_max_queue_delay_us),
         )
         worker_config = WorkerConfig(
             namespace=args.namespace,
@@ -220,7 +214,6 @@ class UserEnsembleEngine(LLMEngine):
         self._encoder = AsyncVisionEncoder(
             backend,
             name="ensemble-vision-encoder",
-            max_queue_delay_us=self._custom_encoder_max_queue_delay_us,
         )
         self._encoder.load(self.model_name)
 
