@@ -164,11 +164,28 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
         .build()
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ValidationScope {
+    Chain,
+    Outermost,
+}
+
 #[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
 impl HttpProblem {
+    /// Classify an arbitrary error through the same logical nested-error flow
+    /// used by `from_annotated`; generic callers retain chain-wide validation
+    /// lookup because untyped context wrappers may surround the typed failure.
     pub(crate) fn from_error(
         err: &(dyn std::error::Error + 'static),
         internal_message: &str,
+    ) -> Self {
+        Self::from_error_with_validation_scope(err, internal_message, ValidationScope::Chain)
+    }
+
+    fn from_error_with_validation_scope(
+        err: &(dyn std::error::Error + 'static),
+        internal_message: &str,
+        validation_scope: ValidationScope,
     ) -> Self {
         let diagnostic = format_error_chain(err);
         let mut current = Some(err);
@@ -187,19 +204,8 @@ impl HttpProblem {
             current = error.source();
         }
 
-        // Preserve the existing handler precedence for typed failures anywhere
-        // in the chain. In particular, an untyped wrapper must not hide an
-        // overload, unavailable, or cancellation signal.
-        for error_type in [
-            DynamoErrorType::ResourceExhausted,
-            DynamoErrorType::Unavailable,
-            DynamoErrorType::InvalidArgument,
-            DynamoErrorType::Backend(BackendError::InvalidArgument),
-            DynamoErrorType::Cancelled,
-        ] {
-            if let Some(dynamo_error) = find_dynamo_error_in_chain(err, error_type) {
-                return Self::from_dynamo_error(dynamo_error, internal_message, diagnostic);
-            }
+        if let Some(dynamo_error) = select_dynamo_error_in_chain(err, validation_scope) {
+            return Self::from_dynamo_error(dynamo_error, internal_message, diagnostic);
         }
 
         // All other typed failures retain outermost-error classification.
@@ -217,7 +223,9 @@ impl HttpProblem {
         Self::internal(internal_message, diagnostic)
     }
 
-    /// Classify a backend stream event without exposing server-side details.
+    /// Classify a backend stream event through the same logical nested-error
+    /// flow as `from_error`; the event's outer typed validation is authoritative,
+    /// while nested operational failures retain their retry/cancellation meaning.
     pub(crate) fn from_annotated<T>(event: &Annotated<T>) -> Option<Self> {
         #[derive(serde::Deserialize)]
         struct ErrorPayload {
@@ -227,7 +235,11 @@ impl HttpProblem {
 
         if event.is_error() {
             if let Some(error) = event.error.as_ref() {
-                return Some(Self::from_error(error, INTERNAL_ERROR_MESSAGE));
+                return Some(Self::from_error_with_validation_scope(
+                    error,
+                    INTERNAL_ERROR_MESSAGE,
+                    ValidationScope::Outermost,
+                ));
             }
 
             let diagnostic = event
@@ -427,6 +439,70 @@ fn backend_http_payload(error: &DynamoError) -> Option<(StatusCode, String)> {
     Some((status, payload.message))
 }
 
+fn select_dynamo_error_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+    validation_scope: ValidationScope,
+) -> Option<&'a DynamoError> {
+    // Preserve operational signals through wrappers before considering the
+    // validation scope selected by the calling boundary.
+    for error_type in [
+        DynamoErrorType::ResourceExhausted,
+        DynamoErrorType::Unavailable,
+    ] {
+        if let Some(error) = find_dynamo_error_in_chain(err, error_type) {
+            return Some(error);
+        }
+    }
+
+    match validation_scope {
+        ValidationScope::Chain => {
+            for error_type in [
+                DynamoErrorType::InvalidArgument,
+                DynamoErrorType::Backend(BackendError::InvalidArgument),
+            ] {
+                if let Some(error) = find_dynamo_error_in_chain(err, error_type) {
+                    return Some(error);
+                }
+            }
+        }
+        ValidationScope::Outermost => {
+            if let Some(error) = find_outermost_dynamo_error_in_chain(err)
+                && matches!(
+                    error.error_type(),
+                    DynamoErrorType::InvalidArgument
+                        | DynamoErrorType::Backend(BackendError::InvalidArgument)
+                )
+            {
+                return Some(error);
+            }
+        }
+    }
+
+    for error_type in [
+        DynamoErrorType::Cancelled,
+        DynamoErrorType::Backend(BackendError::Cancelled),
+    ] {
+        if let Some(error) = find_dynamo_error_in_chain(err, error_type) {
+            return Some(error);
+        }
+    }
+
+    None
+}
+
+fn find_outermost_dynamo_error_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
+            return Some(dynamo_error);
+        }
+        current = error.source();
+    }
+    None
+}
+
 fn find_dynamo_error_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
     error_type: DynamoErrorType,
@@ -575,6 +651,11 @@ mod tests {
                 HttpProblemKind::Cancelled,
                 StatusCode::from_u16(499).unwrap(),
             ),
+            (
+                DynamoErrorType::Backend(BackendError::Cancelled),
+                HttpProblemKind::Cancelled,
+                StatusCode::from_u16(499).unwrap(),
+            ),
         ] {
             let error = DynamoError::builder()
                 .error_type(DynamoErrorType::Unknown)
@@ -594,6 +675,38 @@ mod tests {
             let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(error)).unwrap();
             assert_eq!(problem.kind(), expected_kind);
             assert_eq!(problem.status(), expected_status);
+        }
+    }
+
+    #[test]
+    fn annotated_validation_uses_the_outermost_typed_error() {
+        for error_type in [
+            DynamoErrorType::InvalidArgument,
+            DynamoErrorType::Backend(BackendError::InvalidArgument),
+        ] {
+            let wrapped_invalid = || {
+                DynamoError::builder()
+                    .error_type(DynamoErrorType::Unknown)
+                    .message("outer internal failure")
+                    .cause(
+                        DynamoError::builder()
+                            .error_type(error_type)
+                            .message("nested invalid argument")
+                            .build(),
+                    )
+                    .build()
+            };
+
+            let problem = HttpProblem::from_error(&wrapped_invalid(), "request failed");
+            assert_eq!(problem.kind(), HttpProblemKind::Validation);
+            assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(problem.message(), "nested invalid argument");
+
+            let problem =
+                HttpProblem::from_annotated(&Annotated::<()>::from_err(wrapped_invalid())).unwrap();
+            assert_eq!(problem.kind(), HttpProblemKind::Internal);
+            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
         }
     }
 
