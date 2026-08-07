@@ -266,19 +266,6 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
 			},
 		},
-		{
-			name: "UPDATE entering the Grove pathway enables the suffix",
-			op:   admissionv1.Update,
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				dgd := groveWorkerHashSuffixTestDGD()
-				dgd.Annotations = map[string]string{consts.KubeAnnotationEnableGrove: "false"}
-				return dgd
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				delete(dgd.Annotations, consts.KubeAnnotationEnableGrove)
-			},
-			wantSuffix: true,
-		},
 	}
 
 	for _, tt := range tests {

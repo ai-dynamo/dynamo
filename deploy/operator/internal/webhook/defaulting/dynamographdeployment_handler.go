@@ -159,6 +159,9 @@ func (d *DGDDefaulter) defaultGroveWorkerHashSuffixForUpdate(
 	}
 
 	oldGrovePathway := d.isGrovePathway(ctx, oldDGD)
+	if !grovePathway || !oldGrovePathway {
+		return nil
+	}
 	d.defaultComponentFields(oldDGD, oldGrovePathway)
 
 	if oldDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled] == "true" {
@@ -169,14 +172,6 @@ func (d *DGDDefaulter) defaultGroveWorkerHashSuffixForUpdate(
 	// This is operator-owned state. An update cannot enable the suffix without
 	// changing the worker spec, nor can it retain a user-supplied value.
 	delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixEnabled)
-	if !grovePathway {
-		return nil
-	}
-	if !oldGrovePathway {
-		setGroveWorkerHashSuffixEnabled(dgd)
-		return nil
-	}
-
 	oldWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(oldDGD)
 	if err != nil {
 		return fmt.Errorf("compute previous Grove worker hash suffix: %w", err)
