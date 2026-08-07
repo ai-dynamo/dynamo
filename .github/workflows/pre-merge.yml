@@ -79,6 +79,12 @@ jobs:
         node-version: '22'
     - name: Install Fern CLI
       run: npm install -g fern-api
+    - name: Sync external DEP bodies
+      # Materialises docs/fern/pages/proposals/_generated/*.mdx from the DEP
+      # manifest so nav entries in docs/fern/index.yml that reference the
+      # generated dir resolve under `fern check`. The dir is gitignored
+      # (see .gitignore).
+      run: python3 docs/fern/scripts/sync_deps.py
     - name: Validate Fern configuration
       working-directory: docs/fern
       run: fern check
@@ -133,6 +139,8 @@ jobs:
         node-version: '22'
     - name: Install Fern CLI
       run: npm install -g fern-api
+    - name: Sync external DEP bodies
+      run: python3 docs/fern/scripts/sync_deps.py
     - name: Check for broken links
       working-directory: docs/fern
       run: fern docs broken-links
