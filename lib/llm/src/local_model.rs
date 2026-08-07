@@ -632,11 +632,12 @@ impl LocalModel {
         // Register the Model Deployment Card via discovery interface
         // The model_suffix (for LoRA) will be appended AFTER the instance_id
         let discovery = endpoint.drt().discovery();
+        let wire_card = self.card.for_mdc_wire();
         let spec = DiscoverySpec::from_model_with_suffix(
             endpoint.component().namespace().name().to_string(),
             endpoint.component().name().to_string(),
             endpoint.name().to_string(),
-            &self.card,
+            &wire_card,
             model_suffix,
         )?;
         let _instance = discovery.register(spec).await?;
