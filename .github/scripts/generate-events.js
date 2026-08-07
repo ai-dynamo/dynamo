@@ -7,10 +7,17 @@
 // component renders the baked arrays as-is, so there is no client-side date logic
 // and no hydration mismatch.
 //
-// GENERATED_AT is emitted for the same reason: the month grid needs a "today"
+// GENERATED_ON is emitted for the same reason: the month grid needs a "today"
 // to highlight, and reading the clock in the component would either be build
 // time (arbitrarily old) or client time (hydration mismatch). Pinning it to the
-// generation moment ties the grid to the six-hour refresh instead.
+// generation date ties the grid to the six-hour refresh instead.
+//
+// It is a Pacific calendar date, not a timestamp, and that is deliberate on two
+// counts. The grid only resolves to a day, so a timestamp would be false
+// precision -- and because this file is committed, a timestamp would differ on
+// every six-hour run and republish the docs four times a day over a byte that
+// renders identically. A date changes once a day, when the rendered grid
+// actually moves. Pacific because ptParts() labels every event in Pacific.
 
 const ical = require('node-ical');
 const fs = require('fs');
@@ -95,6 +102,8 @@ function toEvent(e, isPast) {
 async function main() {
   const events = await ical.async.fromURL(ICS_URL);
   const now = new Date();
+  // en-CA formats as YYYY-MM-DD, which is what the component parses.
+  const generatedOn = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 
   const all = Object.values(events)
     .filter((e) => e.type === 'VEVENT' && e.start && e.summary && String(e.status || '').toUpperCase() !== 'CANCELLED')
@@ -136,8 +145,8 @@ async function main() {
     '  locationUrl: string | null;\n' +
     '  addUrl: string;\n' +
     '}\n\n' +
-    '/** Generation moment, ISO 8601. The calendar grid treats this as "today". */\n' +
-    `export const GENERATED_AT = ${JSON.stringify(now.toISOString())};\n\n` +
+    '/** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */\n' +
+    `export const GENERATED_ON = ${JSON.stringify(generatedOn)};\n\n` +
     `export const UPCOMING_EVENTS: DynamoEvent[] = ${JSON.stringify(upcoming, null, 2)};\n\n` +
     `export const PAST_EVENTS: DynamoEvent[] = ${JSON.stringify(past, null, 2)};\n`;
 

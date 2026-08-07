@@ -12,14 +12,9 @@
 import {
   UPCOMING_EVENTS,
   PAST_EVENTS,
-  GENERATED_AT,
+  GENERATED_ON,
   type DynamoEvent,
 } from "./events.generated";
-
-// The generator labels every event day/month/year in Pacific time, so "today"
-// has to be resolved in the same zone -- a UTC today lands on the next day for
-// the last 16-17 hours of every Pacific date and would highlight the wrong cell.
-const CALENDAR_TZ = "America/Los_Angeles";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -44,24 +39,25 @@ const MONTH_INDEX = Object.fromEntries(
 );
 
 /**
- * Today's calendar date in {@link CALENDAR_TZ}, as of the last generator run.
+ * Today, as of the last generator run.
  *
- * GENERATED_AT is refreshed every six hours by the fern-docs workflow, so the
- * grid tracks the real month without any client-side date logic. The
- * `new Date()` fallback only matters for a hand-run generator predating the
- * export.
+ * GENERATED_ON is a Pacific YYYY-MM-DD refreshed every six hours by
+ * community-events-refresh.yml, so the grid tracks the real month with no
+ * client-side date logic and no timezone work here -- the generator already
+ * resolved the zone. Parsed field-wise rather than via `new Date(string)`,
+ * which would read the date as UTC midnight and shift it a day west.
  */
 function resolveToday() {
-  const now = GENERATED_AT ? new Date(GENERATED_AT) : new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: CALENDAR_TZ,
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  }).formatToParts(now);
-  const part = (type: string) =>
-    Number(parts.find((entry) => entry.type === type)?.value);
-  return { year: part("year"), month: part("month") - 1, day: part("day") };
+  const [year, month, day] = GENERATED_ON.split("-").map(Number);
+  if (!year || !month || !day) {
+    const fallback = new Date();
+    return {
+      year: fallback.getFullYear(),
+      month: fallback.getMonth(),
+      day: fallback.getDate(),
+    };
+  }
+  return { year, month: month - 1, day };
 }
 
 function buildMonthDays(year: number, month: number) {

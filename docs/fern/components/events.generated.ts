@@ -20,8 +20,8 @@ export interface DynamoEvent {
   addUrl: string;
 }
 
-/** Generation moment, ISO 8601. The calendar grid treats this as "today". */
-export const GENERATED_AT = "2026-08-07T23:21:32.558Z";
+/** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
+export const GENERATED_ON = "2026-08-07";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [];
 
