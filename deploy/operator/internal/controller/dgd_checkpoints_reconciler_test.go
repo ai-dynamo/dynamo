@@ -889,6 +889,12 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
 		},
 	}
+	expected, _, _, _, err := newTestDGDCheckpointsReconciler(reconciler).
+		expectedCheckpointCR(testScheme, dgd, "worker", &dgd.Spec.Components[0])
+	require.NoError(t, err)
+	existing.Spec = expected.Spec
+	existing.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] =
+		expected.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]
 	reconciler.Client = fake.NewClientBuilder().
 		WithScheme(testScheme).
 		WithObjects(existing).

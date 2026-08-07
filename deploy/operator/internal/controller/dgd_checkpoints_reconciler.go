@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -202,15 +203,74 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	componentName string,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	checkpointConfig := dynamo.GetCheckpoint(component)
-	if checkpointConfig == nil {
-		return nil, fmt.Errorf("checkpoint config is required")
+	expected, claimTemplateName, gpuCount, deviceClassName, err := r.expectedCheckpointCR(
+		r.Scheme(),
+		dynamoDeployment,
+		componentName,
+		component,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if expected.Spec.GPUMemoryService != nil && expected.Spec.GPUMemoryService.Enabled {
+		if err := r.syncCheckpointGMSResourceClaimTemplate(
+			ctx,
+			dynamoDeployment,
+			claimTemplateName,
+			gpuCount,
+			deviceClassName,
+		); err != nil {
+			return nil, err
+		}
 	}
 
+	ckpt, err := checkpoint.CreateOrGetAutoCheckpoint(ctx, r.Client, expected)
+	if err != nil {
+		return nil, err
+	}
+	if expected.Spec.GPUMemoryService != nil && expected.Spec.GPUMemoryService.Enabled {
+		if err := r.adoptCheckpointGMSResourceClaimTemplate(ctx, ckpt, claimTemplateName); err != nil {
+			return nil, err
+		}
+	}
+	return ckpt, nil
+}
+
+// expectedCheckpointCR constructs the operator-owned checkpoint object without
+// reading or writing Kubernetes resources.
+//
+//nolint:gocyclo
+func (r *dgdCheckpointsReconciler) expectedCheckpointCR(
+	scheme *runtime.Scheme,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, string, int, string, error) {
 	workerHash, err := checkpointWorkerHashForComponent(dynamoDeployment, componentName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+		return nil, "", 0, "", fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 	}
+	return r.expectedCheckpointCRForWorkerHash(
+		scheme,
+		dynamoDeployment,
+		componentName,
+		component,
+		workerHash,
+	)
+}
+
+func (r *dgdCheckpointsReconciler) expectedCheckpointCRForWorkerHash(
+	scheme *runtime.Scheme,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	workerHash string,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, string, int, string, error) {
+	checkpointConfig := dynamo.GetCheckpoint(component)
+	if checkpointConfig == nil {
+		return nil, "", 0, "", fmt.Errorf("checkpoint config is required")
+	}
+
 	checkpointID := checkpoint.DGDCheckpointID(
 		dynamoDeployment.Namespace,
 		dynamoDeployment.Name,
@@ -221,18 +281,18 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 
 	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
+		return nil, "", 0, "", fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 	}
 	if (backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop) &&
 		checkpointConfig.Identity != nil &&
 		checkpointConfig.Identity.BackendFramework != "" {
 		backendFramework, err = dynamo.ParseBackendFramework(checkpointConfig.Identity.BackendFramework)
 		if err != nil {
-			return nil, fmt.Errorf("invalid legacy checkpoint identity backend framework for component %s: %w", componentName, err)
+			return nil, "", 0, "", fmt.Errorf("invalid legacy checkpoint identity backend framework for component %s: %w", componentName, err)
 		}
 	}
 	if backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop {
-		return nil, fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
+		return nil, "", 0, "", fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
 	}
 
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
@@ -242,7 +302,7 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		backendFramework,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
+		return nil, "", 0, "", fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 	}
 	if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dynamoDeployment.Annotations) &&
 		podTemplate.Spec.ServiceAccountName == "" {
@@ -263,7 +323,7 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	}
 	targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 	if err != nil {
-		return nil, err
+		return nil, "", 0, "", err
 	}
 	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
@@ -274,27 +334,20 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		}
 	}
 	var checkpointGMSClaimTemplateName string
+	var checkpointGMSGPUCount int
+	var checkpointGMSDeviceClassName string
 	if gmsSpec != nil && gmsSpec.Enabled {
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
-		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
+		checkpointGMSGPUCount, err = dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {
-			return nil, fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
+			return nil, "", 0, "", fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
 		}
-		checkpointGMSDeviceClassName := gmsSpec.DeviceClassName
+		checkpointGMSDeviceClassName = gmsSpec.DeviceClassName
 		if checkpointGMSDeviceClassName == "" {
 			checkpointGMSDeviceClassName = dra.DefaultDeviceClassName
 		}
-		if err := r.syncCheckpointGMSResourceClaimTemplate(
-			ctx,
-			dynamoDeployment,
-			checkpointGMSClaimTemplateName,
-			checkpointGMSGPUCount,
-			checkpointGMSDeviceClassName,
-		); err != nil {
-			return nil, err
-		}
 		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, checkpointID, gmsSpec); err != nil {
-			return nil, err
+			return nil, "", 0, "", err
 		}
 	}
 	deletionPolicy := nvidiacomv1alpha1.CheckpointDeletionPolicy(checkpointConfig.DeletionPolicy)
@@ -302,9 +355,8 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
 	}
 
-	ckpt, err := checkpoint.CreateOrGetAutoCheckpoint(
-		ctx,
-		r.Client,
+	ckpt, err := checkpoint.ExpectedAutoCheckpoint(
+		scheme,
 		dynamoDeployment.Namespace,
 		checkpointID,
 		nvidiacomv1alpha1.DynamoCheckpointIdentity{
@@ -323,14 +375,9 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		dynamoDeployment,
 	)
 	if err != nil {
-		return nil, err
+		return nil, "", 0, "", err
 	}
-	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := r.adoptCheckpointGMSResourceClaimTemplate(ctx, ckpt, checkpointGMSClaimTemplateName); err != nil {
-			return nil, err
-		}
-	}
-	return ckpt, nil
+	return ckpt, checkpointGMSClaimTemplateName, checkpointGMSGPUCount, checkpointGMSDeviceClassName, nil
 }
 
 func checkpointGMSResourceClaimTemplateName(checkpointID string) string {
