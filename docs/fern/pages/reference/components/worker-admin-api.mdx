@@ -1,0 +1,51 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Worker Admin API
+subtitle: Worker-local lifecycle endpoints for draining, resuming, and checking deletion safety
+---
+
+**Experimental.** Unified-backend workers expose lifecycle controls through the worker system-status
+server. Set `DYN_SYSTEM_PORT` to zero or a positive port to enable this server.
+
+<Warning>
+The system-status server does not authenticate Admin API requests. Restrict the system port to the
+operator network.
+</Warning>
+
+## Endpoints
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| `POST` | `/engine/drain` | Stop new request admission, unregister the worker from discovery, and begin draining admitted work |
+| `POST` | `/engine/resume` | Re-register the worker in discovery and resume request admission |
+| `GET` | `/engine/status` | Return the worker lifecycle and deletion-safety status |
+
+Send an empty body or an empty JSON object. Each endpoint returns the same status shape:
+
+```json
+{
+  "state": "draining",
+  "inflight_requests": 2,
+  "kv_transfers": "not_applicable",
+  "safe_to_delete": false,
+  "discovery_registered": false
+}
+```
+
+`state` is one of `serving`, `draining`, `drained`, or `stopping`. Delete a worker only when
+`safe_to_delete` is `true`. For a disaggregated prefill worker, the worker reports `drained` only when
+the backend confirms that both admitted requests and pending KV transfers are complete. If the
+backend cannot confirm KV-transfer completion, `kv_transfers` remains `unknown` and
+`safe_to_delete` remains `false`.
+
+The existing `SIGTERM` graceful-shutdown path remains the default fallback. The Admin API does not
+delete the worker or replace the shutdown timeout.
+
+## Example
+
+```bash
+curl --fail-with-body -X POST http://worker-host:8081/engine/drain
+curl --fail-with-body http://worker-host:8081/engine/status
+curl --fail-with-body -X POST http://worker-host:8081/engine/resume
+```

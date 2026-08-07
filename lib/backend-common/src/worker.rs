@@ -34,6 +34,7 @@ use crate::engine::{
     EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
+use crate::lifecycle::{RequestTracker, WorkerLifecycleController};
 use crate::publisher::{PublisherHandles, setup_publishers};
 
 /// Default grace-period in seconds between discovery unregister and engine drain.
@@ -281,7 +282,7 @@ impl EngineKind {
     }
 
     /// See [`LLMEngine::is_quiescent`].
-    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+    pub(crate) async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.is_quiescent().await,
             EngineKind::Raw(e) => e.is_quiescent().await,
@@ -616,7 +617,7 @@ impl Worker {
         // alive.
         if shutdown.is_cancelled() {
             tracing::info!("Shutdown signal observed during engine.start(); running orchestrator");
-            self.orchestrator_steps(&endpoint).await;
+            self.orchestrator_steps(&endpoint, None).await;
             return Ok(());
         }
 
@@ -761,8 +762,14 @@ impl Worker {
     /// Full graceful-shutdown orchestrator: discovery unregister →
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
-    async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
-        if let Err(e) = endpoint.unregister_endpoint_instance().await {
+    async fn orchestrator_steps(
+        &mut self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+        lifecycle: Option<&WorkerLifecycleController>,
+    ) {
+        if let Some(lifecycle) = lifecycle {
+            lifecycle.begin_shutdown().await;
+        } else if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
             tracing::info!("Endpoint unregistered from discovery");
@@ -894,14 +901,23 @@ impl Worker {
         // `serde_json::Value` probe surface; the raw pipeline
         // (`RawEngineAdapter`) is already JSON-shaped, so it serves as its
         // own probe. The tuple annotation drives the trait-object coercions.
+        let request_tracker = RequestTracker::new();
+        let lifecycle = WorkerLifecycleController::new(
+            Arc::clone(&request_tracker),
+            endpoint.clone(),
+            self.engine.clone(),
+            self.config.disaggregation_mode,
+        );
+
         let (ingress, probe_engine): (
             Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>,
             dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
-                let engine_adapter = Arc::new(EngineAdapter::new(
+                let engine_adapter = Arc::new(EngineAdapter::with_request_tracker(
                     engine.clone(),
                     self.config.disaggregation_mode,
+                    Arc::clone(&request_tracker),
                 ));
                 let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
                     err(
@@ -913,7 +929,10 @@ impl Worker {
                 (ingress, probe)
             }
             EngineKind::Raw(engine) => {
-                let raw_adapter = Arc::new(RawEngineAdapter::new(engine.clone()));
+                let raw_adapter = Arc::new(RawEngineAdapter::with_request_tracker(
+                    engine.clone(),
+                    Arc::clone(&request_tracker),
+                ));
                 let ingress = Ingress::for_engine(raw_adapter.clone()).map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),
@@ -979,7 +998,15 @@ impl Worker {
                 )
             })?;
         }
-        let serve_fut = builder.start();
+        let started_endpoint = builder.start_with_registration().await.map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("serve registration: {e}"),
+            )
+        })?;
+        lifecycle.register_admin_routes(endpoint.drt().engine_routes());
+
+        let serve_fut = started_endpoint.wait();
         tokio::pin!(serve_fut);
 
         tokio::select! {
@@ -1008,7 +1035,7 @@ impl Worker {
             }
         }
 
-        self.orchestrator_steps(&endpoint).await;
+        self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
         Ok(())
     }
 
