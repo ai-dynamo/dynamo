@@ -1344,13 +1344,10 @@ async fn embeddings(
     let mut response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to fold embeddings stream for {}: {:?}",
-                request_id,
-                e
+            let err_response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(e),
+                "Failed to fold embeddings stream",
             );
-            let err_response =
-                ErrorMessage::internal_server_error("Failed to fold embeddings stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -3864,8 +3861,8 @@ async fn images(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold images stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -4019,9 +4016,10 @@ async fn videos(
         let response = NvVideosResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-                let err_response =
-                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                let err_response = ErrorMessage::from_anyhow(
+                    anyhow::Error::new(e),
+                    "Failed to fold videos stream",
+                );
                 inflight.mark_error(extract_error_type_from_response(&err_response));
                 err_response
             })?;

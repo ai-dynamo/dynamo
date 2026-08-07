@@ -19,30 +19,6 @@ pub trait StreamAggregable: Sized {
 /// Aggregate a stream of [`Annotated<T>`] into a single `T`. The first error
 /// encountered short-circuits further merging and is returned; the remainder
 /// of the stream is dropped.
-pub async fn aggregate_stream<T, S>(stream: S) -> Result<T, String>
-where
-    T: StreamAggregable,
-    S: Stream<Item = Annotated<T>>,
-{
-    let mut stream = std::pin::pin!(stream);
-    let mut response: Option<T> = None;
-
-    while let Some(delta) = stream.next().await {
-        let delta = delta.ok()?;
-        if let Some(data) = delta.data {
-            match response.as_mut() {
-                Some(existing) => existing.merge(data),
-                None => response = Some(data),
-            }
-        }
-    }
-
-    Ok(response.unwrap_or_else(T::empty))
-}
-
-/// Aggregate a stream of [`Annotated<T>`] while preserving structured backend
-/// errors. Existing callers that expose string errors can continue to use
-/// [`aggregate_stream`].
 ///
 /// The [`DynamoError`] is returned intact so the HTTP layer can classify a
 /// backend rejection — invalid argument, overload, cancellation — into the
@@ -76,6 +52,7 @@ where
 
     Ok(response.unwrap_or_else(T::empty))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
