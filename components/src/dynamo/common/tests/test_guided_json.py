@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dynamo.common.utils.guided_json import reject_cyclic_guided_json_ref_chain
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.llm import HttpError
 
 pytestmark = [
@@ -43,8 +43,38 @@ pytestmark = [
     ],
 )
 def test_rejects_cyclic_root_ref_chains(schema):
-    with pytest.raises(HttpError, match=r"circular local \$ref chain") as error:
-        reject_cyclic_guided_json_ref_chain(schema)
+    with pytest.raises(HttpError, match=r"non-progressing local \$ref cycle") as error:
+        reject_nonprogressing_guided_json_ref_cycles(schema)
+
+    assert error.value.code == 400
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param(
+            {
+                "$defs": {
+                    "A": {"allOf": [{"$ref": "#/$defs/A"}]},
+                },
+                "$ref": "#/$defs/A",
+            },
+            id="allof",
+        ),
+        pytest.param(
+            {
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/A"}},
+                "required": ["value"],
+                "$defs": {"A": {"$ref": "#/$defs/A"}},
+            },
+            id="required-property",
+        ),
+    ],
+)
+def test_rejects_nonprogressing_ref_cycles(schema):
+    with pytest.raises(HttpError, match=r"non-progressing local \$ref cycle") as error:
+        reject_nonprogressing_guided_json_ref_cycles(schema)
 
     assert error.value.code == 400
 
@@ -84,7 +114,7 @@ def test_rejects_cyclic_root_ref_chains(schema):
     ],
 )
 def test_allows_schemas_outside_cyclic_root_ref_chains(schema):
-    reject_cyclic_guided_json_ref_chain(schema)
+    reject_nonprogressing_guided_json_ref_cycles(schema)
 
 
 @pytest.mark.parametrize(
@@ -96,4 +126,4 @@ def test_allows_schemas_outside_cyclic_root_ref_chains(schema):
     ],
 )
 def test_leaves_unresolved_references_to_backend(schema):
-    reject_cyclic_guided_json_ref_chain(schema)
+    reject_nonprogressing_guided_json_ref_cycles(schema)
