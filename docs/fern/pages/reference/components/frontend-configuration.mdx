@@ -109,8 +109,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
   Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative.
-  Values greater than `1.0` give device overlap extra credit and can make adjusted prefill cost
-  negative. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
+  Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
+  clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
   Environment variable: `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`
 </ParamField>
@@ -248,7 +248,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-track-output-blocks / --no-router-track-output-blocks" type="boolean" default="false">
-  Track output blocks with fractional decay during generation.
+  Track output blocks during generation. With `nvext.agent_hints.osl`, fractional decay applies
+  to output blocks and the structurally exclusive prompt suffix; shared prompt blocks retain full weight.
 
   Environment variable: `DYN_ROUTER_TRACK_OUTPUT_BLOCKS`
 </ParamField>

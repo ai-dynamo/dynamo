@@ -161,7 +161,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		componentName := component.ComponentName
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		usesPCSG := component.UsesPCSG()
 		resourceName := GroveComponentResourceName(dgd, componentName)
 
 		var ok bool
