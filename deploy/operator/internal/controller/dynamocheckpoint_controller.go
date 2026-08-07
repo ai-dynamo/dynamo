@@ -238,9 +238,6 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
 		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 	}
-	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, r.RuntimeConfig.Gate); err != nil {
-		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
-	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}

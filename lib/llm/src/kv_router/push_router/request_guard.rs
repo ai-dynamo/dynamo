@@ -3,13 +3,15 @@
 
 use std::sync::Arc;
 
+use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
 };
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -18,15 +20,21 @@ use crate::{
 };
 
 /// Owns scheduler cleanup after a worker is selected.
-struct RequestCleanup {
-    chooser: Arc<KvRouter>,
+struct RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    chooser: Arc<KvRouter<Sel>>,
     context_id: String,
     scheduler_tracked: bool,
     freed: bool,
 }
 
-impl RequestCleanup {
-    fn new(chooser: Arc<KvRouter>, context_id: String, scheduler_tracked: bool) -> Self {
+impl<Sel> RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn new(chooser: Arc<KvRouter<Sel>>, context_id: String, scheduler_tracked: bool) -> Self {
         Self {
             chooser,
             context_id,
@@ -49,7 +57,10 @@ impl RequestCleanup {
     }
 }
 
-impl Drop for RequestCleanup {
+impl<Sel> Drop for RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn drop(&mut self) {
         if self.freed || !self.scheduler_tracked {
             return;
@@ -243,16 +254,22 @@ impl OutputBlockTracker {
 ///
 /// Session-affinity lifetime is separate: `AffinityAcquire` and
 /// `AffinityLease` own binding commit, release, and invalidation.
-pub(super) struct RequestGuard {
-    cleanup: RequestCleanup,
+pub(super) struct RequestGuard<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    cleanup: RequestCleanup<Sel>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     prefill_marked: bool,
 }
 
-impl RequestGuard {
+impl<Sel> RequestGuard<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub(super) fn new(
-        chooser: Arc<KvRouter>,
+        chooser: Arc<KvRouter<Sel>>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         request: &PreprocessedRequest,
@@ -360,7 +377,10 @@ impl RequestGuard {
     }
 }
 
-impl Drop for RequestGuard {
+impl<Sel> Drop for RequestGuard<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
         self.observability.record_metrics();

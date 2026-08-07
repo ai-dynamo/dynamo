@@ -3,7 +3,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::{
+    protocols::{TokensWithHashes, WorkerWithDpRank},
+    selector::WorkerSelector,
+};
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -17,7 +20,8 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -53,11 +57,14 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
     }
 }
 
-fn monitor_response_stream(
+fn monitor_response_stream<Sel>(
     mut response_stream: ManyOut<Annotated<LLMEngineOutput>>,
     context: Arc<dyn AsyncEngineContext>,
-    mut guard: RequestGuard,
-) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send {
+    mut guard: RequestGuard<Sel>,
+) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     async_stream::stream! {
         // Keep one cancellation future alive for the whole response stream. Calling
         // `stopped()` for every item repeatedly clones and polls a watch receiver.
@@ -93,17 +100,23 @@ fn monitor_response_stream(
     }
 }
 
-pub struct KvPushRouter {
+pub struct KvPushRouter<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    pub chooser: Arc<KvRouter>,
+    pub chooser: Arc<KvRouter<Sel>>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
 }
 
-impl KvPushRouter {
+impl<Sel> KvPushRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        chooser: Arc<KvRouter>,
+        chooser: Arc<KvRouter<Sel>>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
@@ -115,7 +128,7 @@ impl KvPushRouter {
 
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        chooser: Arc<KvRouter>,
+        chooser: Arc<KvRouter<Sel>>,
         affinity: Option<AffinityCoordinator>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
@@ -248,7 +261,7 @@ impl KvPushRouter {
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
         is_query_only: bool,
-    ) -> Result<RequestGuard, Error> {
+    ) -> Result<RequestGuard<Sel>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
@@ -334,7 +347,7 @@ impl KvPushRouter {
         &self,
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
-        mut guard: RequestGuard,
+        mut guard: RequestGuard<Sel>,
         exact: bool,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
@@ -483,8 +496,10 @@ impl KvPushRouter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for KvPushRouter
+impl<Sel> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for KvPushRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     /// Generate method that handles KV-aware routing with three distinct behaviors:
     ///
@@ -668,7 +683,7 @@ mod tests {
         time::Duration,
     };
 
-    use dynamo_kv_router::{DefaultWorkerSelector, config::KvRouterConfig};
+    use dynamo_kv_router::{DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -707,6 +722,13 @@ mod tests {
 
         output.finish_reason = Some(FinishReason::Length);
         assert!(!response_item_failed(&Annotated::from_data(output)));
+    }
+
+    #[test]
+    fn selector_state_remains_owned_by_the_scheduler_actor() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<KvPushRouter<WorkerSelectionPolicy>>();
     }
 
     #[tokio::test]
