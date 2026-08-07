@@ -158,6 +158,29 @@ def test_every_shape_conserves_the_cell_s_exact_totals():
             assert sum(row[1] for row in point["rows"]) == total_kv
 
 
+def test_cells_sample_variance_when_only_the_average_prefix_is_ragged():
+    """The block deal is over the cell's exact KV total, so a cell is runnable
+    whenever that total is whole blocks -- the floored per-request average need
+    not be. Gating on the average rejected cells whose exact total distributes
+    perfectly well, and those cells then contributed a reference point and no
+    variance at all."""
+    b, total_new, total_kv, kv_block = 3, 3072, 256, 64
+    assert (total_kv // b) % kv_block, "not the case under test"
+    assert total_kv % kv_block == 0
+
+    manifest, _ = build_manifest(
+        [(b, total_new, total_kv)], TOPK, repeats=1, kv_block=kv_block
+    )
+    points = manifest["prefill"]
+    reference = reference_rows(b, total_new, total_kv, kv_block)
+    assert [list(map(list, reference))] == [points[0]["rows"]]
+    assert len(points) > 1, "cell emitted its reference and no spread"
+    for point in points:
+        assert point["total_prefill_tokens"] == total_new
+        assert point["total_kv_read_tokens"] == total_kv
+        assert all(row[1] % kv_block == 0 for row in point["rows"])
+
+
 def test_manifest_emits_the_reference_batch_for_every_cell():
     """This manifest REPLACES the generated grid rather than adding to it, so
     a cell dropped here is a coordinate the switch-off run would have measured

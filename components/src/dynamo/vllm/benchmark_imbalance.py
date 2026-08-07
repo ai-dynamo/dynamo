@@ -581,14 +581,6 @@ def plan_cell(
     reference = sum(idx_work(s, p, topk) + mla_work(s, p, topk) for s, p in ref_rows)
     if reference <= 0:
         return None
-    # A pure segment holds p = p_bar on every row, so the whole cell is
-    # unrunnable if the average prefix is not a whole number of cache blocks.
-    if p_bar % kv_block:
-        plan.unusable.append(
-            f"avg_p={p_bar} is not a multiple of the kv block size {kv_block}"
-        )
-        return None
-
     for regime in plan.segments:
         rungs, tried = [], 0
         for m, short_len, reach in _knobs(b, s_bar, regime, topk, avg_is_sat):
@@ -657,7 +649,7 @@ def build_manifest(
     cells,
     topk: int,
     *,
-    repeats: int = 5,
+    repeats: int = 1,
     max_model_len: int = 131072,
     kv_block: int = 1,
     decode: list | None = None,
