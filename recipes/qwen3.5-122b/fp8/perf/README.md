@@ -26,18 +26,29 @@ the recipe [README](../README.md)).
 
 The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace via
 `aiperf --custom-dataset-type mooncake_trace`. Each JSONL line describes one request
-(`input_length`, `output_length`, `hash_ids`; no `timestamp` for no-schedule replay). The
+(`input_length`, `output_length`, `hash_ids`, `timestamp`). The
 agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, block size
 **512**, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA
 knee: the highest value holding P50 TTFT < 5 s and P50 output >= 50 tok/s/user.
 
-Use the agentic trace in `perf/traces/` (Git LFS), first 1,500 requests:
+Use the 3,541-request agentic trace in `perf/traces/` (Git LFS). AIPerf builds its replay
+schedule from a `timestamp` field; the shipped rows have none, and without it AIPerf
+replays a small default instead of the file, so add one:
 
 ```bash
 git lfs install
 git lfs pull --include "recipes/*/perf/traces/*"
-head -1500 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl > mooncake_1500.jsonl
+python3 -c "
+import json
+src='traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+for line in open(src):
+    print(json.dumps({'timestamp': 0, **json.loads(line)}))
+" > mooncake_agentic.jsonl
 ```
+
+Confirm a run replayed the whole file: `Request Count` in
+`profile_export_aiperf.csv` should be ~3,411, plus ~130 rows that exceed the 262,144-token
+context and return errors.
 
 ## Workflow
 
@@ -51,7 +62,7 @@ See the deployment instructions in the recipe [README](../README.md).
 
 ### 2. Stage the trace on the PVC
 
-Copy `mooncake_1500.jsonl` onto the `model-cache` PVC via a helper pod that mounts it:
+Copy `mooncake_agentic.jsonl` onto the `model-cache` PVC via a helper pod that mounts it:
 
 ```bash
 kubectl run pvc-helper -n ${NAMESPACE} --image=busybox:1.36 --restart=Never \
@@ -59,7 +70,7 @@ kubectl run pvc-helper -n ${NAMESPACE} --image=busybox:1.36 --restart=Never \
   --command -- sleep 3600
 
 kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
-kubectl cp mooncake_1500.jsonl ${NAMESPACE}/pvc-helper:/model-cache/traces/
+kubectl cp mooncake_agentic.jsonl ${NAMESPACE}/pvc-helper:/model-cache/traces/
 ```
 
 Keep `pvc-helper` around for fetching artifacts later, or
@@ -111,7 +122,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | per profile — see the table above | |
 | `CONCURRENCY` | sweep to the SLA knee | Single value per run; restart server pods between values |
-| `TRACE_FILE` | `/model-cache/traces/mooncake_1500.jsonl` | first 1,500 requests of the agentic trace |
+| `TRACE_FILE` | `/model-cache/traces/mooncake_agentic.jsonl` | 3,541-request agentic trace with timestamps |
 | `TARGET_MODEL` | `Qwen/Qwen3.5-122B-A10B` | Must match `--served-model-name` |
 
 ## Artifacts

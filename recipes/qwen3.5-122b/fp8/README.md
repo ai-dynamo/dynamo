@@ -100,30 +100,31 @@ See [perf/README.md](perf/README.md).
 | -------- | ---------- | ---------- | ----------------- | ----------------- |
 | Agentic  | 64k        | 400        | 90%               | 50                |
 
-## Performance results
+## Benchmark Results
 
-Measured 2026-08-05 on the first 1,500 requests of the agentic Mooncake trace (see
+Measured 2026-08-06 on the 3,541-request agentic Mooncake trace (see
 [perf/README.md](perf/README.md)), block size 512, closed-loop, both profiles on the same
-trace. SLA: P50 TTFT < 5 s and P50 output >= 50 tok/s/user. Per-GPU = system throughput /
-GPUs. Each profile is reported at its highest SLA-passing concurrency. Aggregated runs
-`replicas: 2`.
+trace. SLA: P50 TTFT < 5 s and P50 output >= 50 tok/s/user; each profile is reported at its
+highest SLA-passing concurrency. `System output tok/s/GPU` is system throughput / GPUs.
 
-| config (shipped) | GPUs | conc | tok/s/GPU | tok/s/user | TTFT (P50) | note |
-| ---------------- | ---- | ---- | --------- | ---------- | ---------- | ---- |
-| aggregated — 2x TP1 + MTP | 2 | c8 | 375.2 | 137.07 | 708 ms | KV-bound; cannot reach the 50 tok/s/user floor — TTFT 14.7 s at c16 |
-| **disaggregated** — 1P2D | 3 | c18 | 244.8 | 51.32 | 3770 ms | at the 50 tok/s/user floor |
+| Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
+|--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
+| `vllm/agg-h200-agentic/deploy.yaml` | H200 | AGG (2x TP1) | agentic | yes | 8 | 136.3 | 760 ms | 381.3 |
+| `vllm/disagg-h200-agentic/deploy.yaml` | H200 | 1P2D | agentic | no | 18 | 52.5 | 3087 ms | 256.5 |
 
-## Known issues
+## Known Issues
 
-1. Disaggregated decode requires `--no-async-scheduling` on vLLM < 0.26.0. The KV-block
-   zeroing kernel is not ordered against the NIXL RDMA write and can erase transferred KV.
-   It is silent — no error, no failed transfer — but IFEval drops 84.66 → 51.02 and
-   GPQA-Diamond 83.84 → 19.19, below the 25% random baseline. Fixed by
+1. Disaggregated decode requires `--no-async-scheduling` on vLLM < 0.26.0. Without it the
+   KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV —
+   IFEval 84.66 → 51.02, GPQA-Diamond 83.84 → 19.19. Fixed by
    [vllm#45357](https://github.com/vllm-project/vllm/pull/45357) and
-   [vllm#48481](https://github.com/vllm-project/vllm/pull/48481). The flag costs ~7%
-   throughput; drop it on the Dynamo 1.4.0 runtime (vLLM 0.26.0).
-2. MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state
+   [vllm#48481](https://github.com/vllm-project/vllm/pull/48481); the flag costs ~7%
+   throughput and can be dropped on a runtime shipping vLLM >= 0.26.0.
+2. Aggregated cannot reach the 50 tok/s/user target on H200. FP8 weights leave ~20 GB for
+   paged KV, capping the running batch near 8 requests, so added concurrency becomes queue
+   delay: 136 tok/s/user at c8 (TTFT 0.8 s), 112 at c14 (TTFT 9.2 s). Use disaggregated for
+   that operating point.
+3. MTP is not supported with disaggregation on this architecture — NIXL's Mamba conv-state
    transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the
    `mamba_cache_mode='align'` that MTP + prefix caching forces
-   ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)). Aggregated ships MTP;
-   disaggregated runs without it.
+   ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
