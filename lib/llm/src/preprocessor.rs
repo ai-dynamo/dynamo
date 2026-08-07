@@ -612,13 +612,16 @@ impl OpenAIPreprocessor {
         })
     }
 
+    fn request_has_client_thinking_control(request: &NvCreateChatCompletionRequest) -> bool {
+        request.thinking.is_some()
+            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
+    }
+
     fn apply_default_thinking_mode_from_runtime_config(
         runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
         request: &mut NvCreateChatCompletionRequest,
     ) {
-        if request.thinking.is_some()
-            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
-        {
+        if Self::request_has_client_thinking_control(request) {
             return;
         }
 
@@ -758,48 +761,67 @@ impl OpenAIPreprocessor {
         default_enabled
     }
 
+    #[cfg(test)]
     fn normalize_thinking_arg(
         request: &mut NvCreateChatCompletionRequest,
         reasoning_parser: Option<&str>,
         tool_call_parser: Option<&str>,
     ) {
-        let normalized = request
+        let thinking_control_from_client = Self::request_has_client_thinking_control(request);
+        Self::normalize_thinking_arg_with_source(
+            request,
+            reasoning_parser,
+            tool_call_parser,
+            thinking_control_from_client,
+        );
+    }
+
+    fn normalize_thinking_arg_with_source(
+        request: &mut NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+        thinking_control_from_client: bool,
+    ) {
+        let normalized = Self::normalize_thinking_aliases(request, reasoning_parser);
+
+        if Self::is_minimax_m3_family(reasoning_parser, tool_call_parser) {
+            Self::normalize_minimax_m3_thinking_mode(
+                request,
+                normalized,
+                thinking_control_from_client,
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+    }
+
+    fn normalize_thinking_aliases(
+        request: &NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+    ) -> Option<bool> {
+        request
             .chat_template_args
             .as_ref()
             .and_then(|args| {
-                // Match thinking_bool_from_args precedence: when both aliases
-                // are present, `thinking` wins and its normalized value is
-                // written back to both keys below.
-                // Precedence: `thinking` > `enable_thinking` > `thinking_mode`.
-                // `thinking_mode` is used by MiniMax M3-family templates and
-                // admits three values: "enabled", "disabled", "adaptive".
-                // Bridge all three keys so a control set on any alias is
-                // honored across every template convention (e.g. clients that
-                // only know `enable_thinking` still reach M3's
-                // `thinking_mode`-only template, and vice versa). "adaptive"
-                // is a tri-state that must not collapse to a boolean.
+                // Normalize public aliases in array order: `thinking`,
+                // `enable_thinking`, then `thinking_mode`.
+                // Preserve "adaptive" as tri-state by returning None.
                 for key in ["thinking", "enable_thinking", "thinking_mode"] {
                     match args.get(key) {
                         Some(serde_json::Value::Bool(b)) => {
-                            // `thinking_bool_from_args` only reads `thinking`
-                            // / `enable_thinking`, so for `thinking_mode` we
-                            // must return the value directly.
+                            // `thinking_bool_from_args` ignores `thinking_mode`,
+                            // so read that bool directly.
                             if key == "thinking_mode" {
                                 return Some(*b);
                             }
                             return dynamo_renderer::thinking_bool_from_args(Some(args));
                         }
                         Some(serde_json::Value::String(value)) => {
-                            // `thinking_mode` is a domain-specific tri-state.
-                            // Route it through explicit parsing rather than
-                            // the generic `is_truthy` (which only knows
-                            // "true"/"on"/"yes" and would silently map
-                            // "enabled" to false). Also accept generic
-                            // boolean spellings so callers can pass
-                            // "true"/"false"/"1"/"0". Any unrecognized value
-                            // (including "adaptive" and DeepSeek's
-                            // "thinking"/"chat") returns None so the client's
-                            // original string is preserved for the template.
+                            // Parse `thinking_mode` explicitly so
+                            // "enabled"/"disabled" and boolean spellings
+                            // behave predictably. Preserve unrecognized strings
+                            // such as "adaptive" or DeepSeek's "chat"/"thinking".
                             if key == "thinking_mode" {
                                 if value.eq_ignore_ascii_case("enabled") {
                                     return Some(true);
@@ -826,72 +848,47 @@ impl OpenAIPreprocessor {
             })
             .or_else(|| {
                 matches!(reasoning_parser, Some("kimi_k25" | "kimi_k3" | "kimi-k3")).then_some(true)
-            });
+            })
+    }
 
-        // MiniMax M3's chat template defaults `thinking_mode` to "adaptive",
-        // which is incompatible with a schema-constrained (`response_format`)
-        // or forced-tool (`tool_choice=required` / named) generation
-        // start-state and yields empty output / no tool_calls. When the
-        // client did not opt in to a specific thinking control, default
-        // `thinking_mode` to "disabled" for these combinations. Mirrors the
-        // M2 handling added in #11554 (which stopped short of M3 parity —
-        // that PR's own docs table calls out `thinking_mode=disabled` for
-        // M3 tool+reasoning as a required client setting).
-        let has_explicit_thinking_mode = request
-            .chat_template_args
-            .as_ref()
-            .is_some_and(|args| args.contains_key("thinking_mode"));
+    fn normalize_minimax_m3_thinking_mode(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+        thinking_control_from_client: bool,
+    ) {
+        // MiniMax M3 defaults `thinking_mode` to "adaptive", which breaks
+        // constrained JSON/schema and forced-tool generation. If the client
+        // did not set thinking controls, force "disabled" for those requests.
         let explicit_thinking_mode_is_adaptive = request
             .chat_template_args
             .as_ref()
             .and_then(|args| args.get("thinking_mode"))
             .and_then(|v| v.as_str())
             .is_some_and(|s| s.eq_ignore_ascii_case("adaptive"));
-        if normalized.is_none()
-            && !has_explicit_thinking_mode
-            && Self::is_minimax_m3_family(reasoning_parser, tool_call_parser)
-            && (Self::has_structured_response_format(request)
-                || Self::has_guided_tool_choice(request))
-        {
+        if !thinking_control_from_client && Self::has_minimax_m3_constrained_generation(request) {
             let args = request.chat_template_args.get_or_insert_default();
             args.insert(
                 "thinking_mode".to_string(),
                 serde_json::Value::String("disabled".to_string()),
             );
-            if !args.contains_key("thinking") {
-                args.insert("thinking".to_string(), serde_json::Value::Bool(false));
-            }
-            if !args.contains_key("enable_thinking") {
-                args.insert(
-                    "enable_thinking".to_string(),
-                    serde_json::Value::Bool(false),
-                );
-            }
+            args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            args.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
             return;
         }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
 
         let Some(normalized) = normalized else {
             return;
         };
-        let args = request.chat_template_args.get_or_insert_default();
-        args.insert("thinking".to_string(), serde_json::Value::Bool(normalized));
-        args.insert(
-            "enable_thinking".to_string(),
-            serde_json::Value::Bool(normalized),
-        );
-        // Canonicalize `thinking_mode` for the M3-family template, whose
-        // gates only match the exact string "disabled" — a non-canonical
-        // value left in place (e.g. `false`, `0`, `"false"`, or an OOV
-        // word from an OR-style client) would leave reasoning enabled
-        // while `thinking`/`enable_thinking` say off. Fires when either
-        // the reasoning or tool-call parser is M3, since both render the
-        // same template. Preserve an explicit "adaptive" (client opted
-        // into the template's adaptive path). Other reasoning parsers use
-        // their own `thinking_mode` vocabulary (e.g. DeepSeek's
-        // "chat"/"thinking"), so leave the key untouched for them.
-        if Self::is_minimax_m3_family(reasoning_parser, tool_call_parser)
-            && !explicit_thinking_mode_is_adaptive
-        {
+
+        // Canonicalize for M3 because its template only treats exact
+        // "disabled" as off. Preserve explicit "adaptive" as client intent.
+        if !explicit_thinking_mode_is_adaptive {
+            let args = request.chat_template_args.get_or_insert_default();
             args.insert(
                 "thinking_mode".to_string(),
                 serde_json::Value::String(
@@ -901,11 +898,23 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// True when the deployment renders MiniMax M3's chat template — the
-    /// template that only reads `thinking_mode` and defaults it to
-    /// "adaptive". Either the reasoning parser or the tool-call parser is
-    /// sufficient (a tool-call-only M3 deployment still uses the same
-    /// template). Tool-call aliases include the `_nom` variants.
+    fn apply_normalized_thinking_aliases(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+    ) {
+        let Some(normalized) = normalized else {
+            return;
+        };
+        let args = request.chat_template_args.get_or_insert_default();
+        args.insert("thinking".to_string(), serde_json::Value::Bool(normalized));
+        args.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(normalized),
+        );
+    }
+
+    /// True when the deployment renders MiniMax M3's `thinking_mode` template.
+    /// Either parser is sufficient, and tool-call aliases include `_nom`.
     fn is_minimax_m3_family(
         reasoning_parser: Option<&str>,
         tool_call_parser: Option<&str>,
@@ -920,9 +929,12 @@ impl OpenAIPreprocessor {
             )
     }
 
-    /// True when `tool_choice` forces a tool call (`"required"` or a
-    /// named-function object). Shared by `guided_output_requires_reasoning`
-    /// and the M3 thinking-mode default.
+    fn has_minimax_m3_constrained_generation<R: OAIChatLikeRequest>(request: &R) -> bool {
+        Self::has_structured_response_format(request) || Self::has_guided_tool_choice(request)
+    }
+
+    /// True when `tool_choice` forces a tool call.
+    /// Shared by guided-output reasoning checks and the M3 default.
     fn has_guided_tool_choice<R: OAIChatLikeRequest>(request: &R) -> bool {
         request.tool_choice().is_some_and(|tool_choice| {
             match tool_choice.as_str() {
@@ -4010,11 +4022,13 @@ impl
         // Apply the deployment default before parser-specific normalization so
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
+        let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
         self.apply_default_thinking_mode(&mut request);
-        Self::normalize_thinking_arg(
+        Self::normalize_thinking_arg_with_source(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
             self.tool_call_parser.as_deref(),
+            thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
 
@@ -5938,9 +5952,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_m3_tool_call_only_deployment_gets_default() {
-        // Tool-call-only M3 deployment: no reasoning_parser, but the
-        // template is still M3's — so the "adaptive" default still needs
-        // to be overridden for guided-output requests.
+        // Tool-call-only M3 deployments still render the M3 template.
+        // Guided-output requests therefore still need "adaptive" overridden.
         for tool_call_parser in [
             "minimax_m3",
             "minimax-m3",
@@ -6012,11 +6025,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_thinking_mode_enabled_is_thinking_on() {
-        // Regression: `thinking_mode` string values must not be routed
-        // through the generic `is_truthy`, which would silently map
-        // "enabled" (and "thinking") to false. On M3, mixed-case input is
-        // canonicalized to lowercase so the M3 gate's exact-string match
-        // sees the canonical form.
+        // `thinking_mode` strings must bypass `is_truthy`, which would map
+        // "enabled" to false. M3 inputs are canonicalized to exact values.
         for value in ["enabled", "ENABLED", "Enabled"] {
             let mut request = minimax_m3_request(serde_json::json!({
                 "chat_template_kwargs": {"thinking_mode": value}
@@ -6055,11 +6065,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_m3_canonicalizes_non_canonical_thinking_mode() {
-        // The M3 template gate only matches the exact string "disabled".
-        // Non-canonical falsy values (Bool false, Number 0, string "false"
-        // or "no") must be rewritten to "disabled" so the gate actually
-        // turns reasoning off — otherwise the request carries
-        // thinking=false while M3 still sees reasoning as enabled.
+        // M3 only treats exact "disabled" as off.
+        // Canonicalize falsy aliases so `thinking=false` and the template gate agree.
         for value in [
             serde_json::json!(false),
             serde_json::json!(0),
@@ -6106,10 +6113,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_deepseek_thinking_mode_words_preserved() {
-        // DeepSeek V3.1's template reads `thinking_mode` with `"chat"`/
-        // `"thinking"` semantics. These are not "enabled"/"disabled" and
-        // must not be coerced to a boolean: no `thinking`/`enable_thinking`
-        // bools written, `thinking_mode` string preserved verbatim.
+        // DeepSeek V3.1 uses `thinking_mode` values "chat" and "thinking".
+        // Preserve them verbatim without writing boolean aliases.
         for value in ["thinking", "chat"] {
             let mut request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
@@ -6135,10 +6140,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_thinking_mode_not_written_for_non_m3_parsers() {
-        // The `thinking_mode` writeback is scoped to M3-family parsers, whose
-        // templates read the "enabled"/"disabled" vocabulary. Other parsers
-        // use their own vocabulary (DeepSeek: "chat"/"thinking") — an
-        // injected "enabled" would be an OOV value on their template.
+        // Only M3-family templates use the "enabled"/"disabled" vocabulary.
+        // Other parsers may treat an injected value as out-of-vocabulary.
         for parser in [
             "deepseek_v3_1",
             "deepseek_v3_2",
@@ -6167,10 +6170,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_kimi_or_else_does_not_write_thinking_mode() {
-        // With no client input at all, kimi_k25/kimi_k3 synthesize
-        // `Some(true)` via the `.or_else` default. The boolean aliases get
-        // written, but `thinking_mode` must not — the Kimi template doesn't
-        // read that vocabulary.
+        // Kimi parsers synthesize `Some(true)` with no client input.
+        // Write boolean aliases only; Kimi does not read `thinking_mode`.
         for parser in ["kimi_k25", "kimi_k3", "kimi-k3"] {
             let mut request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
@@ -6194,9 +6195,8 @@ mod tests {
 
     #[test]
     fn test_normalize_thinking_arg_non_m3_adaptive_is_no_op() {
-        // A `thinking_mode: "adaptive"` on a non-M3 request must resolve to
-        // `None` normalized (no writeback), preserving the client's exact
-        // input for whatever template will render it.
+        // Preserve non-M3 `thinking_mode: "adaptive"` verbatim by leaving
+        // normalization as `None`.
         let mut request: NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "model": "test",
@@ -6215,11 +6215,12 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_thinking_arg_operator_default_bypasses_m3_override() {
-        // When an operator has set default_thinking_mode via runtime_config,
-        // apply_default_thinking_mode writes concrete values before
-        // normalize_thinking_arg runs, and the M3 default block must not
-        // clobber them.
+    fn test_normalize_thinking_arg_operator_default_forces_m3_constrained_disabled() {
+        // Runtime defaults are operator policy, not client intent. When the
+        // client sends no thinking control, constrained M3 requests force
+        // "disabled" even if the operator default is "enabled" — otherwise
+        // the deployment default silently propagates a mode M3 cannot honor
+        // with a constrained decoder attached.
         let runtime_config = runtime_config_with_default_thinking_mode("enabled");
         let mut request = minimax_m3_request(serde_json::json!({
             "response_format": {
@@ -6227,18 +6228,91 @@ mod tests {
                 "json_schema": {"name": "s", "schema": {"type": "object"}}
             }
         }));
+        let thinking_control_from_client =
+            OpenAIPreprocessor::request_has_client_thinking_control(&request);
+        assert!(
+            !thinking_control_from_client,
+            "no chat_template_kwargs → not client intent"
+        );
         OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
             &runtime_config,
             &mut request,
         );
-        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        OpenAIPreprocessor::normalize_thinking_arg_with_source(
+            &mut request,
+            Some("minimax_m3"),
+            None,
+            thinking_control_from_client,
+        );
         let args = request.chat_template_args.as_ref().unwrap();
         assert_eq!(
             args.get("thinking_mode"),
-            Some(&serde_json::json!("enabled"))
+            Some(&serde_json::json!("disabled"))
         );
-        assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
-        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_explicit_thinking_for_constrained() {
+        // Explicit client thinking intent is respected for constrained M3
+        // requests. The runtime attempts the combination even though the
+        // template's adaptive/enabled path is known to conflict with the
+        // constrained decoder — this is the client's opt-in, and returning
+        // possibly-degraded content is preferred to a hard reject at the
+        // API boundary (which would break provider-compatibility probes
+        // that expect the request to be attempted).
+        for (body, expected_mode, desc) in [
+            (
+                serde_json::json!({
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "s", "schema": {"type": "object"}}
+                    },
+                    "chat_template_kwargs": {"thinking_mode": "enabled"}
+                }),
+                "enabled",
+                "json_schema + explicit thinking_mode=enabled",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": "required",
+                    "chat_template_kwargs": {"thinking_mode": "adaptive"}
+                }),
+                "adaptive",
+                "required tool + explicit thinking_mode=adaptive",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": {"type": "function", "function": {"name": "f"}},
+                    "chat_template_kwargs": {"thinking": true}
+                }),
+                "enabled",
+                "named tool + explicit thinking=true",
+            ),
+        ] {
+            let mut request = minimax_m3_request(body);
+            let thinking_control_from_client =
+                OpenAIPreprocessor::request_has_client_thinking_control(&request);
+            assert!(
+                thinking_control_from_client,
+                "{desc} must be classified as client thinking intent"
+            );
+            OpenAIPreprocessor::normalize_thinking_arg_with_source(
+                &mut request,
+                Some("minimax_m3"),
+                None,
+                thinking_control_from_client,
+            );
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!(expected_mode)),
+                "{desc} must preserve explicit client thinking"
+            );
+        }
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
