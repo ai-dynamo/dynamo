@@ -273,12 +273,15 @@ class Workload(BaseModel):
         return max(1, round((self.num_request_ratio or 0.0) * load))
 
     @property
-    def synthetic_arrival_interval_ms(self) -> float:
-        """Mean inter-arrival for a synthetic request-rate workload (1.0 default;
-        ignored in closed-loop / concurrency mode)."""
-        if self.request_rate:
-            return 1000.0 / self.request_rate
-        return 1.0
+    def synthetic_arrival_interval_ms(self) -> float | None:
+        """Mean inter-arrival for a synthetic request-rate workload.
+
+        Closed-loop workloads return ``None`` so Replay receives only their
+        ``replay_concurrency`` load controller.
+        """
+        if self.request_rate is None:
+            return None
+        return 1000.0 / self.request_rate
 
     @model_validator(mode="after")
     def _validate_workload(self) -> Workload:
