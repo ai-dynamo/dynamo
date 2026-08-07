@@ -995,7 +995,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     f"nvext.token_data[{index}] must be an integer token ID",
                 )
             # Some models, such as Phi-3, use negative multimodal sentinel IDs.
-            if token_id > self._max_input_token_id and token_id not in allowed_oov_ids:
+            if (
+                token_id < 0 or token_id > self._max_input_token_id
+            ) and token_id not in allowed_oov_ids:
                 raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 
     def _validate_nvext_token_data(
