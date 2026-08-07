@@ -13,12 +13,16 @@ import pytest
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
 
-# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
-# sequential GPU stage so TensorRT-LLM initialization is shared.
+# gpu_0 despite the TensorRT-LLM test below: nothing is imported at module
+# scope, so this file collects on a host with no CUDA driver. The two
+# prometheus tests then run there, and the one test that does reach
+# tensorrt_llm skips itself, because importing its bindings raises
+# ImportError("libcuda.so.1: cannot open shared object file") -- which the
+# handler in that test already treats as a skip.
 
 
 def test_tensorrt_llm_metrics_collector_import():
