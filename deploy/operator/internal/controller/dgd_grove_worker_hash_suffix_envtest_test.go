@@ -57,7 +57,7 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	require.Empty(t, dgd.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 
 	startGroveWorkerHashSuffixTestController(t, env)
-	waitForGroveWorkerHashSuffixesAbsent(t, ctx, env, dgd)
+	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
 
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
@@ -67,7 +67,7 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 		corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
 	require.NoError(t, env.Client().Update(ctx, current))
 	waitForGroveFrontendEnv(t, ctx, env, current, "FRONTEND_CONFIG_REVISION", "2")
-	waitForGroveWorkerHashSuffixesAbsent(t, ctx, env, current)
+	waitForGroveWorkerHashSuffixes(t, ctx, env, current, "")
 
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	prefill := current.GetComponentByName("prefill")
@@ -175,27 +175,6 @@ func waitForGroveWorkerHashSuffixEnabled(
 	return dgd
 }
 
-func getGroveWorkerHashSuffixTestPCS(
-	t *testing.T,
-	ctx context.Context,
-	env *operatorenv.TestEnv,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) *grovev1alpha1.PodCliqueSet {
-	t.Helper()
-	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-		Namespace: dgd.Namespace,
-	}
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	dynamotesting.Eventually(t, func() (bool, string) {
-		if err := env.Client().Get(ctx, key, pcs); err != nil {
-			return false, fmt.Sprintf("get PodCliqueSet: %v", err)
-		}
-		return true, "PodCliqueSet exists"
-	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove PodCliqueSet was not created")
-	return pcs
-}
-
 func waitForGroveWorkerHashSuffixes(
 	t *testing.T,
 	ctx context.Context,
@@ -225,6 +204,12 @@ func waitForGroveWorkerHashSuffixes(
 				return false, fmt.Sprintf("%s clique %q has no main container", component, clique.Name)
 			}
 			suffix := findEnv(main.Env, consts.DynamoNamespaceWorkerSuffixEnvVar)
+			if want == "" {
+				if suffix != nil {
+					return false, fmt.Sprintf("%s clique %q unexpectedly has worker suffix %q", component, clique.Name, suffix.Value)
+				}
+				continue
+			}
 			if suffix == nil {
 				return false, fmt.Sprintf("%s clique %q has no worker suffix", component, clique.Name)
 			}
@@ -237,29 +222,9 @@ func waitForGroveWorkerHashSuffixes(
 				return false, fmt.Sprintf("PodCliqueSet has no %s clique", component)
 			}
 		}
-		return true, "Grove worker cliques have the expected suffix"
-	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker cliques did not receive the expected suffix")
+		return true, "Grove worker cliques have the expected worker suffix state"
+	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker cliques did not reach the expected worker suffix state")
 	return pcs
-}
-
-func waitForGroveWorkerHashSuffixesAbsent(
-	t *testing.T,
-	ctx context.Context,
-	env *operatorenv.TestEnv,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) {
-	t.Helper()
-	pcs := getGroveWorkerHashSuffixTestPCS(t, ctx, env, dgd)
-	for _, clique := range pcs.Spec.Template.Cliques {
-		component := clique.Labels[consts.KubeLabelDynamoComponent]
-		if component != "prefill" && component != "decode" {
-			continue
-		}
-		main := findMainContainer(clique.Spec.PodSpec.Containers)
-		require.NotNil(t, main, "%s clique %q has no main container", component, clique.Name)
-		require.Nil(t, findEnv(main.Env, consts.DynamoNamespaceWorkerSuffixEnvVar),
-			"%s clique %q unexpectedly has a worker suffix", component, clique.Name)
-	}
 }
 
 func waitForGroveFrontendEnv(
