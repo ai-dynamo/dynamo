@@ -39,6 +39,7 @@ impl<R> Annotated<R> {
                 DynamoError::msg(
                     self.comment
                         .as_ref()
+                        .filter(|comments| !comments.is_empty())
                         .map(|comments| comments.join(", "))
                         .unwrap_or_else(|| "unknown error".to_string()),
                 )
@@ -195,6 +196,27 @@ mod tests {
         assert!(annotated.is_err());
         let err = annotated.err().unwrap();
         assert!(err.to_string().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_comment_only_error_fallback() {
+        for (comments, expected) in [
+            (vec![], "unknown error"),
+            (
+                vec!["first".to_string(), "second".to_string()],
+                "first, second",
+            ),
+        ] {
+            let annotated = Annotated::<String> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: Some(comments),
+                error: None,
+            };
+
+            assert_eq!(annotated.err().unwrap().message(), expected);
+        }
     }
 
     #[test]
