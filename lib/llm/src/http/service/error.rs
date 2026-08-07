@@ -14,6 +14,12 @@ use crate::types::Annotated;
 
 pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";
 
+#[derive(serde::Deserialize)]
+struct BackendHttpPayload {
+    code: u16,
+    message: String,
+}
+
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
     let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
     value
@@ -220,15 +226,8 @@ impl HttpProblem {
         }
 
         if event.is_error() {
-            // A typed error is authoritative. Its message is data, not another
-            // envelope to inspect: parsing JSON-looking text here could leak an
-            // unknown failure as a client error or override InvalidArgument.
             if let Some(error) = event.error.as_ref() {
-                return Some(Self::from_dynamo_error(
-                    error,
-                    INTERNAL_ERROR_MESSAGE,
-                    format_error_chain(error),
-                ));
+                return Some(Self::from_error(error, INTERNAL_ERROR_MESSAGE));
             }
 
             let diagnostic = event
@@ -308,6 +307,10 @@ impl HttpProblem {
     }
 
     fn from_dynamo_error(error: &DynamoError, internal_message: &str, diagnostic: String) -> Self {
+        if let Some((status, message)) = backend_http_payload(error) {
+            return Self::from_backend_status(status, message, diagnostic);
+        }
+
         match error.error_type() {
             DynamoErrorType::InvalidArgument
             | DynamoErrorType::Backend(BackendError::InvalidArgument) => Self {
@@ -407,6 +410,21 @@ impl HttpProblem {
     pub(crate) fn metric_type_for_status(status: StatusCode) -> MetricErrorType {
         metric_type_for_kind(kind_for_status(status))
     }
+}
+
+/// Decode the deliberate Python-boundary `{code, message}` compatibility
+/// envelope without treating arbitrary typed error messages as HTTP policy.
+fn backend_http_payload(error: &DynamoError) -> Option<(StatusCode, String)> {
+    let payload = serde_json::from_str::<BackendHttpPayload>(error.message()).ok()?;
+    let status = StatusCode::from_u16(payload.code).ok()?;
+
+    match error.error_type() {
+        DynamoErrorType::Backend(BackendError::InvalidArgument) if status.is_client_error() => {}
+        DynamoErrorType::Backend(BackendError::Unknown) if status.is_server_error() => {}
+        _ => return None,
+    }
+
+    Some((status, payload.message))
 }
 
 fn find_dynamo_error_in_chain<'a>(
@@ -572,6 +590,10 @@ mod tests {
             let problem = HttpProblem::from_error(&error, "request failed");
             assert_eq!(problem.kind(), expected_kind);
             assert_eq!(problem.status(), expected_status);
+
+            let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(error)).unwrap();
+            assert_eq!(problem.kind(), expected_kind);
+            assert_eq!(problem.status(), expected_status);
         }
     }
 
@@ -624,7 +646,28 @@ mod tests {
     }
 
     #[test]
-    fn typed_annotated_errors_ignore_json_shaped_messages() {
+    fn typed_backend_http_payload_preserves_status_policy() {
+        let invalid = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
+            .message(r#"{"code":415,"message":"unsupported media type"}"#)
+            .build();
+        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(invalid)).unwrap();
+        assert_eq!(problem.kind(), HttpProblemKind::Validation);
+        assert_eq!(problem.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(problem.message(), "unsupported media type");
+
+        let unavailable = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::Unknown))
+            .message(r#"{"code":503,"message":"worker host leaked"}"#)
+            .build();
+        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(unavailable)).unwrap();
+        assert_eq!(problem.kind(), HttpProblemKind::Unavailable);
+        assert_eq!(problem.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+    }
+
+    #[test]
+    fn typed_annotated_errors_reject_untrusted_json_shaped_messages() {
         let invalid = DynamoError::builder()
             .error_type(DynamoErrorType::InvalidArgument)
             .message(r#"{"code":500,"message":"wrong"}"#)
