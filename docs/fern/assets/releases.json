@@ -942,7 +942,7 @@
       "name": "Multimodal (Image)",
       "sglang": {
         "status": "yes",
-        "note": "Not compatible with KV-aware routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D)"
+        "note": "KV-aware routing supported on Dynamo's SGLang image for aggregated workers; a custom build without the hash-forwarding patch falls back to text-prefix routing. Separately, multimodal serving supports EPD, E/PD and E/P/D disaggregation (not traditional EP/D)"
       },
       "trtllm": {
         "status": "yes",
@@ -1821,7 +1821,7 @@
     "v1.3.0": {
       "prs": 930,
       "contributors": 125,
-      "firstTimers": 23,
+      "firstTimers": 24,
       "breaking": 24,
       "knownIssues": 10
     },
@@ -1834,7 +1834,6 @@
     "v1.1.0": {
       "prs": 896,
       "contributors": 113,
-      "firstTimers": 12,
       "breaking": 8,
       "knownIssues": 20
     },

@@ -712,40 +712,111 @@ def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
     return groups
 
 
-def render_support_matrix(data: dict) -> str:
-    """Human-facing collapsed CUDA/driver matrix for the released lines.
+def parse_driver_floor(min_driver: str) -> int:
+    """'580.xx+' -> 580.
 
-    One captioned table per minor line, all inside a single <Accordion>. A
-    flat 60-row run pushes its header off screen inside a collapsed panel;
-    per-line tables repeat the header every few rows. Separate tables rather
-    than a version column blanked after its first row -- blank leading cells
-    are ambiguous once the page is flattened into the agent markdown export.
+    Numeric on purpose. These are compared, and comparing them as strings is
+    only accidentally right while every floor has the same digit count -- the
+    bug the retired RunsWhereWizard shipped with.
+    """
+    match = re.match(r"\s*(\d+)", min_driver)
+    if not match:
+        raise TSParseError(
+            f"minDriver {min_driver!r} does not start with a number -- the "
+            "driver-floor table cannot place it"
+        )
+    return int(match.group(1))
+
+
+def post_train_base(version: str) -> str:
+    """'0.7.0.post1' -> '0.7.0'; every other version is returned unchanged.
+
+    Post trains republish images or wheels off an existing release and carry
+    no CUDA_HISTORY row of their own -- CUDA_NOTES states they have the same
+    CUDA support as their base version.
+    """
+    return version.split(".post", 1)[0]
+
+
+def newest_release_per_base(data: dict) -> dict[str, str]:
+    """Base CUDA_HISTORY version -> the newest released version it covers.
+
+    RELEASES is maintained newest-first, so the first released entry that
+    resolves to a base is the newest thing a reader can pull for that base's
+    CUDA profile. Without this, a table keyed on CUDA_HISTORY names v0.7.0
+    while v0.7.0.post1 is the newest release that actually runs there.
+    """
+    newest: dict[str, str] = {}
+    for rel in data["RELEASES"]:
+        if rel.get("kind") not in SUPPORT_MATRIX_KINDS:
+            continue
+        bare = rel["version"].removeprefix("v")
+        newest.setdefault(post_train_base(bare), bare)
+    return newest
+
+
+def driver_floor_table(data: dict) -> str:
+    """Driver floor -> the newest release each backend can run on that driver.
+
+    Read a row as "if my driver is at least this version": a 580 driver also
+    satisfies the 575 and 570 floors, so each cell is the newest release whose
+    requirement that driver meets, not the newest release that requires
+    exactly that floor.
+
+    Floors and backends both come from CUDA_HISTORY, so a fourth floor or a
+    fourth backend appears here the moment it is added to the data. Cells name
+    the newest release including post trains, which inherit their base row.
     """
     versions = released_versions(data)
-    groups = group_by_minor_line(data, versions)
-    if not groups:
+    newest_per_base = newest_release_per_base(data)
+    rows = [row for row in data["CUDA_HISTORY"] if row["version"] in versions]
+    if not rows:
         raise TSParseError(
             "no CUDA_HISTORY row matches a released RELEASES version -- the "
-            "support-matrix accordion would render an empty table"
+            "driver-floor table would render with no rows"
         )
 
-    parts = [
-        '<Accordion title="CUDA toolkit and minimum driver by release">',
-        "Every released line — stable releases and their patches, grouped by "
-        "minor line, newest first. Platform previews and model-specific "
-        "builds are not listed individually; those with a documented toolkit "
-        "requirement appear in the notes below, and "
-        "[Releases (machine-readable)](releases-machine-readable.mdx) "
-        "has the full release inventory.",
-    ]
-    for line, line_versions in groups.items():
-        parts.append(f"**{line}**")
-        parts.append(cuda_table(data, line_versions))
-    cuda_notes = data.get("CUDA_NOTES") or []
-    if cuda_notes:
-        parts.append("\n".join(f"- {note}" for note in cuda_notes))
-    parts.append("</Accordion>")
-    return "\n\n".join(parts)
+    floors = sorted({parse_driver_floor(row["minDriver"]) for row in rows})
+    backends = sorted({row["backend"] for row in rows})
+    # CUDA_HISTORY is maintained newest-first, so the first matching row for a
+    # backend is its newest release -- the same ordering the matrix relies on.
+    labels = {parse_driver_floor(row["minDriver"]): row["minDriver"] for row in rows}
+
+    table_rows = []
+    for floor in floors:
+        cells = [labels[floor]]
+        for backend in backends:
+            runnable = next(
+                (
+                    row["version"]
+                    for row in rows
+                    if row["backend"] == backend
+                    and parse_driver_floor(row["minDriver"]) <= floor
+                ),
+                None,
+            )
+            cells.append(
+                newest_per_base.get(runnable, runnable) if runnable else "None"
+            )
+        table_rows.append(cells)
+    return md_table(["Driver", *backends], table_rows)
+
+
+def render_driver_floors(data: dict) -> str:
+    """The driver-first view of the support matrix.
+
+    The matrix answers "what does this release need". A reader who already has
+    a driver installed is asking the inverse, and answering it from the matrix
+    means scanning every row for the floors their driver clears.
+    """
+    return "\n\n".join(
+        [
+            "Driver already installed? Read across from your version — each "
+            "cell is the newest release that backend can run on it. A driver "
+            "meeting a higher floor also runs everything below it.",
+            driver_floor_table(data),
+        ]
+    )
 
 
 def render_release_artifacts(data: dict) -> str:
@@ -858,6 +929,13 @@ def render_release_stats(data: dict) -> str:
             "## Release statistics",
             "Counts taken from each release's GitHub body. A dash means the "
             "count was not recorded for that release, not that it was zero.",
+            "The pre-v1.0.0 bodies predate the current release-note template "
+            "and state no PR or contributor totals, so those cells stay empty: "
+            "the figures were never published, and the counts recoverable from "
+            "the archive and from git disagree with each other and with the "
+            "totals the later bodies state. First-time contributors are "
+            "counted release-wide; a release whose body lists only its "
+            "external first-timers is left empty rather than undercounted.",
             release_stats_table(data),
         ]
     )
@@ -1149,7 +1227,14 @@ class Block(NamedTuple):
 # components); releases-machine-readable.mdx IS the page body, human-viewable
 # and machine-consumable alike.
 PAGES: dict[str, tuple[Block, ...]] = {
-    "compatibility.mdx": (Block("llms-tables", render_compatibility, True, True),),
+    "compatibility.mdx": (
+        # The driver-floor table inverts the support matrix: read across from a
+        # driver you already have to the newest release each backend can run on
+        # it. <ReleaseSupportMatrix /> renders the forward view (release -> min
+        # driver) and has no inverse mode, so this stays a generated span.
+        Block("driver-floors", render_driver_floors, False, False),
+        Block("llms-tables", render_compatibility, True, True),
+    ),
     "release-artifacts.mdx": (
         Block("llms-tables", render_release_artifacts, True, True),
     ),

@@ -127,6 +127,14 @@ repos:
       language: system
       files: ^docs/fern/scripts/check_published_styles\.py$
       pass_filenames: false
+    - id: gen-llms-tables
+      name: Test the generated docs tables (gen_llms_tables.py)
+      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py
+      language: python
+      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
+      pass_filenames: false
+      additional_dependencies:
+        - pytest
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py
