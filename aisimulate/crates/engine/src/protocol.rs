@@ -285,5 +285,6 @@ pub struct PassCompletionEffects {
 /// Retained completion effects of an eagerly executed engine pass.
 #[doc(hidden)]
 pub struct PendingPass {
+    pub(crate) started_at_ms: f64,
     pub(crate) effects: PassCompletionEffects,
 }

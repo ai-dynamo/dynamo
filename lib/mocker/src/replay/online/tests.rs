@@ -559,6 +559,55 @@ async fn test_online_trace_replay_uses_grouped_attention_dp_engine() {
 }
 
 #[tokio::test]
+async fn terminal_delivery_waits_for_grouped_completion_boundary_before_shutdown() {
+    let mut terminal_request = request(10, 10, Some(0.0));
+    terminal_request.max_output_tokens = 1;
+    terminal_request.output_token_ids = Some(vec![10_010]);
+    let runtime = LiveRuntime::new(
+        replay_config(
+            replay_args(),
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
+        VecDeque::from(vec![terminal_request]),
+        LiveReplayMode::Trace,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let engines = runtime.engines();
+    let boundary = engines[0].pause_completion_boundary_before_finish();
+    let run = tokio::spawn(runtime.run());
+
+    tokio::time::timeout(Duration::from_secs(1), boundary.wait_until_reached())
+        .await
+        .expect("completion dispatcher should reach the final boundary");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while engines[0].active_request_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal output should be delivered before boundary finish");
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !engines[0].group_is_cancelled(),
+        "LiveRunSession must drain the completion boundary before shutdown cancellation"
+    );
+    assert!(!run.is_finished());
+
+    boundary.release();
+    let (report, _) = tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("orderly boundary release should finish replay")
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.request_counts.completed_requests, 1);
+}
+
+#[tokio::test]
 async fn test_online_concurrency_replay_reaches_but_does_not_exceed_cap() {
     let args = replay_args();
     let requests = VecDeque::from(vec![

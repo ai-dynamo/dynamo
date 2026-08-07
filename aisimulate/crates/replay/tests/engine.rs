@@ -9,8 +9,8 @@ use aisimulate_replay::{
     ProviderSpec, ReplayAdapters, ReplayCaptureOptions, ReplayComposition, ReplayDeterminism,
     ReplayEngineConfig, ReplayEngineFactory, ReplayRequest, ReplayRoleConfig,
     ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot, ReplaySpec, ReplayTopology,
-    Replayer, TraceSimulationReport, WorkerPoolSpec, WorkerTopology, run_engine_replay,
-    run_engine_replay_with_optional_role_timing, run_engine_replay_with_timing,
+    Replayer, TraceSimulationReport, WorkerPoolSpec, WorkerStage, WorkerTopology,
+    run_engine_replay, run_engine_replay_with_optional_role_timing, run_engine_replay_with_timing,
 };
 use anyhow::Result;
 
@@ -128,6 +128,46 @@ fn disaggregated_spec(
         handoff_latency_ms: 1.0,
     };
     spec
+}
+
+#[test]
+fn disaggregated_replay_rejects_attention_dp_before_engine_materialization() {
+    for stage in [WorkerStage::Prefill, WorkerStage::Decode] {
+        let mut spec = disaggregated_spec(
+            Backend::Vllm,
+            TimingModelConfig::Fixed {
+                prefill_ms: 1.0,
+                decode_ms: 1.0,
+            },
+            TimingModelConfig::Fixed {
+                prefill_ms: 1.0,
+                decode_ms: 1.0,
+            },
+        );
+        let mut config: ReplayEngineConfig = serde_json::from_value(spec.engine.clone()).unwrap();
+        match stage {
+            WorkerStage::Prefill => config.prefill.as_mut().unwrap().dp_size = 2,
+            WorkerStage::Decode => config.decode.as_mut().unwrap().dp_size = 2,
+            WorkerStage::Aggregated => unreachable!(),
+        }
+        spec.engine = serde_json::to_value(config).unwrap();
+
+        let error = run_engine_replay(spec).unwrap_err();
+        assert!(matches!(
+            error,
+            aisimulate_replay::ReplayError::InvalidSpec(_)
+        ));
+        let role_name = match stage {
+            WorkerStage::Prefill => "prefill",
+            WorkerStage::Decode => "decode",
+            WorkerStage::Aggregated => unreachable!(),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{role_name} dp_size=1"))
+        );
+    }
 }
 
 #[test]

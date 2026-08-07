@@ -18,6 +18,7 @@ use crate::scheduler::{SchedulerEventSender, SchedulerHandle};
 pub(crate) struct LiveEngineScheduler {
     pub(crate) handle: Box<dyn SchedulerHandle>,
     pub(crate) actor: JoinHandle<anyhow::Result<()>>,
+    pub(crate) completion_drain: crate::grouped_scheduler::CompletionBoundaryDrain,
 }
 
 /// Create a scheduler for the configured engine type.
@@ -32,7 +33,11 @@ pub fn create_engine(
     cancellation_token: Option<CancellationToken>,
     fpm_publisher: FpmPublisher,
 ) -> anyhow::Result<Box<dyn SchedulerHandle>> {
-    let LiveEngineScheduler { handle, actor } = create_engine_with_event_sender(
+    let LiveEngineScheduler {
+        handle,
+        actor,
+        completion_drain: _,
+    } = create_engine_with_event_sender(
         args,
         dp_rank,
         output_tx.map(SchedulerEventSender::from),
@@ -69,6 +74,7 @@ pub(crate) fn create_engine_with_event_sender(
     let GroupedSchedulers {
         mut schedulers,
         actor,
+        completion_drain,
     } = create_single_rank_scheduler_with_event_sender(
         args,
         dp_rank,
@@ -86,7 +92,11 @@ pub(crate) fn create_engine_with_event_sender(
         schedulers.is_empty(),
         "single-rank generalized Mocker engine returned extra scheduler handles"
     );
-    Ok(LiveEngineScheduler { handle, actor })
+    Ok(LiveEngineScheduler {
+        handle,
+        actor,
+        completion_drain,
+    })
 }
 
 #[cfg(test)]

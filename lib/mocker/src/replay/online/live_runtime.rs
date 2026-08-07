@@ -112,6 +112,18 @@ impl LiveRunSession {
             bail!("online replay cancelled");
         }
 
+        // A request task observes terminal output before the grouped effect
+        // dispatcher publishes the remaining completion effects and calls
+        // GroupedPassBoundary::finish(). Wait for that explicit acknowledgement
+        // before shutdown cancels the shared actor.
+        for engine in self.task_ctx.engines.iter() {
+            tokio::select! {
+                biased;
+                _ = self.task_ctx.cancel.cancelled() => bail!("online replay cancelled"),
+                result = engine.drain_completion_boundary() => result?,
+            }
+        }
+
         let LiveRunSession {
             task_ctx,
             recorder_tx,

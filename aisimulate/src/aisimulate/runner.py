@@ -228,6 +228,12 @@ def _materialize_engine_execution_spec(
             raw_decode,
             "decode",
         )
+        for role, role_config in (("prefill", prefill), ("decode", decode)):
+            if role_config["dp_size"] != 1:
+                raise ValueError(
+                    "disaggregated engine replay requires "
+                    f"{role} dp_size=1; attention-DP handoff identity is not implemented"
+                )
         _require_parallel_match(
             deployment.parallel_config,
             "prefill_replicas",

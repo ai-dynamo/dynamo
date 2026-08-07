@@ -108,7 +108,9 @@ enum BoundaryRequest {
         command: SchedulerCommand<Command>,
         reply: oneshot::Sender<Result<EngineEffects<CommandEffects>>>,
     },
-    Finish,
+    Finish {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Adapter-owned handle that keeps a completed pass at its publication
@@ -134,10 +136,14 @@ impl GroupedPassBoundary {
     }
 
     pub(crate) async fn finish(self) -> Result<()> {
+        let (reply, acknowledged) = oneshot::channel();
         self.request_tx
-            .send(BoundaryRequest::Finish)
+            .send(BoundaryRequest::Finish { reply })
             .await
-            .map_err(|_| anyhow!("grouped live pass boundary is closed"))
+            .map_err(|_| anyhow!("grouped live pass boundary is closed"))?;
+        acknowledged
+            .await
+            .context("grouped live engine stopped before acknowledging pass-boundary finish")
     }
 }
 
@@ -408,7 +414,10 @@ impl GroupedLiveActor {
                         .apply_command_effects(command, self.elapsed_ms());
                     let _ = reply.send(result);
                 }
-                BoundaryRequest::Finish => return Ok(true),
+                BoundaryRequest::Finish { reply } => {
+                    let _ = reply.send(());
+                    return Ok(true);
+                }
             }
         }
     }
@@ -607,11 +616,12 @@ async fn sleep_until_ms(origin: Instant, deadline_ms: Option<f64>) {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::sync::Arc;
 
     use aisimulate_engine::generalized::EngineIdentity;
     use aisimulate_engine::{
-        CommandResult, EngineConfig, EngineFactory, HandoffId, Request, TimingModelConfig,
-        WorkerType,
+        CommandResult, EngineConfig, EngineFactory, HandoffId, Request, TimingModel,
+        TimingModelConfig, WorkerType,
     };
 
     use super::*;
@@ -646,6 +656,44 @@ mod tests {
         let engine = EngineFactory::new(config)
             .unwrap()
             .build(EngineIdentity::new(7), NonZeroU32::new(dp_size).unwrap())
+            .unwrap();
+        spawn_grouped_live_engine(engine, GroupedLiveDriverConfig::default(), None).unwrap()
+    }
+
+    struct PromptLengthTiming;
+
+    impl TimingModel for PromptLengthTiming {
+        fn predict_prefill_ms(
+            &self,
+            _batch_size: usize,
+            mean_isl: usize,
+            _mean_prefix: usize,
+        ) -> Result<f64> {
+            Ok(mean_isl as f64 * 10.0)
+        }
+
+        fn predict_decode_ms(
+            &self,
+            _batch_size: usize,
+            _active_kv_tokens: usize,
+            _mean_context_length: usize,
+            _total_kv_tokens: usize,
+        ) -> Result<f64> {
+            Ok(0.0)
+        }
+    }
+
+    fn unequal_rank_runtime() -> GroupedLiveRuntime {
+        let config = EngineConfig {
+            num_gpu_blocks: 128,
+            block_size: 4,
+            max_num_seqs: 8,
+            max_num_batched_tokens: 256,
+            ..EngineConfig::default()
+        };
+        let engine = EngineFactory::with_timing_model(config, Arc::new(PromptLengthTiming))
+            .unwrap()
+            .build(EngineIdentity::new(7), NonZeroU32::new(2).unwrap())
             .unwrap();
         spawn_grouped_live_engine(engine, GroupedLiveDriverConfig::default(), None).unwrap()
     }
@@ -695,6 +743,69 @@ mod tests {
             panic!("expected grouped pass completion");
         };
         assert_eq!(completed.effects.by_rank.len(), 2);
+        boundary.finish().await.unwrap();
+
+        handle.shutdown();
+        actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attention_dp_active_rank_fpm_uses_the_modeled_shared_boundary() {
+        let GroupedLiveRuntime {
+            handle,
+            mut events,
+            actor,
+        } = unequal_rank_runtime();
+        let rank0 = handle.apply_command(SchedulerCommand::new(
+            0,
+            Command::Submit(request(101, 4, 1)),
+        ));
+        let rank1 = handle.apply_command(SchedulerCommand::new(
+            1,
+            Command::Submit(request(102, 8, 1)),
+        ));
+        let (rank0, rank1) = tokio::join!(rank0, rank1);
+        rank0.unwrap();
+        rank1.unwrap();
+        assert!(matches!(
+            next_event(&mut events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await else {
+            panic!("expected grouped pass start");
+        };
+        let rank_durations = started
+            .by_rank
+            .iter()
+            .map(|rank| rank.rank_end_ms - started.started_at_ms)
+            .collect::<Vec<_>>();
+        assert_eq!(rank_durations.len(), 2);
+        assert!(rank_durations[0] < rank_durations[1]);
+        let modeled_group_duration_ms = started.end_ms - started.started_at_ms;
+
+        // Wake the actor after the modeled boundary. Wall-clock scheduling
+        // delay must not inflate either active rank's modeled FPM duration.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let GroupedLiveEvent::PassCompleted {
+            completed,
+            boundary,
+        } = next_event(&mut events).await
+        else {
+            panic!("expected grouped pass completion");
+        };
+        assert_eq!(
+            completed
+                .effects
+                .by_rank
+                .iter()
+                .map(|rank| rank.effects.forward_pass_metrics.duration_ms)
+                .collect::<Vec<_>>(),
+            vec![modeled_group_duration_ms, modeled_group_duration_ms]
+        );
         boundary.finish().await.unwrap();
 
         handle.shutdown();

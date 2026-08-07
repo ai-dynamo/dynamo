@@ -311,7 +311,10 @@ impl<C: RankEngine> GeneralizedMockerEngine<C> {
                     .next()
                     .expect("peeked pending rank pass must remain available");
                 let rank_effects = self.ranks[rank_index]
-                    .complete_pass(rank_pass.pending, end_ms)
+                    // Rank-local FPM is normalized to the modeled shared
+                    // barrier. A wall-clock driver's late wakeup is accepted
+                    // above, but must not inflate modeled execution time.
+                    .complete_pass(rank_pass.pending, pending.end_ms)
                     .with_context(|| format!("completing attention-DP rank {dp_rank}"));
                 let rank_effects = rank_effects.map_err(|error| self.poison(error))?;
                 effects.push(RankEffects {
