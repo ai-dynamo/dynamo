@@ -15,28 +15,24 @@
  * limitations under the License.
  */
 
-package checkpoint
+package controller
 
 import (
-	"fmt"
-
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-func ValidateGMSSnapshotGate(
-	fieldPath string,
-	checkpointEnabled bool,
-	gms *nvidiacomv1alpha1.GPUMemoryServiceSpec,
-	gate features.Gate,
-) error {
-	if !checkpointEnabled || gms == nil || !gms.Enabled {
-		return nil
-	}
-	if gate.Enabled(features.GMSSnapshot) {
-		return nil
-	}
-	return fmt.Errorf(
-		"%s: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
-		fieldPath)
+func generationOrDeletionChangedPredicate() predicate.Predicate {
+	return predicate.Or(
+		predicate.GenerationChangedPredicate{},
+		predicate.Funcs{
+			CreateFunc:  func(event.CreateEvent) bool { return false },
+			DeleteFunc:  func(event.DeleteEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+			UpdateFunc: func(update event.UpdateEvent) bool {
+				return update.ObjectOld.GetDeletionTimestamp().IsZero() &&
+					!update.ObjectNew.GetDeletionTimestamp().IsZero()
+			},
+		},
+	)
 }
