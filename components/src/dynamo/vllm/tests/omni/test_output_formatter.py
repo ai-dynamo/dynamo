@@ -3,6 +3,7 @@
 
 """Tests for output_formatter.py — modality-specific formatters."""
 
+import base64
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -367,6 +368,86 @@ class TestAudioFormatterFormat:
         assert result["object"] == "audio.speech"
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
+        import torch
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
+
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState()
+        first_chunk = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        second_chunk = torch.tensor([0.3], dtype=torch.float32)
+
+        first = await formatter.format(
+            {"audio": [first_chunk], "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+        second = await formatter.format(
+            {"audio": [first_chunk, second_chunk], "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+        duplicate = await formatter.format(
+            {"audio": [first_chunk, second_chunk], "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+
+        assert len(base64.b64decode(first["data"][0]["b64_json"])) == 4
+        assert len(base64.b64decode(second["data"][0]["b64_json"])) == 2
+        assert duplicate is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_per_step_tensors_are_all_emitted(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
+
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState()
+        chunks = []
+        for value in (0.1, 0.2):
+            response = await formatter.format(
+                {"audio": np.array([value], dtype=np.float32), "sr": 24000},
+                "req-1",
+                output_format="pcm",
+                audio_stream_state=state,
+            )
+            chunks.append(base64.b64decode(response["data"][0]["b64_json"]))
+
+        assert [len(chunk) for chunk in chunks] == [2, 2]
+
+    @pytest.mark.asyncio
+    async def test_streaming_wav_header_is_emitted_once(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
+
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState()
+        responses = [
+            await formatter.format(
+                {"audio": np.zeros(2, dtype=np.float32), "sr": 24000},
+                "req-1",
+                output_format="wav",
+                audio_stream_state=state,
+            )
+            for _ in range(2)
+        ]
+        chunks = [
+            base64.b64decode(response["data"][0]["b64_json"]) for response in responses
+        ]
+
+        assert chunks[0][:4] == b"RIFF"
+        assert chunks[0][8:12] == b"WAVE"
+        assert len(chunks[0]) == 48
+        assert chunks[1] == b"\x00" * 4
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────

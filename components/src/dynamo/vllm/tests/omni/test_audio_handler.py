@@ -228,6 +228,7 @@ class TestEngineInputsFromAudio:
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
         assert inputs.sampling_params_list is None
+        assert inputs.stream_audio is True
 
     @pytest.mark.asyncio
     async def test_empty_input_rejected(self):
@@ -244,3 +245,24 @@ class TestEngineInputsFromAudio:
         req = NvCreateAudioSpeechRequest(input="hello", speed=2.0)
         inputs = await handler.build_engine_inputs(req)
         assert inputs.speed == 2.0
+        assert inputs.stream_audio is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_args", "expected"),
+        [
+            ({"response_format": "pcm"}, True),
+            ({"response_format": "wav"}, True),
+            ({"response_format": "mp3"}, False),
+            ({"response_format": "pcm", "data_source": "url"}, False),
+        ],
+    )
+    async def test_streaming_eligibility(self, request_args, expected):
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = None
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hello", **request_args)
+        )
+
+        assert inputs.stream_audio is expected
