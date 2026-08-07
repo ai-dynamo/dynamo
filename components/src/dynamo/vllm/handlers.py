@@ -2156,14 +2156,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         runtime_config = ModelRuntimeConfig()
-        apply_data_parallel_runtime_config(runtime_config, self.dp_range)
-        runtime_config.context_length = self.model_max_len
-        publish_vllm_token_budget(runtime_config, self.model_max_len)
-        runtime_config.kv_event_publishing_enabled = getattr(
-            self.config, "use_kv_events", False
-        )
-        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
-        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
         if self.config.disaggregation_mode == DisaggregationMode.PREFILL:
             lora_model_type = ModelType.Prefill
@@ -2179,12 +2171,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set = []
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
+
+        apply_data_parallel_runtime_config(runtime_config, self.dp_range)
         enable_router_hint_support(
             runtime_config,
             self.config.engine_args,
             lora_worker_type,
             self.dp_range,
         )
+        runtime_config.context_length = self.model_max_len
+        publish_vllm_token_budget(runtime_config, self.model_max_len)
+        runtime_config.kv_event_publishing_enabled = getattr(
+            self.config, "use_kv_events", False
+        )
+        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
         await register_model(

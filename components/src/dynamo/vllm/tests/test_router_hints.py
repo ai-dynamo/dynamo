@@ -55,7 +55,16 @@ def test_enable_router_hint_support_publishes_single_dp_rank_endpoint():
     )
 
 
-def test_enable_router_hint_support_publishes_aggregated_worker_type():
+@pytest.mark.parametrize(
+    ("worker_type", "expected_runtime_value"),
+    [
+        (WorkerType.Aggregated, "aggregated"),
+        (WorkerType.Decode, "decode"),
+    ],
+)
+def test_enable_router_hint_support_publishes_worker_type(
+    worker_type, expected_runtime_value
+):
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -72,34 +81,10 @@ def test_enable_router_hint_support_publishes_aggregated_worker_type():
         )
     )
 
-    enable_router_hint_support(runtime_config, engine_args, WorkerType.Aggregated)
+    enable_router_hint_support(runtime_config, engine_args, worker_type)
 
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps("aggregated")
-    )
-
-
-def test_enable_router_hint_support_publishes_decode_worker_type():
-    runtime_config = MagicMock()
-    engine_args = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_connector_extra_config={
-                "secondary_tiers": [
-                    {
-                        "type": "custom",
-                        "router_capabilities": ["router_hint"],
-                        "control_advertise_host": "worker-a",
-                        "control_port": "23280",
-                    }
-                ]
-            }
-        )
-    )
-
-    enable_router_hint_support(runtime_config, engine_args, WorkerType.Decode)
-
-    runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps("decode")
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps(expected_runtime_value)
     )
 
 
