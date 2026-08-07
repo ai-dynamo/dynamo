@@ -661,6 +661,41 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    #[apply(compressed_tree_size_indexer_template)]
+    async fn test_batched_remove_handles_order_duplicates_and_descendants(variant: &str) {
+        let mut index = TreeSizeTestIndexer::new(variant);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+
+        index
+            .apply_event(make_store_event(0, &[1, 2, 3, 4, 5, 6]))
+            .await;
+        index
+            .apply_event(make_store_event(1, &[1, 2, 3, 4, 7, 8]))
+            .await;
+        index.flush().await;
+
+        let removal = make_remove_event_with_parent(0, &[1, 2, 3, 4], &[5, 6]);
+        let KvCacheEventData::Removed(removal) = removal.event.data else {
+            unreachable!("remove fixture must contain a remove event");
+        };
+        let [first, second] = removal.block_hashes.as_slice() else {
+            panic!("fixture must contain exactly two removed hashes");
+        };
+        index
+            .apply_event(remove_event(0, 0, 0, vec![*second, *first, *second]))
+            .await;
+        index.flush().await;
+
+        index
+            .assert_score_and_tree_size(&[1, 2, 3, 4, 5, 6], worker0, 4, 4)
+            .await;
+        index
+            .assert_score_and_tree_size(&[1, 2, 3, 4, 7, 8], worker1, 6, 6)
+            .await;
+    }
+
+    #[tokio::test]
     #[apply(indexer_template)]
     async fn test_shared_prefix_branch_rejects_invalid_suffix_parent(variant: &str) {
         let index = make_indexer(variant);

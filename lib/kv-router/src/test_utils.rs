@@ -214,6 +214,31 @@ pub fn make_remove_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
     make_remove_event_with_dp_rank(worker_id, local_hashes, 0)
 }
 
+/// Shared compressed-radix regression: two workers own a parent edge and its
+/// descendant, then worker 0 removes out-of-order duplicate hashes from the
+/// parent edge. Worker 0 must lose the descendant while worker 1 keeps it.
+pub fn descendant_invalidation_regression_events() -> (Vec<RouterEvent>, RouterEvent) {
+    let stores = vec![
+        make_store_event(0, &[1, 2, 3]),
+        make_store_event(1, &[1, 2, 3]),
+        make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]),
+        make_store_event_with_parent(1, &[1, 2, 3], &[4, 5]),
+    ];
+    let sequence_hashes =
+        compute_seq_hash_for_block(&[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)]);
+    let removal = remove_event(
+        0,
+        1,
+        0,
+        vec![
+            ExternalSequenceBlockHash(sequence_hashes[2]),
+            ExternalSequenceBlockHash(sequence_hashes[1]),
+            ExternalSequenceBlockHash(sequence_hashes[2]),
+        ],
+    );
+    (stores, removal)
+}
+
 /// Create a remove event with a specific dp_rank.
 pub fn make_remove_event_with_dp_rank(
     worker_id: u64,

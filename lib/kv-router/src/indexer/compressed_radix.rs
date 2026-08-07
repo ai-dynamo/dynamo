@@ -274,6 +274,18 @@ impl NodeState {
             };
         }
 
+        self.truncate_worker_at_pos(worker, pos)
+    }
+
+    /// Truncate a worker's coverage at a position known to be covered.
+    pub(crate) fn truncate_worker_at_pos(
+        &mut self,
+        worker: WorkerWithDpRank,
+        pos: usize,
+    ) -> RemoveOutcome {
+        let current_cutoff = self.current_cutoff(worker);
+        debug_assert!(pos < current_cutoff);
+
         let new_cutoff = pos;
         let stale_hashes = self.newly_uncovered_hashes(new_cutoff, current_cutoff);
 
