@@ -106,9 +106,11 @@ capacity are missing.
 
 When checking GPU capacity, count every pod that is bound to a node (`spec.nodeName` set) and not in a terminal phase
 (`Succeeded`/`Failed`) as holding its full GPU request. Do not filter on `phase == Running`: pods in
-`ImagePullBackOff`, `ContainerCreating`, or init hold their reservations. Exclude nodes carrying taints beyond the
-standard GPU taint (tenant reservations) from schedulable capacity, and never add tolerations for them. Report free
-capacity as the largest schedulable per-node block, not a cluster-wide sum: a 4-GPU pod needs 4 free GPUs on one node.
+`ImagePullBackOff`, `ContainerCreating`, or init hold their reservations. Exclude nodes whose taints the
+assigned manifest does not already tolerate, and never add new tolerations for other tenants' reservation taints.
+Evaluate fit per component pod — each pod's GPU request, node selectors, affinity, and tolerations against per-node
+free blocks — rather than a cluster-wide sum: a multi-component DGD schedules only if every one of its pods fits on
+some node.
 
 If a manifest must change only to work with the target cluster, such as resolving a storage class placeholder or adding
 a required node-taint toleration, update only the copy under `applied_manifests/`. Preserve the handed-off source

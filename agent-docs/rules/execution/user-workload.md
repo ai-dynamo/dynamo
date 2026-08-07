@@ -68,7 +68,7 @@ preferences:
 resources:
   gpu_floor: null                  # GPUs guaranteed available to this work
   gpu_ceiling: null                # maximum GPUs the user authorizes, across all concurrent experiments
-  parallel_experiments: null      # whether the user authorizes concurrent candidate experiments within the ceiling
+  parallel_experiments: null      # user authorization for concurrent candidates (advisory until the loop supports slot isolation)
   pinned: []                       # configuration knobs the user forbids changing (e.g. ["mode", "precision"])
   teardown_deadline: ""            # optional wall-clock bound by which all run resources must be gone
 

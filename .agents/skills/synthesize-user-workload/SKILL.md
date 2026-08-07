@@ -63,9 +63,9 @@ Ask only for blocking facts that remain unknown or contradictory after reading a
 - Do not add a ceremonial confirmation round when the user's message already provides an unambiguous value.
 - Ask once for the resource envelope: the GPU floor and ceiling in play for this work, whether parallel experiments
   are authorized within the ceiling, any knobs the user forbids changing, and any teardown deadline. Record the
-  answers in the contract's `resources` block. When capacity within the ceiling allows, downstream roles prefer
-  running approved candidates in parallel (one variable per slot, slot attribution in every ledger record) over
-  queueing them serially.
+  answers in the contract's `resources` block. The envelope informs capacity planning; candidates still run serially
+  under the current iteration model (each iteration retires the previous deployment). Do not run candidates in
+  parallel unless artifact roots, DGD names, and teardown ownership are slot-isolated.
 - When the user's production deployment shape differs from the unit under test (for example, fleet-level traffic
   numbers but a single-replica test deployment), derive the per-unit load explicitly and confirm it with the user
   before recording it.
@@ -133,12 +133,15 @@ A correction of fact is different from a material change: the user is not changi
 misreported description of the same workload (a wrong traffic number, a fleet-level figure that should have been
 per-replica, a mistaken SLO value). When the user corrects the contract:
 
-1. Append a correction annotation to the experiment ledger recording what changed, why, and when. Never rewrite or
-   delete prior records.
+1. Append a correction record to `<EXP_ROOT>/analysis/workload-corrections.jsonl` (append-only) stating what
+   changed, why, when, and which prior runs or iterations it supersedes. Never rewrite or delete prior records.
 2. Mark every run measured under the pre-correction contract as superseded, not invalid: those runs remain evidence
    about the conditions they actually measured.
 3. Update the contract file in place with the correction noted inline, and recompute its SHA256.
-4. Re-establish the baseline under the corrected contract before proposing any new candidate.
+4. Return the corrected path and SHA256 to the parent for re-handoff: every downstream role holding the
+   pre-correction hash must receive the corrected pair before doing further work. This procedure is the only
+   sanctioned exception to the freeze rule above.
+5. Re-establish the baseline under the corrected contract before proposing any new candidate.
 
 If the user is genuinely changing the workload rather than correcting its description, the existing rule applies:
 new experiment root.
