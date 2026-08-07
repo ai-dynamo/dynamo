@@ -18,6 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
+use crate::hf_runtime::HfRuntimeTokenizer;
 use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
@@ -1282,13 +1283,13 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Merge already applied above; just wrap.
-                let wrap_hf =
-                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                let wrap_hf = |hf: HfTokenizer| {
+                    HfRuntimeTokenizer::from_file(p, hf).with_context(|| p.display().to_string())
+                };
 
                 // Pick the inner backend.
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
-                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)?),
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
@@ -1301,7 +1302,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    Arc::new(wrap_hf(hf)?)
                                 }
                             }
                         } else {
@@ -1309,7 +1310,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            Arc::new(wrap_hf(hf)?)
                         }
                     }
                     TokenizerBackend::Basetenkenizer => {
@@ -1324,7 +1325,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    Arc::new(wrap_hf(hf)?)
                                 }
                             }
                         } else {
@@ -1332,7 +1333,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            Arc::new(wrap_hf(hf)?)
                         }
                     }
                 };
