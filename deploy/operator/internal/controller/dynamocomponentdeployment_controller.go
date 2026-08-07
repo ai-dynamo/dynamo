@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"maps"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -128,6 +130,32 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	logs = logs.WithValues("dynamoComponentDeployment", dynamoComponentDeployment.Name, "namespace", dynamoComponentDeployment.Namespace)
 
+	// Finalize deleting resources before validating their now-immutable live configuration.
+	if !dynamoComponentDeployment.GetDeletionTimestamp().IsZero() {
+		_, err = commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
+		if err != nil {
+			logs.Error(err, "Failed to handle finalizer")
+		}
+		return ctrl.Result{}, err
+	}
+
+	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
+		dynamoComponentDeployment.Spec.Experimental,
+	)...); compatibilityErr != nil {
+		if _, statusErr := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dynamoComponentDeployment.Generation,
+				Reason:             "InvalidCheckpointConfiguration",
+				Message:            compatibilityErr.Error(),
+			},
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Setup defer to handle errors and update status
 	defer func() {
 		if err == nil {
@@ -149,13 +177,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}()
 
-	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
-	if err != nil {
+	if _, err = commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r); err != nil {
 		logs.Error(err, "Failed to handle finalizer")
 		return ctrl.Result{}, err
-	}
-	if deleted {
-		return ctrl.Result{}, nil
 	}
 
 	if len(dynamoComponentDeployment.Status.Conditions) == 0 {
@@ -873,7 +897,7 @@ func hasLegacyWorkerSelector(labels map[string]string, componentType string) boo
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(generationOrDeletionChangedPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment

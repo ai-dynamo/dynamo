@@ -148,11 +148,11 @@ fn build_request_envelope<T>(
     recv_conn_info: ConnectionInfo,
     send_conn_info: Option<ConnectionInfo>,
     request: Option<&T>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<bytes::Bytes, Error>
 where
     T: serde::Serialize,
 {
-    let payload_codec = RequestPlanePayloadCodec::configured();
     let request_id = context.id();
     let request_type = if send_conn_info.is_some() {
         RequestType::ManyIn
@@ -199,6 +199,12 @@ where
     let codec = TwoPartCodec::default();
     let buffer = codec.encode_message(msg)?;
     Ok(buffer)
+}
+
+fn payload_codec_for_worker(instance: Option<&Instance>) -> RequestPlanePayloadCodec {
+    instance
+        .and_then(|instance| instance.request_plane_codec)
+        .unwrap_or(RequestPlanePayloadCodec::Json)
 }
 
 /// Await the network request-stream dial-in (if `request_stream_provider` is `Some`)
@@ -483,7 +489,7 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let enable_request_stream = input_stream.is_some();
-        let payload_codec = RequestPlanePayloadCodec::configured();
+        let payload_codec = payload_codec_for_worker(instance);
 
         // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
         // which simplifies the cancellation of registration on error. Each side is
@@ -527,6 +533,7 @@ impl AddressedPushRouter {
             recv_registered.connection_info.clone(),
             send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
+            payload_codec,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
@@ -855,8 +862,14 @@ where
 mod tests {
     use super::{
         CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestPlanePayloadCodec,
-        RequestType, ResponseType, serialize_control_message,
+        RequestType, ResponseType, TwoPartCodec, build_request_envelope, payload_codec_for_worker,
+        serialize_control_message,
     };
+    use crate::{
+        component::{Instance, TransportType},
+        pipeline::Context,
+    };
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
@@ -873,6 +886,49 @@ mod tests {
             frontend_send_ts_ns: None,
             request_stream_connection_info: None,
         }
+    }
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+    struct TestRequest {
+        value: u64,
+    }
+
+    #[test]
+    fn legacy_worker_without_codec_metadata_receives_json() {
+        let worker = Instance {
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            namespace: "default".to_string(),
+            instance_id: 42,
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let payload_codec = payload_codec_for_worker(Some(&worker));
+        assert_eq!(payload_codec, RequestPlanePayloadCodec::Json);
+
+        let request = TestRequest { value: 123 };
+        let buffer = build_request_envelope(
+            &Context::new(()),
+            ConnectionInfo {
+                transport: "tcp".to_string(),
+                info: "{}".to_string(),
+            },
+            None,
+            Some(&request),
+            payload_codec,
+        )
+        .expect("legacy-worker request envelope should encode");
+        let message = TwoPartCodec::default()
+            .decode_message(buffer)
+            .expect("request envelope should decode");
+
+        let control: RequestControlMessage = serde_json::from_slice(&message.header).unwrap();
+        assert_eq!(control.payload_codec, RequestPlanePayloadCodec::Json);
+        assert_eq!(
+            serde_json::from_slice::<TestRequest>(&message.data).unwrap(),
+            request
+        );
     }
 
     #[test]

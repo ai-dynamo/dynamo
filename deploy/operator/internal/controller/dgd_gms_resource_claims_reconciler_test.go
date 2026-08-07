@@ -286,7 +286,7 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 		Client:        cl,
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      record.NewFakeRecorder(100),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true, GMSSnapshot: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
 	t.Log("Reconcile GMS ResourceClaimTemplates")

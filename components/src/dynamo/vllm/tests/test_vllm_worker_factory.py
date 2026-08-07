@@ -23,9 +23,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.core,
-    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
-    # runners with "Failed to infer device type" even for mock tests.
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s

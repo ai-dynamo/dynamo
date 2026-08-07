@@ -1355,6 +1355,7 @@ mod tests {
                 instance_id: publisher_id,
                 transport: TransportType::Nats(String::new()),
                 device_type: None,
+                request_plane_codec: None,
             }),
         )
     }
@@ -2588,6 +2589,7 @@ mod tests {
                     endpoint: serving_id.name.clone(),
                     transport: TransportType::Tcp("tcp://127.0.0.1:1".to_string()),
                     device_type: None,
+                    request_plane_codec: None,
                 })
                 .await
                 .unwrap();
