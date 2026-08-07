@@ -1525,6 +1525,7 @@ fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
