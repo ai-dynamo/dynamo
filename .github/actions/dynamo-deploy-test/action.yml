@@ -141,6 +141,23 @@ runs:
           --alluredir=test-results/allure-results \
           --log-cli-level=INFO
 
+    - name: Dump cluster state on failure
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
+      run: |
+        namespaces="${NAMESPACE}"
+        if [ "${NAMESPACE}" != default ]; then
+          namespaces="${NAMESPACE},default"
+        fi
+
+        mkdir -p "${DYN_TEST_OUTPUT_PATH}"
+        kubectl cluster-info dump \
+          --namespaces="${namespaces}" \
+          --output-directory="${DYN_TEST_OUTPUT_PATH}/cluster-info" || true
+
     - name: Cleanup Deployment
       if: always()
       shell: bash
