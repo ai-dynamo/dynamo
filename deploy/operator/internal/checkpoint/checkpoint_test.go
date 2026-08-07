@@ -122,6 +122,126 @@ func testInfo() *CheckpointInfo {
 	return &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 }
 
+func TestAutomaticCheckpointBinding(t *testing.T) {
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-dgd", Namespace: testNamespace, UID: types.UID("dgd-uid"),
+	}}
+	ckpt := mustExpectedAutoCheckpoint(
+		t,
+		testScheme(),
+		testIdentity(),
+		corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: "worker:expected",
+			}},
+		}},
+		consts.MainContainerName,
+		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete,
+		nil,
+		owner,
+	)
+	ckpt.UID = types.UID("checkpoint-uid")
+	ckpt.Generation = 7
+	ckpt.Status.CheckpointID = testHash
+
+	binding, err := AutomaticCheckpointBinding(ckpt)
+	require.NoError(t, err)
+	assert.Regexp(t, `^v1/checkpoint-uid/7/[0-9a-f]{64}$`, binding)
+	recomputed, err := AutomaticCheckpointBinding(ckpt.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, binding, recomputed)
+
+	tests := []struct {
+		name      string
+		binding   string
+		mutate    func(*nvidiacomv1alpha1.DynamoCheckpoint)
+		wantErr   bool
+		errorText string
+	}{
+		{name: "matching"},
+		{
+			name: "artifact version changed",
+			mutate: func(actual *nvidiacomv1alpha1.DynamoCheckpoint) {
+				actual.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] = "changed"
+			},
+			wantErr:   true,
+			errorText: "provenance differs",
+		},
+		{
+			name: "automatic marker changed",
+			mutate: func(actual *nvidiacomv1alpha1.DynamoCheckpoint) {
+				actual.Annotations[consts.CheckpointAutoAnnotation] = "false"
+			},
+			wantErr:   true,
+			errorText: "provenance differs",
+		},
+		{
+			name: "checkpoint ID label changed",
+			mutate: func(actual *nvidiacomv1alpha1.DynamoCheckpoint) {
+				actual.Labels[snapshotprotocol.CheckpointIDLabel] = "changed"
+			},
+			wantErr:   true,
+			errorText: "checkpoint ID label differs",
+		},
+		{
+			name: "owner reference changed",
+			mutate: func(actual *nvidiacomv1alpha1.DynamoCheckpoint) {
+				actual.OwnerReferences[0].UID = types.UID("replacement-owner")
+			},
+			wantErr:   true,
+			errorText: "provenance differs",
+		},
+		{
+			name: "deletion policy changed",
+			mutate: func(actual *nvidiacomv1alpha1.DynamoCheckpoint) {
+				actual.Annotations[consts.CheckpointDeletionPolicyAnnotation] =
+					string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+			},
+			wantErr:   true,
+			errorText: "provenance differs",
+		},
+		{
+			name: "capture spec changed",
+			mutate: func(actual *nvidiacomv1alpha1.DynamoCheckpoint) {
+				actual.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image = "worker:changed"
+			},
+			wantErr:   true,
+			errorText: "provenance differs",
+		},
+		{
+			name:      "old binding rejected",
+			binding:   "checkpoint-uid/7",
+			wantErr:   true,
+			errorText: "invalid format",
+		},
+		{
+			name:      "malformed digest rejected",
+			binding:   "v1/checkpoint-uid/7/not-a-digest",
+			wantErr:   true,
+			errorText: "SHA-256 digest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := ckpt.DeepCopy()
+			if tt.mutate != nil {
+				tt.mutate(actual)
+			}
+			expectedBinding := binding
+			if tt.binding != "" {
+				expectedBinding = tt.binding
+			}
+			err := VerifyAutomaticCheckpointBinding(actual, expectedBinding)
+			if tt.wantErr {
+				require.ErrorContains(t, err, tt.errorText)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func testSnapshotAgentDaemonSet() *appsv1.DaemonSet {
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -358,12 +478,21 @@ func TestApplyRestorePodMetadataWithStorageConfig(t *testing.T) {
 	require.NoError(t, ApplyRestorePodMetadataWithStorageConfig(
 		labels,
 		annotations,
-		&CheckpointInfo{Enabled: true, Ready: true, Hash: testHash},
+		&CheckpointInfo{
+			Enabled:        true,
+			Exists:         true,
+			Ready:          true,
+			Hash:           testHash,
+			CheckpointName: "automatic-checkpoint",
+			AutoBinding:    "checkpoint-uid/1",
+		},
 		storageConfig,
 	))
 
 	assert.Equal(t, "true", labels[snapshotprotocol.RestoreTargetLabel])
 	assert.Equal(t, testHash, labels[snapshotprotocol.CheckpointIDLabel])
+	assert.Equal(t, "automatic-checkpoint", annotations[consts.CheckpointNameAnnotation])
+	assert.Equal(t, "checkpoint-uid/1", annotations[consts.CheckpointBindingAnnotation])
 	assert.Equal(t, snapshotprotocol.StorageTypePVC, annotations[snapshotprotocol.CheckpointStorageTypeAnnotation])
 	assert.Equal(t, "/snapshots", annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation])
 
@@ -1168,6 +1297,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 			Exists:                  true,
 			Ready:                   true,
 			CheckpointName:          "worker-checkpoint",
+			AutoBinding:             "checkpoint-uid/1",
 			StartupPolicy:           nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			RestoreTargetContainers: []string{"engine-0", "engine-1"},
 		})
@@ -1178,6 +1308,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 		assert.Empty(t, annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 		assert.Equal(t, consts.KubeLabelValueTrue, annotations[consts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, "worker-checkpoint", annotations[consts.CheckpointNameAnnotation])
+		assert.Equal(t, "checkpoint-uid/1", annotations[consts.CheckpointBindingAnnotation])
 		assert.Equal(t, string(nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint), annotations[consts.CheckpointStartupPolicyAnnotation])
 		assert.Equal(t, "engine-0,engine-1", annotations[snapshotprotocol.TargetContainersAnnotation])
 	})

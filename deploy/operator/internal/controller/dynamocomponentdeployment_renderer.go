@@ -24,6 +24,7 @@ import (
 
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -73,6 +74,46 @@ func newDCDWorkloadRenderer(
 
 func (r *DynamoComponentDeploymentReconciler) workloadRenderer() *dcdWorkloadRenderer {
 	return newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+}
+
+func (r *dcdWorkloadRenderer) verifyAutomaticCheckpointBinding(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	info *checkpoint.CheckpointInfo,
+) error {
+	binding, podTemplateBinding := checkpointBindingCopies(dcd)
+	if info == nil || info.CheckpointName == "" {
+		if binding != "" || podTemplateBinding != "" {
+			return fmt.Errorf("bound automatic checkpoint is missing")
+		}
+		return nil
+	}
+	if binding == "" || podTemplateBinding == "" {
+		if info.Automatic {
+			return fmt.Errorf("automatic checkpoint binding copies are required")
+		}
+		return nil
+	}
+	if binding != podTemplateBinding {
+		return fmt.Errorf("automatic checkpoint binding copies disagree")
+	}
+	actual := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	if err := r.reader.Get(ctx, types.NamespacedName{
+		Namespace: dcd.Namespace,
+		Name:      info.CheckpointName,
+	}, actual); err != nil {
+		return fmt.Errorf("failed to get bound automatic checkpoint: %w", err)
+	}
+	if actual.Annotations[commonconsts.CheckpointAutoAnnotation] != commonconsts.KubeLabelValueTrue {
+		return fmt.Errorf("bound checkpoint is not operator-managed")
+	}
+	if err := checkpoint.VerifyAutomaticCheckpointBinding(
+		actual,
+		binding,
+	); err != nil {
+		return fmt.Errorf("automatic checkpoint provenance differs: %w", err)
+	}
+	return nil
 }
 
 // renderMultinodePodTemplateSpecs renders the leader and worker pod templates
@@ -209,6 +250,9 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 		}
 		checkpointInfo = info
+	}
+	if err := r.verifyAutomaticCheckpointBinding(ctx, dcd, checkpointInfo); err != nil {
+		return nil, errors.Wrap(err, "failed to verify automatic checkpoint binding")
 	}
 
 	podSpec, err := dynamo.GenerateBasePodSpecForController(

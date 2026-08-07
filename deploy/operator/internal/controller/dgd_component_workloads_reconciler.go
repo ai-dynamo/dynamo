@@ -94,17 +94,24 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
+	}
+
+	for key, dcd := range dcds {
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
 		if err := r.preserveExistingBackendFramework(ctx, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
 		}
-		_, syncedDCD, err := commoncontroller.SyncResource(
+		_, syncedDCD, err := commoncontroller.SyncResourceWithOptions(
 			ctx,
 			&r.syncer,
 			dgd,
 			func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 				return dcd, false, nil
+			},
+			commoncontroller.SyncResourceOptions[*nvidiacomv1beta1.DynamoComponentDeployment]{
+				OwnedAnnotationKeys:           []string{consts.CheckpointBindingAnnotation},
+				ValidateCurrentAgainstDesired: validateCheckpointBinding,
 			},
 		)
 		if err != nil {
@@ -132,6 +139,68 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	return result, nil
+}
+
+func validateCheckpointBinding(
+	current *nvidiacomv1beta1.DynamoComponentDeployment,
+	desired *nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
+	const annotation = consts.CheckpointBindingAnnotation
+
+	// Require a complete and internally consistent desired binding.
+	desiredMetadata, desiredTemplate := checkpointBindingCopies(desired)
+	if desiredMetadata == "" && desiredTemplate == "" {
+		return nil
+	}
+	if desiredMetadata == "" || desiredTemplate == "" || desiredTemplate != desiredMetadata {
+		return fmt.Errorf(
+			"desired automatic checkpoint binding copies for DynamoComponentDeployment %s/%s disagree",
+			desired.Namespace,
+			desired.Name,
+		)
+	}
+
+	// Fail closed unless both existing binding copies agree with the desired identity.
+	currentMetadata, currentTemplate := checkpointBindingCopies(current)
+	if currentMetadata == "" || currentTemplate == "" {
+		return fmt.Errorf(
+			"automatic checkpoint binding copies are required on existing DynamoComponentDeployment %s/%s; recreate the workload",
+			current.Namespace,
+			current.Name,
+		)
+	}
+	if currentMetadata != currentTemplate {
+		return fmt.Errorf(
+			"automatic checkpoint binding copies disagree on DynamoComponentDeployment %s/%s",
+			current.Namespace,
+			current.Name,
+		)
+	}
+	if currentMetadata != desiredMetadata {
+		return fmt.Errorf(
+			"automatic checkpoint binding for DynamoComponentDeployment %s/%s is immutable: existing %q, desired %q",
+			current.Namespace,
+			current.Name,
+			currentMetadata,
+			desiredMetadata,
+		)
+	}
+	return nil
+}
+
+func checkpointBindingCopies(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (metadata, podTemplate string) {
+	if dcd == nil {
+		return "", ""
+	}
+
+	// Read the independently durable metadata and pod-template copies.
+	metadata = dcd.Annotations[consts.CheckpointBindingAnnotation]
+	if dcd.Spec.PodTemplate != nil {
+		podTemplate = dcd.Spec.PodTemplate.Annotations[consts.CheckpointBindingAnnotation]
+	}
+	return metadata, podTemplate
 }
 
 func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
@@ -186,6 +255,9 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 	}
 
 	if checkpointInfo.Exists && checkpointInfo.CheckpointName != "" {
+		if checkpointInfo.Automatic && checkpointInfo.AutoBinding == "" {
+			return fmt.Errorf("automatic checkpoint binding is missing")
+		}
 		if dcd.Spec.Experimental == nil {
 			dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
 		}
@@ -202,6 +274,19 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
+		if checkpointInfo.AutoBinding != "" {
+			if dcd.Annotations == nil {
+				dcd.Annotations = map[string]string{}
+			}
+			dcd.Annotations[consts.CheckpointBindingAnnotation] = checkpointInfo.AutoBinding
+			if dcd.Spec.PodTemplate == nil {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
+			}
+			if dcd.Spec.PodTemplate.Annotations == nil {
+				dcd.Spec.PodTemplate.Annotations = map[string]string{}
+			}
+			dcd.Spec.PodTemplate.Annotations[consts.CheckpointBindingAnnotation] = checkpointInfo.AutoBinding
+		}
 	}
 
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {

@@ -8,6 +8,7 @@ package mutation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -84,10 +85,36 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		podNamespace = req.Namespace
 	}
 
-	if pod.Labels != nil &&
-		(pod.Labels[snapshotprotocol.CheckpointIDLabel] != "" ||
-			pod.Labels[snapshotprotocol.CheckpointSourceLabel] != "") {
-		return admission.Allowed("pod is already checkpoint-shaped")
+	if pod.Labels[snapshotprotocol.CheckpointSourceLabel] == consts.KubeLabelValueTrue {
+		return admission.Allowed("pod is a checkpoint source")
+	}
+
+	// Verify bound restore targets before accepting an already-shaped Pod.
+	if pod.Labels[snapshotprotocol.CheckpointIDLabel] != "" ||
+		pod.Labels[snapshotprotocol.RestoreTargetLabel] == consts.KubeLabelValueTrue {
+		binding := pod.Annotations[consts.CheckpointBindingAnnotation]
+		if binding == "" {
+			return admission.Allowed("unbound pod is already checkpoint-shaped")
+		}
+		checkpointName := pod.Annotations[consts.CheckpointNameAnnotation]
+		if checkpointName == "" {
+			return admission.Denied("bound restore target has no checkpoint name")
+		}
+
+		// Resolve and verify the exact automatic checkpoint object.
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		if err := h.client.Get(ctx, types.NamespacedName{
+			Namespace: podNamespace,
+			Name:      checkpointName,
+		}, ckpt); err != nil {
+			return admission.Denied("bound automatic checkpoint is unavailable")
+		}
+		if err := verifyBoundAutomaticCheckpoint(ckpt, binding); err != nil {
+			logger.Error(err, "already-shaped restore target rejected because its binding is invalid",
+				"namespace", podNamespace, "pod", pod.Name, "checkpoint", checkpointName)
+			return admission.Denied("automatic checkpoint binding is missing or stale")
+		}
+		return admission.Allowed("bound pod is already checkpoint-shaped")
 	}
 	if pod.Annotations == nil ||
 		pod.Annotations[consts.CheckpointRestoreCandidateAnnotation] != consts.KubeLabelValueTrue {
@@ -106,9 +133,29 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 
 	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: podNamespace, Name: checkpointName}, ckpt); err != nil {
+		if pod.Annotations[consts.CheckpointBindingAnnotation] != "" {
+			return admission.Denied("bound automatic checkpoint is unavailable")
+		}
 		logger.V(1).Info("checkpoint restore candidate not mutated because checkpoint could not be read",
 			"namespace", podNamespace, "checkpoint", checkpointName, "error", err.Error())
 		return admission.Allowed("checkpoint not available")
+	}
+
+	// Enforce the automatic binding before shaping an unshaped restore candidate.
+	binding := pod.Annotations[consts.CheckpointBindingAnnotation]
+	automatic := ckpt.Annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue
+	if binding != "" && !automatic {
+		return admission.Denied("bound checkpoint is not operator-managed")
+	}
+	if automatic {
+		if err := checkpoint.VerifyAutomaticCheckpointBinding(
+			ckpt,
+			binding,
+		); err != nil {
+			logger.Error(err, "automatic checkpoint restore candidate rejected because its binding is invalid",
+				"namespace", podNamespace, "pod", pod.Name, "checkpoint", checkpointName)
+			return admission.Denied("automatic checkpoint binding is missing or stale")
+		}
 	}
 	if ckpt.Status.Phase != nvidiacomv1alpha1.DynamoCheckpointPhaseReady {
 		return admission.Allowed("checkpoint not ready")
@@ -141,6 +188,8 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		Ready:                   true,
 		StartupPolicy:           nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
 		RestoreTargetContainers: targets,
+		AutoBinding:             binding,
+		Automatic:               automatic,
 	}
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
@@ -174,4 +223,14 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		return admission.Allowed("checkpoint restore mutation unavailable")
 	}
 	return admission.PatchResponseFromRaw(original, mutated)
+}
+
+func verifyBoundAutomaticCheckpoint(
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	binding string,
+) error {
+	if ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		return fmt.Errorf("bound checkpoint is not operator-managed")
+	}
+	return checkpoint.VerifyAutomaticCheckpointBinding(ckpt, binding)
 }
