@@ -60,6 +60,8 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 - **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
 
+- **[Slime External Rollouts](rl/slime/README.md)** - Slime training with Dynamo SGLang routing, a shared `/generate` endpoint, and health-filtered worker controls
+
 ## Getting Started
 
 1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md) for advanced architectures.
