@@ -43,6 +43,10 @@ where
 /// Aggregate a stream of [`Annotated<T>`] while preserving structured backend
 /// errors. Existing callers that expose string errors can continue to use
 /// [`aggregate_stream`].
+///
+/// The [`DynamoError`] is returned intact so the HTTP layer can classify a
+/// backend rejection — invalid argument, overload, cancellation — into the
+/// matching status code.
 pub async fn aggregate_typed_stream<T, S>(stream: S) -> Result<T, DynamoError>
 where
     T: StreamAggregable,
@@ -71,4 +75,63 @@ where
     }
 
     Ok(response.unwrap_or_else(T::empty))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_runtime::{
+        error::{BackendError, ErrorType},
+        protocols::maybe_error::MaybeError,
+    };
+    use futures::stream;
+    use serde::Deserialize;
+
+    #[derive(Debug, Default, PartialEq, Deserialize)]
+    struct Chunks(Vec<u32>);
+
+    impl StreamAggregable for Chunks {
+        fn empty() -> Self {
+            Self::default()
+        }
+
+        fn merge(&mut self, next: Self) {
+            self.0.extend(next.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn merges_data_and_falls_back_to_empty() {
+        let empty = aggregate_typed_stream::<Chunks, _>(stream::empty())
+            .await
+            .unwrap();
+        assert_eq!(empty, Chunks(vec![]));
+
+        let stream = stream::iter(vec![
+            Annotated::from_data(Chunks(vec![1])),
+            Annotated::from_data(Chunks(vec![2])),
+        ]);
+        assert_eq!(
+            aggregate_typed_stream(stream).await.unwrap(),
+            Chunks(vec![1, 2])
+        );
+    }
+
+    /// The property every OpenAI endpoint depends on: a backend rejection keeps
+    /// its type, so the HTTP layer can answer 4xx rather than a blanket 500.
+    #[tokio::test]
+    async fn preserves_backend_error_type() {
+        let stream = stream::iter(vec![Annotated::<Chunks>::from_err(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("invalid argument")
+                .build(),
+        )]);
+
+        let error = aggregate_typed_stream(stream).await.unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid argument");
+    }
 }
