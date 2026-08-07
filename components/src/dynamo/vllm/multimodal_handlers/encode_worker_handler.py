@@ -246,7 +246,7 @@ class EncodeWorkerHandler:
                 # Load URL images and read frontend-decoded pixels via NIXL.
                 # load_image_batch preserves order and aggregates per-item
                 # failures into a single raised error.
-                wire_items = []
+                wire_items: list[dict[str, Any]] = []
                 for idx, _ in need_encode_indexes:
                     group_mm_input = request.multimodal_inputs[idx].multimodal_input
                     assert group_mm_input is not None
