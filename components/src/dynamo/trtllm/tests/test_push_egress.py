@@ -24,6 +24,7 @@ decorators and helpers above).  Anything test-local must be passed in or bound
 at module scope instead, or the class body raises NameError.
 """
 
+import ast
 import asyncio
 import functools
 import importlib.util
@@ -706,8 +707,6 @@ class TestDecoratorAppliedToRealHandlers:
 
     @staticmethod
     def _generate_decorators(path, class_name):
-        import ast
-
         tree = ast.parse(pathlib.Path(path).read_text())
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name == class_name:
@@ -773,8 +772,6 @@ class TestNoBleedIntoOtherEngines:
 
     @staticmethod
     def _declares_response_sender(path):
-        import ast
-
         try:
             tree = ast.parse(path.read_text())
         except SyntaxError:
