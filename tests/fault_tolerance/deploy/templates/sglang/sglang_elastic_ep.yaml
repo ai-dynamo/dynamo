@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SGLang Elastic EP Scale-Up Deployment (single node, warm standby)
+#
+# Drives the Dynamo SGLang worker's elastic-EP scale-up control, which calls
+# SGLang's native runtime API:
+#
+#   POST /engine/control/scale_elastic_ep {"new_ep_size": <int>}   (leader system port 9090)
+#   GET  /engine/control/is_scaling_elastic_ep                     (poll for completion)
+#
+# HOW SGLANG ELASTIC EP WORKS
+# ---------------------------
+#   * The running server is the "primary group". Scaling up requires a SEPARATE
+#     "joining group" process, launched with
+#       --elastic-ep-join-mode scale --elastic-ep-join-rank-offset <current_ep_size>
+#     pointing at the primary's --dist-init-addr. Once the joiner's GPUs are up,
+#     POSTing scale_elastic_ep integrates them and redistributes experts (ePLB).
+#   * Only SCALE-UP is supported today: SGLang rejects a target below the
+#     current EP size. The request field is "new_ep_size" (the target EP ranks).
+#
+# REQUIREMENTS
+# ------------
+#   * SGLang >= 0.5.16 in the runtime image (older builds have no
+#     tokenizer_manager.scale_elastic_ep; the Dynamo worker capability-gates the
+#     route and simply will not expose it there).
+#   * A MoE model with DP-attention (here: deepseek-ai/DeepSeek-V2-Lite).
+#   * 8 GPUs on ONE node: 4 for the primary group (--elastic-ep-initial-size 4),
+#     4 idle warm-standby GPUs for the joining group (scale 4 -> 8).
+#   * RDMA / InfiniBand for the mooncake weight-transfer backend. Set
+#     --mooncake-ib-device to the node's IB device list before applying.
+#   * DYN_SYSTEM_ENABLED=true so the leader exposes the :9090 system server that
+#     serves /engine/control/*.
+#
+# The joining group is NOT launched by the operator yet (that orchestration is
+# tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
+# launches it manually via `kubectl exec` on the worker pod's idle GPUs, then
+# drives the scale-up.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-elastic-ep
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+    SGLangDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          memory: "60Gi"
+          # Reserve the whole node: 4 GPUs run the primary EP group, the other 4
+          # are idle warm standby that the joining group claims on scale-up.
+          gpu: "8"
+        limits:
+          memory: "120Gi"
+          gpu: "8"
+      envs:
+        # Required: exposes the :9090 system server that serves the
+        # /engine/control/scale_elastic_ep and /engine/control/is_scaling_elastic_ep
+        # routes registered by the SGLang worker.
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "1"
+        - name: HF_HOME
+          value: "/model-cache"
+        # Rendezvous address the joining group dials on scale-up.
+        - name: SGLANG_ELASTIC_SCALE_DIST_INIT
+          value: "127.0.0.1:24555"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          workingDir: /workspace/examples/backends/sglang
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+            - --model-path
+            - deepseek-ai/DeepSeek-V2-Lite
+            - --served-model-name
+            - deepseek-ai/DeepSeek-V2-Lite
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --page-size
+            - "16"
+            # DP-attention MoE: the primary group runs EP size 4 (4 GPUs).
+            - --tp
+            - "4"
+            - --dp
+            - "4"
+            - --enable-dp-attention
+            - --enable-dp-lm-head
+            # All-to-all + elastic-EP weight transfer backends.
+            - --moe-a2a-backend
+            - nixl
+            - --deepep-mode
+            - low_latency
+            - --elastic-ep-backend
+            - mooncake
+            # REQUIRED: set to the node's IB device list, e.g. "mlx5_0,mlx5_1".
+            - --mooncake-ib-device
+            - "SET-ME"
+            # ePLB keeps experts balanced across the (growing) EP group.
+            - --enable-eplb
+            - --ep-num-redundant-experts
+            - "24"
+            # Start at EP 4; allow growth up to EP 8 on scale-up.
+            - --elastic-ep-initial-size
+            - "4"
+            - --max-ep-size
+            - "8"
+            # Stable rendezvous address the joining group dials on scale-up.
+            # Sourced from SGLANG_ELASTIC_SCALE_DIST_INIT (single source of truth).
+            - --dist-init-addr
+            - "$(SGLANG_ELASTIC_SCALE_DIST_INIT)"

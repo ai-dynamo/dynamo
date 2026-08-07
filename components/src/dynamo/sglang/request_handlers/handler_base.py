@@ -601,6 +601,13 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         )
         self._pause_lock = asyncio.Lock()
 
+        # Serialise concurrent scale_elastic_ep calls. SGLang tracks a single
+        # in-flight elastic-EP scale phase on the tokenizer manager; two callers
+        # racing through it would corrupt that state. One handler exists per
+        # worker process, so all concurrent HTTP callers share this lock and
+        # only one scale operation runs at a time.
+        self._scale_ep_lock = asyncio.Lock()
+
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
 
@@ -866,6 +873,108 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
+    def _supports_elastic_ep(self) -> bool:
+        """Whether the underlying SGLang engine exposes runtime elastic-EP
+        scaling.
+
+        The runtime API ``tokenizer_manager.scale_elastic_ep`` only exists on
+        SGLang >= 0.5.16. Older builds lack it, so the elastic-EP routes are not
+        registered and a caller gets a 404 rather than an ``AttributeError``.
+        """
+        if self.engine is None:
+            return False
+        # register_engine_routes() calls this on any engine object, including the
+        # bare stand-ins some route unit tests pass, so probe for tokenizer_manager
+        # defensively rather than assume it (direct access is only safe inside the
+        # handlers, which are reachable only once the route is registered).
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        return tokenizer_manager is not None and hasattr(
+            tokenizer_manager, "scale_elastic_ep"
+        )
+
+    def _require_elastic_ep_backend(self) -> Optional[dict]:
+        """Return an error dict if elastic EP is not enabled, else ``None``.
+
+        Shared by ``scale_elastic_ep`` and ``is_scaling_elastic_ep``: both are
+        no-ops unless the worker was launched with ``--elastic-ep-backend``.
+        """
+        if self.engine.tokenizer_manager.server_args.elastic_ep_backend is None:
+            return {
+                "status": "error",
+                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
+            }
+        return None
+
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale up the expert-parallel group to ``new_ep_size`` ranks.
+
+        SGLang integrates the GPUs contributed by a separately-launched joining
+        group (``--elastic-ep-join-mode scale``), redistributes experts (ePLB)
+        across the widened EP group, and keeps serving on the leader — no
+        restart.
+
+        Only scale-up is supported today: SGLang rejects a target smaller than
+        the current EP size. ``new_ep_size`` is the target number of EP ranks.
+        """
+
+        def err(message: str) -> dict:
+            return {"status": "error", "message": message}
+
+        body = body or {}
+        if not isinstance(body, dict):
+            return err("request body must be a JSON object")
+
+        new_ep_size = body.get("new_ep_size")
+        if new_ep_size is None:
+            return err("Missing required field: new_ep_size")
+        # bool is an int subclass — reject it so True/False can't pose as a size.
+        if isinstance(new_ep_size, bool) or not isinstance(new_ep_size, int):
+            return err(f"new_ep_size must be an integer, got: {new_ep_size!r}")
+        if new_ep_size <= 0:
+            return err("new_ep_size must be a positive integer")
+
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+
+        from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
+
+        tokenizer_manager = self.engine.tokenizer_manager
+        async with self._scale_ep_lock:
+            try:
+                result = await tokenizer_manager.scale_elastic_ep(
+                    ScaleElasticEPReqInput(new_ep_size=new_ep_size)
+                )
+            except Exception as e:
+                logger.error("[ElasticEP] Scaling failed: %s", e)
+                return err(str(e))
+
+        response = {
+            "status": "ok" if result.success else "error",
+            "message": result.message
+            or (
+                f"Scaled to ep_size={new_ep_size}"
+                if result.success
+                else "scale_elastic_ep failed"
+            ),
+            "old_ep_size": result.old_ep_size,
+            "new_ep_size": result.new_ep_size,
+        }
+        if not result.success:
+            response["pending_ep_size"] = result.pending_ep_size
+        return response
+
+    async def is_scaling_elastic_ep(self, body: dict) -> dict:
+        """Return the engine's current elastic-EP scale state.
+
+        Lets a caller poll for scale-up completion (``scale_phase`` reaches
+        ``serving_expanded``).
+        """
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+        return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
+
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -889,6 +998,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weights_from_ipc": self.update_weights_from_ipc,
             "control/update_weight_version": self.update_weight_version,
         }
+        # Elastic-EP scale-up is only exposed when the engine actually supports
+        # it (SGLang >= 0.5.16). Capability-gated so older SGLang builds and
+        # non-EP deployments don't advertise a route that would 500.
+        if self._supports_elastic_ep():
+            built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
+            built_in_routes[
+                "control/is_scaling_elastic_ep"
+            ] = self.is_scaling_elastic_ep
         for path, _ in configured_routes:
             if path in built_in_routes:
                 raise ValueError(
