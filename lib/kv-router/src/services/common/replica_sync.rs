@@ -781,7 +781,7 @@ mod tests {
         assert!(registry_b.list_loads(None, None)[0].active_decode_blocks > 0);
 
         for request_id in &warmup_requests {
-            registry_a.free(&key, request_id, None).unwrap();
+            registry_a.free(&key, request_id).unwrap();
         }
         wait_for_load(&registry_b, 0, 0).await;
 
@@ -793,7 +793,7 @@ mod tests {
         registry_a.mark_prefill_completed(&key, "target").unwrap();
         wait_for_load(&registry_b, 3, 0).await;
 
-        registry_a.free(&key, "target", None).unwrap();
+        registry_a.free(&key, "target").unwrap();
         wait_for_load(&registry_b, 0, 0).await;
         cancel_token.cancel();
         peer_b.shutdown().await;

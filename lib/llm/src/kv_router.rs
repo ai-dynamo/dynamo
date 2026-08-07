@@ -73,6 +73,10 @@ use crate::{
 };
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 
+pub(crate) type WorkerSelectorFactory<Sel> = Arc<
+    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
+>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -334,7 +338,7 @@ fn resolve_tracking_model_name(
 
 impl<Sel> KvRouter<Sel>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -1131,12 +1135,10 @@ where
         self.scheduler.free(request_id).await
     }
 
-    /// Legacy slot cleanup targeted at the worker the caller booked.
+    /// Release a booking only if it still belongs to `worker`.
     ///
-    /// A same-id re-dispatch (migration failover) re-binds `request_id` to a new
-    /// worker while the failed attempt's cleanup is still in flight. Targeting the
-    /// captured worker keeps that late cleanup from releasing the replacement's
-    /// booking; an ownership mismatch is a harmless no-op.
+    /// An ownership mismatch is a harmless no-op, which makes this safe for
+    /// delayed cleanup that captured the worker when it acquired the booking.
     pub async fn free_if_worker(
         &self,
         request_id: &str,
@@ -1411,7 +1413,7 @@ where
 impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
     for KvRouter<Sel>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     async fn generate(
         &self,

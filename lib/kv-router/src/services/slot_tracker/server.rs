@@ -65,13 +65,6 @@ struct LifecycleRequest {
     #[serde(default = "default_routing_group")]
     routing_group: String,
     request_id: String,
-    /// Optional on `/free`: the worker the caller booked. Supplying it makes the
-    /// release worker-targeted so a superseded attempt cannot release the booking
-    /// of the attempt that replaced it. Omitted means release the current owner.
-    #[serde(default)]
-    worker_id: Option<u64>,
-    #[serde(default)]
-    dp_rank: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -214,10 +207,7 @@ async fn free(
         Err(error) => return json_rejection(error),
     };
     let key = RoutingPartitionId::new(req.model_name, req.routing_group);
-    let worker = req
-        .worker_id
-        .map(|worker_id| WorkerWithDpRank::new(worker_id, req.dp_rank.unwrap_or(0)));
-    match state.registry.free(&key, &req.request_id, worker) {
+    match state.registry.free(&key, &req.request_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => service_error(error),
     }

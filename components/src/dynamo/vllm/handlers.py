@@ -87,6 +87,7 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
+from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -2067,6 +2068,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         runtime_config = ModelRuntimeConfig()
         runtime_config.context_length = self.model_max_len
+        publish_vllm_token_budget(runtime_config, self.model_max_len)
         runtime_config.kv_event_publishing_enabled = getattr(
             self.config, "use_kv_events", False
         )
@@ -3097,10 +3099,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
-            encodings = await self._custom_encoder.encode(image_urls)
+            artifacts = await self._custom_encoder.encode(image_urls)
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
-                encodings,
+                artifacts,
             )
         except Exception as exc:
             msg = f"CustomEncoder failed: {exc}"
@@ -3110,7 +3112,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
-            len(encodings),
+            len(artifacts),
         )
         return prepared, None
 

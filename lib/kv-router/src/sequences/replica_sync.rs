@@ -219,17 +219,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 effects.cleanup_prompt_trie = true;
             }
             ActiveSequenceEventData::Free => {
-                // `event_worker` is an ownership constraint, not metadata. A peer
-                // emits `Free(R, A)` while a migration re-dispatch moves ownership
-                // from A to B, so this replica may have already applied
-                // `Add(R, B)`. Releasing whichever worker currently maps to R
-                // would drop B's booking. Free A specifically, and keep a newer
-                // `R -> B` mapping intact.
+                let Some(worker) = self.request_index.remove_request(&request_id) else {
+                    return;
+                };
                 let table = self.workers.read();
-                let Some(&idx) = table.index.get(&event_worker) else {
-                    drop(table);
-                    self.request_index
-                        .remove_request_if_worker(&request_id, event_worker);
+                let Some(&idx) = table.index.get(&worker) else {
                     return;
                 };
                 let load = {
@@ -238,13 +232,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     let delta = seq.free(&request_id, decay_now);
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(event_worker, delta, load);
+                        .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
                     load
                 };
                 drop(table);
-                self.request_index
-                    .remove_request_if_worker(&request_id, event_worker);
-                effects.record_worker_load(event_worker, load, true);
+                effects.record_worker_load(worker, load, true);
                 effects.wake_scheduler = true;
                 effects.cleanup_prompt_trie = true;
             }

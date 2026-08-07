@@ -82,7 +82,7 @@ The standalone router does not include the HTTP frontend and does not expose `/v
 
 ## Deployment Modes
 
-The Dynamo router can be deployed in several configurations. The table below shows every combination and when to use it:
+The Dynamo router can be deployed in several configurations. The table below shows common combinations and when to use them:
 
 | Mode | Command | Routing Logic | KV Events | Topology | Use Case |
 |------|---------|---------------|-----------|----------|----------|
@@ -95,6 +95,12 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + Device-Aware Weighted** | `python -m dynamo.frontend --router-mode device-aware-weighted` | Device-aware budget + least-loaded within selected device group | None | Aggregated or disaggregated fallback | Heterogeneous fleet balancing (CPU/non-CPU); degenerates to least-loaded when only one device class is present |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
+
+> [!IMPORTANT]
+> With `DYN_LORA_ENABLED`, use KV, random, or round-robin routing. Direct,
+> power-of-two, least-loaded, and device-aware-weighted modes are not LoRA-aware
+> and fail startup. Session affinity with LoRA is supported only in KV mode;
+> random and round-robin plus affinity are rejected.
 
 ### Routing Modes (`--router-mode`)
 
@@ -120,7 +126,7 @@ normalized_load = total_inflight(group) / (instance_count(group) x throughput_we
 
 The throughput weight is `1` for CPU workers and `DYN_ENCODER_CUDA_TO_CPU_RATIO` for non-CPU workers. The next request is routed to the group with the lower normalized load, then to the least-loaded worker inside that group.
 
-For multimodal requests, a full embedding-cache hit on one or more workers bypasses the CPU-to-non-CPU ratio. The router selects the least-loaded worker among those that hold every distinct embedding-cache key in the request. Partial hits continue through the normal weighted group selection. See [Embedding Cache](../../../../use-cases/multimodal-serving/embedding-cache.md#cache-aware-routing).
+For multimodal requests, a full embedding-cache hit on one or more workers bypasses the CPU-to-non-CPU ratio. The router selects the least-loaded worker among those that hold every distinct embedding-cache key in the request. Partial hits continue through the normal weighted group selection. See [Embedding Cache](../../../../use-cases/multimodal-serving/embedding-cache.md#configuration).
 
 Use `DYN_ENCODER_CUDA_TO_CPU_RATIO` to approximate the throughput ratio of a non-CPU worker relative to one CPU worker. The default is `8`.
 

@@ -55,6 +55,13 @@ const fn default_decode_active_request_weight() -> f64 {
     0.0
 }
 
+// Default-valued post-v1.3 fields are omitted so v1.3 frontends can read v1.4 MDCs during
+// rolling upgrades. Non-default values still serialize and fail closed on the older frontend.
+// TODO(v1.5): Remove these compatibility skips when v1.3 falls outside the N-1 window.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
+}
+
 const fn default_overlap_score_credit_decay() -> f64 {
     0.0
 }
@@ -516,6 +523,11 @@ struct KvRouterConfigSerde {
     disk_cache_hit_weight: f64,
     router_temperature: f64,
     use_kv_events: bool,
+    // Compatibility with v1.3 MDCs during v1.4 rolling upgrades. These fields remain private
+    // because the removed JetStream behavior is not supported by the current router.
+    // TODO(v1.5): Remove when v1.3 falls outside the N-1 window.
+    #[serde(rename = "durable_kv_events")]
+    legacy_durable_kv_events: bool,
     router_replica_sync: bool,
     router_track_active_blocks: bool,
     router_track_output_blocks: bool,
@@ -525,6 +537,10 @@ struct KvRouterConfigSerde {
     router_tracking_key_file: Option<PathBuf>,
     router_tracking_key_id: Option<String>,
     router_prefill_load_model: RouterPrefillLoadModel,
+    #[serde(rename = "router_snapshot_threshold")]
+    _legacy_router_snapshot_threshold: Option<u32>,
+    #[serde(rename = "router_reset_states")]
+    _legacy_router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
@@ -560,6 +576,7 @@ impl Default for KvRouterConfigSerde {
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
             use_kv_events: config.use_kv_events,
+            legacy_durable_kv_events: false,
             router_replica_sync: config.router_replica_sync,
             router_track_active_blocks: config.router_track_active_blocks,
             router_track_output_blocks: config.router_track_output_blocks,
@@ -569,6 +586,8 @@ impl Default for KvRouterConfigSerde {
             router_tracking_key_file: config.router_tracking_key_file,
             router_tracking_key_id: config.router_tracking_key_id,
             router_prefill_load_model: config.router_prefill_load_model,
+            _legacy_router_snapshot_threshold: None,
+            _legacy_router_reset_states: false,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
             router_policy_config: config.router_policy_config,
@@ -614,6 +633,7 @@ pub struct KvRouterConfig {
     /// Block-equivalent cost added for each active request on a candidate
     /// worker. This can balance decode batch size when per-request decode
     /// compute matters more than resident KV footprint. Defaults to 0.0.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub decode_active_request_weight: f64,
 
     #[serde(default = "default_host_cache_hit_weight")]
@@ -648,12 +668,15 @@ pub struct KvRouterConfig {
     pub router_track_prefill_tokens: bool,
 
     /// Hash algorithm used for router-derived active-sequence identities.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub router_tracking_hash: TrackingHashAlgorithm,
 
     /// File containing the 32-byte provider key used by keyed tracking mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_tracking_key_file: Option<PathBuf>,
 
     /// Provider-managed epoch identifier mixed into keyed tracking scope derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_tracking_key_id: Option<String>,
 
     /// Optional model for estimating effective prompt-side prefill load over time.
@@ -725,29 +748,35 @@ pub struct KvRouterConfig {
 
     /// Enable conditional-disagg bypass. When true, the `PrefillRouter`
     /// may short-circuit selected requests to prefill+decode on a decode worker.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub conditional_disagg_enabled: bool,
 
     /// Which conditional-disagg policy to run.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub conditional_disagg_policy: ConditionalDisaggPolicyKind,
 
     /// `IslBoundingPolicy` absolute effective-ISL cutoff in tokens.
-    #[serde(default = "default_conditional_disagg_eff_isl_threshold")]
+    #[serde(
+        default = "default_conditional_disagg_eff_isl_threshold",
+        skip_serializing_if = "is_default_conditional_disagg_eff_isl_threshold"
+    )]
     pub conditional_disagg_eff_isl_threshold: usize,
 
     /// `IslBoundingPolicy` effective-ISL/prompt-token ratio cutoff.
-    #[serde(default = "default_conditional_disagg_eff_isl_ratio_threshold")]
+    #[serde(
+        default = "default_conditional_disagg_eff_isl_ratio_threshold",
+        skip_serializing_if = "is_default_conditional_disagg_eff_isl_ratio_threshold"
+    )]
     pub conditional_disagg_eff_isl_ratio_threshold: f64,
 
     /// `PrefillLoadPolicy` busy-line fraction for the chosen prefill worker.
     /// When unset, the prefill-load condition falls back to `router_queue_threshold`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditional_disagg_prefill_busy_threshold: Option<f64>,
 
     /// Decode-busy guard fraction for the chosen decode worker. When unset,
     /// the guard is disabled.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
@@ -757,6 +786,14 @@ fn default_conditional_disagg_eff_isl_threshold() -> usize {
 
 fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
     crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
+}
+
+fn is_default_conditional_disagg_eff_isl_threshold(value: &usize) -> bool {
+    *value == default_conditional_disagg_eff_isl_threshold()
+}
+
+fn is_default_conditional_disagg_eff_isl_ratio_threshold(value: &f64) -> bool {
+    *value == default_conditional_disagg_eff_isl_ratio_threshold()
 }
 
 impl Default for KvRouterConfig {
@@ -807,6 +844,10 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
     type Error = String;
 
     fn try_from(compat: KvRouterConfigSerde) -> Result<Self, Self::Error> {
+        if compat.legacy_durable_kv_events {
+            return Err("durable_kv_events=true is not supported by this runtime".to_string());
+        }
+
         let mut overlap_score_credit = compat.overlap_score_credit;
         let mut prefill_load_scale = compat.prefill_load_scale;
 
@@ -1523,6 +1564,42 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn kv_router_config_preserves_v1_3_wire_compatibility() {
+        let _: KvRouterConfig = serde_json::from_value(serde_json::json!({
+            "durable_kv_events": false,
+            "router_snapshot_threshold": 1_000_000,
+            "router_reset_states": false,
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(KvRouterConfig::default()).unwrap();
+        for post_v1_3_field in [
+            "decode_active_request_weight",
+            "router_tracking_hash",
+            "router_tracking_key_file",
+            "router_tracking_key_id",
+            "conditional_disagg_enabled",
+            "conditional_disagg_policy",
+            "conditional_disagg_eff_isl_threshold",
+            "conditional_disagg_eff_isl_ratio_threshold",
+            "conditional_disagg_prefill_busy_threshold",
+            "conditional_disagg_decode_busy_threshold",
+        ] {
+            assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
+        }
+
+        let error = serde_json::from_value::<KvRouterConfig>(serde_json::json!({
+            "durable_kv_events": true,
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("durable_kv_events=true is not supported")
+        );
     }
 
     #[test]

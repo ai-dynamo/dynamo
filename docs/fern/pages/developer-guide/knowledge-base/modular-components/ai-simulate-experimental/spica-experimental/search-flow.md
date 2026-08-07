@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Spica Overview
+title: Spica Search Flow
 subtitle: How Spica turns a deployment-tuning problem into a replay-backed search
 ---
 
@@ -100,12 +100,6 @@ backends support each. `context_length` is threaded into KV feasibility.
 - A *pinned* `parallel_configs` that is legal for no backend is a **hard error** (fail fast).
 - A ranged `workload.kv_load_ratio` (Pareto) becomes a continuous per-trial dimension on the
   branch. A scalar ratio is injected as a constant.
-
-The default `dynamo-planner` image currently uses AI Configurator 0.9, which does not expose
-`aiconfigurator.sdk.memory`. Spica warns and skips the pre-search KV-capacity shape filter in that
-environment. Trace and fixed-concurrency workloads can continue through Replay, but
-`kv_load_ratio` fails fast before branch enumeration because it cannot derive candidate-specific
-concurrency without the memory estimator.
 
 ### 5. Per-branch Vizier study loop
 

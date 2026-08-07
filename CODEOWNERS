@@ -164,6 +164,7 @@
 /aisimulate/                                                                 @ai-dynamo/dynamo-planner-codeowners
 /examples/aisimulate/                                                        @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
+/examples/power-aware-budget/                                                @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/profiler/                                             @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/core/                                         @ai-dynamo/dynamo-planner-codeowners
@@ -384,6 +385,7 @@
 /lib/gpu_memory_service/client/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/common/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/server/                                              @ai-dynamo/dynamo-gms-codeowners
+/benchmarks/cuda_custom_storage/                                             @ai-dynamo/dynamo-gms-codeowners
 /deploy/snapshot/internal/types/                                             @ai-dynamo/dynamo-gms-codeowners
 /deploy/snapshot/cmd/snapshotctl/                                            @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/snapshot/                                            @ai-dynamo/dynamo-gms-codeowners

@@ -634,10 +634,10 @@ impl Client {
         self.routing_instances.overload_reconciliation_needed()
     }
 
-    /// Mark an instance overloaded immediately. A worker returning
-    /// `ResourceExhausted` is busy ("queue full, retry later"), not faulted, so
-    /// this is the overload path, NOT `report_instance_down`. Short-lived: the
-    /// next `set_overloaded_instances` recompute overwrites the overloaded set.
+    /// Mark an instance overloaded immediately after a worker-scoped
+    /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
+    /// does not call `report_instance_down`. The next worker-monitor
+    /// reconciliation replaces this short-lived global routing hint.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
         self.routing_instances
             .mark_overloaded_immediate(instance_id);

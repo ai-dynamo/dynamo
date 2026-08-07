@@ -98,6 +98,10 @@ class frontend_service:
     KV_HIT_RATE = "kv_hit_rate"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
+    # Scheduler selections with less overlap than another eligible worker
+    NON_MAX_OVERLAP_SELECTIONS_TOTAL = "non_max_overlap_selections_total"
+    # Effective KV overlap blocks lost by non-max-overlap selections
+    OVERLAP_BLOCKS_LOST = "overlap_blocks_lost"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -373,6 +377,10 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Scheduler selections with less overlap than another eligible worker
+    NON_MAX_OVERLAP_SELECTIONS_TOTAL = "router_non_max_overlap_selections_total"
+    # Effective KV overlap blocks lost by non-max-overlap selections
+    OVERLAP_BLOCKS_LOST = "router_overlap_blocks_lost"
     # Whether the router currently has a worker/dp_rank registered (1 = registered)
     WORKER_REGISTERED = "router_worker_registered"
 

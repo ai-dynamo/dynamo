@@ -315,29 +315,11 @@ impl SlotTrackerRegistry {
         Ok(())
     }
 
-    /// Release `request_id`'s booking.
-    ///
-    /// When `worker` is `Some`, only that worker's booking is released and an
-    /// ownership mismatch is a no-op. A superseded attempt must pass the worker
-    /// it booked: after a same-id rebind, an untargeted free resolves the *current*
-    /// owner and would release the replacement's booking.
-    ///
-    /// `None` preserves the original untargeted behavior for callers that do not
-    /// track which worker they booked.
-    pub fn free(
-        &self,
-        key: &RoutingPartitionId,
-        request_id: &str,
-        worker: Option<WorkerWithDpRank>,
-    ) -> Result<(), ServiceError> {
+    pub fn free(&self, key: &RoutingPartitionId, request_id: &str) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
-        let request_id = request_id.to_string();
-        match worker {
-            Some(worker) => entry
-                .tracker
-                .free_if_worker(&request_id, worker, Instant::now())?,
-            None => entry.tracker.free(&request_id, Instant::now())?,
-        }
+        entry
+            .tracker
+            .free(&request_id.to_string(), Instant::now())?;
         Ok(())
     }
 
@@ -740,14 +722,8 @@ mod tests {
         assert_eq!(registry.list_workers(None, None).len(), 2);
     }
 
-    /// The public `/add` contract after same-id rebind landed: a duplicate on the
-    /// *same* worker is still a conflict (`409` at the HTTP layer), while a
-    /// duplicate on a *different* worker rebinds instead of failing.
-    ///
-    /// The rebind is what makes migration failover work; the conflict is what
-    /// keeps accidental id reuse an error.
     #[tokio::test]
-    async fn duplicate_add_conflicts_on_same_worker_and_rebinds_across_workers() {
+    async fn duplicate_add_conflicts_across_workers() {
         let registry = registry();
         let key = key("default");
         registry.register(key.clone(), 1, 16, 0, 1).unwrap();
@@ -760,12 +736,12 @@ mod tests {
         add(worker_a).unwrap();
         assert!(
             matches!(
-                add(worker_a),
+                add(worker_b),
                 Err(ServiceError::Sequence(
                     SequenceError::DuplicateRequest { .. }
                 ))
             ),
-            "same id on the same worker must stay a conflict"
+            "a request ID already booked on another worker must conflict"
         );
 
         let blocks_on = |worker_id| {
@@ -779,27 +755,11 @@ mod tests {
         let booked = blocks_on(1);
         assert!(booked > 0, "the first add must book worker 1");
 
-        add(worker_b).expect("same id on a different worker must rebind, not conflict");
+        assert_eq!(blocks_on(1), booked, "the original booking is unchanged");
+        assert_eq!(blocks_on(2), 0, "the duplicate creates no booking");
 
-        // The booking moved rather than duplicating.
-        assert_eq!(blocks_on(1), 0, "the stale booking on worker 1 is released");
-        assert_eq!(blocks_on(2), booked, "the request is re-booked on worker 2");
-
-        // The lifecycle boundary: worker A's superseded attempt now issues its
-        // late `/free`. Targeted at A, it must leave B's booking alone. An
-        // untargeted free here would resolve the current owner and release B.
-        registry
-            .free(&key, "req-1", Some(worker_a))
-            .expect("a late free from a superseded attempt is a no-op");
-        assert_eq!(
-            blocks_on(2),
-            booked,
-            "worker A's late /free must not release worker B's booking"
-        );
-
-        // Targeted at the actual owner, it does release.
-        registry.free(&key, "req-1", Some(worker_b)).unwrap();
-        assert_eq!(blocks_on(2), 0, "the owner's free releases the booking");
+        registry.free(&key, "req-1").unwrap();
+        assert_eq!(blocks_on(1), 0);
     }
 
     #[tokio::test]
@@ -808,7 +768,7 @@ mod tests {
         let key = key("default");
         registry.register(key.clone(), 1, 16, 0, 1).unwrap();
 
-        registry.free(&key, "early-free", None).unwrap();
+        registry.free(&key, "early-free").unwrap();
         assert!(matches!(
             registry.mark_prefill_completed(&key, "early-complete"),
             Err(ServiceError::Sequence(
@@ -849,8 +809,8 @@ mod tests {
         ));
         registry.mark_prefill_completed(&key, "early-free").unwrap();
         registry.mark_prefill_completed(&key, "early-free").unwrap();
-        registry.free(&key, "early-free", None).unwrap();
-        registry.free(&key, "early-free", None).unwrap();
+        registry.free(&key, "early-free").unwrap();
+        registry.free(&key, "early-free").unwrap();
 
         registry
             .add_request(
@@ -862,7 +822,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(registry.list_loads(None, None)[0].active_prefill_tokens, 8);
-        registry.free(&key, "early-complete", None).unwrap();
+        registry.free(&key, "early-complete").unwrap();
 
         assert_eq!(registry.list_loads(None, None)[0].active_decode_blocks, 0);
     }

@@ -8,8 +8,10 @@ use anyhow::Result;
 use tokio::sync::oneshot;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
+    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
+    conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -22,7 +24,8 @@ use dynamo_runtime::{
 use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouter},
+    kv_router::{KvPushRouter, KvRouter, WorkerSelectorFactory},
+    local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -31,9 +34,56 @@ use crate::{
     session_affinity::create_affinity_coordinator,
 };
 
-impl PrefillRouter {
+impl PrefillRouter<DefaultWorkerSelector> {
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        session_affinity_ttl_secs: Option<u64>,
+    ) -> Arc<Self> {
+        Self::disabled_with_selector(model_manager, router_mode, session_affinity_ttl_secs)
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub fn new(
+        activation_rx: oneshot::Receiver<Endpoint>,
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        decode_router: Option<Arc<KvRouter>>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        session_affinity_ttl_secs: Option<u64>,
+        model_name: String,
+        namespace: String,
+        is_eagle: bool,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+    ) -> Arc<Self> {
+        Self::new_with_selector_factory(
+            activation_rx,
+            model_manager,
+            router_mode,
+            kv_cache_block_size,
+            kv_router_config,
+            decode_router,
+            Arc::new(|config, worker_type, _partition| {
+                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+            }),
+            prefill_load_estimator,
+            session_affinity_ttl_secs,
+            model_name,
+            namespace,
+            is_eagle,
+            worker_monitor,
+        )
+    }
+}
+
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    pub(crate) fn disabled_with_selector(
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
@@ -41,6 +91,7 @@ impl PrefillRouter {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
             decode_router: None,
+            worker_selector_factory: None,
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
@@ -59,13 +110,14 @@ impl PrefillRouter {
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new_with_selector_factory(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        decode_router: Option<Arc<KvRouter>>,
+        decode_router: Option<Arc<KvRouter<Sel>>>,
+        worker_selector_factory: WorkerSelectorFactory<Sel>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
@@ -87,6 +139,7 @@ impl PrefillRouter {
         let router = Arc::new(Self {
             prefill_router,
             decode_router,
+            worker_selector_factory: Some(worker_selector_factory),
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
@@ -181,10 +234,20 @@ impl PrefillRouter {
             };
 
             // Create KV chooser using the endpoint (this is a prefill router)
+            let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
+            let selector = (self
+                .worker_selector_factory
+                .as_ref()
+                .expect("enabled prefill router has a worker selector factory"))(
+                &effective_kv_router_config,
+                WORKER_TYPE_PREFILL,
+                RoutingPartitionRef::new(&self.model_name, DEFAULT_ROUTING_GROUP),
+            );
             let kv_chooser = model_manager
-                .kv_chooser_for_with_worker_role(
+                .kv_chooser_for_with_selector(
                     &endpoint,
                     kv_cache_block_size,
+                    selector,
                     kv_router_config,
                     prefill_load_estimator,
                     Some(crate::worker_type::WorkerType::Prefill),

@@ -66,8 +66,7 @@ impl RequestIndex {
     }
 
     /// Drop the mapping for `request_id` only if it still points at `worker`.
-    /// Atomic against a concurrent re-dispatch that already re-bound the id to a
-    /// different worker. Returns whether the entry was removed.
+    /// Returns whether the entry was removed.
     pub(super) fn remove_request_if_worker(
         &self,
         request_id: &RequestId,

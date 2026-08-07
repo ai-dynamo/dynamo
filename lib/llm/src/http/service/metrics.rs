@@ -464,6 +464,12 @@ pub enum Endpoint {
     /// OAI Embeddings
     Embeddings,
 
+    /// Classification (sequence classification / cross-encoder pooling)
+    Classify,
+
+    /// Pooling (raw pooler output)
+    Pooling,
+
     /// OAI Images
     Images,
 
@@ -1504,6 +1510,8 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
             Endpoint::Audios => write!(f, "audios"),
@@ -1521,6 +1529,8 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Classify => "classify",
+            Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
             Endpoint::Audios => "audios",

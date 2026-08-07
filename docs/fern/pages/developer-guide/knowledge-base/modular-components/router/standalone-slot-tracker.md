@@ -188,18 +188,8 @@ Returns `201`. `sequence_hashes` is required and may be empty. `new_isl_tokens` 
 to `0`; positive values enable prefill-token accounting. Unknown trackers or worker ranks
 return `404`.
 
-Duplicate request IDs behave differently depending on the worker:
-
-| Request | Behavior |
-|---------|----------|
-| Same ID, **same** worker | `409` conflict — the booking is unchanged |
-| Same ID, **different** worker | State-changing **rebind** — the booking on the previously recorded worker is released and the ID is re-bound to the new worker |
-
-The rebind supports migration failover, where a request is re-dispatched to a
-replacement worker after its original worker fails. It means an `/add` is **not
-idempotent across workers**: the second call mutates state rather than conflicting.
-Cleanup is worker-targeted to match, so a late `/free` from the original attempt
-cannot release the rebound booking.
+Duplicate request IDs return `409` regardless of the target worker. The original
+booking is unchanged.
 
 ### `POST /prefill_complete`
 
@@ -290,6 +280,6 @@ Projection response order is unspecified to keep the routing read path lean. `/l
 and `/potential_loads` are advisory snapshots, not reservations. A selected worker may
 disappear before `/add`; recompute after `/add` returns `404`. An ambiguous `/add`
 timeout is also consumer-owned: automatically retrying the same request is not
-guaranteed safe. Retrying against the **same** worker returns `409`; retrying against a
-**different** worker is not idempotent — it rebinds the request rather than failing (see
-[`POST /add`](#post-add)). Retry only when you intend one of those outcomes.
+guaranteed safe. A duplicate returns `409` regardless of the target worker, but the
+consumer cannot infer from a timeout whether the original booking succeeded. Reconcile
+the lifecycle state before retrying.

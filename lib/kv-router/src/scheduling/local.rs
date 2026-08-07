@@ -18,8 +18,9 @@ use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdvisorySchedulingResponse, KvSchedulerError, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -48,7 +49,7 @@ impl<P, C, Sel, RF> LocalScheduler<P, C, Sel, RF>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
     RF: OverlapScoresRefresh + 'static,
 {
     fn make_scheduling_request(
@@ -317,6 +318,16 @@ where
         self.queue.select_without_admission(request).await
     }
 
+    /// Install the observer for admitted selections that sacrifice KV overlap.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_non_max_overlap_selection_observer(
+        &self,
+        observer: NonMaxOverlapSelectionObserver,
+    ) -> bool {
+        self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -451,8 +462,6 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
-            // Legacy scheduling API: callers of this path do not perform
-            // migration re-dispatch.
         })
         .await
     }
@@ -497,11 +506,10 @@ where
         Ok(())
     }
 
-    /// Legacy slot cleanup targeted at the worker the caller booked.
+    /// Release a booking only if it still belongs to `worker`.
     ///
-    /// Unlike [`Self::free`], an ownership mismatch is a harmless no-op, so the
-    /// cleanup of a failed attempt cannot release the booking of the attempt
-    /// that replaced it.
+    /// An ownership mismatch is a harmless no-op, which makes this safe for
+    /// delayed cleanup that captured the worker when it acquired the booking.
     pub async fn free_if_worker(
         &self,
         request_id: &str,
@@ -602,7 +610,7 @@ impl<P, C, Sel> LocalScheduler<P, C, Sel, NoopOverlapScoresRefresh>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new_without_overlap_refresh_with_policy_profile(

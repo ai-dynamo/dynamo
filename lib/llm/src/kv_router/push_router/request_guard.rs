@@ -3,17 +3,20 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::{protocols::WorkerWithDpRank, selector::WorkerSelector};
 use dynamo_runtime::{
+    error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
 };
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
+        preprocessor::MigrationState,
         timing::{RequestPhase, RequestTracker},
     },
 };
@@ -21,19 +24,24 @@ use crate::{
 /// Owns scheduler cleanup after a worker is selected.
 ///
 /// `worker` is captured at construction so cleanup targets the booking this
-/// guard acquired: migration re-dispatches the same id to a replacement worker
-/// while a failed attempt's guard is still unwinding.
-struct RequestCleanup {
-    chooser: Arc<KvRouter>,
+/// guard acquired, even if cleanup is delayed.
+struct RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    chooser: Arc<KvRouter<Sel>>,
     context_id: String,
     worker: WorkerWithDpRank,
     scheduler_tracked: bool,
     freed: bool,
 }
 
-impl RequestCleanup {
+impl<Sel> RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn new(
-        chooser: Arc<KvRouter>,
+        chooser: Arc<KvRouter<Sel>>,
         context_id: String,
         worker: WorkerWithDpRank,
         scheduler_tracked: bool,
@@ -48,6 +56,9 @@ impl RequestCleanup {
     }
 
     async fn finish(&mut self) {
+        if self.freed {
+            return;
+        }
         if self.scheduler_tracked
             && let Err(error) = self
                 .chooser
@@ -65,7 +76,10 @@ impl RequestCleanup {
     }
 }
 
-impl Drop for RequestCleanup {
+impl<Sel> Drop for RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn drop(&mut self) {
         if self.freed || !self.scheduler_tracked {
             return;
@@ -83,8 +97,6 @@ impl Drop for RequestCleanup {
         let context_id = self.context_id.clone();
         let worker = self.worker;
         handle.spawn(async move {
-            // Targeted at the captured worker: this drop can land after a
-            // migration re-dispatch has already re-bound the id elsewhere.
             let result = chooser.free_if_worker(&context_id, worker).await;
             if let Err(error) = result {
                 tracing::warn!(
@@ -263,16 +275,23 @@ impl OutputBlockTracker {
 ///
 /// Session-affinity lifetime is separate: `AffinityAcquire` and
 /// `AffinityLease` own binding commit, release, and invalidation.
-pub(super) struct RequestGuard {
-    cleanup: RequestCleanup,
+pub(super) struct RequestGuard<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    cleanup: RequestCleanup<Sel>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     prefill_marked: bool,
+    migration_state: Option<MigrationState>,
 }
 
-impl RequestGuard {
+impl<Sel> RequestGuard<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub(super) fn new(
-        chooser: Arc<KvRouter>,
+        chooser: Arc<KvRouter<Sel>>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
@@ -303,6 +322,13 @@ impl RequestGuard {
                 expected_output_tokens,
             ),
             prefill_marked: false,
+            migration_state: request.migration_state.clone(),
+        }
+    }
+
+    pub(super) fn record_migration_failure(&self, error: Option<DynamoError>) {
+        if let Some(state) = self.migration_state.as_ref() {
+            state.record_failure(self.cleanup.worker.worker_id, error);
         }
     }
 
@@ -381,7 +407,10 @@ impl RequestGuard {
     }
 }
 
-impl Drop for RequestGuard {
+impl<Sel> Drop for RequestGuard<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
         self.observability.record_metrics();

@@ -2,18 +2,24 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Kubernetes quickstart image selector. It keeps the quickstart's release,
- * custom-build, and XPU paths in one copyable block.
+ * Kubernetes quickstart image selector. It mirrors the CLI install selector's
+ * support-matrix rows while emitting Kubernetes image variables and XPU build
+ * commands.
  */
 "use client";
 
 import { useState } from "react";
 
-import { CURRENT_TAG } from "./releases.data";
+import {
+  INSTALL_DATA,
+  type InstallBackend,
+  type InstallChannel,
+  type InstallForm,
+} from "./install-selector-data";
 import { LOCAL_SELECTOR_CSS } from "./local-selector-styles";
+import { CURRENT_TAG } from "./releases.data";
 
 type Hardware = "nvidia" | "intel";
-type Build = "release" | "custom";
 
 type Option<T extends string> = {
   id: T;
@@ -22,17 +28,51 @@ type Option<T extends string> = {
 };
 
 const HARDWARES: Option<Hardware>[] = [
-  { id: "nvidia", label: "NVIDIA GPU", sub: "published images" },
+  { id: "nvidia", label: "NVIDIA GPU", sub: "CUDA" },
   { id: "intel", label: "Intel XPU", sub: "source build" },
 ];
 
-const BUILDS: Option<Build>[] = [
-  { id: "release", label: "Dynamo release image", sub: CURRENT_TAG },
-  { id: "custom", label: "Custom XPU image", sub: "build and push" },
+const BACKENDS: Option<InstallBackend>[] = [
+  { id: "sglang", label: "SGLang" },
+  { id: "trtllm", label: "TensorRT-LLM" },
+  { id: "vllm", label: "vLLM" },
 ];
 
-function buildEnabled(hardware: Hardware, build: Build): boolean {
-  return hardware === "nvidia" ? build === "release" : build === "custom";
+const CHANNELS: Option<InstallChannel>[] = [
+  { id: "stable", label: "Stable release", sub: "QA-validated" },
+  { id: "nightly", label: "Nightly", sub: "latest features" },
+  { id: "source", label: "Source build", sub: "main branch" },
+];
+
+const FORMS: Option<InstallForm>[] = [
+  { id: "container", label: "Container" },
+  { id: "wheel", label: "Wheel" },
+];
+
+function backendEnabled(hardware: Hardware, backend: InstallBackend): boolean {
+  return hardware === "nvidia" || backend === "vllm";
+}
+
+function channelEnabled(hardware: Hardware, channel: InstallChannel): boolean {
+  return hardware === "nvidia" ? channel !== "source" : channel === "source";
+}
+
+function formEnabled(form: InstallForm): boolean {
+  return form === "container";
+}
+
+function disabledReason(
+  kind: "backend" | "channel" | "form",
+  hardware: Hardware,
+  label: string,
+): string {
+  if (kind === "backend") return `${label} is not currently part of the Intel XPU Kubernetes quickstart path.`;
+  if (kind === "channel") {
+    return hardware === "intel"
+      ? "Intel XPU Kubernetes images are built from source rather than published as stable or nightly artifacts."
+      : "Source build is only used for the Intel XPU Kubernetes path in this quickstart.";
+  }
+  return "Kubernetes deployments use container images rather than wheel installs.";
 }
 
 function normalizeRegistry(registry: string): string {
@@ -50,10 +90,22 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function commandFor(hardware: Hardware, registry: string): string {
+function runtimeVersionFor(version: string | undefined): string {
+  const semver = version?.match(/^(\d+\.\d+\.\d+)/)?.[1];
+  return semver ?? CURRENT_TAG;
+}
+
+function commandFor(
+  hardware: Hardware,
+  backend: InstallBackend,
+  channel: InstallChannel,
+  dynamoVersion: string | undefined,
+  registry: string,
+): string {
   if (hardware === "intel") {
     const imageRegistry = normalizeRegistry(registry) || "<your-registry>/<namespace>";
     return [
+      `export DYNAMO_VERSION=${CURRENT_TAG}`,
       `export IMAGE_REGISTRY=${shellQuote(imageRegistry)}`,
       'export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"',
       "",
@@ -67,13 +119,22 @@ function commandFor(hardware: Hardware, registry: string): string {
     ].join("\n");
   }
 
+  if (channel === "nightly") {
+    return [
+      `export DYNAMO_VERSION=${CURRENT_TAG}`,
+      `export DYNAMO_RUNTIME_VERSION=${runtimeVersionFor(dynamoVersion)}`,
+      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly"',
+    ].join("\n");
+  }
+
+  const version = dynamoVersion ?? CURRENT_TAG;
   return [
-    `export DYNAMO_VERSION=${CURRENT_TAG}`,
+    `export DYNAMO_VERSION=${version}`,
     'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"',
   ].join("\n");
 }
 
-function ChoiceRow<T extends string>({
+function SelectorRow<T extends string>({
   label,
   options,
   selected,
@@ -116,25 +177,58 @@ function ChoiceRow<T extends string>({
 
 export function KubernetesContainerSelector() {
   const [hardware, setHardware] = useState<Hardware>("nvidia");
-  const [build, setBuild] = useState<Build>("release");
+  const [backend, setBackend] = useState<InstallBackend>("vllm");
+  const [channel, setChannel] = useState<InstallChannel>("stable");
+  const [versionIndex, setVersionIndex] = useState(0);
+  const [form, setForm] = useState<InstallForm>("container");
   const [registry, setRegistry] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy");
 
-  const command = commandFor(hardware, registry);
+  const entries = INSTALL_DATA[backend][channel].filter((candidate) => candidate.commands.container);
+  const entry = entries[versionIndex] ?? entries[0];
+  const command = commandFor(hardware, backend, channel, entry?.dynamo, registry);
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
-  const buildLabel = hardware === "intel"
-    ? "Custom XPU runtime"
-    : "Published Dynamo image";
   const registryNeeded = hardware === "intel";
   const canCopy = !registryNeeded || registryIsValid(registry);
+  const badge = channel === "stable" ? "Stable" : channel === "nightly" ? "Nightly" : "Source";
+  const title = channel === "stable"
+    ? `Dynamo ${entry?.dynamo}`
+    : channel === "nightly"
+      ? entry?.latest
+        ? "Latest nightly"
+        : `Nightly ${entry?.dynamo}`
+      : "Build Dynamo XPU image";
+  const role = channel === "stable"
+    ? "Latest stable release that supports this version"
+    : channel === "nightly"
+      ? entry?.latest
+        ? "Latest nightly container"
+        : "Pinned nightly build"
+      : "Intel XPU Kubernetes runtime";
+  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
 
   function chooseHardware(next: Hardware) {
     setHardware(next);
+    setVersionIndex(0);
+    setForm("container");
     if (next === "intel") {
-      setBuild("custom");
+      setBackend("vllm");
+      setChannel("source");
     } else {
-      setBuild("release");
+      setChannel("stable");
     }
+  }
+
+  function chooseBackend(next: InstallBackend) {
+    setBackend(next);
+    setVersionIndex(0);
+    setForm("container");
+  }
+
+  function chooseChannel(next: InstallChannel) {
+    setChannel(next);
+    setVersionIndex(0);
+    setForm("container");
   }
 
   function resetCopyLabel(label = "Copy") {
@@ -162,18 +256,66 @@ export function KubernetesContainerSelector() {
       <style>{LOCAL_SELECTOR_CSS}</style>
       <section className="lqs-panel" aria-label="Kubernetes container image selector">
         <div className="lqs-head">
-          <h3>Choose your Kubernetes image path</h3>
-          <p>Use the variables from this block in the deployment steps below.</p>
+          <h3>Choose your Kubernetes build</h3>
+          <p>Unavailable combinations remain visible to show the current support boundary.</p>
         </div>
 
-        <ChoiceRow label="Hardware" options={HARDWARES} selected={hardware} onSelect={chooseHardware} />
-        <ChoiceRow
-          label="Container"
-          options={BUILDS}
-          selected={build}
-          onSelect={setBuild}
-          isDisabled={(value) => !buildEnabled(hardware, value)}
-          disabledTitle={(option) => `${option.label} is not used by this quickstart path.`}
+        <SelectorRow label="Hardware" options={HARDWARES} selected={hardware} onSelect={chooseHardware} />
+        <SelectorRow
+          label="Backend"
+          options={BACKENDS}
+          selected={backend}
+          onSelect={chooseBackend}
+          isDisabled={(value) => !backendEnabled(hardware, value)}
+          disabledTitle={(option) => disabledReason("backend", hardware, option.label)}
+        />
+        <SelectorRow
+          label="Dynamo build"
+          options={CHANNELS}
+          selected={channel}
+          onSelect={chooseChannel}
+          isDisabled={(value) => !channelEnabled(hardware, value)}
+          disabledTitle={(option) => disabledReason("channel", hardware, option.label)}
+        />
+        {entry && (
+          <div className="lqs-row">
+            <span className="lqs-label">{versionRowLabel}</span>
+            <div className="lqs-options" role="group" aria-label={versionRowLabel}>
+              {entries.map((version, index) => {
+                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                const displayMeta = version.source
+                  ? "from main"
+                  : channel === "nightly"
+                    ? version.latest
+                      ? "latest nightly"
+                      : version.date ?? "nightly"
+                    : `Dynamo ${version.dynamo}`;
+                return (
+                  <button
+                    key={`${version.backend_version}-${version.dynamo ?? index}`}
+                    type="button"
+                    className="lqs-chip"
+                    aria-pressed={versionIndex === index}
+                    onClick={() => {
+                      setVersionIndex(index);
+                      setForm("container");
+                    }}
+                  >
+                    {displayVersion}
+                    <span className="lqs-chip-sub">{displayMeta}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <SelectorRow
+          label="Install form"
+          options={FORMS}
+          selected={form}
+          onSelect={setForm}
+          isDisabled={(value) => !formEnabled(value)}
+          disabledTitle={(option) => disabledReason("form", hardware, option.label)}
         />
         {registryNeeded && (
           <div className="lqs-row">
@@ -193,13 +335,15 @@ export function KubernetesContainerSelector() {
         )}
 
         <div className="lqs-output">
-          <div className={`lqs-rec lqs-rec--${build === "release" ? "stable" : "source"}`}>
-            <div className="lqs-eyebrow">Kubernetes quickstart</div>
+          <div className={`lqs-rec lqs-rec--${channel}`}>
+            <div className="lqs-eyebrow">{role}</div>
             <div className="lqs-title">
-              <span className="lqs-badge">{build === "release" ? "Use" : "Build"}</span>
-              {buildLabel}
+              <span className="lqs-badge">{badge}</span>
+              {title}
             </div>
-            <div className="lqs-support">{hardwareLabel} / {hardware === "intel" ? "vLLM XPU runtime image" : "DGDR planner image"}</div>
+            <div className="lqs-support">
+              {hardwareLabel} · {INSTALL_DATA[backend].label} {entry?.backend_version}
+            </div>
           </div>
           <div className="lqs-command">
             {canCopy && (
