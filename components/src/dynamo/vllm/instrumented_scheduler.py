@@ -2577,6 +2577,16 @@ class InstrumentedScheduler(AsyncScheduler):
         except ValueError:
             return False
 
+        eagle_cache_drop_tokens = self._bench_eagle_cache_drop_tokens()
+        if eagle_cache_drop_tokens and any(
+            kv_read_tokens > 0 and new_tokens <= eagle_cache_drop_tokens
+            for new_tokens, kv_read_tokens in zip(new_token_lengths, kv_read_lengths)
+        ):
+            # EAGLE recomputes the last matched cache block. A request needs
+            # more than that block's tokens to reach the extra seeded block
+            # while preserving both benchmark axes.
+            return False
+
         prompt_lengths = [
             new_tokens + kv_read_tokens
             for new_tokens, kv_read_tokens in zip(new_token_lengths, kv_read_lengths)
