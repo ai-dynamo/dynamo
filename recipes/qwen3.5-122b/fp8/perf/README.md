@@ -78,7 +78,7 @@ Keep `pvc-helper` around for fetching artifacts later, or
 
 ### 3. Run AIPerf
 
-An AIPerf client pod (image `nvcr.io/nvidia/ai-dynamo/aiperf`, mounts the PVC) run against
+An AIPerf client pod (image `nvcr.io/nvidia/ai-dynamo/aiperf:0.8.0`, mounts the PVC) run against
 the frontend service:
 
 ```bash
@@ -112,9 +112,10 @@ kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD} --timeout=7200s
 ```
 
-In mooncake mode AIPerf replays the whole trace file (`--num-requests` is ignored); subset
-the file to cap request count. Do not compare partial runs — account for successful,
-errored, and unfinished requests before reporting aggregate throughput.
+In mooncake mode AIPerf replays the whole trace file (`--num-requests` is ignored) provided
+each row carries a `timestamp`; subset the file to cap request count. Do not compare partial
+runs — check `Request Count` and account for successful, errored, and unfinished requests
+before reporting aggregate throughput.
 
 ## Tunable environment variables
 
