@@ -3067,7 +3067,7 @@ async fn responses(
             invalid_argument(format!("Failed to convert responses request: {e}")).into(),
             "Failed to convert responses request",
         );
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error(ErrorType::Validation);
         err_response
     })?;
     // Extract the API context before consuming the UnifiedRequest — this
@@ -3084,7 +3084,7 @@ async fn responses(
             invalid_argument(error.to_string()).into(),
             "Invalid responses request",
         );
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error(ErrorType::Validation);
         return Err(err_response);
     }
 

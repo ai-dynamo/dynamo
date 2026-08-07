@@ -3,6 +3,7 @@
 
 //! HTTP regressions for validation performed by protocol adapters.
 
+use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_runtime::config::environment_names::llm::{
     DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
     DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
@@ -57,7 +58,7 @@ async fn assert_anthropic_400(response: reqwest::Response, message: &str) {
 async fn protocol_adapter_validation_is_400_before_streaming_headers() {
     temp_env::async_with_vars(BASE_ENV, async {
         let valid_script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start([valid_script]).await;
+        let svc = HarnessService::start([valid_script.clone(), valid_script]).await;
 
         for stream in [false, true] {
             let response = svc
@@ -132,6 +133,45 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
 
         let response = svc
             .client
+            .post(format!("{}/v1/messages/count_tokens", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": ["hello"]}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_anthropic_400(response, "content blocks must be objects").await;
+
+        for endpoint in [Endpoint::Responses, Endpoint::AnthropicMessages] {
+            for request_type in [RequestType::Unary, RequestType::Stream] {
+                assert_eq!(
+                    svc.metrics.get_request_counter(
+                        MODEL,
+                        &endpoint,
+                        &request_type,
+                        &Status::Error,
+                        &ErrorType::Validation,
+                    ),
+                    3,
+                    "validation errors were not metered for {endpoint}/{request_type}"
+                );
+                assert_eq!(
+                    svc.metrics.get_request_counter(
+                        MODEL,
+                        &endpoint,
+                        &request_type,
+                        &Status::Error,
+                        &ErrorType::Internal,
+                    ),
+                    0,
+                    "validation errors were misclassified for {endpoint}/{request_type}"
+                );
+            }
+        }
+
+        let response = svc
+            .client
             .post(format!("{}/v1/messages", svc.base_url))
             .json(&json!({
                 "model": MODEL,
@@ -149,7 +189,64 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(svc.engine.take_requests().await.len(), 1);
+
+        let anthropic_tool_name = "a".repeat(128);
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "name": anthropic_tool_name,
+                    "input_schema": {"type": "object", "properties": {}}
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let too_long_anthropic_tool_name = "a".repeat(129);
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "name": too_long_anthropic_tool_name,
+                    "input_schema": {"type": "object", "properties": {}}
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_anthropic_400(response, "128 character limit").await;
+
+        let too_long_openai_tool_name = "a".repeat(97);
+        let response = svc
+            .client
+            .post(format!("{}/v1/chat/completions", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": too_long_openai_tool_name,
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_openai_400(response, "96 character limit").await;
+
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
         svc.shutdown().await;
     })
     .await;
