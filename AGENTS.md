@@ -89,8 +89,7 @@ notices. Two rules:
    background work that will re-invoke you, or return the specific blocking question you need answered.
 
 **Harness tiers.** These roles and skills are developed and tested on Claude Code and Codex CLI (role configurations
-ship for both). The skills follow the Agent Skills open standard and load on other compliant harnesses (for example,
-OpenCode reads `.claude/skills/` and `.agents/skills/` directly), with three known degradations there: no native goal
+ship for both). The skills follow the Agent Skills open standard and load on other compliant harnesses (for example, OpenCode includes `.agents/skills/` among its standard skill search paths), with three known degradations there: no native goal
 mode (run lights-out sessions under an external loop), role isolation may collapse into a single context (weakening
 the independence of adversarial review), and every rule in this pack is prompt-enforced, so discipline depends on the
 driver model. If you hit an instruction gap on any harness, file an issue on this repository describing the gap.
