@@ -42,7 +42,15 @@ def dynamo_worker(enable_nats: Optional[bool] = None):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
-            runtime = DistributedRuntime(loop, discovery_backend, request_plane)
+            # Match frontend/worker create_runtime: pass DYN_EVENT_PLANE through so
+            # DYN_EVENT_PLANE=zmq does not connect to an ambient NATS_SERVER.
+            event_plane = os.environ.get("DYN_EVENT_PLANE") or None
+            runtime = DistributedRuntime(
+                loop,
+                discovery_backend,
+                request_plane,
+                event_plane=event_plane,
+            )
 
             await func(runtime, *args, **kwargs)
 
