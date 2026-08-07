@@ -76,6 +76,25 @@ user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_g
 `recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
 exploration or selection step before the baseline deployment.
 
+## Long-Running Runs And Harness Compatibility
+
+An optimization loop is long-running, unattended work. An interactive harness ends its turn whenever the agent stops
+calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
+notices. Two rules:
+
+1. **Wrap the loop in your harness's goal mode.** On Codex CLI, use `/goal` with a token budget. On Claude Code
+   (v2.1.139+), use `/goal` with an `or stop after N turns` clause. Both keep the loop running until the objective is
+   judged complete or the budget is reached.
+2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
+   background work that will re-invoke you, or return the specific blocking question you need answered.
+
+**Harness tiers.** These roles and skills are developed and tested on Claude Code and Codex CLI (role configurations
+ship for both). The skills follow the Agent Skills open standard and load on other compliant harnesses (for example,
+OpenCode reads `.claude/skills/` and `.agents/skills/` directly), with three known degradations there: no native goal
+mode (run lights-out sessions under an external loop), role isolation may collapse into a single context (weakening
+the independence of adversarial review), and every rule in this pack is prompt-enforced, so discipline depends on the
+driver model. If you hit an instruction gap on any harness, file an issue on this repository describing the gap.
+
 ## Ecosystem
 
 Sibling repositories this repo integrates with:
