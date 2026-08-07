@@ -181,6 +181,32 @@ def test_enable_router_hint_support_rejects_dp_offset_port_overflow():
     runtime_config.set_engine_specific.assert_not_called()
 
 
+@pytest.mark.parametrize("dp_range", [(-1, 1), (0, 0)])
+def test_enable_router_hint_support_rejects_invalid_dp_range(dp_range):
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "custom",
+                        "router_capabilities": ["router_hint"],
+                        "control_advertise_host": "worker-a",
+                        "control_port": "23280",
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="router_hint support requires"):
+        enable_router_hint_support(
+            runtime_config, engine_args, WorkerType.Prefill, dp_range=dp_range
+        )
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
 def test_enable_router_hint_support_fails_with_multiple_router_hint_tiers():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
