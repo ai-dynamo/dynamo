@@ -182,6 +182,16 @@ def _plain(value: Any) -> Any:
 
 def _planner_optimization_target(goal: Mapping[str, JSONValue]) -> str:
     target = str(_plain(goal.get("target", "throughput")))
+    if target == "pareto":
+        raw_objectives = goal.get("pareto_objectives")
+        objectives = (
+            {str(_plain(objective)) for objective in raw_objectives}
+            if isinstance(raw_objectives, list)
+            else set()
+        )
+        if objectives.intersection({"goodput", "goodput_per_gpu"}):
+            return "sla"
+        return "throughput"
     return {
         "throughput": "throughput",
         "throughput_per_gpu": "throughput",
@@ -189,7 +199,6 @@ def _planner_optimization_target(goal: Mapping[str, JSONValue]) -> str:
         "e2e_latency": "latency",
         "goodput": "sla",
         "goodput_per_gpu": "sla",
-        "pareto": "throughput",
     }[target]
 
 
