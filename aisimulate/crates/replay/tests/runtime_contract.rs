@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -491,6 +492,185 @@ struct ScaleUpThenDown {
     observations: Rc<RefCell<Vec<ScalingObservation>>>,
 }
 
+struct ReleaseOnTopologyCallbacks {
+    pending: VecDeque<Uuid>,
+    stable_scheduler_id: usize,
+    released_on_settled: bool,
+}
+
+impl ReleaseOnTopologyCallbacks {
+    fn new(topology: Vec<WorkerTopology>) -> Self {
+        let stable_scheduler_id = topology[0].scheduler_ids[0];
+        Self {
+            pending: VecDeque::new(),
+            stable_scheduler_id,
+            released_on_settled: false,
+        }
+    }
+
+    fn release_next(&mut self, scheduler_id: usize) -> Vec<Placement> {
+        self.pending
+            .pop_front()
+            .map(|request_id| {
+                vec![Placement {
+                    request_id,
+                    scheduler_id,
+                    reported_overlap_tokens: 0,
+                    cache_sample: None,
+                }]
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl PlacementPolicy<ReplayRequestPayload> for ReleaseOnTopologyCallbacks {
+    type Metadata = NoReplayMetadata;
+    type Observation = ();
+
+    fn place(
+        &mut self,
+        request: &ReplayRequestPayload,
+        _metadata: Self::Metadata,
+        _session_id: Option<String>,
+        _now_ms: f64,
+    ) -> anyhow::Result<PlacementEffects> {
+        self.pending
+            .push_back(request.metadata().uuid.expect("test request UUID"));
+        Ok(PlacementEffects {
+            decision: aisimulate_replay::PlacementDecision::Queued,
+            released: Vec::new(),
+        })
+    }
+
+    fn observe(&mut self, _observation: (), _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn cancel_pending(&mut self, request_id: Uuid) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|pending| *pending != request_id);
+        self.pending.len() != before
+    }
+
+    fn request_terminal(
+        &mut self,
+        _request_id: Uuid,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn prefill_completed(
+        &mut self,
+        _request_id: Uuid,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn worker_ready(
+        &mut self,
+        worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(self.release_next(worker.scheduler_ids[0]))
+    }
+
+    fn worker_draining(
+        &mut self,
+        _worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(self.release_next(self.stable_scheduler_id))
+    }
+
+    fn worker_removed(
+        &mut self,
+        _worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(self.release_next(self.stable_scheduler_id))
+    }
+
+    fn topology_settled(&mut self, _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+        if self.released_on_settled {
+            return Ok(Vec::new());
+        }
+        self.released_on_settled = true;
+        Ok(self.release_next(self.stable_scheduler_id))
+    }
+}
+
+struct TopologyReleaseComposition {
+    scaling: Option<Box<dyn ReplayScalingPolicy>>,
+}
+
+impl ReplayComposition for TopologyReleaseComposition {
+    type Metadata = NoReplayMetadata;
+    type Observation = NoEngineEvents;
+    type AggregatedPlacement = ReleaseOnTopologyCallbacks;
+    type DisaggregatedPlacement = PoolRoundRobinPlacement<()>;
+
+    fn create_aggregated_placement(
+        &mut self,
+        _dp_size: u32,
+        topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<Self::AggregatedPlacement> {
+        Ok(ReleaseOnTopologyCallbacks::new(topology))
+    }
+
+    fn create_disaggregated_placements(
+        &mut self,
+        _prefill_dp_size: u32,
+        prefill_topology: Vec<WorkerTopology>,
+        _decode_dp_size: u32,
+        decode_topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        Ok((
+            PoolRoundRobinPlacement::new(prefill_topology),
+            PoolRoundRobinPlacement::new(decode_topology),
+        ))
+    }
+
+    fn take_scaling_policy(&mut self) -> anyhow::Result<Option<Box<dyn ReplayScalingPolicy>>> {
+        Ok(self.scaling.take())
+    }
+}
+
+struct AddThenRemoveWorker {
+    step: usize,
+}
+
+impl ReplayScalingPolicy for AddThenRemoveWorker {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(0.0)
+    }
+
+    fn on_tick(
+        &mut self,
+        _snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        let decision = match self.step {
+            0 => ReplayScalingDecision {
+                target_decode: Some(2),
+                next_tick_ms: Some(1.0),
+                ..ReplayScalingDecision::default()
+            },
+            1 => ReplayScalingDecision {
+                target_decode: Some(1),
+                ..ReplayScalingDecision::default()
+            },
+            _ => panic!("unexpected scaling tick {}", self.step),
+        };
+        self.step += 1;
+        Ok(decision)
+    }
+}
+
 impl ReplayScalingPolicy for ScaleUpThenDown {
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
         Ok(100.0)
@@ -594,4 +774,60 @@ fn scaling_honors_startup_delay_then_scales_the_ready_worker_back_down() {
     assert_eq!(report.request_counts.completed_requests, 1);
     assert_eq!(report.throughput.duration_ms, 3_000.0);
     assert!((report.throughput.decode_worker_seconds - 3.2).abs() < 1e-9);
+}
+
+#[test]
+fn aggregated_topology_callbacks_dispatch_and_record_every_released_request() {
+    let requests = (0..4)
+        .map(|index| request(&format!("callback-{index}"), 0.0, 4, 2))
+        .collect();
+    let mut spec = aggregated_spec(Backend::Vllm, 1, 0.0, requests);
+    spec.adapters.scaling = ProviderSpec {
+        provider: "topology_callback_test".to_string(),
+        config: serde_json::Value::Null,
+    };
+
+    let report = Replayer::with_composition(
+        spec,
+        ReplayEngineFactory::new(),
+        TopologyReleaseComposition {
+            scaling: Some(Box::new(AddThenRemoveWorker { step: 0 })),
+        },
+    )
+    .unwrap()
+    .with_capture_options(ReplayCaptureOptions {
+        capture_lifecycle_evidence: true,
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..ReplayCaptureOptions::default()
+    })
+    .run()
+    .unwrap();
+
+    assert_eq!(report.request_counts.completed_requests, 4);
+    let released = report
+        .runtime_evidence
+        .lifecycle_operations
+        .iter()
+        .filter(|operation| !operation.topology_released_request_uuids.is_empty())
+        .map(|operation| {
+            (
+                operation.cause,
+                operation.topology_released_request_uuids.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        released,
+        vec![
+            (
+                "planner_scale",
+                vec![
+                    Uuid::from_u128(1).to_string(),
+                    Uuid::from_u128(2).to_string(),
+                ],
+            ),
+            ("planner_scale", vec![Uuid::from_u128(3).to_string()],),
+            ("drain_settlement", vec![Uuid::from_u128(4).to_string()],),
+        ]
+    );
 }

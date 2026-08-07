@@ -201,6 +201,30 @@ def test_runner_lowers_disaggregated_grouped_engines():
     assert set(runtime.execution_spec["engine"]) == {"prefill", "decode"}
 
 
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+def test_runner_rejects_disaggregated_attention_dp_before_runtime(role):
+    runtime = RecordingRuntime()
+    prefill_args = _engine_args(role="prefill")
+    decode_args = _engine_args(role="decode")
+    selected = prefill_args if role == "prefill" else decode_args
+    selected["aic_attention_dp_size"] = 2
+    deployment = BackendDeploymentSpec(
+        deployment_mode="disagg",
+        backend="vllm",
+        backend_version="test",
+        prefill_engine_args=prefill_args,
+        decode_engine_args=decode_args,
+        num_prefill_workers=1,
+        num_decode_workers=1,
+    )
+
+    with pytest.raises(ValueError, match=rf"{role} dp_size=1"):
+        EngineReplayRunnerFactory(runtime=runtime).create(0).run(
+            _spec(deployment=deployment)
+        )
+    assert runtime.execution_spec is None
+
+
 def test_runner_threads_canonical_backend_version_into_aic_timing():
     runtime = RecordingRuntime()
     engine_args = _engine_args()

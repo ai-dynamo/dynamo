@@ -329,6 +329,7 @@ impl<C: ReplayComposition> Replayer<C> {
         let wall_start = Instant::now();
         self.composition.set_determinism(self.capture.determinism)?;
         let engine_config = ReplayEngineConfig::parse(&self.spec.engine)?;
+        engine_config.validate_topology(&self.spec.topology)?;
         let runtime_input = match self.runtime_input.take() {
             Some(mut input) => {
                 apply_runtime_determinism(&mut input, self.capture.determinism);

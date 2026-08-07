@@ -33,6 +33,7 @@ pub(super) async fn run_effect_dispatcher(
     compatibility: Arc<CompatibilityState>,
     pending: Arc<Mutex<HashMap<u64, PendingCommand>>>,
     cancel: CancellationToken,
+    completion_tracker: CompletionBoundaryTracker,
 ) -> Result<()> {
     let mut deferred_commands = (0..ranks.len())
         .map(|_| DeferredCommandPublication::default())
@@ -77,12 +78,14 @@ pub(super) async fn run_effect_dispatcher(
                 completed,
                 boundary,
             } => {
+                let _completion_guard = completion_tracker.enter();
                 dispatch_pass_completion(
                     completed,
                     boundary,
                     &ranks,
                     &compatibility,
                     &mut deferred_commands,
+                    &completion_tracker,
                 )
                 .await?;
                 ensure!(
@@ -102,6 +105,7 @@ async fn dispatch_pass_completion(
     ranks: &[RankDispatch],
     compatibility: &CompatibilityState,
     deferred_commands: &mut [DeferredCommandPublication],
+    completion_tracker: &CompletionBoundaryTracker,
 ) -> Result<()> {
     let dispatch_result = async {
         let mut publications = Vec::with_capacity(completed.effects.by_rank.len());
@@ -177,6 +181,7 @@ async fn dispatch_pass_completion(
 
     // Always release the actor, including sink/conversion error paths. The
     // primary publication error remains the one returned to the supervisor.
+    completion_tracker.before_finish().await;
     let finish_result = boundary.finish().await;
     match (dispatch_result, finish_result) {
         (Err(error), _) => Err(error),

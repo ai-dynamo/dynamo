@@ -7,6 +7,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use aisimulate_engine::KvEventData;
@@ -60,6 +62,114 @@ pub struct GroupedSchedulerRankSinks {
 pub struct GroupedSchedulers {
     pub schedulers: Vec<Box<dyn SchedulerHandle>>,
     pub actor: JoinHandle<Result<()>>,
+    pub(crate) completion_drain: CompletionBoundaryDrain,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompletionBoundaryDrain {
+    receiver: watch::Receiver<bool>,
+    #[cfg(test)]
+    test_gate: Arc<CompletionBoundaryTestGate>,
+}
+
+impl CompletionBoundaryDrain {
+    pub(crate) async fn wait(&self) -> Result<()> {
+        let mut receiver = self.receiver.clone();
+        loop {
+            if !*receiver.borrow_and_update() {
+                return Ok(());
+            }
+            receiver
+                .changed()
+                .await
+                .context("grouped completion-boundary acknowledgement lane closed")?;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_before_finish(&self) -> CompletionBoundaryTestControl {
+        self.test_gate.paused.store(true, Ordering::Release);
+        CompletionBoundaryTestControl {
+            gate: Arc::clone(&self.test_gate),
+        }
+    }
+}
+
+struct CompletionBoundaryTracker {
+    sender: watch::Sender<bool>,
+    #[cfg(test)]
+    test_gate: Arc<CompletionBoundaryTestGate>,
+}
+
+impl CompletionBoundaryTracker {
+    fn new() -> (Self, CompletionBoundaryDrain) {
+        let (sender, receiver) = watch::channel(false);
+        #[cfg(test)]
+        let test_gate = Arc::new(CompletionBoundaryTestGate::default());
+        (
+            Self {
+                sender,
+                #[cfg(test)]
+                test_gate: Arc::clone(&test_gate),
+            },
+            CompletionBoundaryDrain {
+                receiver,
+                #[cfg(test)]
+                test_gate,
+            },
+        )
+    }
+
+    fn enter(&self) -> CompletionBoundaryGuard {
+        debug_assert!(!*self.sender.borrow());
+        self.sender.send_replace(true);
+        CompletionBoundaryGuard {
+            sender: self.sender.clone(),
+        }
+    }
+
+    async fn before_finish(&self) {
+        #[cfg(test)]
+        if self.test_gate.paused.load(Ordering::Acquire) {
+            self.test_gate.reached.notify_one();
+            self.test_gate.release.notified().await;
+            self.test_gate.paused.store(false, Ordering::Release);
+        }
+    }
+}
+
+struct CompletionBoundaryGuard {
+    sender: watch::Sender<bool>,
+}
+
+impl Drop for CompletionBoundaryGuard {
+    fn drop(&mut self) {
+        self.sender.send_replace(false);
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct CompletionBoundaryTestGate {
+    paused: AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(crate) struct CompletionBoundaryTestControl {
+    gate: Arc<CompletionBoundaryTestGate>,
+}
+
+#[cfg(test)]
+impl CompletionBoundaryTestControl {
+    pub(crate) async fn wait_until_reached(&self) {
+        self.gate.reached.notified().await;
+    }
+
+    pub(crate) fn release(self) {
+        self.gate.release.notify_one();
+    }
 }
 
 /// Construct one generalized engine and a rank-fixed compatibility handle for
@@ -252,12 +362,14 @@ fn create_grouped_scheduler_from_components(
         )));
     }
 
+    let (completion_tracker, completion_drain) = CompletionBoundaryTracker::new();
     child_tasks.push(tokio::spawn(run_effect_dispatcher(
         events,
         dispatch_ranks,
         Arc::clone(&compatibility),
         Arc::clone(&pending),
         cancel_token.clone(),
+        completion_tracker,
     )));
     drop(response_monitor_tx);
     child_tasks.push(tokio::spawn(run_command_response_monitor(
@@ -269,7 +381,11 @@ fn create_grouped_scheduler_from_components(
     child_tasks.push(engine_actor);
     let actor = supervise_grouped_tasks(child_tasks, cancel_token);
 
-    Ok(GroupedSchedulers { schedulers, actor })
+    Ok(GroupedSchedulers {
+        schedulers,
+        actor,
+        completion_drain,
+    })
 }
 
 struct CompatibilityCancelGuard(CancellationToken);
