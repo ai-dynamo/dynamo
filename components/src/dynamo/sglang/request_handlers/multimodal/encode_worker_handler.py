@@ -693,28 +693,40 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         ``NvdecVideoDecoder`` (H.264/H.265), the fetched bytes (any other codec,
         so SGLang does not re-download what we already validated and hold), or
         the original URL string when nothing was fetched.
-        Non-video modalities, decoded inputs, and disabled/ineligible cases
-        are returned unchanged.
+        Non-video modalities and decoded inputs are returned unchanged. When
+        NVDEC is disabled or ineligible the URLs are returned policy-validated
+        and normalized, since SGLang fetches them with its own session.
 
         Called from both the cached and uncached encode paths. The embedding
         cache is disabled by default, so routing this only through the cached
         path would leave hardware decode unreachable in a stock deployment.
         """
-        if modality_name != "VIDEO" or not self._nvdec_video_enabled():
-            # NVDEC off (CPU image, DYN_DISABLE_NVDEC, or a gated model type)
-            # means video URLs go straight to SGLang's software path -- the
-            # deployments MOST likely to lack a decoder entirely. Without this
-            # preflight they are exactly the ones that still get the deep
+        if modality_name != "VIDEO":
+            return media_inputs
+        if not self._nvdec_video_enabled():
+            # NVDEC off (CPU image, DYN_DISABLE_NVDEC, or a gated model type):
+            # these URLs go straight to SGLang's software path, which fetches
+            # them with its own session and never consults our url policy. Run
+            # the policy here so a source we would refuse is refused before
+            # SGLang can reach it -- and before we answer with anything about
+            # this deployment, since a request we reject is not the place to
+            # report which decoders are installed.
+            validated = [
+                await validate_media_url(media_input, self._url_policy)
+                if isinstance(media_input, str)
+                else media_input
+                for media_input in media_inputs
+            ]
+            # Without this preflight these deployments -- the ones MOST likely
+            # to lack a decoder entirely -- still get the deep
             # "No module named 'decord'" with the payload repr embedded. No
             # bytes were fetched here, so the codec cannot be named. Only str
             # items count: pre-decoded frontend variants need no decoder.
-            if (
-                modality_name == "VIDEO"
-                and any(isinstance(m, str) for m in media_inputs)
-                and not _software_video_decoder_imports()
-            ):
+            if any(
+                isinstance(media_input, str) for media_input in media_inputs
+            ) and not _software_video_decoder_imports():
                 raise video_decoder_missing("sglang", "decord2", "decord", None)
-            return media_inputs
+            return validated
         encode_inputs: list[Any] = []
         for media_input in media_inputs:
             if not isinstance(media_input, str):

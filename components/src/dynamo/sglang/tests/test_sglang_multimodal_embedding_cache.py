@@ -16,6 +16,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import TransferRequest
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     Modality,
     MultimodalEncodeWorkerHandler,
@@ -71,6 +72,9 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
         capacity_bytes=32 * 1024 * 1024
     )
     handler._cache_publisher = None
+    # The real __init__ always sets this (UrlValidationPolicy.from_env); the
+    # video paths read it, so a handler built with __new__ needs it too.
+    handler._url_policy = UrlValidationPolicy()
     handler.encoder = _DummyEncoder()
     return handler
 
@@ -466,11 +470,18 @@ async def test_video_cache_key_includes_sampling_config(
 _HANDLER_MOD = "dynamo.sglang.request_handlers.multimodal.encode_worker_handler"
 
 
+# A data: URI passes the url policy without touching the network, so the
+# decoder-gating tests below exercise gating rather than DNS.
+_INLINE_VIDEO = "data:video/mp4;base64,AAAAIGZ0eXBpc29t"
+# http:// is refused on scheme alone (allow_http defaults False), so the
+# validation tests are deterministic and offline too.
+_BLOCKED_URL = "http://169.254.169.254/latest/meta-data/"
+
+
 @pytest.fixture
 def nvdec_handler(cache_handler) -> MultimodalEncodeWorkerHandler:
     """cache_handler wired with the attributes the NVDEC path reads."""
     cache_handler.num_video_frames = 32
-    cache_handler._url_policy = SimpleNamespace()
     return cache_handler
 
 
@@ -494,7 +505,7 @@ async def test_disabled_nvdec_without_software_decoder_is_actionable(
     )
 
     with pytest.raises(MissingMediaDecoderError) as exc_info:
-        await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+        await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
 
     assert "install_media_decoders sglang" in str(exc_info.value)
 
@@ -508,8 +519,8 @@ async def test_disabled_nvdec_with_software_decoder_passes_urls(
     monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
     monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
-    out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
-    assert out == ["https://x/clip.mp4"]
+    out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
+    assert out == [_INLINE_VIDEO]
 
 
 def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
@@ -753,8 +764,32 @@ async def test_decode_failure_falls_back_to_the_fetched_bytes(
     # preflight probe (the image ships no software decoder).
     monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
     assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") == b"bytes"
-    out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+    out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
     assert out == [b"bytes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("software_decoder_present", [False, True])
+async def test_disabled_nvdec_validates_url_before_reporting_decoders(
+    nvdec_handler, monkeypatch, software_decoder_present
+) -> None:
+    """A source the policy refuses must be refused here, whatever the decoders.
+
+    With NVDEC off, SGLang fetches these URLs with its own session and never
+    consults our policy, so this is the only place the policy can apply. Two
+    failures this pins, both reproduced on the real image: a blocked URL was
+    handed back for SGLang to fetch when a decoder was present, and answered
+    with "install decord2" -- deployment configuration, in response to a
+    request we should refuse -- when one was not.
+    """
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports",
+        lambda: software_decoder_present,
+    )
+
+    with pytest.raises(UrlValidationError):
+        await nvdec_handler._build_encode_inputs([_BLOCKED_URL], "VIDEO")
 
 
 @pytest.mark.asyncio
