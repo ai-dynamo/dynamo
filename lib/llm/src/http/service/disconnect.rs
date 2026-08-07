@@ -31,7 +31,7 @@
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::http::service::error::SanitizedError;
@@ -64,6 +64,26 @@ pub enum ConnectionStatus {
 pub struct ConnectionHandle {
     sender: Option<tokio::sync::oneshot::Sender<ConnectionStatus>>,
     on_drop: ConnectionStatus,
+}
+
+/// One-shot application error reported by an SSE producer.
+///
+/// The producer writes only when it emits a terminal protocol failure. The
+/// disconnect monitor reads once when the source stream ends, avoiding
+/// synchronization on successful per-token events.
+#[derive(Clone, Default)]
+pub(super) struct StreamErrorSignal {
+    error_type: Arc<OnceLock<ErrorType>>,
+}
+
+impl StreamErrorSignal {
+    pub(super) fn set(&self, error_type: ErrorType) {
+        let _ = self.error_type.set(error_type);
+    }
+
+    fn get(&self) -> Option<&ErrorType> {
+        self.error_type.get()
+    }
 }
 
 impl ConnectionHandle {
@@ -208,12 +228,47 @@ pub fn monitor_for_disconnects(
     )
 }
 
+pub(super) fn monitor_for_disconnects_with_error_signal(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_and_error_signal(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        Some(error_signal),
+    )
+}
+
 fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_and_error_signal(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        inactivity_timeout,
+        None,
+    )
+}
+
+fn monitor_for_disconnects_with_timeout_and_error_signal(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
+    error_signal: Option<StreamErrorSignal>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -268,8 +323,13 @@ fn monitor_for_disconnects_with_timeout(
                             break;
                         }
                         None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
+                            if let Some(error_type) =
+                                error_signal.as_ref().and_then(StreamErrorSignal::get)
+                            {
+                                inflight_guard.mark_error(error_type.clone());
+                            } else {
+                                inflight_guard.mark_ok();
+                            }
                             stream_handle.disarm();
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
