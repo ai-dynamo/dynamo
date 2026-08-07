@@ -43,10 +43,12 @@ func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
 	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "new-without-pcs")
 	require.NoError(t, env.Client().Create(ctx, dgd))
 
-	enabled := waitForGroveWorkerHashSuffixEnabled(t, ctx, env, dgd.Name)
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(enabled)
+	createdDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, env.Client().Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: env.Namespace()}, createdDGD))
+	require.Equal(t, createdDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled], "true")
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD)
 	require.NoError(t, err)
-	waitForGroveWorkerHashSuffixes(t, ctx, env, enabled, wantHash)
+	waitForGroveWorkerHashSuffixes(t, ctx, env, createdDGD, wantHash)
 }
 
 func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
@@ -54,7 +56,6 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	env := newGroveWorkerHashSuffixTestEnv(t)
 	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "existing-without-suffix")
 	createLegacyGroveWorkerHashSuffixTestDGD(t, ctx, env, dgd)
-	require.Empty(t, dgd.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 
 	startGroveWorkerHashSuffixTestController(t, env)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
@@ -62,22 +63,28 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
 	require.NoError(t, env.Client().Get(ctx, key, current))
+	require.Empty(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
+
 	frontend := current.GetComponentByName("frontend")
 	frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
 	require.NoError(t, env.Client().Update(ctx, current))
+
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	require.Empty(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 	waitForGroveFrontendEnv(t, ctx, env, current, "FRONTEND_CONFIG_REVISION", "2")
-	waitForGroveWorkerHashSuffixes(t, ctx, env, current, "")
+	checkGroveWorkerHashSuffixes(t, ctx, env, current, "")
 
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	prefill := current.GetComponentByName("prefill")
 	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
 	require.NoError(t, env.Client().Update(ctx, current))
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	require.Equal(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled], "true")
 
-	enabled := waitForGroveWorkerHashSuffixEnabled(t, ctx, env, dgd.Name)
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(enabled)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
-	waitForGroveWorkerHashSuffixes(t, ctx, env, enabled, wantHash)
+	waitForGroveWorkerHashSuffixes(t, ctx, env, current, wantHash)
 }
 
 func newGroveWorkerHashSuffixTestEnv(t *testing.T) *operatorenv.TestEnv {
@@ -150,81 +157,66 @@ func newGroveWorkerHashSuffixTestDGD(namespace, name string) *nvidiacomv1beta1.D
 	}
 }
 
-func waitForGroveWorkerHashSuffixEnabled(
-	t *testing.T,
-	ctx context.Context,
-	env *operatorenv.TestEnv,
-	name string,
-) *nvidiacomv1beta1.DynamoGraphDeployment {
-	t.Helper()
-	key := types.NamespacedName{Name: name, Namespace: env.Namespace()}
-	dynamotesting.Eventually(t, func() (bool, string) {
-		dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-		if err := env.Client().Get(ctx, key, dgd); err != nil {
-			return false, fmt.Sprintf("get DGD: %v", err)
-		}
-		annotations := dgd.GetAnnotations()
-		if annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] != "true" {
-			return false, "worker hash suffix is not enabled"
-		}
-		return true, "Grove worker hash suffix enabled"
-	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker hash suffix was not enabled")
-
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	require.NoError(t, env.Client().Get(ctx, key, dgd))
-	return dgd
-}
-
 func waitForGroveWorkerHashSuffixes(
 	t *testing.T,
 	ctx context.Context,
 	env *operatorenv.TestEnv,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	want string,
-) *grovev1alpha1.PodCliqueSet {
+) {
+	t.Helper()
+	dynamotesting.Eventually(t, func() (bool, string) {
+		return checkGroveWorkerHashSuffixes(t, ctx, env, dgd, want)
+	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker cliques did not reach the expected worker suffix state")
+}
+
+func checkGroveWorkerHashSuffixes(
+	t *testing.T,
+	ctx context.Context,
+	env *operatorenv.TestEnv,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	want string,
+) (bool, string) {
 	t.Helper()
 	key := types.NamespacedName{
 		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
 		Namespace: dgd.Namespace,
 	}
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	dynamotesting.Eventually(t, func() (bool, string) {
-		if err := env.Client().Get(ctx, key, pcs); err != nil {
-			return false, fmt.Sprintf("get PodCliqueSet: %v", err)
+	if err := env.Client().Get(ctx, key, pcs); err != nil {
+		return false, fmt.Sprintf("get PodCliqueSet: %v", err)
+	}
+	seenWorkers := map[string]bool{"prefill": false, "decode": false}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		component := clique.Labels[consts.KubeLabelDynamoComponent]
+		if component != "prefill" && component != "decode" {
+			continue
 		}
-		seenWorkers := map[string]bool{"prefill": false, "decode": false}
-		for _, clique := range pcs.Spec.Template.Cliques {
-			component := clique.Labels[consts.KubeLabelDynamoComponent]
-			if component != "prefill" && component != "decode" {
-				continue
-			}
-			seenWorkers[component] = true
-			main := findMainContainer(clique.Spec.PodSpec.Containers)
-			if main == nil {
-				return false, fmt.Sprintf("%s clique %q has no main container", component, clique.Name)
-			}
-			suffix := findEnv(main.Env, consts.DynamoNamespaceWorkerSuffixEnvVar)
-			if want == "" {
-				if suffix != nil {
-					return false, fmt.Sprintf("%s clique %q unexpectedly has worker suffix %q", component, clique.Name, suffix.Value)
-				}
-				continue
-			}
-			if suffix == nil {
-				return false, fmt.Sprintf("%s clique %q has no worker suffix", component, clique.Name)
-			}
-			if suffix.Value != want {
-				return false, fmt.Sprintf("%s clique %q suffix=%q, want %q", component, clique.Name, suffix.Value, want)
-			}
+		seenWorkers[component] = true
+		main := findMainContainer(clique.Spec.PodSpec.Containers)
+		if main == nil {
+			return false, fmt.Sprintf("%s clique %q has no main container", component, clique.Name)
 		}
-		for component, found := range seenWorkers {
-			if !found {
-				return false, fmt.Sprintf("PodCliqueSet has no %s clique", component)
+		suffix := findEnv(main.Env, consts.DynamoNamespaceWorkerSuffixEnvVar)
+		if want == "" {
+			if suffix != nil {
+				return false, fmt.Sprintf("%s clique %q unexpectedly has worker suffix %q", component, clique.Name, suffix.Value)
 			}
+			continue
 		}
-		return true, "Grove worker cliques have the expected worker suffix state"
-	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker cliques did not reach the expected worker suffix state")
-	return pcs
+		if suffix == nil {
+			return false, fmt.Sprintf("%s clique %q has no worker suffix", component, clique.Name)
+		}
+		if suffix.Value != want {
+			return false, fmt.Sprintf("%s clique %q suffix=%q, want %q", component, clique.Name, suffix.Value, want)
+		}
+	}
+	for component, found := range seenWorkers {
+		if !found {
+			return false, fmt.Sprintf("PodCliqueSet has no %s clique", component)
+		}
+	}
+	return true, "Grove worker cliques have the expected worker suffix state"
 }
 
 func waitForGroveFrontendEnv(
