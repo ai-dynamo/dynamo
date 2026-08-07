@@ -119,6 +119,7 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     priority = agent_hints.get("priority")
     if _is_i32(priority):
         priority_value = cast(int, priority)
+        routing["priority"] = priority_value
         routing["priority_jump"] = float(max(priority_value, 0))
     else:
         latency_sensitivity = _finite_float(agent_hints.get("latency_sensitivity"))

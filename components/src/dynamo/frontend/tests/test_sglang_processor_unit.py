@@ -252,10 +252,24 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
 
         assert result["routing"] == {
+            "priority": 10,
             "priority_jump": 10.0,
             "strict_priority": 3,
             "expected_output_tokens": 128,
         }
+
+    def test_negative_priority_hint_preserves_backend_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": -5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": -5, "priority_jump": 0.0}
 
     def test_existing_routing_overrides_agent_hint_projection(self):
         result = _build_dynamo_preproc(
@@ -276,6 +290,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
 
         assert result["routing"] == {
+            "priority": 10,
             "priority_jump": 1.0,
             "strict_priority": 2,
             "expected_output_tokens": 128,
