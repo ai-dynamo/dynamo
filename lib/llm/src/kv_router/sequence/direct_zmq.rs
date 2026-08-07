@@ -96,6 +96,7 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
 ) -> Result<JoinHandle<()>> {
     let metrics = ActiveSequenceZmqIngressMetrics::from_component(endpoint.component());
     let handler_metrics = metrics.clone();
+    let handler_tracker = Arc::clone(&tracker);
     let handler = move |envelope: dynamo_runtime::transports::event_plane::ValidatedEnvelope| {
         let codec = Codec::default();
         let batch = codec
@@ -111,12 +112,17 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
                 MAX_REPLICA_BATCH_EVENTS
             );
         }
-        tracker.apply_replica_batch(batch.events);
+        if let Some(scheduler_id) = batch.scheduler_heartbeat {
+            handler_tracker.scheduler_heartbeat(scheduler_id);
+        }
+        handler_tracker.apply_scheduler_replica_batch(batch.events);
         Ok(())
     };
     let observer =
         move |observation: crate::direct_zmq_fan_in::FanInObservation| match observation.event {
-            FanInEvent::SourceStarted => metrics.source_started(),
+            FanInEvent::SourceStarted => {
+                metrics.source_started();
+            }
             FanInEvent::SourceStopped => metrics.source_stopped(),
             FanInEvent::Reconnect => metrics.record_reconnect(),
             FanInEvent::Replacement => metrics.record_replacement(),
@@ -264,6 +270,7 @@ mod tests {
                     publisher
                         .publish(&ActiveSequenceEventBatch {
                             events: vec![add_event(request_id)],
+                            scheduler_heartbeat: None,
                         })
                         .await
                         .unwrap();

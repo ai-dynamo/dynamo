@@ -13,9 +13,10 @@ use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
+use super::request_maps::SchedulerEvent;
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS, SCHEDULER_HEARTBEAT_INTERVAL, WorkerWithDpRank,
 };
 
 #[derive(Default)]
@@ -53,11 +54,77 @@ impl ReplicaBatchEffects {
 impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Apply one decoded replica-sync batch and flush its deferred effects once.
     pub fn apply_replica_batch(&self, events: Vec<ActiveSequenceEvent>) {
+        self.apply_replica_batch_inner(events, false);
+    }
+
+    pub fn apply_scheduler_replica_batch(&self, events: Vec<ActiveSequenceEvent>) {
+        self.apply_replica_batch_inner(events, true);
+    }
+
+    fn apply_replica_batch_inner(&self, events: Vec<ActiveSequenceEvent>, track_scheduler: bool) {
         let mut effects = ReplicaBatchEffects::default();
         for event in events {
-            self.apply_replica_event(event, &mut effects);
+            let track_event = if track_scheduler {
+                match self
+                    .request_index
+                    .scheduler_event(event.router_id, Instant::now())
+                {
+                    SchedulerEvent::Untracked => false,
+                    SchedulerEvent::Track => true,
+                    SchedulerEvent::Reject => continue,
+                }
+            } else {
+                false
+            };
+            self.apply_replica_event(event, track_event, &mut effects);
         }
         self.flush_replica_batch_effects(&mut effects);
+    }
+
+    pub fn scheduler_heartbeat(&self, scheduler_id: u64) {
+        self.scheduler_heartbeat_at(scheduler_id, Instant::now());
+    }
+
+    pub(super) fn scheduler_heartbeat_at(&self, scheduler_id: u64, now: Instant) {
+        if scheduler_id != self.router_id {
+            self.request_index.scheduler_heartbeat(scheduler_id, now);
+        }
+    }
+
+    pub(super) fn expire_schedulers_at(&self, now: Instant) {
+        for (scheduler_id, request_ids) in self.request_index.expire_schedulers(now) {
+            self.expire_scheduler_requests(scheduler_id, request_ids, now);
+        }
+    }
+
+    fn expire_scheduler_requests(&self, scheduler_id: u64, request_ids: Vec<String>, now: Instant) {
+        let mut effects = ReplicaBatchEffects::default();
+        for request_id in &request_ids {
+            self.apply_replica_free(request_id, now, &mut effects);
+        }
+        self.flush_replica_batch_effects(&mut effects);
+
+        if !request_ids.is_empty() {
+            tracing::warn!(
+                scheduler_id,
+                evicted_requests = request_ids.len(),
+                "Expired scheduler decisions owned by an unresponsive router replica"
+            );
+        }
+    }
+
+    pub fn start_scheduler_expiration(self: &Arc<Self>, cancel_token: CancellationToken) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SCHEDULER_HEARTBEAT_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => return,
+                    now = interval.tick() => this.expire_schedulers_at(now),
+                }
+            }
+        });
     }
 
     /// Spawn a background task that subscribes to replica-sync events from peer routers
@@ -112,7 +179,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let event = next_event
                     .take()
                     .expect("replica batch event must be present");
-                self.apply_replica_event(event, &mut effects);
+                self.apply_replica_event(event, false, &mut effects);
                 batch_events += 1;
 
                 if cancel_token.is_cancelled() {
@@ -154,7 +221,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    fn apply_replica_event(&self, event: ActiveSequenceEvent, effects: &mut ReplicaBatchEffects) {
+    fn apply_replica_event(
+        &self,
+        event: ActiveSequenceEvent,
+        track_scheduler: bool,
+        effects: &mut ReplicaBatchEffects,
+    ) {
         let ActiveSequenceEvent {
             request_id,
             worker: event_worker,
@@ -190,9 +262,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     return;
                 };
 
-                self.request_index
-                    .set_request(request_id.clone(), event_worker, lora_name);
-                let (expired_request_ids, load) = {
+                let indexed_request_id = request_id.clone();
+                let apply = || {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
                     let outcome = seq.add_request_with_prefill_tracking(
@@ -212,33 +283,34 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         );
                     (outcome.expired_request_ids, load)
                 };
+                let result = if track_scheduler {
+                    self.request_index.track_scheduler_request(
+                        indexed_request_id,
+                        event_worker,
+                        lora_name,
+                        router_id,
+                        apply,
+                    )
+                } else {
+                    self.request_index.set_request_metadata(
+                        indexed_request_id,
+                        event_worker,
+                        lora_name,
+                    );
+                    Some(apply())
+                };
+                let Some((expired_request_ids, load)) = result else {
+                    return;
+                };
                 drop(table);
                 self.request_index
                     .remove_requests(expired_request_ids.iter());
+
                 effects.record_worker_load(event_worker, load, true);
                 effects.cleanup_prompt_trie = true;
             }
             ActiveSequenceEventData::Free => {
-                let Some(worker) = self.request_index.remove_request(&request_id) else {
-                    return;
-                };
-                let table = self.workers.read();
-                let Some(&idx) = table.index.get(&worker) else {
-                    return;
-                };
-                let load = {
-                    let slot = &table.slots[idx];
-                    let mut seq = slot.sequences.write();
-                    let delta = seq.free(&request_id, decay_now);
-                    let load = seq.worker_load_snapshot();
-                    self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
-                    load
-                };
-                drop(table);
-                effects.record_worker_load(worker, load, true);
-                effects.wake_scheduler = true;
-                effects.cleanup_prompt_trie = true;
+                self.apply_replica_free(&request_id, decay_now, effects);
             }
             ActiveSequenceEventData::MarkPrefillCompleted => {
                 let Some(worker) = self.request_index.worker_for(&request_id) else {
@@ -260,6 +332,34 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 effects.wake_scheduler = true;
             }
         }
+    }
+
+    fn apply_replica_free(
+        &self,
+        request_id: &String,
+        decay_now: Instant,
+        effects: &mut ReplicaBatchEffects,
+    ) {
+        let Some(worker) = self.request_index.remove_request(request_id) else {
+            return;
+        };
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&worker) else {
+            return;
+        };
+        let load = {
+            let slot = &table.slots[idx];
+            let mut seq = slot.sequences.write();
+            let delta = seq.free(request_id, decay_now);
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry
+                .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
+            load
+        };
+        drop(table);
+        effects.record_worker_load(worker, load, true);
+        effects.wake_scheduler = true;
+        effects.cleanup_prompt_trie = true;
     }
 
     fn flush_replica_batch_effects(&self, effects: &mut ReplicaBatchEffects) {

@@ -15,7 +15,7 @@ pub use dynamo_kv_router::multi_worker_sequence::{
 };
 use dynamo_kv_router::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS, SCHEDULER_HEARTBEAT_INTERVAL, WorkerWithDpRank,
 };
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
@@ -222,24 +222,19 @@ async fn run_replica_singleton_publisher<P: SingletonEventPublisher>(
     }
 }
 
-async fn publish_replica_batch(publisher: &EventPublisher, events: Vec<ActiveSequenceEvent>) {
-    let batch = ActiveSequenceEventBatch { events };
-    let first_request_id = &batch
-        .events
-        .first()
-        .expect("replica batch must contain an event")
-        .request_id;
-    let last_request_id = &batch
-        .events
-        .last()
-        .expect("replica batch must contain an event")
-        .request_id;
-
+async fn publish_replica_batch(
+    publisher: &EventPublisher,
+    events: Vec<ActiveSequenceEvent>,
+    scheduler_heartbeat: Option<u64>,
+) {
+    let batch = ActiveSequenceEventBatch {
+        events,
+        scheduler_heartbeat,
+    };
     if let Err(error) = publisher.publish(&batch).await {
         tracing::error!(
             event_count = batch.events.len(),
-            first_request_id = %first_request_id,
-            last_request_id = %last_request_id,
+            scheduler_heartbeat,
             error = %error,
             "Failed to publish active-sequence replica batch"
         );
@@ -274,11 +269,18 @@ async fn collect_replica_batch(
 async fn run_replica_batch_publisher(
     publisher: EventPublisher,
     mut event_rx: mpsc::Receiver<ActiveSequenceEvent>,
+    scheduler_id: Option<u64>,
     cancellation_token: CancellationToken,
 ) {
+    let mut heartbeat = tokio::time::interval(SCHEDULER_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let first_event = tokio::select! {
             _ = cancellation_token.cancelled() => break,
+            _ = heartbeat.tick(), if scheduler_id.is_some() => {
+                publish_replica_batch(&publisher, Vec::new(), scheduler_id).await;
+                continue;
+            }
             event = event_rx.recv() => match event {
                 Some(event) => event,
                 None => break,
@@ -286,7 +288,7 @@ async fn run_replica_batch_publisher(
         };
         let (events, stop_after_flush) =
             collect_replica_batch(first_event, &mut event_rx, &cancellation_token).await;
-        publish_replica_batch(&publisher, events).await;
+        publish_replica_batch(&publisher, events, None).await;
         if stop_after_flush {
             break;
         }
@@ -392,6 +394,8 @@ pub async fn create_multi_worker_sequences(
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
+    let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
+    let scheduler_expiration = replica_sync && direct_config.should_use_direct(transport_kind);
     let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
         replica_sync,
         REPLICA_EVENT_CHANNEL_CAPACITY,
@@ -416,6 +420,7 @@ pub async fn create_multi_worker_sequences(
                 tokio::spawn(run_replica_batch_publisher(
                     event_publisher,
                     event_rx,
+                    scheduler_expiration.then_some(router_id),
                     publisher_cancellation_token,
                 ));
             }
@@ -456,8 +461,7 @@ pub async fn create_multi_worker_sequences(
     let arc = Arc::new(multi_worker);
 
     if replica_sync {
-        let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
-        if direct_config.should_use_direct(transport_kind) {
+        if scheduler_expiration {
             let _direct_zmq_task = direct_zmq::start(
                 endpoint,
                 arc.clone(),
@@ -465,6 +469,7 @@ pub async fn create_multi_worker_sequences(
                 cancellation_token.child_token(),
             )
             .await?;
+            arc.start_scheduler_expiration(cancellation_token.child_token());
         } else {
             let subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint).await?;
             arc.start_replica_sync(subscriber, cancellation_token.child_token());
@@ -709,7 +714,10 @@ mod tests {
         assert_eq!(events.len(), 100);
         assert_eq!(Instant::now() - start, MAX_REPLICA_BATCH_DURATION);
         let payload = MsgpackCodec
-            .encode_payload(&ActiveSequenceEventBatch { events })
+            .encode_payload(&ActiveSequenceEventBatch {
+                events,
+                scheduler_heartbeat: None,
+            })
             .unwrap();
         let decoded: ActiveSequenceEventBatch = MsgpackCodec.decode_payload(&payload).unwrap();
         assert_eq!(decoded.events.len(), 100);
@@ -743,6 +751,11 @@ mod tests {
 
     #[test]
     fn active_sequence_wire_format_uses_singletons_only_for_nats() {
+        #[derive(serde::Serialize)]
+        struct LegacyBatch {
+            events: Vec<ActiveSequenceEvent>,
+        }
+
         assert_eq!(
             active_sequence_event_wire_format(EventTransportKind::Nats),
             ActiveSequenceEventWireFormat::Singleton
@@ -764,13 +777,24 @@ mod tests {
         );
 
         let batch_payload = MsgpackCodec
-            .encode_payload(&ActiveSequenceEventBatch {
+            .encode_payload(&LegacyBatch {
                 events: vec![event],
             })
             .unwrap();
         let decoded_batch: ActiveSequenceEventBatch =
             MsgpackCodec.decode_payload(&batch_payload).unwrap();
         assert_eq!(decoded_batch.events[0].request_id, "request");
+        assert_eq!(decoded_batch.scheduler_heartbeat, None);
+
+        let heartbeat_payload = MsgpackCodec
+            .encode_payload(&ActiveSequenceEventBatch {
+                events: Vec::new(),
+                scheduler_heartbeat: Some(7),
+            })
+            .unwrap();
+        let heartbeat: ActiveSequenceEventBatch =
+            MsgpackCodec.decode_payload(&heartbeat_payload).unwrap();
+        assert_eq!(heartbeat.scheduler_heartbeat, Some(7));
         assert!(
             MsgpackCodec
                 .decode_payload::<ActiveSequenceEvent>(&batch_payload)

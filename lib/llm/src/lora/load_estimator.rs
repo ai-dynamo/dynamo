@@ -809,6 +809,7 @@ mod tests {
                         lora_event("alpha", Some("lora-alpha"), ActiveSequenceEventData::Free),
                         lora_event("no-lora", None, add_request()),
                     ],
+                    scheduler_heartbeat: None,
                 };
 
                 let events = tokio::time::timeout(Duration::from_secs(5), async {

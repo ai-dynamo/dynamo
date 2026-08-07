@@ -2,15 +2,45 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use super::single::RequestId;
-use crate::protocols::WorkerWithDpRank;
+use crate::protocols::{SCHEDULER_EXPIRATION_TIMEOUT, WorkerWithDpRank};
+
+const SCHEDULER_TOMBSTONE_RETENTION: Duration = Duration::from_secs(600);
+
+#[derive(Debug)]
+struct SchedulerRequests {
+    deadline: Instant,
+    requests: HashSet<RequestId>,
+    expired: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SchedulerEvent {
+    Untracked,
+    Track,
+    Reject,
+}
+
+impl SchedulerRequests {
+    fn new(now: Instant) -> Self {
+        Self {
+            deadline: now + SCHEDULER_EXPIRATION_TIMEOUT,
+            requests: HashSet::new(),
+            expired: false,
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(super) struct RequestIndex {
     request_to_worker: DashMap<RequestId, WorkerWithDpRank>,
     request_to_lora: DashMap<RequestId, String>,
+    request_to_scheduler: DashMap<RequestId, u64>,
+    scheduler_requests: DashMap<u64, SchedulerRequests>,
 }
 
 impl RequestIndex {
@@ -32,15 +62,50 @@ impl RequestIndex {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn set_request(
         &self,
         request_id: RequestId,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
     ) {
+        self.set_request_metadata(request_id, worker, lora_name);
+    }
+
+    pub(super) fn track_scheduler_request<T>(
+        &self,
+        request_id: RequestId,
+        worker: WorkerWithDpRank,
+        lora_name: Option<String>,
+        scheduler_id: u64,
+        apply: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let mut scheduler = self.scheduler_requests.get_mut(&scheduler_id)?;
+        if scheduler.expired {
+            return None;
+        }
+        scheduler.requests.insert(request_id.clone());
+        self.request_to_scheduler
+            .insert(request_id.clone(), scheduler_id);
         self.request_to_worker.insert(request_id.clone(), worker);
+        self.set_lora(request_id, lora_name);
+        Some(apply())
+    }
+
+    pub(super) fn set_request_metadata(
+        &self,
+        request_id: RequestId,
+        worker: WorkerWithDpRank,
+        lora_name: Option<String>,
+    ) {
+        self.remove_scheduler_request(&request_id);
+        self.request_to_worker.insert(request_id.clone(), worker);
+        self.set_lora(request_id, lora_name);
+    }
+
+    fn set_lora(&self, request_id: RequestId, lora_name: Option<String>) {
         if let Some(lora_name) = lora_name {
-            self.request_to_lora.insert(request_id, lora_name);
+            self.request_to_lora.insert(request_id.clone(), lora_name);
         } else {
             self.request_to_lora.remove(&request_id);
         }
@@ -62,7 +127,53 @@ impl RequestIndex {
             .remove(request_id)
             .map(|(_request_id, worker)| worker);
         self.request_to_lora.remove(request_id);
+        self.remove_scheduler_request(request_id);
         worker
+    }
+
+    fn remove_scheduler_request(&self, request_id: &RequestId) {
+        if let Some((_request_id, scheduler_id)) = self.request_to_scheduler.remove(request_id)
+            && let Some(mut scheduler) = self.scheduler_requests.get_mut(&scheduler_id)
+        {
+            scheduler.requests.remove(request_id);
+        }
+    }
+
+    pub(super) fn scheduler_heartbeat(&self, scheduler_id: u64, now: Instant) {
+        let mut scheduler = self
+            .scheduler_requests
+            .entry(scheduler_id)
+            .or_insert_with(|| SchedulerRequests::new(now));
+        scheduler.expired = false;
+        scheduler.deadline = now + SCHEDULER_EXPIRATION_TIMEOUT;
+    }
+
+    pub(super) fn scheduler_event(&self, scheduler_id: u64, now: Instant) -> SchedulerEvent {
+        let Some(mut scheduler) = self.scheduler_requests.get_mut(&scheduler_id) else {
+            return SchedulerEvent::Untracked;
+        };
+        if scheduler.expired {
+            return SchedulerEvent::Reject;
+        }
+        scheduler.deadline = now + SCHEDULER_EXPIRATION_TIMEOUT;
+        SchedulerEvent::Track
+    }
+
+    pub(super) fn expire_schedulers(&self, now: Instant) -> Vec<(u64, Vec<RequestId>)> {
+        let mut expired = Vec::new();
+        for mut scheduler in self.scheduler_requests.iter_mut() {
+            if !scheduler.expired && scheduler.deadline <= now {
+                scheduler.expired = true;
+                scheduler.deadline = now + SCHEDULER_TOMBSTONE_RETENTION;
+                expired.push((*scheduler.key(), scheduler.requests.drain().collect()));
+            }
+        }
+        expired
+    }
+
+    pub(super) fn prune_scheduler_tombstones(&self, now: Instant) {
+        self.scheduler_requests
+            .retain(|_, scheduler| !scheduler.expired || scheduler.deadline > now);
     }
 
     pub(super) fn remove_requests<'a>(&self, request_ids: impl IntoIterator<Item = &'a RequestId>) {
@@ -93,7 +204,9 @@ impl RequestIndex {
 
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn is_empty(&self) -> bool {
-        self.request_to_worker.is_empty() && self.request_to_lora.is_empty()
+        self.request_to_worker.is_empty()
+            && self.request_to_lora.is_empty()
+            && self.request_to_scheduler.is_empty()
     }
 
     #[cfg(any(test, feature = "bench"))]
