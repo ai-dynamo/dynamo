@@ -768,6 +768,16 @@ impl OpenAIPreprocessor {
                 None => true,
             }
         });
+
+        // MiniMax M3 uses adaptive reasoning. For required/named tool choices,
+        // SGLang must apply the guided tool grammar from the first generated
+        // token; gating that grammar behind a reasoning end marker allows the
+        // model's native tool-call namespace to bypass the JSON constraint.
+        // Structured responses retain their existing reasoning behavior.
+        if is_guided_tool_choice && matches!(reasoning_parser, Some("minimax_m3" | "minimax-m3")) {
+            return false;
+        }
+
         let is_structured_response = Self::has_structured_response_format(request);
         let structured_response_requires_reasoning = is_structured_response
             && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
@@ -5333,6 +5343,24 @@ mod tests {
             Some("deepseek_v4")
         ));
 
+        // MiniMax M3 remains an adaptive-thinking model for normal/auto
+        // requests, but required/named tool choices must constrain JSON from
+        // token zero instead of waiting for a reasoning boundary.
+        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+            &request(serde_json::json!("required"), None),
+            Some("minimax_m3")
+        ));
+        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+            &request(
+                serde_json::json!({
+                    "type": "function",
+                    "function": {"name": "lookup"}
+                }),
+                Some(true)
+            ),
+            Some("minimax-m3")
+        ));
+
         let structured_request = |enable_thinking: bool| {
             serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
                 "model": "test-model",
@@ -5380,6 +5408,10 @@ mod tests {
         assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
             &structured_request(false),
             Some("gpt_oss")
+        ));
+        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+            &structured_request(true),
+            Some("minimax_m3")
         ));
         assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
             &request(serde_json::json!("required"), None),
