@@ -13,7 +13,10 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::{
+    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
+    selector::{DefaultWorkerSelector, WorkerSelector},
+};
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -36,8 +39,10 @@ use crate::{
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
+    kv_router::{EncoderRouter, PrefillRouter, WorkerSelectorFactory},
+    local_model::runtime_config::{
+        ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -230,7 +235,10 @@ pub enum ModelUpdate {
     Removed(ModelDeploymentCard),
 }
 
-pub struct ModelWatcher {
+pub struct ModelWatcher<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig>,
+{
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -267,6 +275,7 @@ pub struct ModelWatcher {
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
+    worker_selector_factory: WorkerSelectorFactory<Sel>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -386,7 +395,7 @@ impl Drop for RegistrationGuard<'_> {
     }
 }
 
-impl ModelWatcher {
+impl ModelWatcher<DefaultWorkerSelector> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: DistributedRuntime,
@@ -398,6 +407,38 @@ impl ModelWatcher {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
+        Self::new_with_worker_selector_factory(
+            runtime,
+            model_manager,
+            router_config,
+            migration_limit,
+            migration_max_seq_len,
+            chat_engine_factory,
+            prefill_load_estimator,
+            metrics,
+            Arc::new(|config, worker_type, _partition| {
+                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+            }),
+        )
+    }
+}
+
+impl<Sel> ModelWatcher<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_worker_selector_factory(
+        runtime: DistributedRuntime,
+        model_manager: Arc<ModelManager>,
+        router_config: RouterConfig,
+        migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
+        chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        metrics: Arc<Metrics>,
+        worker_selector_factory: WorkerSelectorFactory<Sel>,
+    ) -> Self {
         Self {
             manager: model_manager,
             drt: runtime,
@@ -417,6 +458,7 @@ impl ModelWatcher {
             local_model_path: None,
             tokenizer_backend: None,
             generate_engine_capabilities: Vec::new(),
+            worker_selector_factory,
         }
     }
 
@@ -1644,11 +1686,17 @@ impl ModelWatcher {
             // need the shared chooser in KV mode.
             let kv_chooser =
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
+                    let selector = (self.worker_selector_factory)(
+                        &router_config.kv_router_config,
+                        WORKER_TYPE_DECODE,
+                        RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
+                    );
                     Some(
                         self.manager
-                            .kv_chooser_for_with_worker_role(
+                            .kv_chooser_for_with_selector(
                                 &endpoint,
                                 card.kv_cache_block_size,
+                                selector,
                                 Some(router_config.kv_router_config.clone()),
                                 self.prefill_load_estimator.clone(),
                                 card.worker_type,
@@ -1663,9 +1711,10 @@ impl ModelWatcher {
                 };
 
             // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
-            // monitor can be handed directly to PrefillRouter::new. Each WorkerSet gets its own
-            // monitor (1-to-1), scoped to this WorkerSet's Client/namespace. The monitor tracks
-            // Prometheus metrics (active_decode_blocks, active_prefill_tokens, worker TTFT/ITL
+            // monitor can be handed directly to PrefillRouter::new_with_selector_factory. Each
+            // WorkerSet gets its own monitor (1-to-1), scoped to this WorkerSet's Client/namespace.
+            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
+            // worker TTFT/ITL
             // cleanup); thresholds control overload detection. The monitor and prefill router are
             // created together here, so the monitor is passed into the prefill router directly.
             //
@@ -1721,13 +1770,14 @@ impl ModelWatcher {
                 // decode-only speculative hash mode.
                 let prefill_enable_eagle = false;
 
-                PrefillRouter::new(
+                PrefillRouter::new_with_selector_factory(
                     rx,
                     self.manager.clone(),
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
                     kv_chooser.clone(),
+                    self.worker_selector_factory.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
@@ -1750,17 +1800,18 @@ impl ModelWatcher {
                 None
             };
 
-            // Store KV router, worker monitor, and prefill router on the WorkerSet.
+            // Store the worker monitor and prefill router on the WorkerSet.
             // The prefill router is stored so the watcher can deactivate/reactivate it
             // when prefill workers die or rejoin.
-            worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
-            worker_set.prefill_router = prefill_chooser.clone();
+            worker_set.prefill_router = prefill_chooser.clone().map(|router| {
+                router as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>
+            });
             worker_set.encoder_router = encoder_chooser.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
-                    entrypoint::build_preprocessed_routing(
+                    entrypoint::input::build_preprocessed_routing_with_selector(
                         &client,
                         self.manager.clone(),
                         router_config.router_mode,

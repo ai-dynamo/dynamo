@@ -233,7 +233,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *te
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -294,7 +294,7 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 
@@ -525,7 +525,7 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1149,7 +1149,7 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{Checkpoint: true, GMSSnapshot: true},
+			Gate: features.Gates{Checkpoint: true},
 		},
 	}
 

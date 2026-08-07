@@ -359,12 +359,11 @@ publish loop observe the shutdown signal before resources are released.
 
 ## Telemetry
 
-> **Requires `DYN_LOGGING_JSONL=1` + `OTEL_EXPORT_ENABLED=1`** for engine
-> telemetry to record anything. In any other configuration the calls
-> silently no-op; one process-level `WARN` fires on first such call so the
-> misconfiguration is visible at default log levels. Trace propagation
-> (`context.trace_headers()`) and the auto-recorded `engine.generate`
-> attributes are NOT subject to this gate — they work regardless.
+> Engine telemetry requires the trace-context layer, enabled by
+> `OTEL_EXPORT_ENABLED=1`, `DYN_LOGGING_CONSOLE_FORMAT=jsonl`, or the legacy
+> `DYN_LOGGING_JSONL=1` switch. `OTEL_EXPORT_ENABLED=1` is still required to
+> export the resulting spans. Without the layer, calls silently no-op and one
+> process-level `WARN` fires on the first call.
 
 The framework opens an `engine.generate` span around every `generate()` call
 (see the Rust backend-common README for the full attribute table). Engine
@@ -410,8 +409,9 @@ Two entry points, one `SpanProxy` returned by both:
 `set_status(status, description)`, `close()`.
 
 **Bridge dependency.** The recording surface needs the
-`tracing-opentelemetry` layer installed, which today happens only when
-`DYN_LOGGING_JSONL=1` AND `OTEL_EXPORT_ENABLED=1`. Without the bridge:
+`tracing-opentelemetry` layer installed. Enable it with `OTEL_EXPORT_ENABLED=1`,
+`DYN_LOGGING_CONSOLE_FORMAT=jsonl`, or the legacy `DYN_LOGGING_JSONL=1` switch.
+Without the bridge:
 
 - `current_span(...)` returns a no-op `SpanProxy` (all method calls silent).
 - `start_span(...)` returns a no-op `SpanProxy`.
@@ -419,9 +419,9 @@ Two entry points, one `SpanProxy` returned by both:
   hit the missing-bridge path, so operators can discover the missing
   configuration. Subsequent no-ops in the same process are silent.
 
-Trace propagation (`context.trace_headers()`) and the `Context` cancellation
-/ identity surface do NOT depend on the bridge — those work regardless of
-mode.
+Trace propagation (`context.trace_headers()`) also needs an available local or
+inbound trace context. The `Context` cancellation and request-identity surface
+does not depend on the bridge.
 
 Performance note: attribute values are rendered via Python `repr()` for
 non-primitive types. Don't pass large objects per-token inside hot loops;
