@@ -147,9 +147,6 @@ func defaultGroveWorkerHashSuffix(
 	if err != nil {
 		return err
 	}
-	if oldDGD == nil {
-		return nil
-	}
 
 	// Normalize defaultable fields before comparing persisted and incoming worker specs.
 	defaultComponentFields(oldDGD, true)
@@ -180,7 +177,7 @@ func defaultGroveWorkerHashSuffix(
 
 func decodeOldDGD(req admission.Request) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
 	if len(req.OldObject.Raw) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("missing previous DynamoGraphDeployment in UPDATE admission request")
 	}
 
 	// Decode the prior object in the only version served by this webhook.
