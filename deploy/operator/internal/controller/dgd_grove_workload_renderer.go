@@ -126,7 +126,7 @@ func applyGroveWorkerHashSuffix(
 	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	if hashSource.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != "true" {
+	if hashSource.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
 		return nil
 	}
 
