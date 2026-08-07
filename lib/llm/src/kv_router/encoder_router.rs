@@ -3,6 +3,7 @@
 
 //! Optional multimodal encoder hop for token-serving pipelines.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -23,10 +24,33 @@ use dynamo_runtime::{
 
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    preprocessor::TraceLink,
+    preprocessor::{MultimodalData, TraceLink},
 };
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+/// Keep frontend-owned NIXL sources alive if the caller cancels while E is reading them.
+async fn await_encode_with_source_guards<F, T, G>(future: F, source_guards: Vec<G>) -> Result<T>
+where
+    F: Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+    G: Send + 'static,
+{
+    if source_guards.is_empty() {
+        return future.await;
+    }
+
+    match tokio::spawn(async move {
+        let _source_guards = source_guards;
+        future.await
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => Err(error).context("Detached encoder hop task was cancelled"),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -229,20 +253,33 @@ impl
             return next.generate(context.map(|_| request)).await;
         }
 
+        let source_guards = request
+            .multi_modal_data
+            .as_ref()
+            .into_iter()
+            .flat_map(|media| media.values())
+            .flatten()
+            .filter_map(|item| match item {
+                MultimodalData::Decoded(descriptor) => descriptor.source_storage.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let encode_context = Context::with_id_and_metadata(
             request.clone(),
             context.id().to_string(),
             context.metadata().clone(),
         );
-        let encode_result = async {
-            let router = self
-                .router
-                .get()
-                .context("Encoder router is active but not initialized")?;
-            let response = router.generate(encode_context).await?;
-            Self::consume_encode_stream(response).await
-        }
-        .await;
+        let encode_result = if let Some(router) = self.router.get().cloned() {
+            let encode_future = async move {
+                let response = router.generate(encode_context).await?;
+                Self::consume_encode_stream(response).await
+            };
+            await_encode_with_source_guards(encode_future, source_guards).await
+        } else {
+            Err(anyhow::anyhow!(
+                "Encoder router is active but not initialized"
+            ))
+        };
 
         match encode_result {
             Ok((encoder_result, worker_link)) => {
@@ -267,10 +304,11 @@ impl
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{collections::HashMap, sync::Mutex, time::Duration};
 
     use futures::stream;
     use serde_json::json;
+    use tokio::sync::oneshot;
 
     use dynamo_runtime::{
         engine::AsyncEngineContextProvider,
@@ -328,6 +366,49 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_guards_outlive_cancelled_encoder_waiter() {
+        let (encode_started_tx, encode_started_rx) = oneshot::channel();
+        let (finish_encode_tx, finish_encode_rx) = oneshot::channel();
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+
+        let waiter = tokio::spawn(await_encode_with_source_guards(
+            async move {
+                let _ = encode_started_tx.send(());
+                let _ = finish_encode_rx.await;
+                Ok(())
+            },
+            vec![DropSignal(Some(guard_dropped_tx))],
+        ));
+
+        encode_started_rx.await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut guard_dropped_rx)
+                .await
+                .is_err(),
+            "source guard dropped when the outer encoder waiter was cancelled"
+        );
+
+        finish_encode_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the encoder hop completed")
+            .unwrap();
     }
 
     #[tokio::test]
