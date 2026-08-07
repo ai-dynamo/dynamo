@@ -484,8 +484,8 @@ pub struct Worker {
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
-    /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
-    /// don't tolerate. We surface a clear `RuntimeError` instead.
+    /// `engine.start()` again, which engine implementations generally do not
+    /// tolerate. We surface a clear `RuntimeError` instead.
     consumed: AtomicBool,
     /// `true` when `engine` is a `DiffusionEngine` (raw media pipeline).
     /// Set by the Python `Worker` shim via `isinstance`. Selects the raw

@@ -2683,7 +2683,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        # Legacy vLLM handler always emits when vLLM returned a dict.
+        # Emit whenever vLLM returns a dictionary.
         return _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,
