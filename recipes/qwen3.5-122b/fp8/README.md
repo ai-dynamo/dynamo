@@ -106,11 +106,12 @@ Measured 2026-08-06 on the 3,541-request agentic Mooncake trace (see
 [perf/README.md](perf/README.md)), block size 512, closed-loop, both profiles on the same
 trace. SLA: P50 TTFT < 5 s and P50 output >= 50 tok/s/user; each profile is reported at its
 highest SLA-passing concurrency. `System output tok/s/GPU` is system throughput / GPUs.
+Aggregated runs `replicas: 2`.
 
 | Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
-| `vllm/agg-h200-agentic/deploy.yaml` | H200 | AGG (2x TP1) | agentic | yes | 8 | 136.3 | 760 ms | 381.3 |
-| `vllm/disagg-h200-agentic/deploy.yaml` | H200 | 1P2D | agentic | no | 18 | 52.5 | 3087 ms | 256.5 |
+| `vllm/agg-h200-agentic/deploy.yaml` | H200 | AGG, 2x TP1 (2 GPU) | agentic | yes | 8 | 136.3 | 760 ms | 381.3 |
+| `vllm/disagg-h200-agentic/deploy.yaml` | H200 | 1P2D (3 GPU) | agentic | no | 18 | 52.5 | 3087 ms | 256.5 |
 
 ## Known Issues
 
