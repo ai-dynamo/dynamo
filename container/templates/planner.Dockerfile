@@ -81,7 +81,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
 # runtime code comes from the wheel installed above. The Router adapter and
-# replay bridge unit tests also run here because this image installs that wheel.
+# replay bridge unit tests also run here because this image installs that wheel;
+# copy the AI Simulate examples exercised by those tests as test fixtures.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
@@ -89,6 +90,7 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspac
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation.py /workspace/components/src/dynamo/replay/tests/test_simulation.py
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation_integration.py /workspace/components/src/dynamo/replay/tests/test_simulation_integration.py
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_sweep_config_provider.py /workspace/components/src/dynamo/router/tests/test_router_sweep_config_provider.py
+COPY --chmod=775 --chown=dynamo:0 aisimulate/examples /workspace/aisimulate/examples
 COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
 RUN chmod 775 \
     /workspace/components/src/dynamo/replay \
