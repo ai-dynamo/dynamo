@@ -26,6 +26,7 @@ from vllm.sampling_params import StructuredOutputsParams
 
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import _prepare_request, build_tool_call_guided_decoding
+from dynamo.llm.exceptions import InvalidArgument
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -1276,16 +1277,60 @@ class TestToolCallGuidedDecoding:
 
         assert result.guided_decoding == expected
 
-    # Forced tool choices must not reuse a client-provided assistant grammar.
+    # A forced tool choice with a client-provided structured_outputs constraint
+    # is a conflict: reject it rather than silently reuse or replace it. (The
+    # parser-generated case is covered by the test above, which is not rejected.)
     @pytest.mark.asyncio
-    async def test_forced_choice_does_not_reuse_client_structured_outputs(
+    async def test_forced_choice_with_client_structured_outputs_is_rejected(
         self, tokenizer
     ):
+        with pytest.raises(InvalidArgument):
+            await prepost_module.preprocess_chat_request(
+                {
+                    **TOOL_REQUEST,
+                    "tool_choice": "required",
+                    "structured_outputs": {"grammar": 'root ::= "not_a_tool_call"'},
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=_FakePassthroughToolParser,
+                structural_tag_mode="on",
+            )
+
+    # A forced tool choice plus an explicit constraint is a client error (400),
+    # matching the Rust path, not a silently dropped constraint.
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_explicit_constraint_is_rejected(self, tokenizer):
+        with pytest.raises(InvalidArgument):
+            await prepost_module.preprocess_chat_request(
+                {
+                    **TOOL_REQUEST,
+                    "tool_choice": "required",
+                    "guided_regex": "yes|no",
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=_FakePassthroughToolParser,
+                structural_tag_mode="on",
+            )
+
+    # Legacy guided_* must resolve to a single constraint, not a merged dict.
+    @pytest.mark.asyncio
+    async def test_legacy_guided_fields_yield_single_constraint(self, tokenizer):
         result = await prepost_module.preprocess_chat_request(
             {
-                **TOOL_REQUEST,
-                "tool_choice": "required",
-                "structured_outputs": {"grammar": 'root ::= "not_a_tool_call"'},
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "guided_json": {"type": "object"},
+                "guided_regex": "\\d+",
             },
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
@@ -1293,12 +1338,9 @@ class TestToolCallGuidedDecoding:
                     return_value=(None, {"prompt_token_ids": [1]})
                 )
             ),
-            tool_parser_class=_FakePassthroughToolParser,
-            structural_tag_mode="on",
+            tool_parser_class=None,
         )
-
-        assert result.guided_decoding is not None
-        assert set(result.guided_decoding) == {"json"}
+        assert result.guided_decoding == {"json": {"type": "object"}}
 
     # Keep vLLM's guidance decisions aligned with the shared backend matrix.
     @pytest.mark.parametrize(

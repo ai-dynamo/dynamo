@@ -25,6 +25,8 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
+from dynamo.llm.exceptions import InvalidArgument
+
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 
 
@@ -199,18 +201,24 @@ def _build_assistant_guided_decoding(
     )
 
     request_extra = request.model_extra or {}
-    legacy_guidance = {
-        key: value
-        for key, value in (
-            ("json", request_extra.get("guided_json")),
-            ("regex", request_extra.get("guided_regex")),
-            ("grammar", request_extra.get("guided_grammar")),
-            ("choice", request_extra.get("guided_choice") or None),
-        )
-        if value is not None
-    }
+    # Pick a single legacy guided_* constraint by precedence rather than merging
+    # several keys into one dict: vLLM/Rust treat guided_decoding as exactly one
+    # constraint (GuidedDecodingOptions::validate rejects more than one), and the
+    # elif chain above already honors that invariant for structured_outputs.
+    legacy_guidance: dict[str, Any] = {}
+    for key, value in (
+        ("json", request_extra.get("guided_json")),
+        ("regex", request_extra.get("guided_regex")),
+        ("grammar", request_extra.get("guided_grammar")),
+        ("choice", request_extra.get("guided_choice") or None),
+    ):
+        if value is not None:
+            legacy_guidance = {key: value}
+            break
     if legacy_guidance:
-        guided_decoding = {**(guided_decoding or {}), **legacy_guidance}
+        # Legacy guided_* takes precedence over structured_outputs (prior
+        # behavior), but as a single constraint.
+        guided_decoding = legacy_guidance
         whitespace_pattern = request_extra.get("guided_whitespace_pattern")
         if whitespace_pattern is not None:
             guided_decoding["whitespace_pattern"] = whitespace_pattern
@@ -454,6 +462,15 @@ async def preprocess_chat_request(
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
     )
+    # A forced tool choice already constrains generation to a tool call, so an
+    # explicit response_format/guided_* constraint is contradictory. Reject it
+    # (InvalidArgument -> 400) rather than silently drop it, matching the Rust
+    # path (tool_choice.rs) and keeping the two frontends consistent.
+    if is_forced_tool_choice and assistant_guided_decoding is not None:
+        raise InvalidArgument(
+            "tool_choice forces a tool call and cannot be combined with an "
+            "explicit response_format or guided_* constraint."
+        )
     guided_decoding = (
         assistant_guided_decoding
         if assistant_guided_decoding is not None and not is_forced_tool_choice
