@@ -96,7 +96,13 @@ def test_workspace_version_matches_current_release(
     covers that direction -- so this test only exercises the published /
     lagging matrix, not workspace-tag equality.
     """
-    assert reference.release_tag == "1.3.0"
+    # Anchored to releases.data.ts rather than a literal: the tag moves every
+    # release, and a hardcoded one turns each bump into a failing test that
+    # says nothing about the property under test.
+    assert reference.release_tag == rust_api_discovery.validate_release_tag(
+        rust_api_discovery.parse_data_module(RELEASES_DATA),
+        reference.workspace_version,
+    )
     current = [
         crate
         for crate in reference.crates
