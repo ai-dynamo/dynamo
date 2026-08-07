@@ -23,6 +23,7 @@ import (
 	"sort"
 	"testing"
 
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -85,6 +86,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	scheme := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(scheme)
 	_ = nvidiacomv1beta1.AddToScheme(scheme)
+	_ = grovev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	builder := fake.NewClientBuilder().
@@ -121,6 +123,47 @@ func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
+}
+
+func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
+	tests := []struct {
+		name              string
+		hashSuffixEnabled bool
+	}{
+		{
+			name:              "enabled",
+			hashSuffixEnabled: true,
+		},
+		{
+			name: "disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			})
+			if tt.hashSuffixEnabled {
+				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+			}
+
+			rendered, err := groveRenderDeployment(dgd, nil)
+			require.NoError(t, err)
+			worker := rendered.GetComponentByName("worker")
+			require.NotNil(t, worker)
+
+			if tt.hashSuffixEnabled {
+				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+				require.NoError(t, err)
+				require.NotNil(t, worker.PodTemplate)
+				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+			} else {
+				assert.Nil(t, worker.PodTemplate)
+			}
+			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+		})
+	}
 }
 
 func TestShouldTriggerRollingUpdate(t *testing.T) {

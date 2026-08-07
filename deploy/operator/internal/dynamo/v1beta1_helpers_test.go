@@ -187,6 +187,62 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 	}
 }
 
+func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
+	tests := []struct {
+		name         string
+		enableSuffix bool
+		wantSuffix   bool
+	}{
+		{
+			name: "suffix disabled uses base namespace",
+		},
+		{
+			name:         "suffix enabled uses canonical worker hash",
+			enableSuffix: true,
+			wantSuffix:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			annotations := map[string]string(nil)
+			if tt.enableSuffix {
+				annotations = map[string]string{commonconsts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "grove",
+					Namespace:   "k8s",
+					Annotations: annotations,
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						ComponentType: commonconsts.ComponentTypeWorker,
+					}},
+				},
+			}
+			component := &dgd.Spec.Components[0]
+			want := dgd.GetDynamoNamespaceForComponent(component)
+			if tt.wantSuffix {
+				hash, err := ComputeDGDWorkersSpecHash(dgd)
+				if err != nil {
+					t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
+				}
+				want += "-" + hash
+			}
+
+			got, err := GetGroveRuntimeNamespace(dgd, component)
+			if err != nil {
+				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
+			}
+			if got != want {
+				t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{

@@ -19,6 +19,7 @@ package defaulting
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -26,7 +27,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -42,6 +45,31 @@ func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) contex
 				Version: kind.Version,
 				Kind:    kind.Kind,
 			},
+		},
+	})
+	return features.WithGate(ctx, features.Defaults())
+}
+
+func admissionCtxWithOld(
+	t *testing.T,
+	op admissionv1.Operation,
+	kind schema.GroupVersionKind,
+	old runtime.Object,
+) context.Context {
+	t.Helper()
+	raw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("marshal old admission object: %v", err)
+	}
+	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: op,
+			Kind: metav1.GroupVersionKind{
+				Group:   kind.Group,
+				Version: kind.Version,
+				Kind:    kind.Kind,
+			},
+			OldObject: runtime.RawExtension{Raw: raw},
 		},
 	})
 	return features.WithGate(ctx, features.Defaults())
@@ -103,7 +131,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			ctx: admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+				&nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"}}),
 			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -115,7 +144,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE preserves existing annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			ctx: admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+				&nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"}}),
 			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -174,6 +204,135 @@ func TestDGDDefaulter_Default(t *testing.T) {
 					consts.KubeAnnotationDynamoOperatorOriginVersion, got, tt.wantAnnotation)
 			}
 		})
+	}
+}
+
+func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
+	tests := []struct {
+		name       string
+		op         admissionv1.Operation
+		old        func() *nvidiacomv1beta1.DynamoGraphDeployment
+		mutate     func(*nvidiacomv1beta1.DynamoGraphDeployment)
+		wantSuffix bool
+	}{
+		{
+			name:       "CREATE enables suffix for a new Grove DGD",
+			op:         admissionv1.Create,
+			wantSuffix: true,
+		},
+		{
+			name: "UPDATE does not enable suffix for a frontend-only change",
+			op:   admissionv1.Update,
+			old:  groveWorkerHashSuffixTestDGD,
+			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
+					corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
+			},
+		},
+		{
+			name: "UPDATE enables suffix for the first legacy worker change",
+			op:   admissionv1.Update,
+			old:  groveWorkerHashSuffixTestDGD,
+			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				prefill := dgd.GetComponentByName("prefill")
+				prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
+			},
+			wantSuffix: true,
+		},
+		{
+			name: "UPDATE does not enable suffix when defaulting legacy worker fields",
+			op:   admissionv1.Update,
+			old:  groveWorkerHashSuffixTestDGD,
+		},
+		{
+			name: "UPDATE preserves a previously enabled suffix",
+			op:   admissionv1.Update,
+			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := groveWorkerHashSuffixTestDGD()
+				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+				return dgd
+			},
+			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixEnabled)
+			},
+			wantSuffix: true,
+		},
+		{
+			name: "UPDATE ignores a user-supplied enabled annotation without a worker change",
+			op:   admissionv1.Update,
+			old:  groveWorkerHashSuffixTestDGD,
+			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var old *nvidiacomv1beta1.DynamoGraphDeployment
+			var dgd *nvidiacomv1beta1.DynamoGraphDeployment
+			if tt.old == nil {
+				dgd = groveWorkerHashSuffixTestDGD()
+			} else {
+				old = tt.old()
+				dgd = old.DeepCopy()
+			}
+			if tt.mutate != nil {
+				tt.mutate(dgd)
+			}
+
+			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			if old != nil {
+				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, old)
+			}
+			ctx = features.WithGate(ctx, features.Gates{Grove: true})
+
+			if err := NewDGDDefaulter("0.9.0").Default(ctx, dgd); err != nil {
+				t.Fatalf("Default() unexpected error: %v", err)
+			}
+			gotSuffix := dgd.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled] == "true"
+			if gotSuffix != tt.wantSuffix {
+				t.Errorf("worker hash suffix enabled = %t, want %t", gotSuffix, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUpdateWithoutOldDGD(t *testing.T) {
+	t.Parallel()
+
+	dgd := groveWorkerHashSuffixTestDGD()
+	ctx := admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	ctx = features.WithGate(ctx, features.Gates{Grove: true})
+
+	err := NewDGDDefaulter("0.9.0").Default(ctx, dgd)
+	if err == nil {
+		t.Fatal("Default() error = nil, want error for UPDATE without old DynamoGraphDeployment")
+	}
+}
+
+func groveWorkerHashSuffixTestDGD() *nvidiacomv1beta1.DynamoGraphDeployment {
+	component := func(name string, componentType nvidiacomv1beta1.ComponentType, image string) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+		return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: name,
+			ComponentType: componentType,
+			PodTemplate: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: image}}},
+			},
+		}
+	}
+	prefill := component("prefill", nvidiacomv1beta1.ComponentTypePrefill, "registry.example/dynamo-worker:1.4.0")
+	prefill.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "MODEL_MAX_LEN", Value: "4096"}}
+	return &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				prefill,
+				component("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0"),
+			},
+		},
 	}
 }
 
@@ -240,7 +399,11 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				},
 			}
 
-			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
+			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			if tt.op == admissionv1.Update {
+				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, dgd.DeepCopy())
+			}
+			if err := defaulter.Default(ctx, dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
@@ -410,6 +573,9 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				},
 			}
 			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			if tt.op == admissionv1.Update {
+				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, dgd.DeepCopy())
+			}
 			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
 
 			if err := defaulter.Default(ctx, dgd); err != nil {
@@ -460,5 +626,32 @@ func TestDGDV1Alpha1Defaulter_Default(t *testing.T) {
 	}
 	if got := dgd.Spec.Services["worker"].Replicas; got == nil || *got != 1 {
 		t.Errorf("worker replicas = %v, want 1", got)
+	}
+}
+
+func TestDGDV1Alpha1Defaulter_EnablesSuffixForWorkerUpdate(t *testing.T) {
+	old := &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Envs:          []corev1.EnvVar{{Name: "MODEL_MAX_LEN", Value: "4096"}},
+				},
+			},
+		},
+	}
+	updated := old.DeepCopy()
+	updated.Spec.Services["worker"].Envs[0].Value = "8192"
+	ctx := admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1alpha1.DynamoGraphDeploymentGVK, old)
+	ctx = features.WithGate(ctx, features.Gates{Grove: true})
+	defaulter := &dgdV1Alpha1Defaulter{defaulter: NewDGDDefaulter("0.9.0")}
+
+	if err := defaulter.Default(ctx, updated); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+	if got := updated.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled]; got != "true" {
+		t.Errorf("worker hash suffix annotation = %q, want true", got)
 	}
 }
