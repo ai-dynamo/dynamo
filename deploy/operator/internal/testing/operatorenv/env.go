@@ -49,6 +49,9 @@ type AdmissionWebhooks struct {
 	// BypassUsers excludes named API users from validating admission.
 	// It is intended for seeding legacy states that current admission rejects.
 	BypassUsers []string
+	// MutatingBypassUsers excludes named API users from mutating admission.
+	// It is intended for seeding legacy states before exercising current defaulting.
+	MutatingBypassUsers []string
 }
 
 // WebhookSetupOptions contains the effective operator settings passed to SetupWebhooks.
@@ -230,6 +233,7 @@ func webhookInstallOptions(opts Options) (envtest.WebhookInstallOptions, error) 
 	}
 	install := envtest.WebhookInstallOptions{}
 	if opts.Admission.Mutating {
+		addMutatingBypassUsers(mutating, opts.Admission.MutatingBypassUsers)
 		install.MutatingWebhooks = mutating
 	}
 	if opts.Admission.Validating {

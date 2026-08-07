@@ -26,11 +26,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
 	groveSuffixTestTimeout  = 10 * time.Second
 	groveSuffixTestInterval = 100 * time.Millisecond
+	legacyGroveDGDSeeder    = "operatorenv-grove-legacy-seeder"
 )
 
 func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
@@ -47,13 +49,63 @@ func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
 	waitForGroveWorkerHashSuffixes(t, ctx, env, enabled, wantHash)
 }
 
+func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
+	ctx := context.Background()
+	env := newGroveWorkerHashSuffixTestEnv(t)
+	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "existing-without-suffix")
+	createLegacyGroveWorkerHashSuffixTestDGD(t, ctx, env, dgd)
+	require.Empty(t, dgd.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
+
+	startGroveWorkerHashSuffixTestController(t, env)
+	waitForGroveWorkerHashSuffixesAbsent(t, ctx, env, dgd)
+
+	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	frontend := current.GetComponentByName("frontend")
+	frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
+	require.NoError(t, env.Client().Update(ctx, current))
+	waitForGroveFrontendEnv(t, ctx, env, current, "FRONTEND_CONFIG_REVISION", "2")
+	waitForGroveWorkerHashSuffixesAbsent(t, ctx, env, current)
+
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	prefill := current.GetComponentByName("prefill")
+	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
+	require.NoError(t, env.Client().Update(ctx, current))
+
+	enabled := waitForGroveWorkerHashSuffixEnabled(t, ctx, env, dgd.Name)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(enabled)
+	require.NoError(t, err)
+	waitForGroveWorkerHashSuffixes(t, ctx, env, enabled, wantHash)
+}
+
 func newGroveWorkerHashSuffixTestEnv(t *testing.T) *operatorenv.TestEnv {
 	t.Helper()
 	return operatorenv.New(operatorenv.Options{
-		Admission:     operatorenv.AdmissionWebhooks{Mutating: true, Validating: true},
+		Admission: operatorenv.AdmissionWebhooks{
+			Mutating:            true,
+			Validating:          true,
+			MutatingBypassUsers: []string{legacyGroveDGDSeeder},
+		},
 		SetupWebhooks: setupProductionWebhooks,
 		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}},
 	}).RunT(t)
+}
+
+func createLegacyGroveWorkerHashSuffixTestDGD(
+	t *testing.T,
+	ctx context.Context,
+	env *operatorenv.TestEnv,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	t.Helper()
+	config := env.RESTConfig()
+	config.Impersonate.UserName = legacyGroveDGDSeeder
+	config.Impersonate.Groups = []string{"system:masters"}
+	legacyClient, err := client.New(config, client.Options{Scheme: env.Client().Scheme()})
+	require.NoError(t, err)
+	require.NoError(t, legacyClient.Create(ctx, dgd))
 }
 
 func startGroveWorkerHashSuffixTestController(t *testing.T, env *operatorenv.TestEnv) {
@@ -188,6 +240,61 @@ func waitForGroveWorkerHashSuffixes(
 		return true, "Grove worker cliques have the expected suffix"
 	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker cliques did not receive the expected suffix")
 	return pcs
+}
+
+func waitForGroveWorkerHashSuffixesAbsent(
+	t *testing.T,
+	ctx context.Context,
+	env *operatorenv.TestEnv,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	t.Helper()
+	pcs := getGroveWorkerHashSuffixTestPCS(t, ctx, env, dgd)
+	for _, clique := range pcs.Spec.Template.Cliques {
+		component := clique.Labels[consts.KubeLabelDynamoComponent]
+		if component != "prefill" && component != "decode" {
+			continue
+		}
+		main := findMainContainer(clique.Spec.PodSpec.Containers)
+		require.NotNil(t, main, "%s clique %q has no main container", component, clique.Name)
+		require.Nil(t, findEnv(main.Env, consts.DynamoNamespaceWorkerSuffixEnvVar),
+			"%s clique %q unexpectedly has a worker suffix", component, clique.Name)
+	}
+}
+
+func waitForGroveFrontendEnv(
+	t *testing.T,
+	ctx context.Context,
+	env *operatorenv.TestEnv,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	name, want string,
+) {
+	t.Helper()
+	key := types.NamespacedName{
+		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Namespace: dgd.Namespace,
+	}
+	dynamotesting.Eventually(t, func() (bool, string) {
+		pcs := &grovev1alpha1.PodCliqueSet{}
+		if err := env.Client().Get(ctx, key, pcs); err != nil {
+			return false, fmt.Sprintf("get PodCliqueSet: %v", err)
+		}
+		for _, clique := range pcs.Spec.Template.Cliques {
+			if clique.Labels[consts.KubeLabelDynamoComponent] != "frontend" {
+				continue
+			}
+			main := findMainContainer(clique.Spec.PodSpec.Containers)
+			if main == nil {
+				return false, fmt.Sprintf("frontend clique %q has no main container", clique.Name)
+			}
+			env := findEnv(main.Env, name)
+			if env == nil || env.Value != want {
+				return false, fmt.Sprintf("frontend clique %q env %s = %v, want %q", clique.Name, name, env, want)
+			}
+			return true, "frontend update reconciled"
+		}
+		return false, "PodCliqueSet has no frontend clique"
+	}, groveSuffixTestTimeout, groveSuffixTestInterval, "frontend update was not reconciled")
 }
 
 func findMainContainer(containers []corev1.Container) *corev1.Container {
