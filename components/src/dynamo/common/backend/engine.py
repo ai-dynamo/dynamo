@@ -446,8 +446,9 @@ class ForcedTokenSequenceSpec:
 class PythonProcessorSpec:
     """Factory for an in-process Python logits processor.
 
-    This entry is suitable only when the engine integration can invoke the
-    factory directly. Serialization helpers reject it.
+    No built-in backend currently realizes this entry. It is reserved for
+    custom or future in-process integrations that invoke the factory directly.
+    Serialization helpers reject it.
     """
 
     factory: Callable[[], "BaseLogitsProcessor"]

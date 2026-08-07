@@ -128,6 +128,15 @@ def test_logits_processors_for_request(mode, generation_only, expected_count):
     )
 
 
+def test_logits_processors_for_request_without_spec():
+    assert (
+        logits_processors_for_request(
+            None, disaggregation_mode=DisaggregationMode.DECODE
+        )
+        == []
+    )
+
+
 def test_logits_processor_entries_round_trip():
     entries = [ForcedTokenSequenceSpec(token_ids=(7, 8, 9), eos_token_id=2)]
     payload = serialize_logits_processor_entries(entries)
