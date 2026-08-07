@@ -21,6 +21,10 @@ new_key_type! {
 pub struct KvPageId(usize);
 
 impl KvPageId {
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+
     #[cfg(test)]
     pub(crate) fn from_token_index(index: usize, page_size: usize) -> Self {
         Self(index / page_size)

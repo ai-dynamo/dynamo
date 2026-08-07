@@ -59,6 +59,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -82,6 +85,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
@@ -246,6 +250,30 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="TLS certificate key path, PEM format.",
             arg_type=pathlib.Path,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
         )
 
         # Router options (shared with dynamo.router)
@@ -437,6 +465,16 @@ class FrontendArgGroup(ArgGroup):
                 "with the complete reasoning block once thinking ends. "
                 "Can be combined with --enable-streaming-tool-dispatch."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--reasoning-field-name",
+            env_var="DYN_REASONING_FIELD_NAME",
+            default="reasoning_content",
+            help=(
+                "OpenAI-compatible response field used for emitted reasoning content."
+            ),
+            choices=["reasoning_content", "reasoning"],
         )
         # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
         # Both definitions are needed: runtime_args controls the Rust-native

@@ -148,11 +148,11 @@ fn build_request_envelope<T>(
     recv_conn_info: ConnectionInfo,
     send_conn_info: Option<ConnectionInfo>,
     request: Option<&T>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<bytes::Bytes, Error>
 where
     T: serde::Serialize,
 {
-    let payload_codec = RequestPlanePayloadCodec::configured();
     let request_id = context.id();
     let request_type = if send_conn_info.is_some() {
         RequestType::ManyIn
@@ -199,6 +199,12 @@ where
     let codec = TwoPartCodec::default();
     let buffer = codec.encode_message(msg)?;
     Ok(buffer)
+}
+
+fn payload_codec_for_worker(instance: Option<&Instance>) -> RequestPlanePayloadCodec {
+    instance
+        .and_then(|instance| instance.request_plane_codec)
+        .unwrap_or(RequestPlanePayloadCodec::Json)
 }
 
 /// Await the network request-stream dial-in (if `request_stream_provider` is `Some`)
@@ -368,7 +374,9 @@ impl<T> AddressedRequest<T> {
         Self::with_instance(request, address, instance)
     }
 
-    pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
+    /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
+    /// impl can read the routed address + instance.
+    pub fn into_parts(self) -> (T, String, Option<Instance>) {
         (self.request, self.address, self.instance)
     }
 }
@@ -430,7 +438,7 @@ impl AddressedPushRouter {
     /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
     /// sugar, so we just do it inline here. Will consider only if we do want to call this from
     /// typed erased AsyncEngine impls.
-    pub async fn generate_bidirectional<T, U>(
+    pub async fn dispatch_bidirectional<T, U>(
         &self,
         instance: Instance,
         address: String,
@@ -481,7 +489,7 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let enable_request_stream = input_stream.is_some();
-        let payload_codec = RequestPlanePayloadCodec::configured();
+        let payload_codec = payload_codec_for_worker(instance);
 
         // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
         // which simplifies the cancellation of registration on error. Each side is
@@ -525,6 +533,7 @@ impl AddressedPushRouter {
             recv_registered.connection_info.clone(),
             send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
+            payload_codec,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
@@ -765,12 +774,102 @@ where
     }
 }
 
+/// Transport seam beneath `PushRouter`: given an already-selected worker (typed
+/// request + resolved address), dispatch the final hop and return a typed stream.
+/// Selection, occupancy, fault detection, and migration stay in `PushRouter`
+/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
+/// (the request plane) is the default impl.
+///
+/// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
+/// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
+/// `ResourceExhausted` / `Cancelled`), or `wrap_with_fault_detection`'s
+/// report-down / overload / migration won't fire.
+///
+/// The removal watcher behind `on_instance_removed` / `on_instance_added` is
+/// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
+/// holding per-instance state must share it per endpoint (the default cleans up
+/// shared per-runtime state, so it is unaffected).
+#[async_trait::async_trait]
+pub trait StreamingDispatch<T, U>: Send + Sync
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    /// Unary final hop: typed request in, typed response stream out.
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error>;
+
+    /// Bidirectional final hop (streaming input).
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error>;
+
+    /// Discovery-driven cleanup when an instance leaves — the request plane
+    /// cancels its call-home streams; another transport frees per-instance state.
+    async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
+
+    /// Discovery-driven notification when an instance (re)appears — the request
+    /// plane clears its tombstone.
+    async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
+}
+
+#[async_trait::async_trait]
+impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        // Delegate to the existing `AsyncEngine` impl (still used directly by the
+        // KV recovery worker-query path); behavior unchanged.
+        <Self as AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error>>::generate(
+            self, request,
+        )
+        .await
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error> {
+        self.dispatch_bidirectional(instance, address, input).await
+    }
+
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        let n = self.cancel_instance_streams(id).await;
+        if n > 0 {
+            tracing::warn!(
+                namespace = %id.namespace,
+                component = %id.component,
+                endpoint = %id.endpoint,
+                instance_id = id.instance_id,
+                cancelled = n,
+                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+            );
+        }
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        self.clear_instance_tombstone(id).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestPlanePayloadCodec,
-        RequestType, ResponseType, serialize_control_message,
+        RequestType, ResponseType, TwoPartCodec, build_request_envelope, payload_codec_for_worker,
+        serialize_control_message,
     };
+    use crate::{
+        component::{Instance, TransportType},
+        pipeline::Context,
+    };
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
@@ -787,6 +886,49 @@ mod tests {
             frontend_send_ts_ns: None,
             request_stream_connection_info: None,
         }
+    }
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+    struct TestRequest {
+        value: u64,
+    }
+
+    #[test]
+    fn legacy_worker_without_codec_metadata_receives_json() {
+        let worker = Instance {
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            namespace: "default".to_string(),
+            instance_id: 42,
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let payload_codec = payload_codec_for_worker(Some(&worker));
+        assert_eq!(payload_codec, RequestPlanePayloadCodec::Json);
+
+        let request = TestRequest { value: 123 };
+        let buffer = build_request_envelope(
+            &Context::new(()),
+            ConnectionInfo {
+                transport: "tcp".to_string(),
+                info: "{}".to_string(),
+            },
+            None,
+            Some(&request),
+            payload_codec,
+        )
+        .expect("legacy-worker request envelope should encode");
+        let message = TwoPartCodec::default()
+            .decode_message(buffer)
+            .expect("request envelope should decode");
+
+        let control: RequestControlMessage = serde_json::from_slice(&message.header).unwrap();
+        assert_eq!(control.payload_codec, RequestPlanePayloadCodec::Json);
+        assert_eq!(
+            serde_json::from_slice::<TestRequest>(&message.data).unwrap(),
+            request
+        );
     }
 
     #[test]

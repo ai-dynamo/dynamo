@@ -64,6 +64,7 @@ from dynamo.common.rl import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
@@ -87,12 +88,14 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
+from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
-from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
-from .multimodal_utils.custom_encoder_adapter import (
+from .multimodal_utils.custom_encoder import (
+    AsyncVisionEncoder,
     CustomEncoderAdapter,
+    VisionEncoderBackend,
     create_custom_encoder_adapter,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
@@ -102,7 +105,6 @@ from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
-from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -717,8 +719,11 @@ def build_sampling_params(
             sampling_options.update(passthrough_sampling_options)
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
+        json_schema = guided_decoding.get("json")
+        if json_schema is not None:
+            reject_nonprogressing_guided_json_ref_cycles(json_schema)
         sampling_params.structured_outputs = StructuredOutputsParams(
-            json=guided_decoding.get("json"),
+            json=json_schema,
             regex=guided_decoding.get("regex"),
             choice=guided_decoding.get("choice"),
             grammar=guided_decoding.get("grammar"),
@@ -1148,7 +1153,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             backend,
             self.model_config,
             config.engine_args,
-            self.engine_client.vllm_config,
         )
         encoder = AsyncVisionEncoder(backend)
         encoder.load(config.model)
@@ -2068,6 +2072,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         runtime_config = ModelRuntimeConfig()
         runtime_config.context_length = self.model_max_len
+        publish_vllm_token_budget(runtime_config, self.model_max_len)
         runtime_config.kv_event_publishing_enabled = getattr(
             self.config, "use_kv_events", False
         )
@@ -3098,10 +3103,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
-            encodings = await self._custom_encoder.encode(image_urls)
+            artifacts = await self._custom_encoder.encode(image_urls)
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
-                encodings,
+                artifacts,
             )
         except Exception as exc:
             msg = f"CustomEncoder failed: {exc}"
@@ -3111,7 +3116,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
-            len(encodings),
+            len(artifacts),
         )
         return prepared, None
 
@@ -3363,14 +3368,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the per-request deferred guard so engine_client.abort() never fires in
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(

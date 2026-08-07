@@ -20,6 +20,7 @@ use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -208,6 +209,12 @@ impl LocalModelBuilder {
         self.frontend_api_config
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn reasoning_field(&mut self, reasoning_field: ReasoningField) -> &mut Self {
+        self.frontend_api_config
+            .set_reasoning_field(reasoning_field);
         self
     }
 
@@ -464,11 +471,12 @@ pub async fn register_model_card(
     let model_suffix = derive_lora_suffix(lora_name);
 
     let discovery = endpoint.drt().discovery();
+    let wire_card = card.for_mdc_wire();
     let spec = DiscoverySpec::from_model_with_suffix(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),
         endpoint.name().to_string(),
-        card,
+        &wire_card,
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
@@ -550,6 +558,10 @@ impl LocalModel {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 
     pub fn tls_cert_path(&self) -> Option<&Path> {
