@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -606,27 +607,40 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
 	})
 
-	t.Run("failover targets shape every engine container", func(t *testing.T) {
+	t.Run("paused restore shapes only named target containers", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "engine-0", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 				{Name: "engine-1", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
-				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
+				{Name: "engine-2", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+				{Name: "gms-server", Image: "gms:latest", Command: []string{"gms-server"}, Args: []string{"--serve"}, Env: []corev1.EnvVar{{Name: "GMS", Value: "server"}}},
+				{Name: "gms-loader", Image: "gms:latest", Command: []string{"gms-loader"}, Args: []string{"--load"}, Env: []corev1.EnvVar{{Name: "GMS", Value: "loader"}}},
+				{Name: "user-helper", Image: "helper:latest", Command: []string{"helper"}, Args: []string{"run"}, Env: []corev1.EnvVar{{Name: "HELPER", Value: "true"}}},
 			},
 		}
+		nonTargets := make(map[string]corev1.Container)
+		for _, name := range []string{"gms-server", "gms-loader", "user-helper"} {
+			nonTargets[name] = *findContainer(podSpec, name).DeepCopy()
+		}
 		info := &CheckpointInfo{
-			Enabled:                 true,
-			Ready:                   true,
-			Hash:                    testHash,
-			RestoreTargetContainers: []string{"engine-0", "engine-1"},
+			Enabled: true,
+			Ready:   true,
+			Hash:    testHash,
+			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+				Enabled: true,
+				Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+			},
+			RestoreTargetContainers: []string{"engine-0", "engine-1", "engine-2"},
+			RestorePaused:           true,
 		}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		for _, name := range []string{"engine-0", "engine-1"} {
+		for _, name := range info.RestoreTargetContainers {
 			c := findContainer(podSpec, name)
 			require.NotNil(t, c, "container %q not found", name)
 			assertRestoreStandbyMode(t, c, []string{"python3"}, []string{"-m", "dynamo.vllm"})
+			assert.Contains(t, c.Env, corev1.EnvVar{Name: snapshotRestorePausedEnv, Value: "1"})
 			gotSubPath := ""
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
@@ -635,9 +649,36 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			}
 			assert.Equal(t, name, gotSubPath, "engine %s control-volume subPath", name)
 		}
-		sidecar := findContainer(podSpec, "sidecar")
-		require.NotNil(t, sidecar)
-		assert.Equal(t, []string{"sidecar"}, sidecar.Command, "sidecar must not be rewritten")
+		for name, before := range nonTargets {
+			after := findContainer(podSpec, name)
+			require.NotNil(t, after)
+			assert.True(t, equality.Semantic.DeepEqual(before, *after), "%s must cold-start unchanged", name)
+		}
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		count := 0
+		for i := range podSpec.InitContainers {
+			if podSpec.InitContainers[i].Name == gms.ServerContainerName {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count)
+	})
+
+	t.Run("paused restore rejects unsupported GMS mode", func(t *testing.T) {
+		podSpec := testPodSpec()
+		info := &CheckpointInfo{
+			Enabled:       true,
+			Ready:         true,
+			Hash:          testHash,
+			RestorePaused: true,
+			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+				Enabled: true,
+				Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+			},
+		}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.ErrorContains(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile), `mode "interPod" is not implemented`)
 	})
 
 	t.Run("ready checkpoint uses configured PVC storage without daemonset discovery", func(t *testing.T) {

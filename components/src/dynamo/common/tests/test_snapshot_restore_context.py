@@ -13,11 +13,14 @@ from dynamo.common.snapshot.constants import (
     RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
+    SNAPSHOT_RESTORE_PAUSED_ENV,
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 from dynamo.common.snapshot.restore_context import (
+    _restore_should_remain_paused,
     apply_snapshot_restore_env,
     refresh_snapshot_restore_config,
+    write_snapshot_restore_context,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -67,6 +70,46 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
+
+
+def test_write_restore_context_is_allowlisted(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_ID", "2")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/gms/failover.lock")
+    monkeypatch.setenv("DYN_VLLM_GMS_SHADOW_MODE", "true")
+    monkeypatch.setenv(SNAPSHOT_RESTORE_PAUSED_ENV, "1")
+    monkeypatch.setenv("SECRET_TOKEN", "do-not-copy")
+
+    write_snapshot_restore_context(str(tmp_path))
+
+    context_path = tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE
+    captured = json.loads(context_path.read_text(encoding="utf-8"))["env"]
+    assert captured["ENGINE_ID"] == "2"
+    assert captured["FAILOVER_LOCK_PATH"] == "/gms/failover.lock"
+    assert captured["DYN_VLLM_GMS_SHADOW_MODE"] == "true"
+    assert captured[SNAPSHOT_RESTORE_PAUSED_ENV] == "1"
+    assert "SECRET_TOKEN" not in captured
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, False), ("0", False), ("1", True)],
+)
+def test_restore_paused_marker_is_strict(monkeypatch, tmp_path, value, expected):
+    env = {} if value is None else {SNAPSHOT_RESTORE_PAUSED_ENV: value}
+    write_restore_context(monkeypatch, tmp_path, env)
+
+    assert _restore_should_remain_paused() is expected
+
+
+def test_restore_paused_marker_rejects_other_values(monkeypatch, tmp_path):
+    write_restore_context(
+        monkeypatch,
+        tmp_path,
+        {SNAPSHOT_RESTORE_PAUSED_ENV: "true"},
+    )
+
+    with pytest.raises(RuntimeError, match="must be 0, 1, or null"):
+        _restore_should_remain_paused()
 
 
 async def test_refresh_snapshot_restore_config_reparses_runtime_fields(

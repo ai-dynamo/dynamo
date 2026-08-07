@@ -11,12 +11,32 @@ from dynamo.common.snapshot.lifecycle import (
     SnapshotConfig,
     configure_snapshot_capture_env,
 )
+from dynamo.common.snapshot.restore_context import (
+    parse_snapshot_restore_runtime_config,
+    refresh_snapshot_restore_config,
+)
+from dynamo.common.utils.env import env_bool
 
 from .args import Config
 from .handlers import VllmEnginePauseController
 from .worker_factory import EngineSetupResult
 
 logger = logging.getLogger(__name__)
+
+
+async def refresh_vllm_snapshot_restore_config(
+    config: Config,
+    argv: list[str] | None,
+    *,
+    restore_paused: bool,
+) -> Config:
+    config = await refresh_snapshot_restore_config(
+        config,
+        lambda: parse_snapshot_restore_runtime_config(argv),
+    )
+    if restore_paused:
+        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+    return config
 
 
 async def prepare_snapshot_engine(

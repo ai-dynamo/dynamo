@@ -17,6 +17,7 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
+    SNAPSHOT_RESTORE_PAUSED_ENV,
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 
@@ -116,9 +117,25 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 def apply_snapshot_restore_env() -> dict[str, str | None]:
     """Load restore-context JSON and apply its runtime env to ``os.environ``."""
 
-    # Load the restore-context JSON captured by the restore standby process. It
-    # contains the target container's actual restore-time env after Kubernetes
-    # resolved literals, Downward API values, ConfigMaps, and Secrets.
+    env_config, source = _load_snapshot_restore_env()
+    return _apply_restore_env(env_config, source=source)
+
+
+def _restore_should_remain_paused() -> bool:
+    """Return whether the target remains application-paused after restore."""
+
+    env_config, _ = _load_snapshot_restore_env()
+    value = env_config.get(SNAPSHOT_RESTORE_PAUSED_ENV)
+    if value in (None, "0"):
+        return False
+    if value == "1":
+        return True
+    raise RuntimeError(
+        f"snapshot restore context {SNAPSHOT_RESTORE_PAUSED_ENV} must be 0, 1, or null"
+    )
+
+
+def _load_snapshot_restore_env() -> tuple[Mapping[str, object], str]:
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
     if not context_path.is_file():
@@ -137,7 +154,7 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
     env_config = restore_context.get("env")
     if not isinstance(env_config, dict):
         raise RuntimeError("snapshot restore context requires an object env field")
-    return _apply_restore_env(env_config, source=source)
+    return env_config, source
 
 
 def write_snapshot_restore_context(control_dir: str | None = None) -> None:
