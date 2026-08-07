@@ -4689,6 +4689,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         }
     }
 

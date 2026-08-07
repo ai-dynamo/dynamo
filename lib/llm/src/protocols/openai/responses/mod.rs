@@ -63,6 +63,22 @@ pub struct NvCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+
+    /// Extra args to pass to the chat template rendering context.
+    /// Also accepts "chat_template_kwargs" as an alias for compatibility.
+    ///
+    /// Declared here rather than inherited from the flattened `inner`:
+    /// `CreateResponse` has no equivalent field, and because `inner` is
+    /// flattened, an undeclared top-level key is silently swallowed rather
+    /// than rejected. Mirrors the identically named field on
+    /// `NvCreateChatCompletionRequest`, which is where
+    /// `TryFrom<NvCreateResponse>` forwards it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
+    pub chat_template_args: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -803,7 +819,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
-            chat_template_args: None,
+            chat_template_args: resp.chat_template_args,
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
@@ -1224,6 +1240,7 @@ mod tests {
                 annotations: Some(vec!["debug".into(), "trace".into()]),
                 ..Default::default()
             }),
+            chat_template_args: None,
         }
     }
 
@@ -1301,6 +1318,71 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_chat_template_args_forwarded_to_chat_completion() {
+        // Deserialize from the wire rather than building the struct by hand:
+        // the field only reaches the conversion if serde binds the top-level
+        // key past the flattened `inner`.
+        let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_args": { "enable_thinking": true }
+        }))
+        .unwrap();
+
+        let chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+
+        let args = chat_req
+            .chat_template_args
+            .expect("chat_template_args must survive the Responses to Chat conversion");
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn test_responses_chat_template_kwargs_alias_forwarded_to_chat_completion() {
+        // vLLM-style spelling; accepted on /v1/chat/completions, so a client
+        // should not have to respell it for /v1/responses.
+        let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_kwargs": { "enable_thinking": true }
+        }))
+        .unwrap();
+
+        let chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+
+        let args = chat_req
+            .chat_template_args
+            .expect("chat_template_kwargs alias must bind chat_template_args");
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn test_responses_without_chat_template_args_converts_to_none() {
+        // Not an empty map: an empty map would render a different prompt and
+        // would defeat `skip_serializing_if` on the chat request.
+        let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello"
+        }))
+        .unwrap();
+
+        let chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+
+        assert!(chat_req.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn test_responses_chat_template_args_rejects_non_object() {
+        let err = serde_json::from_value::<NvCreateResponse>(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_args": "enable_thinking"
+        }));
+
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn test_instructions_prepended_as_system_message() {
         let req = NvCreateResponse {
             inner: CreateResponse {
@@ -1310,6 +1392,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1354,6 +1437,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1433,6 +1517,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1474,6 +1559,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1517,6 +1603,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1565,6 +1652,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1604,6 +1692,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1638,6 +1727,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1680,6 +1770,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1741,6 +1832,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1813,6 +1905,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1870,6 +1963,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1925,6 +2019,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1972,6 +2067,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2037,6 +2133,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2116,6 +2213,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2189,6 +2287,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2258,6 +2357,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2324,6 +2424,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2381,6 +2482,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2420,6 +2522,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
