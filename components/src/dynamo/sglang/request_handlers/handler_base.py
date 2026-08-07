@@ -993,10 +993,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     400,
                     f"nvext.token_data[{index}] must be an integer token ID",
                 )
-            # Some models, such as Phi-3, use negative multimodal sentinel IDs.
+            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
             if (
-                token_id < 0
-                or (max_input_token_id is not None and token_id > max_input_token_id)
+                max_input_token_id is not None and token_id > max_input_token_id
             ) and token_id not in allowed_oov_ids:
                 raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 

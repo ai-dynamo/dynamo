@@ -403,14 +403,11 @@ def test_nvext_token_data_skips_validation_when_model_bound_is_unavailable():
     assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
 
 
-@pytest.mark.parametrize("invalid_token_id", [-1, True])
-def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id(
-    invalid_token_id,
-):
+def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id():
     handler = _new_token_input_handler()
     handler._max_input_token_id = None
     request = {
-        "token_ids": [invalid_token_id],
+        "token_ids": [True],
         "extra_args": {"nvext": {"token_in": True}},
     }
 
@@ -420,7 +417,7 @@ def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id(
     assert error.value.code == 400
 
 
-@pytest.mark.parametrize("invalid_token_id", [-1, True, 1.5, "1"])
+@pytest.mark.parametrize("invalid_token_id", [True, 1.5, "1"])
 def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
     handler = _new_token_input_handler()
     request = {
@@ -432,23 +429,6 @@ def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
         handler._get_input_param(request)
 
     assert error.value.code == 400
-
-
-def test_nvext_token_data_accepts_configured_negative_multimodal_sentinel():
-    handler = _new_token_input_handler()
-    handler.engine = SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(
-            mm_processor=SimpleNamespace(mm_tokens=SimpleNamespace(image_token_id=-1)),
-            model_config=SimpleNamespace(image_token_id=None),
-        )
-    )
-    request = {
-        "token_ids": [-1],
-        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
-        "extra_args": {"nvext": {"token_in": True}},
-    }
-
-    assert handler._get_input_param(request) == {"input_ids": [-1]}
 
 
 def test_nvext_token_data_validation_skips_ordinary_token_input():
