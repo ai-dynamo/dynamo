@@ -597,14 +597,110 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 
 func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	want := ps.DeepCopy()
+	require.NoError(t, buildFailoverPod(want, 1, BackendFrameworkVLLM))
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{
+			Failover: &v1beta1.FailoverSpec{NumShadows: 1},
+		},
+	}
+	err := buildFailoverPodWithComponent(&ps, component, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
+	assert.Equal(t, want, &ps)
 
 	// 2 engines + 1 preserved sidecar
 	assert.Len(t, ps.Containers, 3)
 	assert.Equal(t, "engine-0", ps.Containers[0].Name)
 	assert.Equal(t, "engine-1", ps.Containers[1].Name)
 	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
+}
+
+func TestBuildFailoverPodWithComponent_ThreeDirectEngines(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm", vllmMasterPortFlag}
+	ps.Containers[0].Args = []string{"30000"}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{
+			Failover: &v1beta1.FailoverSpec{NumShadows: 2},
+		},
+	}
+
+	require.NoError(t, buildFailoverPodWithComponent(&ps, component, 1, BackendFrameworkVLLM))
+	require.Len(t, ps.Containers, 4)
+
+	used := map[int]bool{}
+	for i := range 3 {
+		engine := ps.Containers[i]
+		assert.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
+		master, found, err := tokenizedVLLMMasterPort(&engine)
+		require.NoError(t, err)
+		require.True(t, found)
+		env := envToMap(engine.Env)
+		for _, port := range []int{
+			master,
+			mustAtoi(t, env["DYN_SYSTEM_PORT"]),
+			mustAtoi(t, env["DYN_FORWARDPASS_METRIC_PORT"]),
+			mustAtoi(t, env["VLLM_NIXL_SIDE_CHANNEL_PORT"]),
+			mustAtoi(t, env["DYN_VLLM_KV_EVENT_PORT"]),
+		} {
+			assert.False(t, used[port], "port %d is duplicated", port)
+			used[port] = true
+		}
+	}
+	assert.Equal(t, "frontend-sidecar", ps.Containers[3].Name)
+}
+
+func TestBuildFailoverPodWithComponent_RollsBackInvalidPorts(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{
+			Failover: &v1beta1.FailoverSpec{NumShadows: 2},
+		},
+	}
+	for _, tt := range []struct {
+		name string
+		port string
+	}{
+		{name: "collision", port: strconv.Itoa(commonconsts.DynamoSystemPort)},
+		{name: "range", port: "65500"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ps := intraPodFailoverPodSpec()
+			ps.Containers[0].Args = []string{vllmMasterPortFlag, tt.port}
+			before := ps.DeepCopy()
+
+			err := buildFailoverPodWithComponent(&ps, component, 1, BackendFrameworkVLLM)
+			require.Error(t, err)
+			assert.Equal(t, before, &ps)
+		})
+	}
+}
+
+func TestTwoShadowIntraPodFailoverProfileError(t *testing.T) {
+	direct := corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}}
+	require.NoError(t, TwoShadowIntraPodFailoverProfileError(&direct, 1, "", ""))
+
+	for _, tt := range []struct {
+		name                string
+		container           corev1.Container
+		nodes               int32
+		backend             string
+		vllmExecutorBackend string
+	}{
+		{name: "shell", container: corev1.Container{Command: []string{"sh", "-c"}, Args: []string{"python3 -m dynamo.vllm"}}, nodes: 1, backend: "vllm"},
+		{name: "ray", container: corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", "--distributed-executor-backend", "ray"}}, nodes: 1, backend: "vllm"},
+		{name: "data parallel", container: corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", "--data-parallel-size", "2"}}, nodes: 1, backend: "vllm"},
+		{name: "multinode", container: direct, nodes: 2, backend: "vllm"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := TwoShadowIntraPodFailoverProfileError(
+				&tt.container,
+				tt.nodes,
+				tt.backend,
+				tt.vllmExecutorBackend,
+			)
+			require.ErrorContains(t, err, twoShadowIntraPodFailoverProfileMessage)
+		})
+	}
 }
 
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
@@ -744,7 +840,10 @@ func TestIsIntraPodFailoverEnabled(t *testing.T) {
 }
 
 func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
-	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
+	})
+	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames(component))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -804,4 +903,11 @@ func envToMap(envs []corev1.EnvVar) map[string]string {
 		m[e.Name] = e.Value
 	}
 	return m
+}
+
+func mustAtoi(t *testing.T, value string) int {
+	t.Helper()
+	port, err := strconv.Atoi(value)
+	require.NoError(t, err)
+	return port
 }
