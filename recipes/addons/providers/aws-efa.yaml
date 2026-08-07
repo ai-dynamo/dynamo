@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AWS EFA fabric profile.
+#
+# An agent materializes this onto a base DynamoGraphDeployment: it adds the fields
+# below to the disaggregated worker services, resolving every {{ ... }} @param from the
+# base recipe and target cluster. This is NOT a kustomize artifact — see ./README.md.
+#
+# EFA is the one fabric that is special on every axis: an arch-suffixed `-efa` image,
+# the FI_* libfabric env, AND a non-default KV backend (LIBFABRIC). The four UCX fabrics
+# carry none of that.
+provider: aws-efa
+fabric: efa
+
+target:
+  by: subComponentType          # match worker services by role — works for any worker name
+  match: [prefill, decode]
+
+image:
+  rule: "{base_tag}-efa-{arch}"  # @param arch: amd64 (H100/B200) | arm64 (GB200), from target nodes
+  verify: registry               # confirm the resulting tag exists before using it
+
+device:                          # added to resources.limits.custom AND requests.custom
+  vpc.amazonaws.com/efa: "{{ gpus_per_worker * 4 }}"   # @param  p5.48xlarge = 32 EFA / 8 GPU = 4/GPU
+
+securityContext:                 # required for fi_mr_reg on CUDA VRAM
+  privileged: true
+  capabilities: { add: [IPC_LOCK, SYS_PTRACE] }
+
+env:                             # appended to each worker's env — engine-neutral fabric layer
+  FI_PROVIDER: efa
+  FI_EFA_USE_DEVICE_RDMA: "1"
+  FI_EFA_ENABLE_SHM_TRANSFER: "0"
+  FI_LOG_LEVEL: warn
+
+kv_backend: LIBFABRIC            # non-default -> must be selected per engine below
+backend:                         # only the base recipe's engine applies
+  vllm:
+    env:
+      DYN_KVBM_NIXL_BACKEND_LIBFABRIC: "true"
+      DYN_KVBM_NIXL_BACKEND_UCX: "false"
+    arg: 'append "LIBFABRIC" to --kv-transfer-config .kv_connector_extra_config.backends'
+  trtllm:
+    env: { TRTLLM_NIXL_KVCACHE_BACKEND: LIBFABRIC }   # else NIXL defaults to UCX -> TCP fallback
+    configmap: 'cache_transceiver_config.backend: NIXL in the engine config'
+  sglang:
+    env: { SGLANG_DISAGGREGATION_NIXL_BACKEND: LIBFABRIC }   # else NIXL defaults to UCX -> TCP fallback
+    arg: '--disaggregation-transfer-backend nixl (usually already in the base)'
+
+skip: [base_image_choice, storage_pvc, volume_mounts]
