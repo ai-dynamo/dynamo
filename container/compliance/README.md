@@ -4,6 +4,7 @@ Inline pipeline that generates per-image license NOTICES at build time, gates th
 build on a license policy, and ships a base-image SBOM corpus that drives both
 baseline subtraction (so NOTICES attributes only what we redistribute on top of the
 upstream base) and a CI drift check that fails fast when a base image moves.
+CI can explicitly allow a policy failure for a branch-scoped exception; see below.
 
 There is no separate extraction job anymore. Every shipped image builds a `licenses`
 stage (see `../templates/compliance.Dockerfile`) that runs the generators against its
@@ -42,8 +43,12 @@ python3 -m compliance.generators \
 Each generator emits a `NOTICES-<Ecosystem>.txt` (with the full upstream license text per
 package where available) plus a `<ecosystem>-deps.csv` into `/legal`, then the policy gate
 runs `compliance.policy.validate` against `licenses.toml` and the build fails on any
-denied / `UNKNOWN` license not covered by an exception. The `sboms` and `legal` scratch
-stages expose `/sboms` and `/legal` for CI extraction; the final runtime stage does
+denied / `UNKNOWN` license not covered by an exception. An explicitly enabled
+`allow_license_policy_failure` workflow input passes `ALLOW_LICENSE_POLICY_FAILURE=true`,
+keeps those violations in the build log, and suppresses the exit code. It writes
+`/legal/LICENSE-POLICY-FAILURE-ALLOWED.txt`, including the validator output, and ships
+that marker inside the final runtime image. The `sboms` and `legal` scratch stages expose
+`/sboms` and `/legal` for CI extraction; the final runtime stage does
 `COPY --from=licenses /legal /legal` so NOTICES ship inside the image.
 
 `BASELINE_SBOM_FILE` is rendered from `container/context.yaml`'s per-(framework, device)

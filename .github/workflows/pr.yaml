@@ -389,6 +389,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
+      # TODO(PR 12513): remove this Kimi K3 base-image exception before merge.
+      # https://github.com/ai-dynamo/dynamo/pull/12513
+      allow_license_policy_failure: ${{ github.ref_name == 'pull-request/12513' }}
       artifact_retention_days: '7'
       build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
@@ -514,6 +517,9 @@ jobs:
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
+      # TODO(PR 12513): remove this Kimi K3 base-image exception before merge.
+      # https://github.com/ai-dynamo/dynamo/pull/12513
+      allow_license_policy_failure: ${{ github.ref_name == 'pull-request/12513' }}
       artifact_retention_days: '7'
       build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
