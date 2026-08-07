@@ -31,6 +31,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import (
+    HttpError,
     KvEventPublisher,
     ModelInput,
     ModelType,
@@ -568,8 +569,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
+        self._max_input_token_id: Optional[int] = None
 
         if engine is not None:
+            self._max_input_token_id = self._resolve_max_input_token_id(engine)
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
                 if self.use_sglang_tokenizer
@@ -910,10 +913,64 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
+        if not isinstance(request_input, str):
+            self._validate_nvext_token_data(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    @staticmethod
+    def _resolve_max_input_token_id(engine: sgl.Engine) -> int:
+        """Resolve the largest token ID accepted by the model or tokenizer.
+
+        Model and tokenizer vocabularies can differ. Matching vLLM's input
+        validation, accept the larger bound so model-only tokens and tokenizer
+        additions remain usable while truly out-of-vocabulary IDs are rejected.
+        """
+        tokenizer_manager = engine.tokenizer_manager
+        model_vocab_size = tokenizer_manager.model_config.hf_text_config.vocab_size
+        tokenizer = tokenizer_manager.tokenizer
+        tokenizer_max_token_id = -1
+
+        if tokenizer is not None:
+            tokenizer_max_token_id = getattr(tokenizer, "max_token_id", None)
+            if tokenizer_max_token_id is None:
+                get_vocab = getattr(tokenizer, "get_vocab", None)
+                if get_vocab is not None:
+                    tokenizer_max_token_id = max(
+                        get_vocab().values(),
+                        default=-1,
+                    )
+                else:
+                    tokenizer_max_token_id = tokenizer.vocab_size - 1
+
+        return max(model_vocab_size - 1, tokenizer_max_token_id)
+
+    def _validate_nvext_token_data(
+        self,
+        request: Dict[str, Any],
+        token_ids: Any,
+    ) -> None:
+        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
+        extra_args = request.get("extra_args")
+        if not isinstance(extra_args, dict):
+            return
+        nvext = extra_args.get("nvext")
+        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
+            return
+
+        if not isinstance(token_ids, list):
+            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+        if not token_ids:
+            return
+
+        max_input_id = max(token_ids)
+        if (
+            self._max_input_token_id is not None
+            and max_input_id > self._max_input_token_id
+        ):
+            raise HttpError(400, f"Token id {max_input_id} is out of vocabulary")
 
     @staticmethod
     def _get_guided_decoding_params(
