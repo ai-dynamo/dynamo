@@ -9,7 +9,7 @@ concurrency:
   group: update-community-events
   cancel-in-progress: false
 
-# The bot PAT (not GITHUB_TOKEN) opens the PR: this org disables
+# The bot PAT (not GITHUB_TOKEN) publishes the update: this org disables
 # "Allow GitHub Actions to create and approve pull requests", so a
 # GITHUB_TOKEN-authenticated create fails with
 # "GitHub Actions is not permitted to create or approve pull requests".
@@ -22,11 +22,14 @@ jobs:
     env:
       BRANCH: auto/update-community-events
     steps:
+      # persist-credentials: false keeps the bot PAT out of the git config that
+      # `npm install` (and any dependency lifecycle script) could reach; the PAT
+      # is scoped to just the push and PR steps below.
       - name: Checkout main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: main
-          token: ${{ secrets.OPS_BOT_PAT }}
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -44,14 +47,30 @@ jobs:
         run: |
           if git diff --quiet -- README.md; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "README events table already up to date; nothing to do."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            git --no-pager diff --stat -- README.md
+            echo "Events table already current on main; nothing to do."
+            exit 0
           fi
+
+          # The table differs from main, but an earlier run may have already
+          # published this exact table to the bot branch and be waiting on
+          # review. Re-pushing it would only churn the open PR with a fresh SHA
+          # every 6 hours, so publish only when the branch is missing, is no
+          # longer based on current main, or carries a different table.
+          if git fetch --depth=2 origin "$BRANCH" 2>/dev/null \
+            && [ "$(git rev-parse FETCH_HEAD^ 2>/dev/null)" = "$(git rev-parse HEAD)" ] \
+            && git diff --quiet FETCH_HEAD -- README.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Bot branch already carries this table on top of current main; nothing to do."
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git --no-pager diff --stat -- README.md
 
       - name: Commit and push branch
         if: steps.diff.outputs.changed == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.OPS_BOT_PAT }}
         run: |
           git config user.name  "dynamo-ops"
           git config user.email "170655669+dynamo-ops@users.noreply.github.com"
@@ -61,7 +80,9 @@ jobs:
           git checkout -B "$BRANCH"
           git add README.md
           git commit -s -m "chore: update community events from Google Calendar"
-          git push --force origin "$BRANCH"
+          git push --force \
+            "https://x-access-token:${BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/$BRANCH"
 
       - name: Open or reuse PR
         if: steps.diff.outputs.changed == 'true'
@@ -69,9 +90,15 @@ jobs:
           GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # Idempotent across runs: the branch is force-updated in place, so
-          # reuse the open PR if there is one instead of failing on create.
-          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url 2>/dev/null || true)
+          # --state open matters: `gh pr view <branch>` falls back to the most
+          # recent closed/merged PR, which would make every run after the first
+          # merge silently skip creating a new PR.
+          # isCrossRepository filtering matters too: --head matches on branch
+          # name alone, and forks have opened PRs from a same-named branch
+          # (e.g. #12530), which would otherwise be mistaken for ours.
+          PR_URL=$(gh pr list --head "$BRANCH" --state open \
+            --json url,isCrossRepository \
+            --jq 'map(select(.isCrossRepository == false)) | .[0].url // empty' 2>/dev/null || true)
           if [[ -z "$PR_URL" ]]; then
             PR_URL=$(gh pr create \
               --base main \
