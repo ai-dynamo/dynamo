@@ -528,6 +528,8 @@ impl SelectionCore {
                     None,
                     Some(overlap_refresh),
                     None,
+                    // Standalone selection has no router Client snapshot.
+                    None,
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),

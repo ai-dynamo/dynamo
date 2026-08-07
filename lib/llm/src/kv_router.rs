@@ -17,8 +17,8 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
+        ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
+        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -438,6 +438,10 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        let client_for_availability = client.clone();
+        let available_worker_provider: WorkerAvailabilityProvider =
+            Arc::new(move || client_for_availability.available_instance_ids());
+
         let scheduler = KvScheduler::start(
             endpoint.clone(),
             block_size,
@@ -447,6 +451,7 @@ where
             prefill_load_estimator.clone(),
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
+            Some(available_worker_provider),
             model_name.as_deref(),
             metric_worker_type,
             cancellation_token.child_token(),
@@ -1543,7 +1548,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use async_trait::async_trait;
     use dynamo_kv_router::{
@@ -2127,5 +2132,77 @@ mod tests {
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
             assert!((worker.router_credit_blocks - 1.0).abs() < f64::EPSILON);
         }
+    }
+
+    #[tokio::test]
+    async fn client_availability_distinguishes_startup_from_last_worker_removal() {
+        use dynamo_kv_router::scheduling::{RoutingEligibility, WorkerEligibilityError};
+
+        const DECODE_WORKER: u64 = 1;
+        const PREFILL_WORKER: u64 = 2;
+        const PREFILL_PEER: u64 = 3;
+
+        let component = make_test_component("availability-lifecycle").await;
+        let decode = component.endpoint("decode").client().await.unwrap();
+        let prefill = component.endpoint("prefill").client().await.unwrap();
+
+        assert!(
+            prefill.available_instance_ids().is_none(),
+            "startup without a discovered worker is uninitialized"
+        );
+
+        decode.override_discovered_instances(vec![DECODE_WORKER]);
+        prefill.override_discovered_instances(vec![PREFILL_WORKER, PREFILL_PEER]);
+
+        // Keep scheduler candidates stale so every transition below is decided
+        // by the Client's hard-availability snapshot alone.
+        let workers = HashMap::from([
+            (DECODE_WORKER, ModelRuntimeConfig::default()),
+            (PREFILL_WORKER, ModelRuntimeConfig::default()),
+            (PREFILL_PEER, ModelRuntimeConfig::default()),
+        ]);
+        let constraints = RoutingConstraints::default();
+        let validate = |available: &HashSet<u64>, worker: u64| {
+            let pinned = WorkerWithDpRank::from_worker_id(worker);
+            RoutingEligibility::new(None, None, Some(pinned), &constraints)
+                .with_available_workers(Some(available))
+                .validate_worker_rank(&workers, pinned)
+                .map(|_| ())
+        };
+
+        let available = prefill.available_instance_ids().unwrap();
+        assert!(validate(available.as_ref(), PREFILL_WORKER).is_ok());
+
+        prefill.override_discovered_instances(vec![PREFILL_PEER]);
+        let available = prefill.available_instance_ids().unwrap();
+        assert_eq!(
+            validate(available.as_ref(), PREFILL_WORKER).unwrap_err(),
+            WorkerEligibilityError::WorkerNotRoutable {
+                worker_id: PREFILL_WORKER
+            }
+        );
+        assert!(
+            decode
+                .available_instance_ids()
+                .unwrap()
+                .contains(&DECODE_WORKER),
+            "prefill removal must not alter decode availability"
+        );
+
+        prefill.override_discovered_instances(Vec::new());
+        let available = prefill
+            .available_instance_ids()
+            .expect("last-worker removal is authoritative after discovery initialized");
+        assert!(available.is_empty());
+        assert_eq!(
+            validate(available.as_ref(), PREFILL_PEER).unwrap_err(),
+            WorkerEligibilityError::WorkerNotRoutable {
+                worker_id: PREFILL_PEER
+            }
+        );
+
+        prefill.override_discovered_instances(vec![PREFILL_WORKER, PREFILL_PEER]);
+        let available = prefill.available_instance_ids().unwrap();
+        assert!(validate(available.as_ref(), PREFILL_WORKER).is_ok());
     }
 }
