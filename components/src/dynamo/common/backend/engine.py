@@ -69,6 +69,7 @@ class GenerateRequest(TypedDict, total=False):
     mm_routing_info: dict[str, Any]
     encoder_result: dict[str, Any]
     extra_args: dict[str, Any]
+    routing: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -95,6 +96,7 @@ class GenerateChunk(TypedDict, total=False):
 
     token_ids: Required[list[int]]
     index: Required[int]
+    text: str
     finish_reason: str
     completion_usage: dict[str, Any]
     disaggregated_params: dict[str, Any]
