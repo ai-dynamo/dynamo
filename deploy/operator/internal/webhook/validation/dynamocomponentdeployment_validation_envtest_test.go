@@ -452,6 +452,21 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 checkpoint with inter-pod GMS and failover reports both errors",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+				dcd.Spec.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
+					Mode:       nvidiacomv1beta1.GMSModeInterPod,
+					NumShadows: 1,
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+			},
+		},
+		{
 			name: "empty dynamo namespace is accepted",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				DynamoNamespace: k8sptr.To(""),
@@ -518,6 +533,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
+					PodSpec: &corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "gms-loader", Image: "loader:latest",
+					}}},
+				},
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 					Enabled:               true,
 					Mode:                  nvidiacomv1alpha1.GMSModeIntraPod,
@@ -666,6 +687,25 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1"},
 		},
 		{
+			name: "GMS extra client container reference must resolve",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
+		},
+		{
+			name: "GMS extra client container update reports one indexed cause",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
+		},
+		{
 			name: "GMS accepts GPU requests when limits are unset",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
@@ -708,7 +748,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint.job.gmsClientContainers: Forbidden: is only supported with gpuMemoryService.mode=IntraPod",
-				"spec.experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
+				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
 			},
 		},
 		{

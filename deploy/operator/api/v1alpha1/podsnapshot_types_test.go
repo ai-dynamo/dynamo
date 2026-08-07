@@ -46,7 +46,7 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 	original := &PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "inference"},
 		Spec: PodSnapshotSpec{
-			Source: PodSnapshotSource{PodRef: PodReference{Name: "worker-0"}},
+			Source: PodSnapshotSource{PodRef: PodReference{Name: "worker-0", Containers: []string{"main"}}},
 		},
 		Status: PodSnapshotStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Captured"}},
@@ -59,9 +59,13 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 	}
 
 	clone.Spec.Source.PodRef.Name = "mutated"
+	clone.Spec.Source.PodRef.Containers[0] = "mutated-container"
 	clone.Status.Conditions[0].Reason = "Changed"
 	if original.Spec.Source.PodRef.Name != "worker-0" {
 		t.Errorf("mutating clone spec changed original: got %q", original.Spec.Source.PodRef.Name)
+	}
+	if original.Spec.Source.PodRef.Containers[0] != "main" {
+		t.Errorf("mutating clone Containers slice changed original: got %q", original.Spec.Source.PodRef.Containers[0])
 	}
 	if original.Status.Conditions[0].Reason != "Captured" {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)
@@ -76,7 +80,7 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 		Spec: PodSnapshotContentSpec{
 			PodSnapshotRef: PodSnapshotReference{Namespace: "inference", Name: "snap-a", UID: types.UID("uid-1")},
 			Source: PodSnapshotContentSource{
-				PodRef:   PodReference{Name: "worker-0", UID: types.UID("pod-uid-1")},
+				PodRef:   PodReference{Name: "worker-0", UID: types.UID("pod-uid-1"), Containers: []string{"main"}},
 				NodeName: "node-a",
 			},
 		},
@@ -91,9 +95,13 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	}
 
 	clone.Spec.Source.PodRef.Name = "mutated"
+	clone.Spec.Source.PodRef.Containers[0] = "mutated-container"
 	clone.Status.Conditions[0].Reason = "Changed"
 	if original.Spec.Source.PodRef.Name != "worker-0" {
 		t.Errorf("mutating clone changed original podRef name: got %q", original.Spec.Source.PodRef.Name)
+	}
+	if original.Spec.Source.PodRef.Containers[0] != "main" {
+		t.Errorf("mutating clone Containers slice changed original: got %q", original.Spec.Source.PodRef.Containers[0])
 	}
 	if original.Status.Conditions[0].Reason != "Bound" {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)

@@ -23,6 +23,26 @@ use crate::sequences::WorkerLoadProjection;
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerSelectionPolicyError {
+    #[error("worker selection policy failed: {0}")]
+    Failed(String),
+
+    #[error("scorer {scorer_index} produced a non-finite cost for candidate row {row}")]
+    NonFiniteCost { scorer_index: usize, row: usize },
+
+    #[error(
+        "picker returned candidate row {row}, but the candidate table contains {candidate_count} rows"
+    )]
+    InvalidPickerRow { row: usize, candidate_count: usize },
+}
+
+impl WorkerSelectionPolicyError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
     #[serde(default)]
@@ -58,6 +78,9 @@ pub enum KvSchedulerError {
 
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+
+    #[error(transparent)]
+    WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
 
 impl KvSchedulerError {
@@ -76,6 +99,35 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub potential_decode_blocks: usize,
+}
+
+/// A routing decision that selected less KV overlap than another eligible worker.
+///
+/// This records the observable locality tradeoff without attributing its cause. The
+/// final selection may differ because of worker load, routing preferences, or
+/// temperature-based sampling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonMaxOverlapSelection {
+    /// Worker selected by the scheduler's complete scoring policy.
+    pub selected_worker: WorkerWithDpRank,
+    /// Eligible worker with the greatest effective KV overlap.
+    pub highest_overlap_worker: WorkerWithDpRank,
+    /// Effective overlap available on `highest_overlap_worker`.
+    pub highest_overlap_blocks: f64,
+    /// Effective overlap available on `selected_worker`.
+    pub selected_overlap_blocks: f64,
+}
+
+/// Callback dispatched off the scheduler actor after an admitted non-max-overlap selection is
+/// delivered.
+pub type NonMaxOverlapSelectionObserver =
+    Arc<dyn Fn(&str, NonMaxOverlapSelection) + Send + Sync + 'static>;
+
+impl NonMaxOverlapSelection {
+    /// Return the effective overlap blocks sacrificed by the final selection.
+    pub fn overlap_blocks_lost(self) -> f64 {
+        self.highest_overlap_blocks - self.selected_overlap_blocks
+    }
 }
 
 #[derive(Debug)]
