@@ -10,10 +10,12 @@ use dynamo_runtime::config::environment_names::llm::{
 use serde_json::{Value, json};
 use serial_test::serial;
 
+#[allow(dead_code)]
 #[path = "common/http_harness.rs"]
 mod http_harness;
 #[path = "common/ports.rs"]
 mod ports;
+#[allow(dead_code)]
 #[path = "common/scripted_chat_engine.rs"]
 mod scripted_chat_engine;
 
