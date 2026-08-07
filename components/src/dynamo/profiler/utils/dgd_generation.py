@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any, Optional
 
 import numpy as np
@@ -55,6 +57,19 @@ from dynamo.profiler.utils.profile_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
+    try:
+        perf_database = importlib.import_module("aiconfigurator_core.sdk.perf_database")
+    except ModuleNotFoundError as e:
+        if e.name != "aiconfigurator_core":
+            raise
+        return None
+    return perf_database.get_latest_database_version
+
+
+get_latest_database_version = _load_latest_database_version()
 
 # ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
 # so that multiple deployments in the same namespace don't collide)
@@ -707,10 +722,31 @@ def build_aic_perf_model_spec(
     if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
         return None
 
+    if get_latest_database_version is None:
+        logger.warning(
+            "aiconfigurator-core is unavailable; Planner will use FPM regression "
+            "instead of native AIC estimates."
+        )
+        return None
+
+    backend_version = get_latest_database_version(
+        system=system,
+        backend=resolved_backend,
+    )
+    if backend_version is None:
+        logger.warning(
+            "No AIC performance database is available for system=%s, backend=%s; "
+            "Planner will use FPM regression instead of native AIC estimates.",
+            system,
+            resolved_backend,
+        )
+        return None
+
     return AICPerfModelSpec(
         hf_id=dgdr.model,
         system=system,
         backend=resolved_backend,
+        backend_version=backend_version,
         prefill_pick=best_prefill_pick,
         decode_pick=best_decode_pick,
     )
