@@ -117,6 +117,10 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
 
 @pytest.mark.asyncio
 async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
+    # LoRA registration builds a fresh ModelRuntimeConfig for the adapter card.
+    # This checks that a parent worker owning global DP ranks 4 and 5 publishes
+    # the same range on the LoRA card, with router-hint endpoints keyed as
+    # {"4": "tcp://...:23280", "5": "tcp://...:23281"}.
     handler = _make_prefill_handler()
     handler.dp_range = (4, 2)
     handler.config.engine_args.kv_transfer_config = SimpleNamespace(

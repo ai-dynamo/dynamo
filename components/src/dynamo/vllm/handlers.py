@@ -856,7 +856,11 @@ def _set_kv_transfer_params_preserving_router_hint(
         if isinstance(sampling_params.extra_args, dict)
         else {}
     )
-    merged = dict(kv_transfer_params)
+    merged = {
+        key: value
+        for key, value in kv_transfer_params.items()
+        if key != _ROUTER_HINT_EXTRA_ARGS_KEY
+    }
     existing = safe_extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
     if isinstance(existing, Mapping) and _ROUTER_HINT_EXTRA_ARGS_KEY in existing:
         merged[_ROUTER_HINT_EXTRA_ARGS_KEY] = existing[_ROUTER_HINT_EXTRA_ARGS_KEY]

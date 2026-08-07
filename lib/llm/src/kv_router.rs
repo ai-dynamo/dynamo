@@ -2161,6 +2161,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_hint_selects_source_with_matching_worker_type() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            7,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
+        );
+        workers.insert(
+            8,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "prefill"),
+        );
+        workers.insert(
+            9,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23282"), "decode"),
+        );
+        workers.insert(
+            10,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23283"), "decode"),
+        );
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(7, 0),
+            },
+            None,
+            workers,
+        )
+        .await;
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+                ExternalSequenceBlockHash(103),
+            ],
+            owner_prefix_blocks: vec![
+                (WorkerWithDpRank::new(8, 0), 2),
+                (WorkerWithDpRank::new(9, 0), 3),
+            ],
+        };
+
+        let prefill_hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+        assert_eq!(
+            prefill_hint,
+            Some(RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+            })
+        );
+
+        let decode_hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
+        assert_eq!(
+            decode_hint,
+            Some(RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                    ExternalSequenceBlockHash(103),
+                ],
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn test_find_best_match_passes_shared_cache_hits_to_scheduler() {
         let router = make_test_router(
             InspectingSelector {

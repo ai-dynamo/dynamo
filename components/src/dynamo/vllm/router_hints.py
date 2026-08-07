@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from dynamo.common.constants import (
@@ -14,46 +15,41 @@ from dynamo.common.constants import (
 )
 
 
-def _set_engine_specific(runtime_config: Any, key: str, value: Any) -> None:
-    """Publish an engine-specific runtime value.
-
-    The PyO3 binding for ``set_engine_specific`` parses its argument with
-    ``serde_json::from_str``, so every value must be JSON text. Routing all
-    writes through here keeps that contract explicit — a bare ``"prefill"``
-    is not valid JSON and would raise at registration.
-    """
-    runtime_config.set_engine_specific(key, json.dumps(value))
+def _set_engine_specific(runtime_config: Any, values: Mapping[str, Any]) -> None:
+    """Publish runtime metadata using the JSON wire format expected by Rust."""
+    for key, value in values.items():
+        runtime_config.set_engine_specific(key, json.dumps(value))
 
 
-def _get(value: Any, key: str) -> Any:
-    if isinstance(value, dict):
+def _get_config_value(value: object, key: str) -> object:
+    if isinstance(value, Mapping):
         return value.get(key)
     return getattr(value, key, None)
 
 
-def _secondary_tiers(engine_args: Any) -> list[Any]:
-    kv_config = _get(engine_args, "kv_transfer_config")
-    extra_config = _get(kv_config, "kv_connector_extra_config")
-    secondary_tiers = _get(extra_config, "secondary_tiers")
+def _secondary_tiers(engine_args: object) -> list[Mapping[str, Any]]:
+    kv_config = _get_config_value(engine_args, "kv_transfer_config")
+    extra_config = _get_config_value(kv_config, "kv_connector_extra_config")
+    secondary_tiers = _get_config_value(extra_config, "secondary_tiers")
     if not isinstance(secondary_tiers, list):
         return []
-    return secondary_tiers
+    return [tier for tier in secondary_tiers if isinstance(tier, Mapping)]
 
 
-def _supports_router_hint(tier: Any) -> bool:
-    capabilities = _get(tier, "router_capabilities")
+def _supports_router_hint(tier: Mapping[str, Any]) -> bool:
+    capabilities = _get_config_value(tier, "router_capabilities")
     if not isinstance(capabilities, list):
         return False
     return ROUTER_HINT_RUNTIME_CAPABILITY_KEY in capabilities
 
 
-def _router_hint_tiers(engine_args: Any) -> list[Any]:
+def _router_hint_tiers(engine_args: object) -> list[Mapping[str, Any]]:
     return [
         tier for tier in _secondary_tiers(engine_args) if _supports_router_hint(tier)
     ]
 
 
-def _router_hint_source_host(host: Any) -> str | None:
+def _router_hint_source_host(host: object) -> str | None:
     if not isinstance(host, str) or not host:
         return None
     try:
@@ -67,15 +63,18 @@ def _router_hint_source_host(host: Any) -> str | None:
     return address.compressed
 
 
-def _router_hint_source_control_endpoint(tier: Any, port_offset: int = 0) -> str | None:
+def _router_hint_source_control_endpoint(
+    tier: Mapping[str, Any], port_offset: int = 0
+) -> str | None:
     try:
-        control_port = int(_get(tier, "control_port")) + port_offset
+        control_port = int(_get_config_value(tier, "control_port")) + port_offset
     except (TypeError, ValueError):
         return None
     if not 0 < control_port <= 65535:
         return None
     host = _router_hint_source_host(
-        _get(tier, "control_advertise_host") or _get(tier, "control_host")
+        _get_config_value(tier, "control_advertise_host")
+        or _get_config_value(tier, "control_host")
     )
     if host is None:
         return None
@@ -83,9 +82,11 @@ def _router_hint_source_control_endpoint(tier: Any, port_offset: int = 0) -> str
 
 
 def _router_hint_source_control_endpoints(
-    tier: Any, dp_range: tuple[int, int]
+    tier: Mapping[str, Any], dp_range: tuple[int, int]
 ) -> dict[str, str] | None:
     dp_start, dp_size = dp_range
+    if dp_start < 0 or dp_size <= 0:
+        return None
     endpoints: dict[str, str] = {}
     for local_dp_rank in range(dp_size):
         endpoint = _router_hint_source_control_endpoint(tier, local_dp_rank)
@@ -95,7 +96,7 @@ def _router_hint_source_control_endpoints(
     return endpoints
 
 
-def _router_hint_worker_type(worker_type: Any) -> str | None:
+def _router_hint_worker_type(worker_type: object) -> str | None:
     role = getattr(worker_type, "value", None)
     if not isinstance(role, str):
         role = str(worker_type)
@@ -108,8 +109,8 @@ def _router_hint_worker_type(worker_type: Any) -> str | None:
 
 def enable_router_hint_support(
     runtime_config: Any,
-    engine_args: Any,
-    worker_type: Any,
+    engine_args: object,
+    worker_type: object,
     dp_range: tuple[int, int] = (0, 1),
 ) -> None:
     router_hint_worker_type = _router_hint_worker_type(worker_type)
@@ -132,10 +133,11 @@ def enable_router_hint_support(
             "for all managed DP ranks"
         )
 
-    _set_engine_specific(runtime_config, ROUTER_HINT_RUNTIME_CAPABILITY_KEY, True)
     _set_engine_specific(
-        runtime_config, ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, router_hint_worker_type
-    )
-    _set_engine_specific(
-        runtime_config, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints
+        runtime_config,
+        {
+            ROUTER_HINT_RUNTIME_CAPABILITY_KEY: True,
+            ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY: router_hint_worker_type,
+            ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: endpoints,
+        },
     )
