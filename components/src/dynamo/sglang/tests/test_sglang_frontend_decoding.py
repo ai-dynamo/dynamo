@@ -10,8 +10,12 @@ import pytest
 from PIL import Image
 
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
+from dynamo.llm import HttpError
 from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+    MultimodalEncodeWorkerHandler,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -58,6 +62,27 @@ def test_validate_rejects_frontend_decoding_with_multimodal_worker():
 def test_validate_accepts_frontend_decoding_alone():
     config = _make_config(frontend_decoding=True)
     config.validate()
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_rejects_unknown_oov_token_before_loading_media():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler.image_token_id = 32000
+    handler.video_token_id = None
+    handler._max_input_token_id = 31999
+    handler._build_encode_inputs = AsyncMock()
+    raw_request = {
+        "token_ids": [1, 32000, 2**32 - 1],
+        "stop_conditions": {"max_tokens": 8},
+        "sampling_options": {"temperature": 0.0},
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+    }
+
+    with pytest.raises(HttpError, match="4294967295"):
+        async for _ in handler.generate(raw_request, context=None):
+            pass
+
+    handler._build_encode_inputs.assert_not_awaited()
 
 
 class _Context:
