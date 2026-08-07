@@ -9,6 +9,7 @@ use dynamo_llm::block_manager::kv_consolidator::EventSource;
 pub enum Action {
     GetNumNewMatchedTokens(GetNumNewMatchedTokensInput, GetNumNewMatchedTokensOutput),
     UpdateStateAfterAlloc(UpdateStateAfterAllocInput, UpdateStateAfterAllocOutput),
+    OnRewind(OnRewindInput, OnRewindOutput),
     BuildConnectorMeta(BuildConnectorMetaInput, BuildConnectorMetaOutput),
     RequestFinished(RequestFinishedInput, RequestFinishedOutput),
     HasSlot(HasSlotInput, HasSlotOutput),
@@ -38,6 +39,16 @@ pub struct UpdateStateAfterAllocInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateStateAfterAllocOutput {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnRewindInput {
+    request_id: String,
+    live_block_ids: Vec<BlockId>,
+    num_tokens: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnRewindOutput {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildConnectorMetaInput {
@@ -294,6 +305,25 @@ impl Leader for KvConnectorLeaderRecorder {
             input_copy,
             UpdateStateAfterAllocOutput {},
         ));
+        Ok(())
+    }
+
+    fn on_rewind(
+        &mut self,
+        request_id: String,
+        live_block_ids: Vec<BlockId>,
+        num_tokens: usize,
+    ) -> anyhow::Result<()> {
+        let input_copy = OnRewindInput {
+            request_id: request_id.clone(),
+            live_block_ids: live_block_ids.clone(),
+            num_tokens,
+        };
+        self.connector_leader
+            .on_rewind(request_id, live_block_ids, num_tokens)?;
+        let _ = self
+            .unbounded_tx
+            .send(Action::OnRewind(input_copy, OnRewindOutput {}));
         Ok(())
     }
 
