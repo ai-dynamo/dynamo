@@ -4,6 +4,8 @@
 """Targeted checks for JSON schemas passed to constrained-decoding backends."""
 
 import json
+from collections import deque
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import unquote
 
@@ -65,11 +67,71 @@ def _resolve_local_pointer(
     return target, target_resource
 
 
-def reject_cyclic_guided_json_ref_chain(schema: Any) -> None:
-    """Reject root-reachable cycles made only of local ``$ref`` hops.
+def _child_resource(child: dict[str, Any], resource: dict[str, Any]) -> dict[str, Any]:
+    return child if isinstance(child.get("$id"), str) else resource
 
-    This intentionally does not interpret JSON Schema applicators. Productive
-    recursion and schemas outside this narrow failure mode remain backend-owned.
+
+def _iter_progressing_children(node: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    for keyword in (
+        "properties",
+        "patternProperties",
+        "dependentSchemas",
+        "dependencies",
+    ):
+        children = node.get(keyword)
+        if isinstance(children, dict):
+            for child in children.values():
+                if isinstance(child, dict):
+                    yield child
+
+    for keyword in (
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "items",
+        "additionalItems",
+        "prefixItems",
+        "contains",
+        "unevaluatedItems",
+        "contentSchema",
+    ):
+        children = node.get(keyword)
+        if isinstance(children, dict):
+            yield children
+        elif isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    yield child
+
+
+def _has_cycle(
+    edges: dict[tuple[int, int], set[tuple[int, int]]],
+) -> bool:
+    in_degree = {node: 0 for node in edges}
+    for targets in edges.values():
+        for target in targets:
+            in_degree.setdefault(target, 0)
+            in_degree[target] += 1
+
+    ready = deque(node for node, degree in in_degree.items() if degree == 0)
+    visited = 0
+    while ready:
+        node = ready.popleft()
+        visited += 1
+        for target in edges.get(node, ()):
+            in_degree[target] -= 1
+            if in_degree[target] == 0:
+                ready.append(target)
+
+    return visited != len(in_degree)
+
+
+def reject_nonprogressing_guided_json_ref_cycles(schema: Any) -> None:
+    """Reject reachable local ``$ref`` cycles that cannot consume JSON.
+
+    ``allOf`` preserves the current JSON instance, while object properties and
+    array items cross a progress boundary. Choice applicators and schemas outside
+    this narrow failure mode remain backend-owned.
     """
     if isinstance(schema, str):
         try:
@@ -80,21 +142,40 @@ def reject_cyclic_guided_json_ref_chain(schema: Any) -> None:
     if not isinstance(schema, dict):
         return
 
-    resource = schema
-    node = schema
-    seen: set[int] = set()
+    pending = [(schema, schema)]
+    processed: set[tuple[int, int]] = set()
+    edges: dict[tuple[int, int], set[tuple[int, int]]] = {}
 
-    while True:
-        node_id = id(node)
-        if node_id in seen:
-            raise _schema_error("circular local $ref chain detected")
-        seen.add(node_id)
+    while pending:
+        node, resource = pending.pop()
+        node_key = (id(node), id(resource))
+        if node_key in processed:
+            continue
+        processed.add(node_key)
+        targets: set[tuple[int, int]] | None = None
 
         ref = node.get("$ref")
-        if not isinstance(ref, str) or not ref.startswith("#"):
-            return
-        resolved = _resolve_local_pointer(resource, ref)
-        if resolved is None:
-            return
+        if isinstance(ref, str) and ref.startswith("#"):
+            resolved = _resolve_local_pointer(resource, ref)
+            if resolved is not None:
+                target, target_resource = resolved
+                targets = edges.setdefault(node_key, set())
+                targets.add((id(target), id(target_resource)))
+                pending.append((target, target_resource))
 
-        node, resource = resolved
+        all_of = node.get("allOf")
+        if isinstance(all_of, list):
+            for child in all_of:
+                if not isinstance(child, dict):
+                    continue
+                child_resource = _child_resource(child, resource)
+                if targets is None:
+                    targets = edges.setdefault(node_key, set())
+                targets.add((id(child), id(child_resource)))
+                pending.append((child, child_resource))
+
+        for child in _iter_progressing_children(node):
+            pending.append((child, _child_resource(child, resource)))
+
+    if _has_cycle(edges):
+        raise _schema_error("non-progressing local $ref cycle detected")
