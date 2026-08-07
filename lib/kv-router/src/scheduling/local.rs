@@ -31,6 +31,13 @@ use crate::sequences::{
 };
 use dynamo_tokens::SequenceHash;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerConfigReconcileOutcome {
+    Unchanged,
+    Applied,
+    Rejected,
+}
+
 pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
     P: SequencePublisher,
@@ -117,18 +124,18 @@ where
         slots: &ActiveSequencesMultiWorker<P>,
         current_workers: HashMap<WorkerId, C>,
         last_workers: &mut Option<HashMap<WorkerId, C>>,
-    ) -> bool {
+    ) -> WorkerConfigReconcileOutcome {
         if last_workers.as_ref() == Some(&current_workers) {
-            return false;
+            return WorkerConfigReconcileOutcome::Unchanged;
         }
 
         let dp_ranges = Self::worker_dp_ranges(&current_workers);
         if let Err(error) = slots.reconcile_workers(dp_ranges) {
             tracing::error!(%error, "Invalid worker topology update");
-            return false;
+            return WorkerConfigReconcileOutcome::Rejected;
         }
         *last_workers = Some(current_workers);
-        true
+        WorkerConfigReconcileOutcome::Applied
     }
 
     /// Construct a scheduler with dequeue-time overlap refresh.
@@ -231,7 +238,8 @@ where
                         &slots_monitor,
                         current_workers,
                         &mut last_workers,
-                    ) {
+                    ) == WorkerConfigReconcileOutcome::Applied
+                    {
                         queue_config_updates.update().await;
                         let _ = queue_updates_config.send(());
                     }
