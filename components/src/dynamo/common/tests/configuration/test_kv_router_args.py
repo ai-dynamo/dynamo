@@ -364,6 +364,37 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.router_assume_kv_reuse is False
 
 
+def test_frontend_reasoning_field_name_cli_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DYN_REASONING_FIELD_NAME", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.reasoning_field_name == "reasoning_content"
+
+    monkeypatch.setenv("DYN_REASONING_FIELD_NAME", "reasoning")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.reasoning_field_name == "reasoning"
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--reasoning-field-name", "reasoning_content"])
+    )
+    assert config.reasoning_field_name == "reasoning_content"
+
+
+def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--reasoning-field-name", "invalid"])
+
+
 def test_frontend_rejection_thresholds_default_to_none(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

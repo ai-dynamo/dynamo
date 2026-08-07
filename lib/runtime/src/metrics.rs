@@ -80,6 +80,20 @@ pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 
         panic!("with_histogram_opts_and_buckets is not implemented for this metric type");
     }
 
+    /// Create a histogram vector with custom buckets and label names.
+    fn with_histogram_opts_buckets_and_label_names(
+        _opts: prometheus::HistogramOpts,
+        _buckets: Option<Vec<f64>>,
+        _label_names: &[&str],
+    ) -> Result<Self, prometheus::Error>
+    where
+        Self: Sized,
+    {
+        panic!(
+            "with_histogram_opts_buckets_and_label_names is not implemented for this metric type"
+        );
+    }
+
     /// Create a new metric with counter options and label names (for CounterVec)
     /// This is a default implementation that will panic for non-countervec metrics
     fn with_opts_and_label_names(
@@ -179,6 +193,25 @@ impl PrometheusMetric for prometheus::Histogram {
             opts = opts.buckets(custom_buckets);
         }
         prometheus::Histogram::with_opts(opts)
+    }
+}
+
+impl PrometheusMetric for prometheus::HistogramVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "HistogramVec requires histogram options and label names".to_string(),
+        ))
+    }
+
+    fn with_histogram_opts_buckets_and_label_names(
+        mut opts: prometheus::HistogramOpts,
+        buckets: Option<Vec<f64>>,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        if let Some(custom_buckets) = buckets {
+            opts = opts.buckets(custom_buckets);
+        }
+        prometheus::HistogramVec::new(opts, label_names)
     }
 }
 
@@ -341,6 +374,14 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("GaugeVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::HistogramVec>() {
+        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("HistogramVec requires const_labels parameter"))?;
+        T::with_histogram_opts_buckets_and_label_names(opts, buckets, label_names)?
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
         // Special handling for Histogram with custom buckets
         // buckets parameter is valid for Histogram, const_labels is not used
@@ -428,7 +469,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
     // - GaugeVec: ✅ IMPLEMENTED - create_gaugevec()
     // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
     // - Histogram: ✅ IMPLEMENTED - create_histogram()
-    // - HistogramVec with custom buckets: create_histogram_with_buckets()
+    // - HistogramVec: ✅ IMPLEMENTED - create_histogramvec()
     // - Info: create_info() - for info metrics with labels
     // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
     // - IntCounterVec: ✅ IMPLEMENTED - create_intcountervec()
@@ -507,6 +548,25 @@ impl<H: MetricsHierarchy> Metrics<H> {
         buckets: Option<Vec<f64>>,
     ) -> anyhow::Result<prometheus::Histogram> {
         create_metric(&self.hierarchy, name, description, labels, buckets, None)
+    }
+
+    /// Create a HistogramVec metric with custom buckets and label names.
+    pub fn create_histogramvec(
+        &self,
+        name: &str,
+        description: &str,
+        label_names: &[&str],
+        labels: &[(&str, &str)],
+        buckets: Option<Vec<f64>>,
+    ) -> anyhow::Result<prometheus::HistogramVec> {
+        create_metric(
+            &self.hierarchy,
+            name,
+            description,
+            labels,
+            buckets,
+            Some(label_names),
+        )
     }
 
     /// Create an IntCounter metric
