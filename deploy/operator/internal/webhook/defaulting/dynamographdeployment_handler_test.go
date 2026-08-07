@@ -221,7 +221,7 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 			wantSuffix: true,
 		},
 		{
-			name: "UPDATE preserves legacy namespace for frontend-only changes",
+			name: "UPDATE does not enable suffix for a frontend-only change",
 			op:   admissionv1.Update,
 			old:  groveWorkerHashSuffixTestDGD,
 			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -241,7 +241,7 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 			wantSuffix: true,
 		},
 		{
-			name: "UPDATE normalizes old defaultable worker fields before comparing",
+			name: "UPDATE does not enable suffix when defaulting legacy worker fields",
 			op:   admissionv1.Update,
 			old:  groveWorkerHashSuffixTestDGD,
 		},

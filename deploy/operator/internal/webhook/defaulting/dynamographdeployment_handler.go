@@ -164,7 +164,7 @@ func (d *DGDDefaulter) defaultGroveWorkerHashSuffixForUpdate(
 	}
 	d.defaultComponentFields(oldDGD, oldGrovePathway)
 
-	if oldDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled] == "true" {
+	if oldDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled] == consts.KubeLabelValueTrue {
 		setGroveWorkerHashSuffixEnabled(dgd)
 		return nil
 	}
@@ -219,7 +219,7 @@ func setGroveWorkerHashSuffixEnabled(dgd *nvidiacomv1beta1.DynamoGraphDeployment
 	if dgd.Annotations == nil {
 		dgd.Annotations = make(map[string]string)
 	}
-	dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = "true"
+	dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
 }
 
 func (d *DGDDefaulter) isGrovePathway(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
