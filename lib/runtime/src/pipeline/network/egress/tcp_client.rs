@@ -31,8 +31,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+
+type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
@@ -376,6 +380,27 @@ struct TcpConnection {
     post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
+/// Cached TLS connector for the request plane. Built once from env vars.
+static REQUEST_PLANE_TLS_CONNECTOR: once_cell::sync::OnceCell<Option<TlsConnector>> =
+    once_cell::sync::OnceCell::new();
+
+fn get_request_plane_tls_connector() -> anyhow::Result<&'static Option<TlsConnector>> {
+    REQUEST_PLANE_TLS_CONNECTOR.get_or_try_init(|| {
+        use crate::config::environment_names::tcp_response_stream::tls as env;
+        let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
+        let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+        let tls_requested = ca_cert_path.is_some() || insecure;
+        if !tls_requested {
+            return Ok(None);
+        }
+        let tls_config = crate::tls_utils::client_tls_config(
+            ca_cert_path.as_deref().map(std::path::Path::new),
+            insecure,
+        )?;
+        Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
+    })
+}
+
 impl TcpConnection {
     /// Create a new connection with lock-free submit and batched write/read tasks
     async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
@@ -386,7 +411,28 @@ impl TcpConnection {
         // Configure socket for lower latency
         Self::configure_socket(&stream)?;
 
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half): (BoxRead, BoxWrite) = if let Some(connector) =
+            get_request_plane_tls_connector()?
+        {
+            use crate::config::environment_names::tcp_response_stream::tls as env;
+            let server_name = match std::env::var(env::DYN_TCP_TLS_SERVER_NAME) {
+                Ok(name) => rustls::pki_types::ServerName::try_from(name)
+                    .map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))?,
+                Err(_) => rustls::pki_types::ServerName::IpAddress(addr.ip().into()),
+            };
+            let tls_stream = tokio::time::timeout(
+                crate::tls_utils::handshake_timeout(),
+                connector.connect(server_name, stream),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Request plane TLS handshake timed out to {}", addr))?
+            .map_err(|e| anyhow::anyhow!("Request plane TLS handshake failed to {}: {e}", addr))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = tokio::io::split(stream);
+            (Box::new(r), Box::new(w))
+        };
 
         let submit_queue = Arc::new(SegQueue::new());
         let response_queue = Arc::new(SegQueue::new());
@@ -557,7 +603,7 @@ impl TcpConnection {
     /// - If a response races back before waiters are queued, the reader's
     ///   existing spin-wait covers that small handoff window
     async fn writer_task(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: BoxWrite,
         submit_queue: Arc<SegQueue<PendingRequest>>,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
@@ -632,11 +678,26 @@ impl TcpConnection {
                     }
                     return Err(e.into());
                 }
+                // Flush after the batch write. `write_half` may be a tokio-rustls
+                // TLS stream, whose `poll_write` copies plaintext into the session
+                // buffer and can return Ready(Ok(n)) with encrypted records still
+                // buffered when the socket would block; without this flush the batch
+                // can stall under write back-pressure until the next request is
+                // written, hanging its callers until the request timeout. For a
+                // plaintext TCP write half this is a no-op.
+                if let Err(e) = write_half.flush().await {
+                    write_buf.clear();
+                    let err_msg = format!("Flush failed: {}", e);
+                    for tx in response_batch.drain(..) {
+                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                    }
+                    return Err(e.into());
+                }
                 TCP_BYTES_SENT_TOTAL.inc_by(bytes_to_write as f64);
                 debug_assert!(write_buf.is_empty());
 
-                // Phase 3: write_all succeeded — data is committed to the wire.
-                // NOW push response_txs to response_queue so the reader can
+                // Phase 3: write_all + flush succeeded — data is committed to the
+                // wire. NOW push response_txs to response_queue so the reader can
                 // match them with incoming responses.
                 for tx in response_batch.drain(..) {
                     response_queue.push(tx);
@@ -698,7 +759,7 @@ impl TcpConnection {
     /// On exit (clean close or error), sets `healthy=false` and wakes the writer
     /// via `writer_notify` so it can detect reader death and drain pending callers.
     async fn reader_task(
-        read_half: tokio::io::ReadHalf<TcpStream>,
+        read_half: BoxRead,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         healthy: Arc<AtomicBool>,
         writer_notify: Arc<tokio::sync::Notify>,
@@ -1711,6 +1772,66 @@ mod tests {
         });
 
         (addr, conn_count)
+    }
+
+    /// Full request-plane TLS handshake + encrypted round-trip using the real
+    /// `tls_utils` config builders (the same ones egress/ingress use). Generates
+    /// a self-signed cert, trusts it as the CA, and drives a verified handshake
+    /// with SNI `localhost` (mirroring `connector.connect(server_name, stream)`
+    /// in `TcpConnection::connect`), then echoes bytes over the encrypted stream.
+    #[tokio::test]
+    async fn request_plane_tls_handshake_roundtrip() {
+        use std::io::Write as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Self-signed cert with SAN=localhost; also used as the trusted CA.
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+
+        // Server acceptor + client connector via the real builders.
+        let server_config =
+            crate::tls_utils::server_tls_config(cert_file.path(), key_file.path()).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let client_config =
+            crate::tls_utils::client_tls_config(Some(cert_file.path()), false).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        // TLS echo server on loopback.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(tcp).await.expect("server TLS handshake");
+            let mut buf = [0u8; 5];
+            tls.read_exact(&mut buf).await.unwrap();
+            tls.write_all(&buf).await.unwrap();
+            tls.flush().await.unwrap();
+        });
+
+        // Client: TCP connect + verified TLS handshake with SNI (mirrors egress).
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("client TLS handshake (CA verification + SNI)");
+
+        tls.write_all(b"hello").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut resp = [0u8; 5];
+        tls.read_exact(&mut resp).await.unwrap();
+        assert_eq!(&resp, b"hello", "bytes should round-trip over TLS");
+
+        server.await.unwrap();
     }
 
     struct RecordingWriter {
