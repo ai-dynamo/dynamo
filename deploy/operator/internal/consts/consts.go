@@ -274,13 +274,6 @@ const (
 	// templates use the canonical worker hash as their runtime namespace suffix.
 	AnnotationGroveWorkerHashSuffixEnabled = "nvidia.com/grove-worker-hash-suffix-enabled"
 
-	// AnnotationGroveWorkerHashSuffixAdoptedGeneration and
-	// AnnotationGroveWorkerHashSuffixAdoptedHashV2 record the unsuffixed Grove
-	// generation observed during an operator upgrade. They are removed once a
-	// later worker-spec change enables the suffix.
-	AnnotationGroveWorkerHashSuffixAdoptedGeneration = "nvidia.com/grove-worker-hash-suffix-adopted-generation"
-	AnnotationGroveWorkerHashSuffixAdoptedHashV2     = "nvidia.com/grove-worker-hash-suffix-adopted-hash-v2"
-
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged
 	// with this value so the existing rolling update machinery can manage the transition.

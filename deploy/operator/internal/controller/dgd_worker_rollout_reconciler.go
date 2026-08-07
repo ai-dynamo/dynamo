@@ -20,11 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
-	"sort"
-	"strconv"
-
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +28,8 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"slices"
+	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -123,104 +120,6 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 		)
 	}
 	return nil
-}
-
-// ReconcileGroveWorkerHashSuffix adopts existing Grove deployments without
-// changing their worker namespace during an operator upgrade. A later
-// worker-spec change enables the canonical v2 worker-hash suffix, separating
-// its new workers from the previous unsuffixed WorkerSet.
-func (r *dgdWorkerRolloutReconciler) ReconcileGroveWorkerHashSuffix(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) error {
-	if groveWorkerHashSuffixEnabled(dgd) {
-		return nil
-	}
-
-	desired, err := desiredWorkerHashes(dgd)
-	if err != nil {
-		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
-	}
-
-	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-		Namespace: dgd.Namespace,
-	}
-	existing := &grovev1alpha1.PodCliqueSet{}
-	if err := r.Get(ctx, key, existing); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get Grove PodCliqueSet %s: %w", key, err)
-		}
-		setGroveWorkerHashSuffixEnabled(dgd)
-		if err := r.Update(ctx, dgd); err != nil {
-			return fmt.Errorf("enable Grove worker hash suffix for new deployment: %w", err)
-		}
-		return nil
-	}
-
-	adoptedGeneration, adoptedHash, adopted, err := groveWorkerHashSuffixAdoption(dgd)
-	if err != nil {
-		return err
-	}
-	if !adopted {
-		setGroveWorkerHashSuffixAdoption(dgd, dgd.Generation, desired.v2)
-		if err := r.Update(ctx, dgd); err != nil {
-			return fmt.Errorf("record Grove worker hash suffix adoption: %w", err)
-		}
-		return nil
-	}
-
-	if dgd.Generation > adoptedGeneration && desired.v2 != adoptedHash {
-		setGroveWorkerHashSuffixEnabled(dgd)
-		if err := r.Update(ctx, dgd); err != nil {
-			return fmt.Errorf("enable Grove worker hash suffix: %w", err)
-		}
-	}
-	return nil
-}
-
-func groveWorkerHashSuffixEnabled(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return dgd.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled] == "true"
-}
-
-func groveWorkerHashSuffixAdoption(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (generation int64, hash string, adopted bool, err error) {
-	annotations := dgd.GetAnnotations()
-	generationText := annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedGeneration]
-	hash = annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2]
-	if generationText == "" && hash == "" {
-		return 0, "", false, nil
-	}
-	if generationText == "" || hash == "" {
-		return 0, "", false, fmt.Errorf("incomplete Grove worker hash suffix adoption annotations")
-	}
-	generation, err = strconv.ParseInt(generationText, 10, 64)
-	if err != nil || generation < 0 {
-		return 0, "", false, fmt.Errorf("invalid Grove worker hash suffix adopted generation %q", generationText)
-	}
-	return generation, hash, true, nil
-}
-
-func setGroveWorkerHashSuffixAdoption(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	generation int64,
-	hash string,
-) {
-	if dgd.Annotations == nil {
-		dgd.Annotations = make(map[string]string)
-	}
-	dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedGeneration] = strconv.FormatInt(generation, 10)
-	dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2] = hash
-}
-
-func setGroveWorkerHashSuffixEnabled(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-	if dgd.Annotations == nil {
-		dgd.Annotations = make(map[string]string)
-	}
-	dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = "true"
-	delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixAdoptedGeneration)
-	delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixAdoptedHashV2)
 }
 
 func (h workerGenerationHashes) empty() bool {

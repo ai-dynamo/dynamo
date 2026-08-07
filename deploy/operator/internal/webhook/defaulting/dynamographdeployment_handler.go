@@ -19,11 +19,13 @@ package defaulting
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -57,8 +59,8 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On every operation: defaults nil Replicas to 1 for all components.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
 // Existing unannotated DGDs remain unselected for controller-side workload adoption.
-// On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
-// does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
+// For Grove-selected DGDs: defaults nil MinAvailable to 1 and enables worker
+// namespace suffixes. Suffixes remain enabled after the first worker-spec change.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -79,21 +81,19 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return nil
 	}
 
+	// This annotation is operator-owned and cannot be supplied by a request.
+	delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixEnabled)
+
 	// Resolve the authoritative or creation-time provider before applying component defaults.
 	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
 
-	// Default nil replicas on every operation so newly added components remain safe to expand.
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	groveProvider := providerSelected && provider == consts.WorkloadProviderGrove
+	defaultComponentFields(dgd, groveProvider)
 
-		// Default omitted replica counts before the controller expands component roles.
-		if component.Replicas == nil {
-			component.Replicas = ptr.To(int32(1))
-		}
-
-		// Default Grove's minimum available replicas only for Grove-selected DGDs.
-		if providerSelected && provider == consts.WorkloadProviderGrove && component.MinAvailable == nil {
-			component.MinAvailable = ptr.To(int32(1))
+	// Drive Grove suffix migration from the immutable provider rather than mutable routing intent.
+	if groveProvider {
+		if err := defaultGroveWorkerHashSuffix(ctx, req, dgd); err != nil {
+			return err
 		}
 	}
 
@@ -110,6 +110,92 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 
 	return nil
+}
+
+func defaultComponentFields(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	groveProvider bool,
+) {
+	// Default nil replica counts before the controller expands component roles.
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.Replicas == nil {
+			component.Replicas = ptr.To(int32(1))
+		}
+		if groveProvider && component.MinAvailable == nil {
+			component.MinAvailable = ptr.To(int32(1))
+		}
+	}
+}
+
+func defaultGroveWorkerHashSuffix(
+	ctx context.Context,
+	req admission.Request,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	if req.Operation == admissionv1.Create {
+		setGroveWorkerHashSuffixEnabled(dgd)
+		return nil
+	}
+	if req.Operation != admissionv1.Update {
+		return nil
+	}
+
+	// Ignore a user-supplied marker before considering durable operator-owned state.
+	delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixEnabled)
+	oldDGD, err := decodeOldDGD(req)
+	if err != nil {
+		return err
+	}
+	if oldDGD == nil {
+		return nil
+	}
+
+	// Normalize defaultable fields before comparing persisted and incoming worker specs.
+	defaultComponentFields(oldDGD, true)
+
+	// Preserve durable suffix state written by a previous Grove admission.
+	if oldDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled] == consts.KubeLabelValueTrue {
+		setGroveWorkerHashSuffixEnabled(dgd)
+		return nil
+	}
+
+	oldWorkerHash, oldErr := dynamo.ComputeDGDWorkersSpecHash(oldDGD)
+	newWorkerHash, newErr := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	if oldErr != nil || newErr != nil {
+		// Default conservatively when a legacy or invalid graph cannot be hashed.
+		log.FromContext(ctx).V(1).Info("enable Grove worker hash suffix after hash calculation failure",
+			"oldError", oldErr,
+			"newError", newErr)
+		setGroveWorkerHashSuffixEnabled(dgd)
+		return nil
+	}
+
+	// Enable suffixes only after an actual worker-spec change.
+	if oldWorkerHash != newWorkerHash {
+		setGroveWorkerHashSuffixEnabled(dgd)
+	}
+	return nil
+}
+
+func decodeOldDGD(req admission.Request) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	if len(req.OldObject.Raw) == 0 {
+		return nil, nil
+	}
+
+	// Decode the prior object in the only version served by this webhook.
+	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := json.Unmarshal(req.OldObject.Raw, oldDGD); err != nil {
+		return nil, fmt.Errorf("decode previous v1beta1 DynamoGraphDeployment: %w", err)
+	}
+	return oldDGD, nil
+}
+
+func setGroveWorkerHashSuffixEnabled(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	if dgd.Annotations == nil {
+		dgd.Annotations = make(map[string]string)
+	}
+	dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
 }
 
 func defaultWorkloadProvider(
