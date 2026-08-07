@@ -260,6 +260,11 @@ def _syn_wl(**kw):
     return Workload(**base)
 
 
+def _assert_only_synthetic_load_controller(rec, expected):
+    controllers = ("replay_concurrency", "request_rate", "arrival_interval_ms")
+    assert [name for name in controllers if rec.get(name) is not None] == [expected]
+
+
 def test_synthetic_static_uses_run_synthetic_trace_replay(monkeypatch):
     # synthetic + static -> a single run_synthetic_trace_replay call with planner_config=None
     # (fixed-fleet replay, no scaling); goodput SLA threaded; in-flight cap = concurrency.
@@ -287,6 +292,7 @@ def test_synthetic_static_uses_run_synthetic_trace_replay(monkeypatch):
         and rec["request_count"] == 100
     )
     assert rec["replay_concurrency"] == 4  # closed-loop cap from concurrency
+    _assert_only_synthetic_load_controller(rec, "replay_concurrency")
     assert rec["sla_ttft_ms"] == 2000.0
     assert rec["planner_config"] is None  # static -> no planner in the loop
     assert rec["num_workers"] == 2
@@ -309,6 +315,7 @@ def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
     goal = OptimizationGoal(target=OptimizationTarget.PARETO)  # no SLA needed
     ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=True), concurrency_override=8)
     assert rec["replay_concurrency"] == 8  # cap = the candidate-derived concurrency
+    _assert_only_synthetic_load_controller(rec, "replay_concurrency")
     assert rec["request_count"] == 200  # num_request_ratio(25) * 8
     assert rec["planner_config"] is None
 
@@ -331,6 +338,7 @@ def test_synthetic_planner_threads_planner_config(monkeypatch):
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
     ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_agg_plan(static=False))
     assert rec["replay_concurrency"] is None
+    _assert_only_synthetic_load_controller(rec, "arrival_interval_ms")
     assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64
     assert rec["arrival_interval_ms"] == 50.0  # 1000 / 20
     assert rec["planner_config"]["mode"] == "agg"
