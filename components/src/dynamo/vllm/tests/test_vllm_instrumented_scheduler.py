@@ -2468,6 +2468,20 @@ def test_prefill_eagle_kv_read_requires_more_than_one_drop_block_per_request():
     assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 18, 2, 16)
 
 
+def test_prefill_eagle_partial_hash_hit_uses_hash_drop_granularity():
+    stub = _prefill_grid_stub(block_size=16)
+    stub._bench_hash_block_size = 8
+    stub.kv_cache_manager = SimpleNamespace(
+        use_eagle=True,
+        coordinator=SimpleNamespace(enable_partial_hash_hits=True),
+    )
+
+    assert InstrumentedScheduler._bench_eagle_cache_drop_tokens(stub) == 8
+    assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
+    assert not InstrumentedScheduler._bench_prefill_point_feasible(stub, 8, 1, 8)
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 9, 1, 8)
+
+
 def test_prefill_fake_seed_feasibility_uses_uncapped_allocation():
     stub = _prefill_grid_stub(block_size=8)
     stub._bench_prefill_blocks_per_req = MagicMock(return_value=1)

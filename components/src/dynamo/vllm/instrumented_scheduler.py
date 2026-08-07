@@ -2776,7 +2776,13 @@ class InstrumentedScheduler(AsyncScheduler):
         kv_cache_manager = getattr(self, "kv_cache_manager", None)
         if self._bench_uses_per_group_cache_lookup():
             return 0
-        return self.block_size if getattr(kv_cache_manager, "use_eagle", False) else 0
+        if not getattr(kv_cache_manager, "use_eagle", False):
+            return 0
+        coordinator = getattr(kv_cache_manager, "coordinator", None)
+        if getattr(coordinator, "enable_partial_hash_hits", False):
+            # Hybrid align-mode cache lookup drops one fine-grained hash unit.
+            return self._bench_hash_block_size
+        return self.block_size
 
     def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
         # EAGLE/MTP deliberately drops the last matched cache block. Seed one
