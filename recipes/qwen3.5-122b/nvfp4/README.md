@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Qwen3.5-122B-A10B-NVFP4 Recipes
 
 Recipes for [Qwen3.5-122B-A10B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-122B-A10B-NVFP4),
@@ -12,9 +17,9 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 
 |                          | B200 aggregated agentic                     | B200 disaggregated agentic                   |
 | ------------------------ | ------------------------------------------- | -------------------------------------------- |
-| **GPU**                  | 1x B200                                     | 1x B200 prefill + 2x B200 decode (3x total)  |
+| **GPU**                  | 1x B200 per replica, `replicas: 2` (2x)     | 1x B200 prefill + 2x B200 decode (3x total)  |
 | **Mode**                 | Aggregated                                  | Prefill/decode disaggregated (1P2D)          |
-| **Framework**            | vLLM                                        | vLLM                                         |
+| **Framework**            | Dynamo 1.3.0 / vLLM 0.23                    | Dynamo 1.3.0 / vLLM 0.23                     |
 | **Precision**            | NVFP4 + FP8 KV                              | NVFP4 + FP8 KV                               |
 | **Parallelism**          | TP1                                         | TP1 (per worker)                             |
 | **MoE backend**          | FLASHINFER_TRTLLM                           | FLASHINFER_TRTLLM                            |
@@ -33,7 +38,7 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 ## Prerequisites
 
 1. **Dynamo Platform installed** on the target cluster with DGD CRDs served —
-   see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
+   see [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
 2. **NGC/nvcr image pull access** — an NGC pull secret named `nvcr-secret`
    attached to the namespace's default service account (the deploy manifests pull
    from `nvcr.io/nvidia/ai-dynamo`).
@@ -118,8 +123,8 @@ is system throughput / GPUs. Aggregated runs `replicas: 2`.
 
 | Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
-| `vllm/agg-b200-agentic/deploy.yaml` | B200 | AGG (2x TP1) | agentic | no | 50 | 52.4 | 246 ms | 1173.2 |
-| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P2D | agentic | no | 60 | 51.4 | 1353 ms | 916.6 |
+| `vllm/agg-b200-agentic/deploy.yaml` | B200 | AGG, 2x TP1 (2 GPU) | agentic | no | 50 | 52.4 | 246 ms | 1173.2 |
+| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P2D (3 GPU) | agentic | no | 60 | 51.4 | 1353 ms | 916.6 |
 
 ## Limitations
 
