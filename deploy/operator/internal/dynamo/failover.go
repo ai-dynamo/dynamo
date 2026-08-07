@@ -20,6 +20,7 @@ package dynamo
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -400,6 +401,124 @@ const (
 	failoverEngineCount = 2
 )
 
+// PrepareVLLMAutomaticFailoverSnapshotSource marks the canonical checkpoint
+// source without applying destination engine topology.
+func PrepareVLLMAutomaticFailoverSnapshotSource(container *corev1.Container) error {
+	if container == nil {
+		return fmt.Errorf("automatic failover snapshot source: container is nil")
+	}
+	updated := container.DeepCopy()
+	if err := removeExactLiteralEnv(
+		updated,
+		"DYN_FORWARDPASS_METRIC_PORT",
+		strconv.Itoa(commonconsts.DynamoFPMBasePort),
+	); err != nil {
+		return fmt.Errorf("automatic failover snapshot source: %w", err)
+	}
+	if err := upsertVLLMAutomaticSnapshotLoadFormat(updated); err != nil {
+		return fmt.Errorf("automatic failover snapshot source: %w", err)
+	}
+	updated.Env = MergeEnvs(updated.Env, []corev1.EnvVar{
+		{Name: "DYN_SNAPSHOT_FAILOVER_SOURCE", Value: "1"},
+		{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "false"},
+	})
+	*container = *updated
+	return nil
+}
+
+// upsertVLLMAutomaticSnapshotLoadFormat intentionally supports only direct,
+// tokenized Dynamo vLLM invocations. Automatic Snapshot sources are generated
+// from this canonical profile; accepting shell syntax here would require
+// rewriting arbitrary user commands and could silently change their behavior.
+func upsertVLLMAutomaticSnapshotLoadFormat(container *corev1.Container) error {
+	if container == nil {
+		return fmt.Errorf("container is nil")
+	}
+	args := container.Args
+	switch {
+	case len(container.Command) == 0 &&
+		len(args) >= 3 &&
+		isPythonCommand(args[0]) &&
+		args[1] == "-m" &&
+		args[2] == "dynamo.vllm":
+	case len(container.Command) == 1 &&
+		isPythonCommand(container.Command[0]) &&
+		len(args) >= 2 &&
+		args[0] == "-m" &&
+		args[1] == "dynamo.vllm":
+	case len(container.Command) == 3 &&
+		isPythonCommand(container.Command[0]) &&
+		container.Command[1] == "-m" &&
+		container.Command[2] == "dynamo.vllm":
+	default:
+		return fmt.Errorf(
+			"requires a direct python -m dynamo.vllm command with tokenized arguments "+
+				"(command=%q args=%q)",
+			container.Command,
+			container.Args,
+		)
+	}
+	if slices.Contains(args, "--") {
+		return fmt.Errorf("arguments after -- are unsupported")
+	}
+
+	const flag = "--load-format"
+	flagIndex := -1
+	equalsForm := false
+	for i, arg := range args {
+		switch {
+		case arg == flag:
+			if flagIndex >= 0 {
+				return fmt.Errorf("%s must appear at most once", flag)
+			}
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return fmt.Errorf("%s requires a value", flag)
+			}
+			flagIndex = i
+		case strings.HasPrefix(arg, flag+"="):
+			if flagIndex >= 0 {
+				return fmt.Errorf("%s must appear at most once", flag)
+			}
+			if arg == flag+"=" {
+				return fmt.Errorf("%s requires a value", flag)
+			}
+			flagIndex = i
+			equalsForm = true
+		}
+	}
+
+	switch {
+	case flagIndex < 0:
+		container.Args = append(container.Args, flag, "gms")
+	case equalsForm:
+		container.Args[flagIndex] = flag + "=gms"
+	default:
+		container.Args[flagIndex+1] = "gms"
+	}
+	return nil
+}
+
+func removeExactLiteralEnv(container *corev1.Container, name, expected string) error {
+	index := -1
+	for i, env := range container.Env {
+		if env.Name != name {
+			continue
+		}
+		if index >= 0 {
+			return fmt.Errorf("%s must appear exactly once", name)
+		}
+		index = i
+		if env.ValueFrom != nil || env.Value != expected {
+			return fmt.Errorf("%s must be literal %q", name, expected)
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("%s must appear exactly once", name)
+	}
+	container.Env = append(container.Env[:index], container.Env[index+1:]...)
+	return nil
+}
+
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
 // engine pod. v1beta1 FailoverSpec is presence-only: v1alpha1 conversion only
@@ -438,7 +557,18 @@ func buildFailoverPodWithComponent(
 ) error {
 	numShadows := component.Experimental.Failover.NumShadows
 	if numShadows <= 1 {
-		return buildFailoverPod(podSpec, numberOfNodes, backendFramework)
+		if GetCheckpoint(component) == nil {
+			return buildFailoverPod(podSpec, numberOfNodes, backendFramework)
+		}
+		updated := podSpec.DeepCopy()
+		if err := buildFailoverPod(updated, numberOfNodes, backendFramework); err != nil {
+			return err
+		}
+		if err := removeFailoverForwardPassPorts(updated, failoverEngineCount); err != nil {
+			return err
+		}
+		*podSpec = *updated
+		return nil
 	}
 	if numShadows > 2 {
 		return fmt.Errorf("intra-pod failover supports one or two shadows")
@@ -468,7 +598,25 @@ func buildFailoverPodWithComponent(
 	}
 	updated.Containers = append(engines, sidecars...)
 	applyThreeEngineVLLMOverrides(updated, ports)
+	if GetCheckpoint(component) != nil {
+		if err := removeFailoverForwardPassPorts(updated, len(engines)); err != nil {
+			return err
+		}
+	}
 	*podSpec = *updated
+	return nil
+}
+
+func removeFailoverForwardPassPorts(podSpec *corev1.PodSpec, engineCount int) error {
+	for i := range engineCount {
+		if err := removeExactLiteralEnv(
+			&podSpec.Containers[i],
+			"DYN_FORWARDPASS_METRIC_PORT",
+			strconv.Itoa(commonconsts.DynamoFPMBasePort+i),
+		); err != nil {
+			return fmt.Errorf("automatic failover restore target %q: %w", podSpec.Containers[i].Name, err)
+		}
+	}
 	return nil
 }
 

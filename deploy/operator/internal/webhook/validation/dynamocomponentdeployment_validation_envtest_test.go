@@ -480,7 +480,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
-				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic vLLM Worker checkpoint: checkpoint failover is only supported for an operator-generated DCD\ngpuMemoryService.mode must be IntraPod\nfailover.mode must be IntraPod",
 			},
 		},
 		{

@@ -16,6 +16,30 @@ tests:
           path: kind
           value: Deployment
 
+  - it: identifies the operator admission principal through the downward API
+    template: charts/dynamo-operator/templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_SERVICE_ACCOUNT
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.serviceAccountName
+        documentSelector:
+          path: kind
+          value: Deployment
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        documentSelector:
+          path: kind
+          value: Deployment
+
   - it: rejects CRD upgrades in namespace-restricted mode
     template: charts/dynamo-operator/templates/deployment.yaml
     set:

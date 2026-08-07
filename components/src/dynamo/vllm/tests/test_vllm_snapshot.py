@@ -32,6 +32,103 @@ _BASE_ARGS = [
 ]
 
 
+def test_snapshot_failover_clone_profile_accepts_canonical_source(monkeypatch):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    config = parse_args(_BASE_ARGS)
+
+    snapshot_mod.validate_snapshot_failover_clone_profile(config, shadow=False)
+
+
+def test_snapshot_failover_clone_profile_accepts_refreshed_target(monkeypatch):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    config = parse_args([*_BASE_ARGS, "--gms-shadow-mode"])
+
+    snapshot_mod.validate_snapshot_failover_clone_profile(config, shadow=True)
+
+
+@pytest.mark.parametrize(
+    "mutate, violation",
+    [
+        (
+            lambda config: setattr(config.engine_args, "tensor_parallel_size", 2),
+            "tensor_parallel_size must be 1",
+        ),
+        (
+            lambda config: setattr(config, "embedding_worker", True),
+            "embedding_worker must be disabled",
+        ),
+        (
+            lambda config: setattr(config.engine_args, "enable_lora", True),
+            "enable_lora must be disabled",
+        ),
+    ],
+)
+def test_snapshot_failover_clone_profile_rejects_unsupported_fields(
+    monkeypatch, mutate, violation
+):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    config = parse_args(_BASE_ARGS)
+    mutate(config)
+
+    with pytest.raises(ValueError, match=violation):
+        snapshot_mod.validate_snapshot_failover_clone_profile(config, shadow=False)
+
+
+def test_snapshot_failover_clone_runner_requires_generate():
+    snapshot_mod.validate_snapshot_failover_clone_runner(
+        SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
+    )
+
+    with pytest.raises(ValueError, match="runner_type must be generate"):
+        snapshot_mod.validate_snapshot_failover_clone_runner(
+            SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling"))
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_snapshot_engine_rejects_malformed_source_marker(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path))
+    monkeypatch.setenv("DYN_SNAPSHOT_FAILOVER_SOURCE", "invalid")
+    setup = Mock()
+
+    with pytest.raises(ValueError, match="must be 1 when set"):
+        await snapshot_mod.prepare_snapshot_engine(parse_args(_BASE_ARGS), setup)
+
+    setup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_snapshot_engine_dispatches_canonical_source(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path))
+    monkeypatch.setenv("DYN_SNAPSHOT_FAILOVER_SOURCE", "1")
+    engine = (
+        Mock(),
+        SimpleNamespace(model_config=SimpleNamespace(runner_type="generate")),
+        Mock(),
+        "/tmp/prometheus",
+        Mock(),
+    )
+    setup = Mock(return_value=engine)
+    controller = Mock()
+    controller.wait_for_restore = AsyncMock(return_value=True)
+    controller_factory = Mock(return_value=controller)
+    monkeypatch.setattr(snapshot_mod, "EngineSnapshotController", controller_factory)
+    monkeypatch.setattr(snapshot_mod, "configure_snapshot_capture_env", Mock())
+
+    config = parse_args(_BASE_ARGS)
+    result = await snapshot_mod.prepare_snapshot_engine(config, setup)
+
+    assert result is controller
+    setup.assert_called_once_with(config)
+    assert config.engine_args.enable_sleep_mode is True
+    controller_factory.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_paused_restore_rejects_resumed_engine():
     factory = WorkerFactory(Mock(), Mock(), AsyncMock(), Mock(), Mock())

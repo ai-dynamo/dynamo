@@ -77,6 +77,33 @@ type DynamoComponentDeploymentReconciler struct {
 	DockerSecretRetriever dockerSecretRetriever
 }
 
+func validateStoredDCDCheckpointCompatibility(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
+	compatibilityContext := checkpoint.CompatibilityContextStandaloneDCD
+	if checkpoint.IsDGDControlled(dcd) {
+		compatibilityContext = checkpoint.CompatibilityContextGeneratedDCD
+	}
+	backendFramework := dcd.Spec.BackendFramework
+	var backendErr error
+	if checkpoint.HasCheckpointEnabledFailover(
+		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+	) {
+		resolved, err := dynamo.GetBackendFrameworkFromDynamoComponent(dcd)
+		backendErr = err
+		if err == nil {
+			backendFramework = string(resolved)
+		}
+	}
+	return stderrors.Join(backendErr, stderrors.Join(
+		checkpoint.ValidateCheckpointCompatibility(
+			&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+			backendFramework,
+			compatibilityContext,
+		)...,
+	))
+}
+
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
@@ -139,9 +166,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
-		dynamoComponentDeployment.Spec.Experimental,
-	)...); compatibilityErr != nil {
+	if compatibilityErr := validateStoredDCDCheckpointCompatibility(
+		dynamoComponentDeployment,
+	); compatibilityErr != nil {
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,

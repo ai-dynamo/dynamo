@@ -173,7 +173,18 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName,
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+						}},
+					}},
+				}},
 				Experimental: &v1beta1.ExperimentalSpec{
 					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
@@ -213,7 +224,10 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 	require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
 	require.Equal(t,
 		"Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"Snapshot with active/passive failover is temporarily unsupported",
+			"Snapshot with active/passive failover requires an operator-managed automatic vLLM Worker checkpoint: "+
+			"checkpoint failover is only supported for an operator-generated DCD\n"+
+			"gpuMemoryService.mode must be IntraPod\n"+
+			"multinode/model-parallel worker topology is unsupported",
 		available.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)

@@ -64,7 +64,11 @@ from .kv_connector_protocols import (
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine, refresh_vllm_snapshot_restore_config
+from .snapshot import (
+    prepare_snapshot_engine,
+    refresh_vllm_snapshot_restore_config,
+    validate_snapshot_failover_clone_profile,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -151,6 +155,8 @@ async def worker(argv: list[str] | None = None) -> None:
             argv,
             restore_paused=snapshot_controller.snapshot_config.restore_paused,
         )
+        if snapshot_controller.snapshot_config.restore_paused:
+            validate_snapshot_failover_clone_profile(config, shadow=True)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).

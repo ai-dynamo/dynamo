@@ -25,6 +25,7 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -166,7 +167,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 	}
-	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(dgd, field.NewPath("spec"), specOpts)...)
 	if v.requestVersionSource == runtimeVersionSourceV1Beta1 {
 		allErrs = append(allErrs, validateTwoShadowProfiles(dgd)...)
 	}
@@ -255,10 +256,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 
 // validateDynamoGraphDeploymentSpec validates spec. spec and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
-	spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	fldPath *field.Path,
 	opts dynamoGraphDeploymentSpecValidationOptions,
 ) field.ErrorList {
+	spec := &dgd.Spec
 	const validateInferencePoolAvailability = true
 
 	allErrs := field.ErrorList{}
@@ -275,6 +277,18 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
+		backendFramework := dynamo.BackendFramework(spec.BackendFramework)
+		var backendErr error
+		if checkpoint.HasCheckpointEnabledFailover(component) {
+			backendFramework, backendErr = dynamo.BackendFrameworkForComponent(component, dgd)
+			if backendErr != nil {
+				allErrs = append(allErrs, field.Invalid(
+					componentPath,
+					component.ComponentName,
+					fmt.Sprintf("failed to determine backend framework: %v", backendErr),
+				))
+			}
+		}
 
 		if opts.grovePathway {
 			combinedLength, detail := dgdComponentResourceNameLength(opts.dgdName, spec.Components, component)
@@ -322,6 +336,18 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			opts.grovePathway,
 			validateInferencePoolAvailability,
 		)...)
+		if backendErr == nil {
+			for _, err := range checkpoint.ValidateCheckpointCompatibility(
+				component,
+				string(backendFramework),
+				checkpoint.CompatibilityContextDGDSource,
+			) {
+				allErrs = append(allErrs, field.Forbidden(
+					componentPath.Child("experimental", "checkpoint"),
+					err.Error(),
+				))
+			}
+		}
 	}
 
 	if spec.Restart != nil {

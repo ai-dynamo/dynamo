@@ -155,6 +155,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
 		if dynamo.IsIntraPodFailoverEnabled(component) {
+			info.RestorePaused = !hasCheckpointRef
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames(component)
 		}
 		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
@@ -335,6 +336,11 @@ func (r *dgdCheckpointsReconciler) expectedCheckpointCRForWorkerHash(
 	targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 	if err != nil {
 		return nil, "", 0, "", err
+	}
+	if dynamo.IsIntraPodFailoverEnabled(component) {
+		if err := dynamo.PrepareVLLMAutomaticFailoverSnapshotSource(targetContainer); err != nil {
+			return nil, "", 0, "", err
+		}
 	}
 	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {

@@ -290,6 +290,138 @@ func TestGetGPUCount(t *testing.T) {
 	}
 }
 
+func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		args     []string
+		wantArgs []string
+	}{
+		{
+			name:     "insertion",
+			args:     []string{"-m", "dynamo.vllm"},
+			wantArgs: []string{"-m", "dynamo.vllm", "--load-format", "gms"},
+		},
+		{
+			name:     "replacement",
+			args:     []string{"-m", "dynamo.vllm", "--load-format=safetensors"},
+			wantArgs: []string{"-m", "dynamo.vllm", "--load-format=gms"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"python3"},
+				Args:    tt.args,
+				Env: []corev1.EnvVar{{
+					Name:  "DYN_FORWARDPASS_METRIC_PORT",
+					Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+				}},
+			}
+			require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(container))
+			assert.Equal(t, tt.wantArgs, container.Args)
+			assert.True(t, hasEnvVar(*container, "DYN_SNAPSHOT_FAILOVER_SOURCE", "1"))
+			assert.True(t, hasEnvVar(*container, "DYN_VLLM_GMS_SHADOW_MODE", "false"))
+			assert.False(t, hasEnvVar(*container, "DYN_FORWARDPASS_METRIC_PORT", ""))
+		})
+	}
+
+	t.Run("rollback", func(t *testing.T) {
+		container := &corev1.Container{
+			Command: []string{"sh", "-c"},
+			Args:    []string{"python3 -m dynamo.vllm $EXTRA"},
+			Env: []corev1.EnvVar{{
+				Name:  "DYN_FORWARDPASS_METRIC_PORT",
+				Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+			}},
+		}
+		original := container.DeepCopy()
+		require.Error(t, PrepareVLLMAutomaticFailoverSnapshotSource(container))
+		assert.Equal(t, original, container)
+	})
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "apparent flag after delimiter",
+			args: []string{"-m", "dynamo.vllm", "--", "--load-format", "safetensors"},
+		},
+		{
+			name: "trailing delimiter",
+			args: []string{"-m", "dynamo.vllm", "--model", "test/model", "--"},
+		},
+	} {
+		t.Run(tt.name+" rolls back", func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"python3"},
+				Args:    tt.args,
+				Env: []corev1.EnvVar{{
+					Name:  "DYN_FORWARDPASS_METRIC_PORT",
+					Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+				}},
+			}
+			original := container.DeepCopy()
+			require.ErrorContains(t, PrepareVLLMAutomaticFailoverSnapshotSource(container), "after --")
+			assert.Equal(t, original, container)
+		})
+	}
+
+	t.Run("direct module command", func(t *testing.T) {
+		container := &corev1.Container{
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Args:    []string{"--model", "test/model"},
+			Env: []corev1.EnvVar{{
+				Name:  "DYN_FORWARDPASS_METRIC_PORT",
+				Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+			}},
+		}
+		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(container))
+		assert.Equal(
+			t,
+			[]string{"--model", "test/model", "--load-format", "gms"},
+			container.Args,
+		)
+	})
+
+	t.Run("tokenized args command", func(t *testing.T) {
+		container := &corev1.Container{
+			Args: []string{"python3", "-m", "dynamo.vllm"},
+			Env: []corev1.EnvVar{{
+				Name:  "DYN_FORWARDPASS_METRIC_PORT",
+				Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+			}},
+		}
+		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(container))
+		assert.Equal(
+			t,
+			[]string{"python3", "-m", "dynamo.vllm", "--load-format", "gms"},
+			container.Args,
+		)
+	})
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "duplicate load format", args: []string{"-m", "dynamo.vllm", "--load-format", "gms", "--load-format=auto"}},
+		{name: "missing load format value", args: []string{"-m", "dynamo.vllm", "--load-format"}},
+	} {
+		t.Run(tt.name+" rolls back", func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"python3"},
+				Args:    tt.args,
+				Env: []corev1.EnvVar{{
+					Name:  "DYN_FORWARDPASS_METRIC_PORT",
+					Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+				}},
+			}
+			original := container.DeepCopy()
+			require.Error(t, PrepareVLLMAutomaticFailoverSnapshotSource(container))
+			assert.Equal(t, original, container)
+		})
+	}
+}
+
 func TestGetDeviceClassName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -648,6 +780,24 @@ func TestBuildFailoverPodWithComponent_ThreeDirectEngines(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "frontend-sidecar", ps.Containers[3].Name)
+}
+
+func TestBuildFailoverPodWithComponent_CheckpointOneShadowUsesLegacyTopology(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{
+			Failover:   &v1beta1.FailoverSpec{NumShadows: 1},
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+		},
+	}
+
+	require.NoError(t, buildFailoverPodWithComponent(&ps, component, 1, BackendFrameworkVLLM))
+	require.Len(t, ps.Containers, 3)
+	for i := range 2 {
+		assert.Equal(t, fmt.Sprintf("engine-%d", i), ps.Containers[i].Name)
+		assert.NotContains(t, envToMap(ps.Containers[i].Env), "DYN_FORWARDPASS_METRIC_PORT")
+	}
+	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
 }
 
 func TestBuildFailoverPodWithComponent_RollsBackInvalidPorts(t *testing.T) {

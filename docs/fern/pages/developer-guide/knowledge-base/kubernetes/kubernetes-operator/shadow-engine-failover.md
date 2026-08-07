@@ -83,8 +83,39 @@ The following diagram illustrates same-node process-level recovery:
   as a complete failover workflow.
 - Do not use it for hardware failure, GPU loss, node loss, cross-node recovery,
   in-flight request recovery, or KV-cache recovery.
-- Do not combine it with Snapshot restore. Snapshot plus GMS is not yet
-  available.
+
+## Snapshot-backed Intra-Pod Failover
+
+The experimental vLLM single-GPU profile can combine a DGD-managed automatic
+checkpoint with intra-pod failover. Set `numShadows` to `1` or `2`. The
+operator creates two or three destination engines, respectively:
+
+Snapshot restore and active/passive failover remain distinct mechanisms. This
+profile composes process restoration with failover election.
+
+| `numShadows` | Restored engine targets |
+| :---: | :--- |
+| `1` | `engine-0`, `engine-1` |
+| `2` | `engine-0`, `engine-1`, `engine-2` |
+
+Checkpoint capture always selects the canonical `main` container. The
+destination restore annotation selects only the generated engine containers.
+GMS containers and user helpers are not restore targets; they cold-start from
+the Pod specification the operator constructed.
+
+Failover restore has two independent gates. The Snapshot restore sentinel
+completes CRIU process restoration, but it does not wake the vLLM model. Every
+restored engine remains application-paused until it acquires the shared
+intra-pod file lock. Only the lock owner wakes the model, registers
+model-serving discovery, and publishes routes. The lock remains held while
+that engine serves. Each target restores and enters election independently;
+there is no cohort-readiness barrier across the restored engines.
+
+This combined profile is limited to an aggregated vLLM generation Worker with
+the TCP request plane, TP=PP=DP=1, one node and GPU, intra-pod GMS, and an
+automatic checkpoint managed by the same DGD. Manual `checkpointRef` and
+InterPod or multinode Snapshot-backed failover are not supported. They are
+follow-on work.
 
 ## GPU Memory Service
 
@@ -139,9 +170,10 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
 - It is not a hardware fault tolerance mechanism for GPU, node, or rack loss.
 - It does not diagnose or fix the backend failure.
 - It does not preserve in-flight requests, network sockets, or KV cache state.
-- It does not make Snapshot restore supported for GPU memory workloads.
-- Snapshot plus GMS is temporarily blocked by admission because of known GPU
-  driver restore issues.
+- Standalone and ordinary prepared IntraPod GMS Snapshot workflows are
+  supported. Snapshot-backed active/passive failover is limited to the narrow
+  automatic vLLM IntraPod profile described above. InterPod and multinode
+  Snapshot-backed failover are follow-on work.
 - It is not covered by the normal v1beta1 compatibility guarantees while it
   lives under `experimental`.
 
