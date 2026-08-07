@@ -11,6 +11,7 @@ use crossbeam_queue::SegQueue;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
+use super::cold_pool::{ColdPoolLane, ColdPoolState};
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
 use super::overlap::SelectedWorkerTierSnapshot;
@@ -56,6 +57,7 @@ struct QueuedRequest {
     request: SchedulingRequest,
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
+    cold_pool_lane: Option<ColdPoolLane>,
 }
 
 struct SelectedWorkerForRequest {
@@ -217,7 +219,10 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    cold_pool_state: Option<ColdPoolState>,
 }
+
+mod cold_pool_integration;
 
 /// Queue that gates scheduling requests behind a capacity check.
 /// When all workers exceed `threshold_frac` utilisation the request is parked in `pending`.
@@ -316,10 +321,11 @@ impl<
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
         let pending = PolicyQueue::new(profile.clone());
-        let queueing_enabled = profile
-            .classes()
-            .iter()
-            .any(PolicyClassConfig::queueing_enabled);
+        let queueing_enabled = profile.cold_pool_config().is_some()
+            || profile
+                .classes()
+                .iter()
+                .any(PolicyClassConfig::queueing_enabled);
         for class in profile.classes() {
             tracing::info!(
                 policy_class = class.name,
@@ -361,6 +367,7 @@ impl<
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
+        let cold_pool_state = profile.cold_pool_config().cloned().map(ColdPoolState::new);
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
@@ -379,6 +386,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider,
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
+            cold_pool_state,
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -759,12 +767,28 @@ impl<
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
             (class_index, Some(snapshot))
         };
+        let cold_pool_lane = self.prepare_cold_pool_request(&request);
         let class = self.profile.class(class_index);
-        let should_queue = self.should_queue(class_index, class, || {
-            self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
-        });
+        let should_queue = if self.cold_pool_state.is_some() {
+            let can_dispatch = self.cold_pool_request_is_dispatchable(
+                class,
+                &request,
+                cold_pool_lane,
+                decay_now,
+                decay_now,
+            );
+            let must_queue = cold_pool_lane == Some(ColdPoolLane::Cold) && !can_dispatch;
+            self.should_queue(class_index, class, must_queue, || !can_dispatch)
+        } else {
+            self.should_queue(class_index, class, false, || {
+                self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
+            })
+        };
         if !should_queue {
-            return (false, self.admit_one(request, decay_now));
+            return (
+                false,
+                self.admit_one(request, cold_pool_lane, class_index, decay_now),
+            );
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -779,6 +803,7 @@ impl<
             request,
             enqueue_at: decay_now,
             block_hashes,
+            cold_pool_lane,
         };
         let worker_count = self.workers_with_configs.borrow().len();
         if let Err((rejection, queued)) = self.pending.enqueue(
@@ -799,6 +824,7 @@ impl<
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
+        self.on_cold_pool_request_queued(cold_pool_lane);
         (false, true)
     }
 
@@ -806,11 +832,15 @@ impl<
         &self,
         class_index: usize,
         class: &PolicyClassConfig,
-        all_workers_busy: impl FnOnce() -> bool,
+        must_queue: bool,
+        policy_blocked: impl FnOnce() -> bool,
     ) -> bool {
-        // Preserve backlog anti-bypass and lazily avoid worker scans when an
-        // earlier condition already decides admission.
-        class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
+        // Mandatory policy waits (for example, Cold soft-drain) bypass the
+        // optional capacity gate. Otherwise preserve backlog anti-bypass and
+        // lazily avoid worker scans when an earlier condition decides admission.
+        must_queue
+            || (class.queueing_enabled()
+                && (self.pending.has_backlog(class_index) || policy_blocked()))
     }
 
     fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
@@ -859,6 +889,7 @@ impl<
                     });
                 removed_ready_head |= class_head_removed;
                 for entry in removed {
+                    self.on_cold_pool_request_dequeued(entry.payload().cold_pool_lane);
                     self.subtract_pending_counters(class_index, entry.snapshot());
                 }
             }
@@ -867,16 +898,34 @@ impl<
     }
 
     fn has_dispatchable_ready_head(&self) -> bool {
-        let active_tokens = self.slots.active_tokens(Instant::now());
+        let now = Instant::now();
+        let active_tokens = self.slots.active_tokens(now);
         let configs = self.workers_with_configs.borrow();
-        self.pending.any_ready_head(|_, class, queued| {
-            !Self::all_workers_prefill_busy_with(
-                &active_tokens,
-                &configs,
-                class,
-                queued.request.eligibility(),
-            )
-        })
+        if self.cold_pool_state.is_some() {
+            let active_counts = self.slots.active_request_counts();
+            self.pending.any_ready_head(|_, class, queued| {
+                Self::cold_pool_request_is_dispatchable_with(
+                    self.cold_pool_state.as_ref(),
+                    class,
+                    &queued.request,
+                    queued.cold_pool_lane,
+                    Some(queued.enqueue_at),
+                    &active_tokens,
+                    &active_counts,
+                    &configs,
+                    now,
+                )
+            })
+        } else {
+            self.pending.any_ready_head(|_, class, queued| {
+                !Self::all_workers_prefill_busy_with(
+                    &active_tokens,
+                    &configs,
+                    class,
+                    queued.request.eligibility(),
+                )
+            })
+        }
     }
 
     fn subtract_pending_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
@@ -887,6 +936,7 @@ impl<
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
+        self.reconcile_cold_pool();
         if !self.pending.has_ready() {
             return;
         }
@@ -906,17 +956,34 @@ impl<
             let active_tokens = self.slots.active_tokens(decay_now);
             let popped = {
                 let configs = self.workers_with_configs.borrow();
-                self.pending.pop_next(|_, class, queued| {
-                    // TODO: This preserves head-of-line blocking within each policy
-                    // class. A blocked constrained head can stall later entries in
-                    // that class until a bounded non-HOL policy is introduced.
-                    !Self::all_workers_prefill_busy_with(
-                        &active_tokens,
-                        &configs,
-                        class,
-                        queued.request.eligibility(),
-                    )
-                })
+                if self.cold_pool_state.is_some() {
+                    let active_counts = self.slots.active_request_counts();
+                    self.pending.pop_next(|_, class, queued| {
+                        Self::cold_pool_request_is_dispatchable_with(
+                            self.cold_pool_state.as_ref(),
+                            class,
+                            &queued.request,
+                            queued.cold_pool_lane,
+                            Some(queued.enqueue_at),
+                            &active_tokens,
+                            &active_counts,
+                            &configs,
+                            decay_now,
+                        )
+                    })
+                } else {
+                    self.pending.pop_next(|_, class, queued| {
+                        // TODO: This preserves head-of-line blocking within each policy
+                        // class. A blocked constrained head can stall later entries in
+                        // that class until a bounded non-HOL policy is introduced.
+                        !Self::all_workers_prefill_busy_with(
+                            &active_tokens,
+                            &configs,
+                            class,
+                            queued.request.eligibility(),
+                        )
+                    })
+                }
             };
             let Some(mut popped) = popped else {
                 break;
@@ -965,17 +1032,21 @@ impl<
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
             let request = queued.request;
+            let cold_pool_lane = queued.cold_pool_lane;
             tracing::debug!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, admit_now);
+            self.on_cold_pool_request_dequeued(cold_pool_lane);
+            self.admit_one(request, cold_pool_lane, class_index, admit_now);
         }
     }
 
     fn select_worker_for_request(
         &self,
         request: &mut SchedulingRequest,
+        cold_pool_lane: Option<ColdPoolLane>,
+        class_index: Option<usize>,
         decay_now: Instant,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         request.worker_loads = self
@@ -988,45 +1059,52 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
-            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
-            self.selector
-                .select_worker(&workers, request, eligibility, self.block_size)
-                .map(|selection| {
-                    let non_max_overlap_selection = if request.mode.is_tracked()
-                        && self.non_max_overlap_selection_observer.get().is_some()
-                    {
-                        non_max_overlap_selection(
-                            &workers,
-                            request,
-                            eligibility,
-                            selection.worker,
-                            selection.effective_overlap_blocks,
-                        )
-                    } else {
-                        None
-                    };
-                    let config = workers
-                        .get(&selection.worker.worker_id)
-                        .expect("selected worker config must exist");
-                    let selected_worker_tiers = request
-                        .overlap
-                        .selected_worker_tiers(selection.worker, config);
-                    let worker_load = request.worker_load_for(selection.worker);
-                    let selected_worker_load = AdvisoryWorkerLoad {
-                        active_prefill_tokens: worker_load.active_prefill_tokens,
-                        prefill_token_capacity: config
-                            .max_num_batched_tokens()
-                            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
-                            as usize,
-                        total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
-                    };
-                    SelectedWorkerForRequest {
-                        selection,
-                        selected_worker_tiers,
-                        selected_worker_load,
-                        non_max_overlap_selection,
-                    }
-                })
+            self.select_worker_with_cold_pool(
+                request,
+                cold_pool_lane,
+                class_index.map(|index| self.profile.class(index)),
+                &workers,
+                overloaded_worker_ids.as_ref(),
+            )
+            .map(|selection| {
+                // The observer intentionally uses caller-level eligibility rather than the
+                // Cold Pool's narrowed candidate set. This preserves main's meaning: report
+                // locality sacrificed by any router policy, including pool isolation.
+                let non_max_overlap_selection = if request.mode.is_tracked()
+                    && self.non_max_overlap_selection_observer.get().is_some()
+                {
+                    non_max_overlap_selection(
+                        &workers,
+                        request,
+                        request.eligibility_with_overloaded(overloaded_worker_ids.as_ref()),
+                        selection.worker,
+                        selection.effective_overlap_blocks,
+                    )
+                } else {
+                    None
+                };
+                let config = workers
+                    .get(&selection.worker.worker_id)
+                    .expect("selected worker config must exist");
+                let selected_worker_tiers = request
+                    .overlap
+                    .selected_worker_tiers(selection.worker, config);
+                let worker_load = request.worker_load_for(selection.worker);
+                let selected_worker_load = AdvisoryWorkerLoad {
+                    active_prefill_tokens: worker_load.active_prefill_tokens,
+                    prefill_token_capacity: config
+                        .max_num_batched_tokens()
+                        .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
+                        as usize,
+                    total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
+                };
+                SelectedWorkerForRequest {
+                    selection,
+                    selected_worker_tiers,
+                    selected_worker_load,
+                    non_max_overlap_selection,
+                }
+            })
         }
     }
 
@@ -1035,7 +1113,7 @@ impl<
         request: &mut SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let selected = self.select_worker_for_request(request, decay_now)?;
+        let selected = self.select_worker_for_request(request, None, None, decay_now)?;
 
         Ok(AdvisorySchedulingResponse {
             selected_worker_load: selected.selected_worker_load,
@@ -1051,8 +1129,19 @@ impl<
 
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
-    fn admit_one(&mut self, mut request: SchedulingRequest, decay_now: Instant) -> bool {
-        let selected = match self.select_worker_for_request(&mut request, decay_now) {
+    fn admit_one(
+        &mut self,
+        mut request: SchedulingRequest,
+        cold_pool_lane: Option<ColdPoolLane>,
+        class_index: usize,
+        decay_now: Instant,
+    ) -> bool {
+        let selected = match self.select_worker_for_request(
+            &mut request,
+            cold_pool_lane,
+            Some(class_index),
+            decay_now,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1101,6 +1190,7 @@ impl<
             sequence_request,
             response,
             non_max_overlap_selection,
+            cold_pool_lane,
         )
     }
 
@@ -1110,11 +1200,12 @@ impl<
     /// request lifetime and the caller must install its RAII cleanup owner. If
     /// delivery loses that race, roll back the booking here.
     fn book_and_respond(
-        &self,
+        &mut self,
         mut request: SchedulingRequest,
         sequence_request: SequenceRequest,
         response: SchedulingResponse,
         non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+        cold_pool_lane: Option<ColdPoolLane>,
     ) -> bool {
         if request.response_is_closed() {
             tracing::debug!(
@@ -1133,8 +1224,13 @@ impl<
 
         if request.respond(Ok(response)) {
             if let Some(selection) = non_max_overlap_selection {
-                self.dispatch_non_max_overlap_selection(request_id, selection);
+                self.dispatch_non_max_overlap_selection(request_id.clone(), selection);
             }
+            let worker = self
+                .slots
+                .request_worker(&request_id)
+                .expect("new scheduler booking must retain its worker");
+            self.on_cold_pool_request_dispatched(request_id, cold_pool_lane, worker);
             return true;
         }
 
@@ -2022,6 +2118,510 @@ mod tests {
         queue.enqueue(abandoned).await;
 
         assert!(observed.lock().unwrap().is_empty());
+    }
+
+    fn cold_pool_profile(soft_drain_timeout_ms: u64) -> PolicyProfile {
+        policy_profile(&format!(
+            r#"
+cold_pool:
+  request_threshold: 131072
+  workers: 1
+  soft_drain_timeout_ms: {soft_drain_timeout_ms}
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: default
+    policy_family: default
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 9000000
+"#
+        ))
+    }
+
+    fn cold_pool_two_worker_fallback_profile() -> PolicyProfile {
+        policy_profile(
+            r#"
+cold_pool:
+  request_threshold: 131072
+  workers: 2
+  soft_drain_timeout_ms: 1000
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: default
+    policy_family: default
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 100000
+"#,
+        )
+    }
+
+    fn cold_pool_cache_affinity_profile() -> PolicyProfile {
+        policy_profile(
+            r#"
+cold_pool:
+  request_threshold: 131072
+  workers: 1
+  soft_drain_timeout_ms: 10000
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cache_affine
+  - min_tokens: 131072
+    bucket: true_miss
+policy_classes:
+  - name: default_cache_affine
+    policy_family: default
+    cache_bucket: cache_affine
+    quantum: 1
+    prefill_busy_threshold: 9000000
+  - name: default_true_miss
+    policy_family: default
+    cache_bucket: true_miss
+    quantum: 1
+    prefill_busy_threshold: 9000000
+"#,
+        )
+    }
+
+    fn cold_pool_isolation_first_profile() -> PolicyProfile {
+        policy_profile(
+            r#"
+cold_pool:
+  request_threshold: 131072
+  workers: 1
+  soft_drain_timeout_ms: 10000
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: warm
+  - min_tokens: 131072
+    bucket: true_miss
+policy_classes:
+  - name: default_warm
+    policy_family: default
+    cache_bucket: warm
+    quantum: 1
+    prefill_busy_threshold: 1000
+  - name: default_true_miss
+    policy_family: default
+    cache_bucket: true_miss
+    quantum: 1
+    prefill_busy_threshold: 1000
+"#,
+        )
+    }
+
+    fn configured_cold_worker(profile: &PolicyProfile, worker_count: usize) -> WorkerId {
+        let mut state = ColdPoolState::new(profile.cold_pool_config().unwrap().clone());
+        state.reconcile_membership(0..worker_count as u64);
+        *state.cold_worker_ids().iter().next().unwrap()
+    }
+
+    fn configured_cold_workers(profile: &PolicyProfile, worker_count: usize) -> Vec<WorkerId> {
+        let mut state = ColdPoolState::new(profile.cold_pool_config().unwrap().clone());
+        state.reconcile_membership(0..worker_count as u64);
+        let mut workers: Vec<_> = state.cold_worker_ids().iter().copied().collect();
+        workers.sort_unstable();
+        workers
+    }
+
+    #[tokio::test]
+    async fn cold_pool_routes_cold_and_prefers_other_workers_for_warm() {
+        let profile = cold_pool_profile(10_000);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (cold, cold_rx) = make_request("cold-active", 400_000);
+        queue.enqueue(cold).await;
+        let cold_response = cold_rx.await.unwrap().unwrap();
+        assert_eq!(cold_response.best_worker.worker_id, cold_worker);
+
+        let (warm, warm_rx) = make_request("warm-preferred", 1_000);
+        queue.enqueue(warm).await;
+        let warm_response = warm_rx.await.unwrap().unwrap();
+        assert_ne!(warm_response.best_worker.worker_id, cold_worker);
+
+        slots.free(&"cold-active".to_string(), decay_now()).unwrap();
+        slots
+            .free(&"warm-preferred".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_pool_queues_warm_when_isolation_preferred_workers_are_busy() {
+        let profile = cold_pool_isolation_first_profile();
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let non_cold_workers: Vec<_> = (0..4u64).filter(|worker| *worker != cold_worker).collect();
+        let cold_worker_rank = WorkerWithDpRank::new(cold_worker, 0);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut warm_on_cold, warm_on_cold_rx) = make_request("warm-on-cold", 1_000);
+        warm_on_cold.pinned_worker = Some(cold_worker_rank);
+        queue.enqueue(warm_on_cold).await;
+        assert_eq!(
+            warm_on_cold_rx.await.unwrap().unwrap().best_worker,
+            cold_worker_rank
+        );
+
+        let mut busy_request_ids = Vec::new();
+        for (index, worker_id) in non_cold_workers.iter().copied().enumerate() {
+            let request_id = format!("busy-warm-{index}");
+            let (mut busy_warm, busy_warm_rx) = make_request(&request_id, 2_000);
+            busy_warm.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
+            queue.enqueue(busy_warm).await;
+            assert_eq!(
+                busy_warm_rx.await.unwrap().unwrap().best_worker.worker_id,
+                worker_id
+            );
+            busy_request_ids.push(request_id);
+        }
+
+        let (cold, mut cold_rx) = make_request("waiting-cold", 400_000);
+        queue.enqueue(cold).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert!(cold_rx.try_recv().is_err());
+
+        let (probe_warm, mut probe_warm_rx) = make_request("queued-warm", 1_000);
+        queue.enqueue(probe_warm).await;
+
+        assert_eq!(queue.pending_count(), 2);
+        assert!(probe_warm_rx.try_recv().is_err());
+
+        slots.free(&busy_request_ids[0], decay_now()).unwrap();
+        queue.update().await;
+
+        let probe_response = probe_warm_rx.try_recv().unwrap().unwrap();
+        assert_ne!(probe_response.best_worker.worker_id, cold_worker);
+        assert_eq!(queue.pending_count(), 1);
+        assert!(cold_rx.try_recv().is_err());
+
+        for request_id in busy_request_ids.iter().skip(1) {
+            slots.free(request_id, decay_now()).unwrap();
+        }
+        slots.free(&"queued-warm".to_string(), decay_now()).unwrap();
+        slots
+            .free(&"warm-on-cold".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+
+        let cold_response = cold_rx.try_recv().unwrap().unwrap();
+        assert_eq!(cold_response.best_worker, cold_worker_rank);
+        slots
+            .free(&"waiting-cold".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_pool_bypasses_cached_long_context_to_non_cold_owner() {
+        let profile = cold_pool_profile(10_000);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let cache_owner = (0..4u64).find(|worker| *worker != cold_worker).unwrap();
+        let cache_owner_rank = WorkerWithDpRank::new(cache_owner, 0);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut continuation, continuation_rx) = make_request("cached-long-context", 400_000);
+        continuation
+            .overlap
+            .effective_overlap_blocks
+            .insert(cache_owner_rank, 18_750.0);
+        continuation
+            .overlap
+            .effective_cached_tokens
+            .insert(cache_owner_rank, 300_000);
+        queue.enqueue(continuation).await;
+
+        let response = continuation_rx.await.unwrap().unwrap();
+        assert_eq!(response.best_worker, cache_owner_rank);
+        assert_eq!(response.cached_tokens, 300_000);
+        slots
+            .free(&"cached-long-context".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_affine_bypass_reuses_cold_owner_while_true_miss_waits() {
+        let profile = cold_pool_cache_affinity_profile();
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let cold_worker_rank = WorkerWithDpRank::new(cold_worker, 0);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut warm, warm_rx) = make_request("warm-on-cold-owner", 1_000);
+        warm.pinned_worker = Some(cold_worker_rank);
+        queue.enqueue(warm).await;
+        assert_eq!(
+            warm_rx.await.unwrap().unwrap().best_worker,
+            cold_worker_rank
+        );
+
+        let (true_miss, true_miss_rx) = make_request("waiting-true-miss", 400_000);
+        queue.enqueue(true_miss).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        let (mut continuation, continuation_rx) = make_request("cached-on-cold-owner", 400_000);
+        continuation
+            .overlap
+            .effective_overlap_blocks
+            .insert(cold_worker_rank, 18_750.0);
+        continuation
+            .overlap
+            .effective_cached_tokens
+            .insert(cold_worker_rank, 300_000);
+        queue.enqueue(continuation).await;
+
+        let continuation_response = continuation_rx.await.unwrap().unwrap();
+        assert_eq!(continuation_response.best_worker, cold_worker_rank);
+        assert_eq!(continuation_response.cached_tokens, 300_000);
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .free(&"cached-on-cold-owner".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"warm-on-cold-owner".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+
+        let true_miss_response = true_miss_rx.await.unwrap().unwrap();
+        assert_eq!(true_miss_response.best_worker, cold_worker_rank);
+        assert_eq!(queue.pending_count(), 0);
+        slots
+            .free(&"waiting-true-miss".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_pool_waits_in_policy_queue_until_active_warm_drains() {
+        let profile = cold_pool_profile(10_000);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut warm, warm_rx) = make_request("warm-on-cold", 1_000);
+        warm.pinned_worker = Some(WorkerWithDpRank::new(cold_worker, 0));
+        queue.enqueue(warm).await;
+        assert_eq!(
+            warm_rx.await.unwrap().unwrap().best_worker.worker_id,
+            cold_worker
+        );
+
+        let (cold, cold_rx) = make_request("waiting-cold", 400_000);
+        queue.enqueue(cold).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .free(&"warm-on-cold".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+        let cold_response = cold_rx.await.unwrap().unwrap();
+        assert_eq!(cold_response.best_worker.worker_id, cold_worker);
+        assert_eq!(queue.pending_count(), 0);
+        slots
+            .free(&"waiting-cold".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_pool_zero_timeout_allows_bounded_fallback() {
+        let profile = cold_pool_profile(0);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut warm, warm_rx) = make_request("warm-overlap", 1_000);
+        warm.pinned_worker = Some(WorkerWithDpRank::new(cold_worker, 0));
+        queue.enqueue(warm).await;
+        warm_rx.await.unwrap().unwrap();
+
+        let (cold, cold_rx) = make_request("fallback-cold", 400_000);
+        queue.enqueue(cold).await;
+        let cold_response = cold_rx.await.unwrap().unwrap();
+        assert_eq!(cold_response.best_worker.worker_id, cold_worker);
+        assert_eq!(queue.pending_count(), 0);
+
+        slots
+            .free(&"warm-overlap".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"fallback-cold".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cold_pool_falls_back_after_soft_drain_timeout() {
+        let profile = cold_pool_profile(1_000);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut warm, warm_rx) = make_request("warm-through-timeout", 1_000);
+        warm.pinned_worker = Some(WorkerWithDpRank::new(cold_worker, 0));
+        queue.enqueue(warm).await;
+        warm_rx.await.unwrap().unwrap();
+
+        let (cold, mut cold_rx) = make_request("bounded-cold", 400_000);
+        queue.enqueue(cold).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        queue.update().await;
+        assert!(cold_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        queue.update().await;
+        let response = cold_rx.try_recv().unwrap().unwrap();
+        assert_eq!(response.best_worker.worker_id, cold_worker);
+        assert_eq!(queue.pending_count(), 0);
+
+        for request_id in ["warm-through-timeout", "bounded-cold"] {
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cold_pool_timeout_skips_busy_preferred_during_fallback() {
+        let profile = cold_pool_two_worker_fallback_profile();
+        let cold_workers = configured_cold_workers(&profile, 6);
+        assert_eq!(cold_workers.len(), 2);
+        let busy_clean = WorkerWithDpRank::new(cold_workers[0], 0);
+        let ready_with_warm = WorkerWithDpRank::new(cold_workers[1], 0);
+        let (queue, slots) = make_queue_with_profile(6, 16, 1_000_000, profile);
+
+        let (mut active_cold, active_cold_rx) = make_request("active-cold", 400_000);
+        active_cold.pinned_worker = Some(busy_clean);
+        queue.enqueue(active_cold).await;
+        assert_eq!(
+            active_cold_rx.await.unwrap().unwrap().best_worker,
+            busy_clean
+        );
+
+        let (mut active_warm, active_warm_rx) = make_request("active-warm", 1_000);
+        active_warm.pinned_worker = Some(ready_with_warm);
+        queue.enqueue(active_warm).await;
+        assert_eq!(
+            active_warm_rx.await.unwrap().unwrap().best_worker,
+            ready_with_warm
+        );
+
+        let (fallback, mut fallback_rx) = make_request("timeout-fallback", 400_000);
+        queue.enqueue(fallback).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert!(fallback_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_millis(1_000)).await;
+        queue.update().await;
+        assert_eq!(
+            fallback_rx.try_recv().unwrap().unwrap().best_worker,
+            ready_with_warm,
+            "the final selector must skip the busy preferred worker after timeout"
+        );
+        assert_eq!(queue.pending_count(), 0);
+
+        for request_id in ["active-cold", "active-warm", "timeout-fallback"] {
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_pool_bypasses_a_cold_request_pinned_to_a_non_member() {
+        let profile = cold_pool_profile(10_000);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let pinned_worker = (0..4u64).find(|worker| *worker != cold_worker).unwrap();
+        let pinned_rank = WorkerWithDpRank::new(pinned_worker, 0);
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile);
+
+        let (mut request, response_rx) = make_request("pinned-non-member", 400_000);
+        request.pinned_worker = Some(pinned_rank);
+        queue.enqueue(request).await;
+
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, pinned_rank);
+        assert_eq!(queue.pending_count(), 0);
+        slots
+            .free(&"pinned-non-member".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_pool_bypasses_incompatible_and_single_worker_topologies() {
+        let profile = cold_pool_profile(10_000);
+        let cold_worker = configured_cold_worker(&profile, 4);
+        let non_cold_worker = (0..4u64).find(|worker| *worker != cold_worker).unwrap();
+        let (queue, slots) = make_queue_with_profile(4, 16, 1_000_000, profile.clone());
+
+        let (mut constrained, constrained_rx) = make_request("constrained-cold", 400_000);
+        constrained.allowed_worker_ids = Some(HashSet::from([non_cold_worker]));
+        queue.enqueue(constrained).await;
+        assert_eq!(
+            constrained_rx.await.unwrap().unwrap().best_worker.worker_id,
+            non_cold_worker
+        );
+        slots
+            .free(&"constrained-cold".to_string(), decay_now())
+            .unwrap();
+
+        let (single_queue, single_slots) = make_queue_with_profile(1, 16, 1_000_000, profile);
+        let (single, single_rx) = make_request("single-worker-cold", 400_000);
+        single_queue.enqueue(single).await;
+        assert_eq!(single_rx.await.unwrap().unwrap().best_worker.worker_id, 0);
+        single_slots
+            .free(&"single-worker-cold".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[test]
+    fn cold_pool_missing_fallback_uses_ordinary_busy_gate() {
+        type TestActor = SchedulerQueueActor<
+            NoopSequencePublisher,
+            SimpleWorkerConfig,
+            DefaultWorkerSelector,
+            NoopOverlapScoresRefresh,
+        >;
+
+        let profile = cold_pool_profile(10_000);
+        let cold_worker = configured_cold_worker(&profile, 2);
+        let non_cold_worker = (0..2u64).find(|worker| *worker != cold_worker).unwrap();
+        let mut state = ColdPoolState::new(profile.cold_pool_config().unwrap().clone());
+        state.reconcile_membership(0..2u64);
+        let class = profile.default_class();
+        let (request, _response_rx) = make_request("missing-cold-fallback", 400_000);
+        let now = decay_now();
+        let active_counts = HashMap::new();
+
+        let workers = HashMap::from([(
+            non_cold_worker,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(1_000_000),
+                ..Default::default()
+            },
+        )]);
+        let active_tokens = HashMap::from([(WorkerWithDpRank::new(non_cold_worker, 0), 9_000_001)]);
+        assert!(!TestActor::cold_pool_request_is_dispatchable_with(
+            Some(&state),
+            class,
+            &request,
+            Some(ColdPoolLane::Cold),
+            Some(now),
+            &active_tokens,
+            &active_counts,
+            &workers,
+            now,
+        ));
+
+        let no_workers = HashMap::new();
+        assert!(TestActor::cold_pool_request_is_dispatchable_with(
+            Some(&state),
+            class,
+            &request,
+            Some(ColdPoolLane::Cold),
+            Some(now),
+            &HashMap::new(),
+            &active_counts,
+            &no_workers,
+            now,
+        ));
     }
 
     #[tokio::test]

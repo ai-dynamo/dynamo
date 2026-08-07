@@ -63,6 +63,7 @@ where
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
+        cold_pool_enabled: bool,
         cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -88,6 +89,13 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        // Cold Pool protects prefill capacity. A shared policy file must not alter the
+        // independent decode scheduler in a disaggregated deployment.
+        let profile = if cold_pool_enabled {
+            profile
+        } else {
+            profile.without_cold_pool()
+        };
         let queue_recheck_interval = kv_router_config.router_queue_recheck_interval();
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
@@ -525,6 +533,7 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
+            false,
             cancellation_token.clone(),
         )
         .await

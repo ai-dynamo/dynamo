@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
+use super::cold_pool::ColdPoolConfig;
 use super::config::RouterQueuePolicy;
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
@@ -62,6 +63,7 @@ impl PolicyClassConfig {
 pub struct PolicyProfile {
     classes: Vec<PolicyClassConfig>,
     classifier: PolicyClassifier,
+    cold_pool: Option<ColdPoolConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +127,7 @@ impl PolicyProfile {
         Self {
             classes: vec![class],
             classifier: PolicyClassifier::SyntheticSingle { class_index: 0 },
+            cold_pool: None,
         }
     }
 
@@ -158,12 +161,23 @@ impl PolicyProfile {
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
         &self.classes[index]
     }
+
+    pub(crate) fn cold_pool_config(&self) -> Option<&ColdPoolConfig> {
+        self.cold_pool.as_ref()
+    }
+
+    /// Removes prefill-only Cold Pool routing from a shared policy profile.
+    pub fn without_cold_pool(mut self) -> Self {
+        self.cold_pool = None;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouterPolicyConfig {
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
+    cold_pool: Option<ColdPoolConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -200,17 +214,21 @@ impl RouterPolicyConfig {
     ) -> PolicyProfile {
         // Model profiles replace the root wholesale; the synthetic profile is
         // constructed only when neither configured profile applies.
-        model_name
+        let mut profile = model_name
             .and_then(|name| self.models.get(name))
             .or(self.root.as_ref())
             .cloned()
-            .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy))
+            .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy));
+        profile.cold_pool = self.cold_pool.clone();
+        profile
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
+    #[serde(default)]
+    cold_pool: Option<RawColdPoolConfig>,
     #[serde(default)]
     default_policy_family: Option<String>,
     #[serde(default)]
@@ -223,6 +241,7 @@ struct RawRouterPolicyConfig {
 
 impl RawRouterPolicyConfig {
     fn resolve(self) -> Result<RouterPolicyConfig, RouterPolicyConfigError> {
+        let cold_pool = self.cold_pool.map(RawColdPoolConfig::resolve).transpose()?;
         let root = match (
             self.default_policy_family,
             self.policy_classes,
@@ -264,7 +283,40 @@ impl RawRouterPolicyConfig {
             ));
         }
 
-        Ok(RouterPolicyConfig { root, models })
+        Ok(RouterPolicyConfig {
+            root,
+            models,
+            cold_pool,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawColdPoolConfig {
+    request_threshold: usize,
+    workers: usize,
+    soft_drain_timeout_ms: u64,
+}
+
+impl RawColdPoolConfig {
+    fn resolve(self) -> Result<ColdPoolConfig, RouterPolicyConfigError> {
+        if self.request_threshold == 0 {
+            return Err(RouterPolicyConfigError::Validation(
+                "cold_pool.request_threshold must be greater than zero".to_string(),
+            ));
+        }
+        if self.workers == 0 {
+            return Err(RouterPolicyConfigError::Validation(
+                "cold_pool.workers must be greater than zero".to_string(),
+            ));
+        }
+
+        Ok(ColdPoolConfig {
+            request_threshold: self.request_threshold,
+            workers: self.workers,
+            soft_drain_timeout: std::time::Duration::from_millis(self.soft_drain_timeout_ms),
+        })
     }
 }
 
@@ -415,6 +467,7 @@ fn resolve_profile(
                 .map(|class_index| class_index.expect("validated complete policy matrix"))
                 .collect(),
         }),
+        cold_pool: None,
     })
 }
 
@@ -904,5 +957,85 @@ policy_classes:
                 .all(|class| class.name != "custom_priority"),
             "model profiles must completely replace root classes"
         );
+    }
+
+    #[test]
+    fn cold_pool_config_is_attached_to_resolved_profiles() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+cold_pool:
+  request_threshold: 131072
+  workers: 2
+  soft_drain_timeout_ms: 1000
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: default
+    policy_family: default
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 65536
+"#,
+        )
+        .unwrap();
+
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        let cold_pool = profile.cold_pool_config().unwrap();
+        assert_eq!(cold_pool.request_threshold, 131_072);
+        assert_eq!(cold_pool.workers, 2);
+        assert_eq!(
+            cold_pool.soft_drain_timeout,
+            std::time::Duration::from_secs(1)
+        );
+
+        let decode_profile = profile.without_cold_pool();
+        assert!(decode_profile.cold_pool_config().is_none());
+    }
+
+    #[test]
+    fn cold_pool_config_allows_zero_soft_drain_timeout() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+cold_pool:
+  request_threshold: 1
+  workers: 1
+  soft_drain_timeout_ms: 0
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: default
+    policy_family: default
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 1
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config
+                .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+                .cold_pool_config()
+                .unwrap()
+                .soft_drain_timeout,
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn cold_pool_config_rejects_zero_required_values() {
+        for cold_pool in [
+            "request_threshold: 0\n  workers: 1",
+            "request_threshold: 1\n  workers: 0",
+        ] {
+            let yaml = format!(
+                "cold_pool:\n  {cold_pool}\n  soft_drain_timeout_ms: 1\ndefault_policy_family: default\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: default\n    policy_family: default\n    cache_bucket: all\n    quantum: 1\n    prefill_busy_threshold: 1\n"
+            );
+            assert!(RouterPolicyConfig::from_yaml(&yaml).is_err());
+        }
     }
 }

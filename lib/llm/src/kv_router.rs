@@ -123,6 +123,13 @@ impl KvEventSourceRequirement {
     }
 }
 
+fn worker_role_supports_cold_pool(worker_role: Option<WorkerType>) -> bool {
+    matches!(
+        worker_role,
+        None | Some(WorkerType::Prefill | WorkerType::Aggregated)
+    )
+}
+
 impl fmt::Display for KvEventSourceRequirement {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -440,6 +447,7 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             metric_worker_type,
+            worker_role_supports_cold_pool(worker_role),
             cancellation_token.child_token(),
         )
         .await?;
@@ -1556,6 +1564,15 @@ mod tests {
             resolve_tracking_model_name(TrackingHashAlgorithm::PublicXxh3V1, Some("")).unwrap(),
             ""
         );
+    }
+
+    #[test]
+    fn cold_pool_is_enabled_only_for_prefill_capable_worker_roles() {
+        assert!(worker_role_supports_cold_pool(None));
+        assert!(worker_role_supports_cold_pool(Some(WorkerType::Prefill)));
+        assert!(worker_role_supports_cold_pool(Some(WorkerType::Aggregated)));
+        assert!(!worker_role_supports_cold_pool(Some(WorkerType::Decode)));
+        assert!(!worker_role_supports_cold_pool(Some(WorkerType::Encode)));
     }
 
     #[test]
