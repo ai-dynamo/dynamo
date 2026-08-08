@@ -77,9 +77,16 @@ or multiple major components require a
   </Step>
 
   <Step title="Request and address review">
-    Request review from the maintainer who approved the issue when applicable. The repository
-    [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) file identifies required
-    reviewers for many paths.
+    Request review from the maintainer who approved the issue when applicable. The teams that own
+    the areas your pull request touches are auto-requested when it opens; preview them with
+    `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`. Any one owner per
+    matched rule satisfies the gate.
+
+    If the `codeowners` check fails because your pull request adds a directory no area claims, add a
+    one-line claim under the owning area in
+    [`areas.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/areas.yaml),
+    regenerate, and commit both files together — see the
+    [CODEOWNERS README](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/README.md).
 
     Respond to review comments, push follow-up commits with DCO sign-off, and re-request review when
     the change is ready.

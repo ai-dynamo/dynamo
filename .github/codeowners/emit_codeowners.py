@@ -227,7 +227,7 @@ def _base_rules(model: ResolvedModel) -> list[tuple[str, str]]:
     return rules
 
 
-def _render_codeowners(
+def render_codeowners(
     model: ResolvedModel,
     group: bool,
     external: list[dict] | None = None,
@@ -447,7 +447,7 @@ def main() -> int:
     )
     external = load_external_contributors(external_path)
 
-    lines, stats = _render_codeowners(model, group=not args.no_group, external=external)
+    lines, stats = render_codeowners(model, group=not args.no_group, external=external)
     Path(args.out).write_text("\n".join(lines) + "\n")
     total = (
         stats["base"]
