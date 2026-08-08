@@ -11,6 +11,12 @@ LIST_DIRECTORY_PROMPT = (
     "ls and report each filename verbatim from the output."
 )
 
+CODEX_LIST_DIRECTORY_PROMPT = (
+    "Call exec_command exactly once with cmd=\"ls\". Do not request elevated "
+    "permissions or set sandbox_permissions. Then report each filename verbatim "
+    "from the output."
+)
+
 
 def write_codex_config(
     codex_home: Path, frontend_port: int, *, enable_multi_agent: bool = False

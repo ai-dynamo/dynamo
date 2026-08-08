@@ -48,6 +48,7 @@ import requests
 from filelock import FileLock
 
 from tests.frontend.agent_smoke_inputs import (
+    CODEX_LIST_DIRECTORY_PROMPT,
     LIST_DIRECTORY_PROMPT,
     claude_subagent_definition,
     claude_subagent_prompt,
@@ -909,7 +910,7 @@ def _run_codex_exec_smoke(
         "-c",
         "model_provider=local",
         "exec",
-        LIST_DIRECTORY_PROMPT,
+        CODEX_LIST_DIRECTORY_PROMPT,
         "--dangerously-bypass-approvals-and-sandbox",
     ]
     result = subprocess.run(
