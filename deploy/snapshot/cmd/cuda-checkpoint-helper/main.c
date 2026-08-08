@@ -90,6 +90,7 @@ static int
 parse_uuid(const char* uuid_str, CUuuid* uuid_out)
 {
   size_t len;
+  char normalized[41];
   int i;
 
   if (uuid_str == NULL || uuid_out == NULL) {
@@ -97,6 +98,17 @@ parse_uuid(const char* uuid_str, CUuuid* uuid_out)
   }
 
   len = strlen(uuid_str);
+
+  if (len > 41 && strncmp(uuid_str, "GPU-", 4) == 0 && uuid_str[40] == '-') {
+    size_t suffix_len = len - 41;
+    if (strspn(uuid_str + 41, "0123456789") == suffix_len) {
+      memcpy(normalized, uuid_str, 40);
+      normalized[40] = '\0';
+      uuid_str = normalized;
+      len = 40;
+    }
+  }
+
   if (len == 40) {
     if (strncmp(uuid_str, "GPU-", 4) != 0) {
       return -1;
