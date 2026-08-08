@@ -24,6 +24,10 @@ Small fixes, such as typo corrections and focused documentation improvements, ca
 straight to a pull request. For new features, broad refactors, or architectural changes, start a
 conversation with the maintainers before investing in implementation.
 
+The contributor ladder, decision-making process, Special Interest Groups (SIGs), and conflict
+resolution are defined in
+[Project Governance](https://github.com/ai-dynamo/dynamo/blob/main/GOVERNANCE.md).
+
 ## Ways to Contribute
 
 - [Report a bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml) with

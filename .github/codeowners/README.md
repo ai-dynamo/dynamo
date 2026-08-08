@@ -26,9 +26,9 @@ adding required approvals.
 | File | What it is |
 |------|------------|
 | `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
-| `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
+| `external_contributors.yaml` | External contributors with their governance standing (`level`) and areas. Maintainer-level entries drive individual `@handle` co-owner lines in `CODEOWNERS`; every entry lands in `CONTRIBUTORS.md`. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
-| `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
+| `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage, and checks the `SIGS.md` roster maps every non-program area to a SIG (CI gate). |
 | `emit_codeowners.py` | Generates root `CODEOWNERS` directly from declared policy globs, plus `CONTRIBUTORS.md`; it never reads the git tree. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for matching, policy resolution, deterministic emission, precedence, and external-contributor co-ownership. |
@@ -51,12 +51,13 @@ adding required approvals.
 
 ## External contributors
 
-An external individual who has earned ownership of an area is granted it by
-attaching them to that area's **label** in `external_contributors.yaml` -- never
-by copying its globs. The generator then appends their `@handle` as a co-owner
-on every `CODEOWNERS` line that area's team owns (base rules, path overrides,
-shared, and file-type rows), so they inherit exactly the team's paths. Add a
-glob to the area in `areas.yaml` and the contributor picks it up automatically.
+Externals cannot join the `dynamo-<area>-codeowners` org teams, so an external
+Maintainer who has earned ownership of an area is granted it by attaching them
+to that area's **label** in `external_contributors.yaml` -- never by copying
+its globs. The generator then appends their `@handle` as a co-owner on every
+`CODEOWNERS` line that area's team owns (base rules, path overrides, shared,
+and file-type rows), so they inherit exactly the team's paths. Add a glob to
+the area in `areas.yaml` and the contributor picks it up automatically.
 
 ```yaml
 # external_contributors.yaml
@@ -68,10 +69,13 @@ contributors:
     areas: [router]          # area labels from areas.yaml
 ```
 
-`level` is standing metadata shown in the generated `CONTRIBUTORS.md`; it does
-not change routing (co-ownership is granted by `areas`). Ownership is
-co-ownership: the area team stays on the line and the contributor is appended,
-so under "any one approves" either can satisfy the gate.
+`level` gates emission: only `maintainer` and `core_maintainer` reach
+`CODEOWNERS`, because a code owner's review satisfies the required-review gate
+and that is merge authority. A `trusted_contributor` may review and approve but
+cannot merge (see `GOVERNANCE.md`), so lower levels are recorded in
+`CONTRIBUTORS.md` only, and `areas` decides which lines a maintainer co-owns.
+Ownership is co-ownership: the area team stays on the line and the contributor
+is appended, so under "any one approves" either can satisfy the gate.
 
 Regenerating `CODEOWNERS` also regenerates `CONTRIBUTORS.md`; the
 `emit_codeowners.py` command above already reads `external_contributors.yaml`
