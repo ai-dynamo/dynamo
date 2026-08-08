@@ -329,8 +329,10 @@ impl ModelManager {
     }
 
     /// Remove a Model if it has no remaining WorkerSets.
+    ///
+    /// The caller holds `reservation_lock` and publishes the resulting catalog update.
     /// Uses atomic remove_if to avoid TOCTOU race between checking is_empty and removing.
-    pub fn remove_model_if_empty(&self, model_name: &str) {
+    fn remove_model_if_empty(&self, model_name: &str) {
         if self
             .models
             .remove_if(model_name, |_, model| model.is_empty())
@@ -534,6 +536,10 @@ impl ModelManager {
         removed
     }
 
+    /// Commit a complete discovery group atomically.
+    ///
+    /// `before_publish` runs while `reservation_lock` is held and must not call methods that
+    /// acquire that lock.
     pub(crate) fn commit_discovery_group<F>(
         &self,
         group_id: &str,
@@ -783,6 +789,10 @@ impl ModelManager {
             .unwrap_or_default()
     }
 
+    /// Remove a complete discovery group atomically.
+    ///
+    /// `before_publish` runs while `reservation_lock` is held and must not call methods that
+    /// acquire that lock.
     pub(crate) fn remove_discovery_group<F>(
         &self,
         group_id: &str,
