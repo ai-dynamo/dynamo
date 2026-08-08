@@ -4,7 +4,7 @@
 use super::*;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::ForwardPassSnapshot;
-use crate::scheduler::{EngineOutputs, SchedulerCommandResult};
+use crate::scheduler::{EngineOutputs, ReplayRequestKey, SchedulerCommandResult};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -216,11 +216,11 @@ async fn cancel_pending_pass(
         let result = tokio::select! {
             reply = reply_rx => reply.unwrap().unwrap().result,
             boundary_result = &mut boundary => {
-                panic!("pass boundary completed before cancellation was acknowledged: {boundary_result}")
+                panic!("pass boundary completed before cancellation was acknowledged: {boundary_result:?}")
             }
         };
         cancel_token.cancel();
-        assert!(!boundary.await);
+        assert!(!boundary.await.unwrap());
         result
     };
     (result, pending)
@@ -275,7 +275,7 @@ fn output_suppression_repairs_stale_accept_length_counters() {
             handoff_delay_ms: None,
         },
     ] {
-        pass.output_signals.push(output, None).unwrap();
+        pass.output_signals.push(output, None);
     }
     pass.accept_length_output_tokens = 0;
     pass.accept_length_decode_forwards = 0;
@@ -286,7 +286,9 @@ fn output_suppression_repairs_stale_accept_length_counters() {
         pass_start_kv_published: false,
     };
 
-    pending.suppress_request_outputs(Uuid::from_u128(1));
+    pending
+        .suppress_request_outputs(Uuid::from_u128(1))
+        .unwrap();
 
     assert_eq!(pending.pass.accept_length_output_tokens, 2);
     assert_eq!(pending.pass.accept_length_decode_forwards, 1);
@@ -294,9 +296,38 @@ fn output_suppression_repairs_stale_accept_length_counters() {
         pending
             .pass
             .output_signals
+            .as_slice()
             .iter()
             .all(|signal| signal.uuid == surviving)
     );
+}
+
+#[test]
+fn tracked_outputs_fail_live_suppression_without_panicking() {
+    let mut pass = pass();
+    let signal = std::mem::take(&mut pass.output_signals)
+        .into_untracked()
+        .unwrap()
+        .pop()
+        .unwrap();
+    let mut keys = slotmap::SlotMap::<ReplayRequestKey, ()>::with_key();
+    let key = keys.insert(());
+    let mut outputs = EngineOutputs::with_capacity(1);
+    outputs.push(signal, Some(key));
+    pass.output_signals = outputs;
+    let mut pending = PendingLivePass {
+        pass,
+        kv_events: Vec::new(),
+        admissions_published: false,
+        pass_start_kv_published: false,
+    };
+
+    assert!(
+        pending
+            .suppress_request_outputs(Uuid::from_u128(1))
+            .is_err()
+    );
+    assert_eq!(pending.pass.output_signals.len(), 1);
 }
 
 #[tokio::test]
@@ -346,14 +377,14 @@ async fn cancellation_does_not_end_pass_with_unrelated_pending_output() {
     let result = tokio::select! {
         biased;
         boundary_result = &mut boundary => {
-            panic!("cancellation ended a pass with unrelated pending output: {boundary_result}")
+            panic!("cancellation ended a pass with unrelated pending output: {boundary_result:?}")
         }
         reply = reply_rx => reply.unwrap().unwrap().result,
     };
     assert_eq!(result, SchedulerCommandResult::Applied);
 
     cancel_token.cancel();
-    assert!(!boundary.await);
+    assert!(!boundary.await.unwrap());
 }
 
 #[tokio::test]

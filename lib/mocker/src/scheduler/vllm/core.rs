@@ -1588,7 +1588,8 @@ impl VllmCore {
                         .state
                         .requests
                         .get(&uuid)
-                        .and_then(|request| request.replay_request_key);
+                        .expect("rejected waiting request must remain active")
+                        .replay_request_key;
                     rejected_requests.push((uuid, replay_request_key));
                     self.drop_request(uuid);
                     continue;
@@ -1648,7 +1649,7 @@ impl VllmCore {
                     handoff_delay_ms: None,
                 },
                 replay_request_key,
-            )?;
+            );
         }
         #[cfg(debug_assertions)]
         debug_assert_eq!(
@@ -2249,7 +2250,7 @@ impl VllmCore {
                     handoff_delay_ms,
                 },
                 replay_request_key,
-            )?;
+            );
         }
 
         if ready.is_empty() {
@@ -2400,7 +2401,7 @@ impl VllmCore {
                 self.complete_source(uuid, deferred_deref);
                 running_changed = true;
             }
-            output_signals.push(output_signal, replay_request_key)?;
+            output_signals.push(output_signal, replay_request_key);
             accept_length.record_forward(1);
         }
 
@@ -2640,7 +2641,7 @@ impl VllmCore {
                         ),
                     },
                     replay_request_key,
-                )?;
+                );
                 emitted_tokens += 1;
                 if is_complete {
                     completed = true;

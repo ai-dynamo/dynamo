@@ -898,6 +898,7 @@ mod destination_lifecycle {
         assert!(
             blocker_terminal
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == blocker_uuid && signal.completed)
         );
@@ -923,6 +924,7 @@ mod destination_lifecycle {
         assert!(
             terminal
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == logical_uuid && signal.completed)
         );
@@ -1609,6 +1611,7 @@ mod core_behavior {
         let second = core.execute_pass(&mut collector, first.end_ms);
         let ordered = second
             .output_signals
+            .as_slice()
             .iter()
             .map(|signal| (signal.uuid, signal.completed))
             .collect::<Vec<_>>();
@@ -1638,6 +1641,7 @@ mod core_behavior {
         assert_eq!(
             third
                 .output_signals
+                .as_slice()
                 .iter()
                 .map(|signal| signal.uuid)
                 .collect::<Vec<_>>(),

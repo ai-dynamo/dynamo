@@ -20,7 +20,9 @@ use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineO
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
-use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
+use crate::scheduler::{
+    EngineOutputs, EnginePassResult, EngineRequest, RouterEventVisibility, SchedulerCommand,
+};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -561,7 +563,7 @@ where
     pub(in crate::replay::offline) fn dispatch_engine(
         &mut self,
         rank_id: usize,
-        request: crate::scheduler::EngineRequest,
+        request: EngineRequest,
     ) -> anyhow::Result<()> {
         self.update_worker(rank_id, |worker| worker.receive_engine_request(request))
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))??;
@@ -575,7 +577,7 @@ where
         rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        self.dispatch_engine(rank_id, crate::scheduler::EngineRequest::untracked(request))
+        self.dispatch_engine(rank_id, EngineRequest::untracked(request))
     }
 
     pub(in crate::replay::offline) fn apply_command(
@@ -801,7 +803,7 @@ where
                                     stage: self.stage,
                                     worker_idx: rank_id,
                                     completed_requests: 0,
-                                    output_signals: crate::scheduler::EngineOutputs::default(),
+                                    output_signals: EngineOutputs::default(),
                                     lifecycle_events: Vec::new(),
                                     engine_events: Observation::Batch::default(),
                                     progress: EngineProgress::default(),
@@ -1079,13 +1081,13 @@ mod tests {
         engine
             .dispatch_engine(
                 0,
-                crate::scheduler::EngineRequest::for_replay(timed_request(fast, 4), fast_key),
+                EngineRequest::for_replay(timed_request(fast, 4), fast_key),
             )
             .unwrap();
         engine
             .dispatch_engine(
                 1,
-                crate::scheduler::EngineRequest::for_replay(timed_request(slow, 8), slow_key),
+                EngineRequest::for_replay(timed_request(slow, 8), slow_key),
             )
             .unwrap();
         let mut collector = TraceCollector::default();
@@ -1507,6 +1509,7 @@ mod tests {
         assert!(
             final_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == uuid && signal.completed)
         );

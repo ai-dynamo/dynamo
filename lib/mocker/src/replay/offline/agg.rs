@@ -39,7 +39,7 @@ use super::{
     },
     state::AggRequestState,
 };
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
@@ -49,7 +49,7 @@ use rustc_hash::FxHashMap;
 use slotmap::SlotMap;
 #[cfg(test)]
 use std::collections::HashMap;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque, hash_map::Entry};
 use uuid::Uuid;
 
 use crate::scheduler::{EngineOutputs, EngineRequest, ReplayRequestKey};
@@ -65,11 +65,17 @@ impl AggRequests {
         self.by_uuid.contains_key(&uuid)
     }
 
-    fn insert(&mut self, uuid: Uuid, state: AggRequestState) -> ReplayRequestKey {
-        debug_assert!(!self.contains_uuid(uuid));
-        let key = self.states.insert((uuid, state));
-        self.by_uuid.insert(uuid, key);
-        key
+    fn insert(&mut self, uuid: Uuid, state: AggRequestState) -> anyhow::Result<ReplayRequestKey> {
+        match self.by_uuid.entry(uuid) {
+            Entry::Occupied(_) => {
+                bail!("offline replay request {uuid} is already active")
+            }
+            Entry::Vacant(entry) => {
+                let key = self.states.insert((uuid, state));
+                entry.insert(key);
+                Ok(key)
+            }
+        }
     }
 
     fn get_mut_by_uuid(
@@ -92,42 +98,47 @@ impl AggRequests {
             .states
             .get_mut(key)
             .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
-        ensure!(
-            *stored_uuid == uuid,
-            "offline aggregate replay request state key does not match {uuid}"
-        );
+        Self::validate_stored_uuid(*stored_uuid, uuid)?;
         Ok(state)
     }
 
-    fn validate_key(&self, key: ReplayRequestKey, uuid: Uuid) -> anyhow::Result<()> {
-        self.get_by_key(key, uuid)?;
+    fn remove(&mut self, key: ReplayRequestKey, uuid: Uuid) -> anyhow::Result<AggRequestState> {
+        let Entry::Occupied(entry) = self.by_uuid.entry(uuid) else {
+            bail!("offline aggregate replay missing request state for {uuid}");
+        };
         ensure!(
-            self.by_uuid.get(&uuid).copied() == Some(key),
+            *entry.get() == key,
             "offline aggregate replay request state indexes disagree for {uuid}"
         );
-        Ok(())
-    }
-
-    fn remove_validated(&mut self, key: ReplayRequestKey, uuid: Uuid) -> AggRequestState {
-        self.by_uuid
-            .remove(&uuid)
-            .expect("validated replay UUID must remain present");
-        self.states
+        let (stored_uuid, _) = self
+            .states
+            .get(key)
+            .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        Self::validate_stored_uuid(*stored_uuid, uuid)?;
+        let (_, state) = self
+            .states
             .remove(key)
-            .expect("validated replay key must remain present")
-            .1
+            .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        entry.remove();
+        Ok(state)
     }
 
+    #[cfg(test)]
     fn get_by_key(&self, key: ReplayRequestKey, uuid: Uuid) -> anyhow::Result<&AggRequestState> {
         let (stored_uuid, state) = self
             .states
             .get(key)
             .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        Self::validate_stored_uuid(*stored_uuid, uuid)?;
+        Ok(state)
+    }
+
+    fn validate_stored_uuid(stored_uuid: Uuid, uuid: Uuid) -> anyhow::Result<()> {
         ensure!(
-            *stored_uuid == uuid,
+            stored_uuid == uuid,
             "offline aggregate replay request state key does not match {uuid}"
         );
-        Ok(state)
+        Ok(())
     }
 
     #[cfg(test)]
@@ -551,7 +562,7 @@ where
                 let replay_request_key = self.requests.insert(
                     uuid,
                     AggRequestState::new_running(input_length, output_length),
-                );
+                )?;
                 self.dispatch_to_worker(
                     request.into_direct_request(),
                     uuid,
@@ -563,7 +574,7 @@ where
                 self.collector
                     .on_route_queued(uuid, ReplayRequestPool::Agg, self.now_ms);
                 self.requests
-                    .insert(uuid, AggRequestState::new_queued(request));
+                    .insert(uuid, AggRequestState::new_queued(request))?;
             }
         }
         self.record_router_pending();
@@ -653,15 +664,11 @@ where
     /// Consume one output signal, updating router state, collector state, and completion counts.
     fn process_output_signal(
         &mut self,
-        signal: crate::common::protocols::OutputSignal,
+        signal: OutputSignal,
         replay_request_key: ReplayRequestKey,
     ) -> anyhow::Result<()> {
         if signal.completed {
-            // Validate the generational key before publishing any terminal
-            // side effects. Terminal signals are rare enough that the later
-            // removal can retain its own defensive validation.
-            self.requests
-                .validate_key(replay_request_key, signal.uuid)?;
+            let removed_state = self.requests.remove(replay_request_key, signal.uuid)?;
             if let Some(token_id) = signal.token_id {
                 CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
             }
@@ -679,9 +686,6 @@ where
                 self.stats.router_freed_count += 1;
             }
             self.record_router_pending();
-            let removed_state = self
-                .requests
-                .remove_validated(replay_request_key, signal.uuid);
             // Rejected requests never ran: keep them out of completed-request
             // shape and latency samples. Their offered demand was already
             // recorded at arrival, matching requests_started_total.
@@ -1449,7 +1453,7 @@ mod tests {
         run_trace_workload_multi_collect_with_stats, run_trace_workload_single_collect,
     };
     use super::*;
-    use crate::common::protocols::{EngineType, G1Backend, OutputSignal, SglangArgs};
+    use crate::common::protocols::{EngineType, G1Backend, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
     use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
@@ -1466,12 +1470,9 @@ mod tests {
         let stale_uuid = Uuid::from_u128(9);
         let stale_key = runtime
             .requests
-            .insert(stale_uuid, AggRequestState::new_running(4, 2));
-        runtime
-            .requests
-            .validate_key(stale_key, stale_uuid)
+            .insert(stale_uuid, AggRequestState::new_running(4, 2))
             .unwrap();
-        runtime.requests.remove_validated(stale_key, stale_uuid);
+        runtime.requests.remove(stale_key, stale_uuid).unwrap();
 
         let uuid = Uuid::from_u128(10);
         let request = |tokens, max_output_tokens| DirectRequest {
@@ -1490,6 +1491,13 @@ mod tests {
             .unwrap();
         let key = runtime.requests.by_uuid[&uuid];
         assert_ne!(stale_key, key);
+        assert!(
+            runtime
+                .requests
+                .insert(uuid, AggRequestState::new_running(9, 7))
+                .is_err()
+        );
+        assert_eq!(runtime.requests.by_uuid[&uuid], key);
 
         let collector_before = runtime.collector.snapshot(uuid).unwrap();
         let in_flight_before = runtime.engine.in_flight();
@@ -1506,26 +1514,45 @@ mod tests {
         assert_eq!(runtime.collector.snapshot(uuid), Some(collector_before));
         assert_eq!(runtime.engine.in_flight(), in_flight_before);
 
-        let signal = |uuid, token_id| OutputSignal {
+        let signal = |uuid, token_id, completed| OutputSignal {
             uuid,
             token_id,
-            completed: false,
+            completed,
             rejected: false,
             handoff_delay_ms: None,
         };
+        let state_before = runtime.debug_snapshot();
+        let collector_before = runtime.collector.snapshot(uuid).unwrap();
         assert!(
             runtime
-                .process_output_signal(signal(uuid, Some(1)), stale_key)
+                .process_output_signal(signal(uuid, Some(1), true), stale_key)
+                .is_err()
+        );
+        assert_eq!(runtime.debug_snapshot(), state_before);
+        assert_eq!(
+            runtime.collector.snapshot(uuid),
+            Some(collector_before.clone())
+        );
+        assert!(
+            runtime
+                .process_output_signal(signal(Uuid::from_u128(11), Some(1), true), key,)
+                .is_err()
+        );
+        assert_eq!(runtime.debug_snapshot(), state_before);
+        assert_eq!(runtime.collector.snapshot(uuid), Some(collector_before));
+        assert!(
+            runtime
+                .process_output_signal(signal(uuid, Some(1), false), stale_key)
                 .is_err()
         );
         assert!(
             runtime
-                .process_output_signal(signal(Uuid::from_u128(11), Some(1)), key)
+                .process_output_signal(signal(Uuid::from_u128(11), Some(1), false), key)
                 .is_err()
         );
 
         runtime
-            .process_output_signal(signal(uuid, None), key)
+            .process_output_signal(signal(uuid, None, false), key)
             .unwrap();
         assert!(
             runtime
@@ -1536,7 +1563,7 @@ mod tests {
         );
 
         runtime
-            .process_output_signal(signal(uuid, Some(1)), key)
+            .process_output_signal(signal(uuid, Some(1), false), key)
             .unwrap();
         assert!(
             runtime

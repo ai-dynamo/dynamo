@@ -651,7 +651,7 @@ mod vllm {
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
         for (uuid, expected_token) in [(first, 4), (second, 104)] {
-            assert!(pass.output_signals.iter().any(|signal| {
+            assert!(pass.output_signals.as_slice().iter().any(|signal| {
                 signal.uuid == uuid
                     && signal.token_id == Some(expected_token)
                     && !signal.completed
@@ -668,7 +668,7 @@ mod vllm {
 
         let next_pass = core.execute_pass(&mut collector, pass.end_ms);
         for (uuid, expected_token) in [(first, 5), (second, 105)] {
-            assert!(next_pass.output_signals.iter().any(|signal| {
+            assert!(next_pass.output_signals.as_slice().iter().any(|signal| {
                 signal.uuid == uuid
                     && signal.token_id == Some(expected_token)
                     && !signal.completed
@@ -713,7 +713,7 @@ mod vllm {
         });
         let seed_pass = core.execute_pass(&mut collector, 0.0);
         assert!(
-            seed_pass.output_signals.iter().any(|signal| {
+            seed_pass.output_signals.as_slice().iter().any(|signal| {
                 signal.uuid == seed
                     && signal.token_id == Some(8)
                     && signal.completed
@@ -740,6 +740,7 @@ mod vllm {
         assert!(
             unrelated_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == unrelated && signal.completed)
         );
@@ -804,6 +805,7 @@ mod vllm {
 
         assert!(
             pass.output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == uuid && signal.completed && signal.rejected)
         );
@@ -878,6 +880,7 @@ mod vllm {
         assert_eq!(pass.output_signals.len(), 3);
         assert!(
             pass.output_signals
+                .as_slice()
                 .iter()
                 .take(2)
                 .all(|signal| !signal.completed)
@@ -1094,11 +1097,7 @@ mod trtllm {
             // the core over-admit.
             let pass = core.execute_pass(&mut collector, now_ms);
             now_ms = pass.end_ms.max(now_ms + 1.0);
-            completed += pass
-                .output_signals
-                .iter()
-                .filter(|signal| signal.completed)
-                .count();
+            completed += pass.output_signals.completed_count();
             max_preemptions = max_preemptions.max(pass.mocker_metrics.vllm_preemptions_total);
         }
 
@@ -1188,11 +1187,7 @@ mod trtllm {
             }
             let pass = core.execute_pass(&mut collector, now_ms);
             now_ms = pass.end_ms.max(now_ms + 1.0);
-            completed += pass
-                .output_signals
-                .iter()
-                .filter(|signal| signal.completed)
-                .count();
+            completed += pass.output_signals.completed_count();
         }
         completed
     }
@@ -1333,6 +1328,7 @@ mod trtllm {
             now_ms = pass.end_ms.max(now_ms + 1.0);
             if pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == valid && signal.completed)
             {
@@ -1377,7 +1373,7 @@ mod trtllm {
             }
             let pass = core.execute_pass(&mut collector, now_ms);
             now_ms = pass.end_ms.max(now_ms + 1.0);
-            for signal in pass.output_signals.iter() {
+            for signal in pass.output_signals.as_slice() {
                 if signal.uuid == oversized && signal.completed && signal.rejected {
                     oversized_rejected = true;
                 }
@@ -1438,6 +1434,7 @@ mod trtllm {
         );
         assert!(
             pass.output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == reuser && signal.completed && signal.rejected),
             "reuser's 10-block footprint can never fit the 8-block pool (reused prefix is still \

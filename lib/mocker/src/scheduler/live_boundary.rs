@@ -250,7 +250,7 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
                 &cancel_token,
                 deadline,
             )
-            .await
+            .await?
             {
                 break;
             }
@@ -319,21 +319,19 @@ impl PendingLivePass {
             || self.pass.mocker_metrics != *metrics_before
     }
 
-    pub(crate) fn suppress_request_outputs(&mut self, request_id: uuid::Uuid) {
+    pub(crate) fn suppress_request_outputs(
+        &mut self,
+        request_id: uuid::Uuid,
+    ) -> anyhow::Result<()> {
         self.pass
             .output_signals
-            .retain_untracked(|signal| signal.uuid != request_id)
-            .expect("live scheduler pass must not carry replay keys");
-        self.pass.completed_requests = self
-            .pass
-            .output_signals
-            .iter()
-            .filter(|signal| signal.completed)
-            .count();
+            .retain_untracked(|signal| signal.uuid != request_id)?;
+        self.pass.completed_requests = self.pass.output_signals.completed_count();
         let (output_tokens, decode_forwards) =
             crate::scheduler::accept_length_sample(self.pass.output_signals.as_slice());
         self.pass.accept_length_output_tokens = output_tokens;
         self.pass.accept_length_decode_forwards = decode_forwards;
+        Ok(())
     }
 }
 
@@ -416,12 +414,7 @@ impl LiveEffectsPublisher {
 
         #[cfg(debug_assertions)]
         {
-            let completed_signals = pending
-                .pass
-                .output_signals
-                .iter()
-                .filter(|signal| signal.completed)
-                .count();
+            let completed_signals = pending.pass.output_signals.completed_count();
             let accept_length =
                 crate::scheduler::accept_length_sample(pending.pass.output_signals.as_slice());
             debug_assert_eq!(pending.pass.completed_requests, completed_signals);
@@ -738,7 +731,7 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
     scheduler_start: &Instant,
     cancel_token: &CancellationToken,
     deadline: Instant,
-) -> bool {
+) -> anyhow::Result<bool> {
     let sleep = sleep_until_precise(deadline);
     tokio::pin!(sleep);
     let mut accept_commands = true;
@@ -748,11 +741,11 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
         tokio::pin!(internal_deadline);
         tokio::select! {
             biased;
-            _ = cancel_token.cancelled() => return false,
-            _ = &mut sleep => return true,
+            _ = cancel_token.cancelled() => return Ok(false),
+            _ = &mut sleep => return Ok(true),
             cancellation = cancellation_rx.recv() => {
                 let Some(cancellation) = cancellation else {
-                    return false;
+                    return Ok(false);
                 };
                 let request_id = cancellation.request_id;
                 let discard_pending_output = cancellation.discard_pending_output;
@@ -765,7 +758,7 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
                     )
                     .await;
                 if discard_pending_output || outcome != Some(SchedulerCommandResult::Noop) {
-                    pending.suppress_request_outputs(request_id);
+                    pending.suppress_request_outputs(request_id)?;
                 }
                 if outcome == Some(SchedulerCommandResult::Applied) && core.live_is_empty() {
                     // Cancellation updates occupancy immediately, but the
@@ -789,7 +782,7 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
             }
             command = command_rx.recv(), if accept_commands => {
                 let Some(command) = command else {
-                    return false;
+                    return Ok(false);
                 };
                 if command_can_apply_during_pass(&command.command) {
                     publisher

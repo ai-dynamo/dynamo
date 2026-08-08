@@ -789,11 +789,7 @@ impl SglangCore {
         Ok(EnginePassResult {
             end_ms: decode.end_ms,
             token_completion_ms: decode.end_ms,
-            completed_requests: decode
-                .output_signals
-                .iter()
-                .filter(|signal| signal.completed)
-                .count(),
+            completed_requests: decode.output_signals.completed_count(),
             output_signals: decode.output_signals,
             admissions,
             lifecycle_events: std::mem::take(&mut self.lifecycle_events),

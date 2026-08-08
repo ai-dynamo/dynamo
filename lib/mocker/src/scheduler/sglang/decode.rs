@@ -250,7 +250,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 ),
             },
             req.replay_request_key,
-        )?;
+        );
     }
     let mut completed_requests = already_completed_indices
         .iter()
@@ -365,7 +365,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                     ),
                 },
                 req.replay_request_key,
-            )?;
+            );
             emitted_tokens += 1;
 
             if is_complete {

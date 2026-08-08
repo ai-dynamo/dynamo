@@ -64,47 +64,59 @@ impl EngineRequest {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EngineOutputs {
     signals: Vec<OutputSignal>,
-    replay_request_keys: Option<Vec<ReplayRequestKey>>,
+    tracking: OutputTracking,
+}
+
+#[derive(Debug, Clone, Default)]
+enum OutputTracking {
+    #[default]
+    Empty,
+    Untracked,
+    Tracked(Vec<ReplayRequestKey>),
+    Mixed,
 }
 
 impl EngineOutputs {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             signals: Vec::with_capacity(capacity),
-            replay_request_keys: None,
+            tracking: OutputTracking::Empty,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn untracked(signals: Vec<OutputSignal>) -> Self {
-        Self {
-            signals,
-            replay_request_keys: None,
-        }
+        let tracking = if signals.is_empty() {
+            OutputTracking::Empty
+        } else {
+            OutputTracking::Untracked
+        };
+        Self { signals, tracking }
     }
 
     pub(crate) fn push(
         &mut self,
         signal: OutputSignal,
         replay_request_key: Option<ReplayRequestKey>,
-    ) -> anyhow::Result<()> {
-        match (&mut self.replay_request_keys, replay_request_key) {
-            (Some(keys), Some(key)) => keys.push(key),
-            (None, Some(key)) if self.signals.is_empty() => {
+    ) {
+        match (&mut self.tracking, replay_request_key) {
+            (OutputTracking::Empty, Some(key)) => {
                 let mut keys = Vec::with_capacity(self.signals.capacity());
                 keys.push(key);
-                self.replay_request_keys = Some(keys);
+                self.tracking = OutputTracking::Tracked(keys);
             }
-            (None, None) => {}
-            _ => anyhow::bail!("engine pass mixed replay-tracked and ordinary outputs"),
+            (OutputTracking::Empty, None) => self.tracking = OutputTracking::Untracked,
+            (OutputTracking::Tracked(keys), Some(key)) => keys.push(key),
+            (OutputTracking::Untracked, None) => {}
+            (OutputTracking::Mixed, _) => {}
+            _ => self.tracking = OutputTracking::Mixed,
         }
         self.signals.push(signal);
-        Ok(())
     }
 
     pub(crate) fn reserve(&mut self, additional: usize) {
         self.signals.reserve(additional);
-        if let Some(keys) = &mut self.replay_request_keys {
+        if let OutputTracking::Tracked(keys) = &mut self.tracking {
             keys.reserve(additional);
         }
     }
@@ -114,7 +126,10 @@ impl EngineOutputs {
         keep: impl FnMut(&OutputSignal) -> bool,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.replay_request_keys.is_none(),
+            matches!(
+                self.tracking,
+                OutputTracking::Empty | OutputTracking::Untracked
+            ),
             "cannot suppress outputs from a replay-tracked pass"
         );
         self.signals.retain(keep);
@@ -123,7 +138,10 @@ impl EngineOutputs {
 
     pub(crate) fn into_untracked(self) -> anyhow::Result<Vec<OutputSignal>> {
         anyhow::ensure!(
-            self.replay_request_keys.is_none(),
+            matches!(
+                self.tracking,
+                OutputTracking::Empty | OutputTracking::Untracked
+            ),
             "replay-tracked outputs reached an ordinary publication boundary"
         );
         Ok(self.signals)
@@ -132,11 +150,16 @@ impl EngineOutputs {
     pub(crate) fn into_tracked(
         self,
     ) -> anyhow::Result<impl Iterator<Item = (OutputSignal, ReplayRequestKey)>> {
-        anyhow::ensure!(
-            self.replay_request_keys.is_some() || self.signals.is_empty(),
-            "ordinary outputs reached an aggregate replay completion boundary"
-        );
-        let keys = self.replay_request_keys.unwrap_or_default();
+        let keys = match self.tracking {
+            OutputTracking::Empty => Vec::new(),
+            OutputTracking::Tracked(keys) => keys,
+            OutputTracking::Untracked => {
+                anyhow::bail!("ordinary outputs reached an aggregate replay completion boundary")
+            }
+            OutputTracking::Mixed => {
+                anyhow::bail!("engine pass mixed replay-tracked and ordinary outputs")
+            }
+        };
         anyhow::ensure!(
             self.signals.len() == keys.len(),
             "aggregate replay output metadata is misaligned"
@@ -145,16 +168,18 @@ impl EngineOutputs {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.signals.is_empty()
+        self.len() == 0
     }
 
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.signals.len()
     }
 
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, OutputSignal> {
-        self.signals.iter()
+    pub(crate) fn completed_count(&self) -> usize {
+        self.signals
+            .iter()
+            .filter(|signal| signal.completed)
+            .count()
     }
 
     pub(crate) fn as_slice(&self) -> &[OutputSignal] {
@@ -163,10 +188,10 @@ impl EngineOutputs {
 
     #[cfg(test)]
     pub(crate) fn replay_key_at(&self, index: usize) -> Option<ReplayRequestKey> {
-        self.replay_request_keys
-            .as_ref()
-            .and_then(|keys| keys.get(index))
-            .copied()
+        match &self.tracking {
+            OutputTracking::Tracked(keys) => keys.get(index).copied(),
+            _ => None,
+        }
     }
 }
 
@@ -390,8 +415,7 @@ impl EngineCore {
         }
     }
 
-    #[cfg(test)]
-    fn receive(&mut self, request: DirectRequest) -> Uuid {
+    pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         self.receive_engine(EngineRequest::untracked(request))
             .expect("ordinary request ID must be unique")
     }
@@ -880,7 +904,7 @@ mod tests {
         };
 
         let mut live = EngineOutputs::with_capacity(1);
-        live.push(signal(), None).unwrap();
+        live.push(signal(), None);
         let live_ptr = live.as_slice().as_ptr();
         let published = live.into_untracked().unwrap();
         assert_eq!(published.as_ptr(), live_ptr);
@@ -888,16 +912,17 @@ mod tests {
         let mut keys = slotmap::SlotMap::<ReplayRequestKey, ()>::with_key();
         let key = keys.insert(());
         let mut replay = EngineOutputs::with_capacity(1);
-        replay.push(signal(), Some(key)).unwrap();
+        replay.push(signal(), Some(key));
         assert!(replay.retain_untracked(|_| true).is_err());
         assert_eq!(replay.into_tracked().unwrap().next().unwrap().1, key);
 
         let mut mixed = EngineOutputs::with_capacity(2);
-        mixed.push(signal(), Some(key)).unwrap();
-        assert!(mixed.push(signal(), None).is_err());
+        mixed.push(signal(), Some(key));
+        mixed.push(signal(), None);
+        assert!(mixed.into_tracked().is_err());
         assert!(EngineOutputs::default().into_tracked().is_ok());
         let mut ordinary = EngineOutputs::with_capacity(1);
-        ordinary.push(signal(), None).unwrap();
+        ordinary.push(signal(), None);
         assert!(ordinary.into_tracked().is_err());
     }
 

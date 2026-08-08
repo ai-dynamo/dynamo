@@ -236,7 +236,7 @@ impl SingleRuntime {
             || !pass.output_signals.is_empty()
             || !pass.kv_events.is_empty();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
-            for signal in pass.output_signals.iter() {
+            for signal in pass.output_signals.as_slice() {
                 if let Some(token_id) = signal.token_id {
                     driver
                         .on_output_token(signal.uuid, token_id)
@@ -259,12 +259,13 @@ impl SingleRuntime {
                 }
             }
         }
-        let completed_requests = pass
+        let completed_requests = pass.output_signals.completed_count();
+        for signal in pass
             .output_signals
+            .as_slice()
             .iter()
             .filter(|signal| signal.completed)
-            .count();
-        for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+        {
             let status = if signal.rejected {
                 ReplayTerminalStatus::Rejected
             } else {
@@ -367,7 +368,12 @@ mod tests {
     }
 
     fn record_manual_terminals(collector: &mut TraceCollector, pass: &EnginePassResult) {
-        for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+        for signal in pass
+            .output_signals
+            .as_slice()
+            .iter()
+            .filter(|signal| signal.completed)
+        {
             let status = if signal.rejected {
                 ReplayTerminalStatus::Rejected
             } else {

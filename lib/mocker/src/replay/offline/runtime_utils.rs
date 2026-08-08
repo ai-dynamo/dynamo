@@ -305,8 +305,8 @@ mod tests {
             engine_events: (),
             progress: EngineProgress::default(),
             fpm: None,
-            accept_length_output_tokens: 0,
-            accept_length_decode_forwards: 0,
+            accept_length_output_tokens: worker_idx * 10 + completed_requests,
+            accept_length_decode_forwards: worker_idx * 10 + completed_requests + 1,
         }
     }
 
@@ -387,13 +387,22 @@ mod tests {
         assert_eq!(
             payloads
                 .iter()
-                .map(|payload| (payload.worker_idx, payload.completed_requests))
+                .map(|payload| (
+                    payload.worker_idx,
+                    payload.completed_requests,
+                    payload.accept_length_output_tokens,
+                    payload.accept_length_decode_forwards,
+                ))
                 .collect::<Vec<_>>(),
-            vec![(7, 1), (8, 2)]
+            vec![(7, 1, 71, 72), (8, 2, 82, 83)]
         );
         assert!(payloads.iter().all(|payload| {
             payload.output_signals.len() == payload.completed_requests
-                && payload.output_signals.iter().all(|signal| signal.completed)
+                && payload
+                    .output_signals
+                    .as_slice()
+                    .iter()
+                    .all(|signal| signal.completed)
         }));
         assert_eq!(
             pop_ready_worker_ready(&mut events, 10.0),

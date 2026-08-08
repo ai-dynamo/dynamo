@@ -3,7 +3,7 @@
 
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
-use crate::scheduler::{EngineCore, EnginePassResult, EngineRequest, SglangCore, VllmCore};
+use crate::scheduler::{EngineCore, EnginePassResult, SglangCore, VllmCore};
 
 fn record_pass(collector: &mut TraceCollector, pass: &EnginePassResult, now_ms: f64) {
     collector.on_scheduler_pass(pass, now_ms, Some(pass.token_completion_ms));
@@ -62,9 +62,7 @@ impl ReplayWorkerCore {
         &mut self,
         request: crate::common::protocols::DirectRequest,
     ) -> uuid::Uuid {
-        self.core
-            .receive_engine(EngineRequest::untracked(request))
-            .expect("ordinary request ID must be unique")
+        self.core.receive(request)
     }
 
     pub(crate) fn num_requests(&self) -> usize {
