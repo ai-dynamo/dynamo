@@ -47,6 +47,18 @@ def make_parallel_label(tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int) -> 
     return "-".join(parts)
 
 
+def _prefix_len(kv_hit_rate: float, isl: int) -> int:
+    """Cached-prefix length (tokens) implied by a prefix-cache hit rate.
+
+    ``kv_hit_rate`` is the fraction of ISL served from a warm KV/prefix cache
+    (0 = cold, 1 = fully cached). The prefill only pays for the uncached
+    ``effective_isl = isl - prefix`` tokens.
+    """
+    if not 0.0 <= kv_hit_rate <= 1.0:
+        raise ValueError(f"kv_hit_rate must be in [0, 1], got {kv_hit_rate}")
+    return round(kv_hit_rate * isl)
+
+
 def build_prefill_row(
     *,
     model: str,
@@ -60,14 +72,24 @@ def build_prefill_row(
     moe_ep: int,
     backend: str = "",
     system: str = "",
+    kv_hit_rate: float = 0.0,
 ) -> dict:
     """Build a single prefill row dict with the minimal columns needed by AIC picking.
 
     Only columns actually accessed by ``pick_autoscale`` and
     ``_build_disagg_summary_dict`` are populated.
+
+    ``kv_hit_rate`` (0-1, default 0) is the prefix-cache hit fraction: it sets
+    ``prefix = round(kv_hit_rate * isl)`` so downstream cost models charge the
+    prefill only for the uncached ``effective_isl = isl - prefix`` tokens.
+    The caller is responsible for supplying ``ttft`` already measured/predicted
+    over ``effective_isl`` (e.g. ``AicSession.predict_prefill(bs, effective_isl,
+    prefix)``); this helper only records the resulting ``prefix``. The default
+    of 0 keeps the previous cold-cache behaviour (``prefix = 0``).
     """
     num_gpus = tp * pp * dp
     seq_s = 1000.0 / ttft * dp if ttft > 0 else 0.0
+    prefix = _prefix_len(kv_hit_rate, isl)
 
     return {
         "ttft": ttft,
@@ -84,7 +106,7 @@ def build_prefill_row(
         "bs": 1,
         "moe_tp": moe_tp,
         "moe_ep": moe_ep,
-        "prefix": 0,
+        "prefix": prefix,
         "gemm": "",
         "kvcache": "",
         "fmha": "",
@@ -150,17 +172,29 @@ def build_decode_row(
 def build_disagg_df_from_static(
     prefill_df: pd.DataFrame,
     decode_df: pd.DataFrame,
+    *,
+    kv_hit_rate: float | None = None,
 ) -> pd.DataFrame:
     """Cross-product prefill x decode into a ColumnsDisagg DataFrame.
 
     Used when calling ``pick_default`` or ``pick_load_match`` from
     THOROUGH-mode benchmark results.
+
+    ``kv_hit_rate`` (0-1) optionally overrides the prefix-cache hit fraction on
+    every prefill row before rate matching, setting ``prefix =
+    round(kv_hit_rate * isl)`` per row. This is a convenience for callers that
+    hold a pre-built ``prefill_df`` and want to apply a hit rate at
+    disagg-assembly time. When ``None`` (default) the ``prefix`` already carried
+    by each prefill row is used unchanged, so existing behaviour is preserved.
     """
     combos: list[dict] = []
     for _, p_row in prefill_df.iterrows():
+        p_dict = p_row.to_dict()
+        if kv_hit_rate is not None:
+            p_dict["prefix"] = _prefix_len(kv_hit_rate, int(p_dict["isl"]))
         for _, d_row in decode_df.iterrows():
             combo = _build_disagg_summary_dict(
-                prefill_summary_dict=p_row.to_dict(),
+                prefill_summary_dict=p_dict,
                 prefill_num_worker=1,
                 decode_summary_dict=d_row.to_dict(),
                 decode_num_worker=1,
