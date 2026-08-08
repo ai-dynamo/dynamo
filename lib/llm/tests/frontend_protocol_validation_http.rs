@@ -53,12 +53,28 @@ async fn assert_anthropic_400(response: reqwest::Response, message: &str) {
     );
 }
 
+async fn assert_anthropic_501(response: reqwest::Response, message: &str) {
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "api_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|actual| actual.contains(message)),
+        "unexpected Anthropic error body: {body}"
+    );
+}
+
 #[tokio::test]
 #[serial]
-async fn protocol_adapter_validation_is_400_before_streaming_headers() {
+// `reqwest::send` completes when response headers arrive. Asserting 4xx/5xx
+// status for `stream: true` proves the adapter rejected the request before
+// committing the HTTP 200 SSE response.
+async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
     temp_env::async_with_vars(BASE_ENV, async {
         let valid_script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start([valid_script.clone(), valid_script]).await;
+        let svc = HarnessService::start([valid_script]).await;
 
         for stream in [false, true] {
             let response = svc
@@ -203,25 +219,56 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
             }
         }
 
+        for stream in [false, true] {
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "stream": stream,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "future_block_type", "value": 1},
+                            {"type": "text", "text": "ping"}
+                        ]
+                    }]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_anthropic_501(response, "content block type \"future_block_type\"").await;
+        }
+
         let response = svc
             .client
-            .post(format!("{}/v1/messages", svc.base_url))
+            .post(format!("{}/v1/messages/count_tokens", svc.base_url))
             .json(&json!({
                 "model": MODEL,
-                "max_tokens": 16,
-                "stream": false,
                 "messages": [{
                     "role": "user",
-                    "content": [
-                        {"type": "future_block_type", "value": 1},
-                        {"type": "text", "text": "ping"}
-                    ]
+                    "content": [{"type": "future_block_type", "value": 1}]
                 }]
             }))
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_anthropic_501(response, "content block type \"future_block_type\"").await;
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_eq!(
+                svc.metrics.get_request_counter(
+                    MODEL,
+                    &Endpoint::AnthropicMessages,
+                    &request_type,
+                    &Status::Error,
+                    &ErrorType::NotImplemented,
+                ),
+                1,
+                "unsupported content blocks were not metered for {request_type}"
+            );
+        }
 
         let anthropic_tool_name = "a".repeat(128);
         let response = svc
@@ -279,7 +326,7 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
             .unwrap();
         assert_openai_400(response, "96 character limit").await;
 
-        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        assert_eq!(svc.engine.take_requests().await.len(), 1);
         svc.shutdown().await;
     })
     .await;

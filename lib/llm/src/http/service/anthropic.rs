@@ -134,11 +134,48 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 
 const ANTHROPIC_MAX_TOOL_NAME_LENGTH: usize = 128;
 
+#[derive(Debug)]
+enum AnthropicMessageValidationError {
+    InvalidArgument(String),
+    NotImplemented(String),
+}
+
+impl AnthropicMessageValidationError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+        }
+    }
+
+    fn metric_error_type(&self) -> ErrorType {
+        match self {
+            Self::InvalidArgument(_) => ErrorType::Validation,
+            Self::NotImplemented(_) => ErrorType::NotImplemented,
+        }
+    }
+
+    fn anthropic_error_type(&self) -> &'static str {
+        match self {
+            Self::InvalidArgument(_) => "invalid_request_error",
+            Self::NotImplemented(_) => "api_error",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidArgument(message) | Self::NotImplemented(message) => message,
+        }
+    }
+}
+
 fn validate_anthropic_messages(
     messages: &[AnthropicMessage],
-) -> Result<(), dynamo_runtime::error::DynamoError> {
+) -> Result<(), AnthropicMessageValidationError> {
     if messages.is_empty() {
-        return Err(invalid_argument("messages: field required"));
+        return Err(AnthropicMessageValidationError::InvalidArgument(
+            "messages: field required".to_string(),
+        ));
     }
 
     for (message_index, message) in messages.iter().enumerate() {
@@ -146,16 +183,28 @@ fn validate_anthropic_messages(
             continue;
         };
         if content.is_empty() {
-            return Err(invalid_argument(format!(
+            return Err(AnthropicMessageValidationError::InvalidArgument(format!(
                 "messages[{message_index}].content: must contain at least one content block"
             )));
         }
         for (block_index, block) in content.iter().enumerate() {
-            if let AnthropicContentBlock::Other(value) = block
-                && !value.is_object()
-            {
-                return Err(invalid_argument(format!(
-                    "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+            if let AnthropicContentBlock::Other(value) = block {
+                if !value.is_object() {
+                    return Err(AnthropicMessageValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+                    )));
+                }
+                let Some(block_type) = value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|block_type| !block_type.is_empty())
+                else {
+                    return Err(AnthropicMessageValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
+                    )));
+                };
+                return Err(AnthropicMessageValidationError::NotImplemented(format!(
+                    "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
                 )));
             }
         }
@@ -185,10 +234,10 @@ async fn handler_anthropic_messages(
     );
 
     if let Err(error) = validate_anthropic_messages(&request.messages) {
-        inflight_guard.mark_error(ErrorType::Validation);
+        inflight_guard.mark_error(error.metric_error_type());
         return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
+            error.status(),
+            error.anthropic_error_type(),
             error.message(),
         ));
     }
@@ -662,8 +711,8 @@ async fn handler_count_tokens(
 ) -> Result<Response, Response> {
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
+            error.status(),
+            error.anthropic_error_type(),
             error.message(),
         ));
     }
