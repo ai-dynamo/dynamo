@@ -1135,6 +1135,11 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         ids=lambda case: case.name,
     )
     def test_shared_tool_guidance_policy(self, tokenizer, case):
+        # A divergent case still runs the backend and asserts its RECORDED current
+        # answer, so an exception or any other behavior change fails here rather
+        # than being absorbed. Fixing SGLang makes this fail with "expected
+        # assistant, got tool", which is the signal to drop the entry.
+        expected = case.divergent_source("sglang") or case.expected
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hello"}],
@@ -1157,7 +1162,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
                 result.guided_decoding,
                 has_assistant_constraint=case.has_assistant_constraint,
             )
-            == case.expected
+            == expected
         )
 
     def test_none_when_no_tools(self):

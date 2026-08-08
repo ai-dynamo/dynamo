@@ -17,6 +17,18 @@ class ToolGuidanceParityCase:
     has_tools: bool
     has_assistant_constraint: bool
     expected: GuidanceSource
+    # Backends known to disagree with `expected` today, mapped to what they
+    # actually produce. The row still states the correct answer; a listed backend
+    # asserts against its recorded value instead, so the code under test still
+    # runs and any OTHER change in its behavior fails loudly. Fixing a backend
+    # means deleting its entry here, not editing `expected`.
+    known_divergent: tuple[tuple[str, GuidanceSource], ...] = ()
+
+    def divergent_source(self, backend: str) -> GuidanceSource | None:
+        for name, source in self.known_divergent:
+            if name == backend:
+                return source
+        return None
 
 
 TOOL_GUIDANCE_PARITY_CASES = (
@@ -31,6 +43,27 @@ TOOL_GUIDANCE_PARITY_CASES = (
         True,
         True,
         "assistant",
+    ),
+    # response_format is scoped to the message returned to the user, not to tool
+    # calls, so a forced choice keeps the tool constraint and drops it. SGLang
+    # instead lets response_format win and can return no tool call at all --
+    # see the TODO above `guided_decoding = response_format_guided_decoding or ...`
+    # in sglang_prepost.py.
+    ToolGuidanceParityCase(
+        "forced-choice-with-response-format",
+        "required",
+        True,
+        True,
+        "tool",
+        known_divergent=(("sglang", "assistant"),),
+    ),
+    ToolGuidanceParityCase(
+        "named-choice-with-response-format",
+        "named",
+        True,
+        True,
+        "tool",
+        known_divergent=(("sglang", "assistant"),),
     ),
 )
 

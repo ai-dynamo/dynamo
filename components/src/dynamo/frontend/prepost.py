@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -54,11 +57,60 @@ SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == 
 
 
 def _is_named_tool_choice(tool_choice: Any) -> bool:
-    return tool_choice is not None and not isinstance(tool_choice, str)
+    """True only for a well-formed named tool choice.
+
+    tool_choice arrives either validated (ChatCompletionNamedToolChoiceParam) or,
+    on the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, as the raw client dict, so
+    both shapes are checked. Testing only `not isinstance(tool_choice, str)` would
+    classify malformed values such as {} or {"type": "function"} as a forced tool
+    choice, which then gates the conflict check below.
+    """
+    if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+        return bool(tool_choice.function.name)
+    if isinstance(tool_choice, dict):
+        function = tool_choice.get("function")
+        return (
+            tool_choice.get("type") == "function"
+            and isinstance(function, dict)
+            and bool(function.get("name"))
+        )
+    return False
 
 
 def _is_forced_tool_choice(tool_choice: Any) -> bool:
     return tool_choice == "required" or _is_named_tool_choice(tool_choice)
+
+
+def _has_explicit_output_constraint(request: ChatCompletionRequest) -> bool:
+    """Whether the caller set a constraint over the whole generated token stream.
+
+    CONTENT response_format variants (json_object, json_schema) are deliberately
+    excluded. The OpenAI spec scopes those to the message the model returns to the
+    user, "rather than when the model calls a tool", so a forced tool choice makes
+    them unenforceable rather than contradictory -- vLLM drops them for exactly
+    this case in ToolParser.adjust_request (response_format = None).
+
+    response_format={"type": "structural_tag"} is NOT a content format: vLLM
+    normalizes it into structured_outputs.structural_tag, a grammar over the whole
+    token stream, which is the same slot the tool grammar needs. It is counted
+    here so a forced choice rejects it instead of silently discarding it.
+
+    guided_* and an explicit structured_outputs have no content scoping either.
+    """
+    if request.structured_outputs is not None:
+        return True
+    # Reads response_format too, so this catches the structural_tag variant
+    # regardless of which field the caller used to express it.
+    extracted = request.extract_structured_outputs()
+    if extracted is not None and extracted.structural_tag is not None:
+        return True
+    request_extra = request.model_extra or {}
+    if request_extra.get("guided_choice"):
+        return True
+    return any(
+        request_extra.get(key) is not None
+        for key in ("guided_json", "guided_regex", "guided_grammar")
+    )
 
 
 def _tool_is_strict(tool: Any) -> bool:
@@ -72,9 +124,22 @@ def _should_build_tool_call_guidance(
     structural_tag_scope: str,
 ) -> bool:
     tool_choice = request.tool_choice or "auto"
+    # TODO: a forced tool_choice with no tools is unsatisfiable and should be a
+    # 400, not an unconstrained request. preprocessor/tool_choice.rs rejects it
+    # (ToolChoiceError::EmptyTools via get_json_schema_from_tools); here and in
+    # sglang_prepost.py it returns no constraint and the caller gets a plausible
+    # answer that can never contain the tool call they required. vLLM's own
+    # "when using tool_choice, tools must be set" validator does not run because
+    # the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path uses model_construct.
     if not request.tools:
         return False
 
+    # TODO: preprocessor/structural_tag.rs installs a tool-call BAN structural tag
+    # for tool_choice="none" when the mode is on and
+    # exclude_tools_when_tool_choice_none is false (apply_tool_call_ban). Neither
+    # Python path does. When tools stay in the rendered prompt the model can still
+    # see them, so "none" is only a prompt-level suggestion here rather than an
+    # enforced guarantee. sglang_prepost.py has the same gap.
     if tool_choice == "none":
         return False
     if _is_forced_tool_choice(tool_choice):
@@ -85,6 +150,12 @@ def _should_build_tool_call_guidance(
         return False
     if structural_tag_scope == "always":
         return True
+    # TODO: parallel_tool_calls only decides whether a structural tag is attempted;
+    # it does not bound call count in the forced-choice JSON fallback below.
+    # get_json_schema_from_tools emits {"type": "array", "minItems": 1} with no
+    # maxItems, matching build_required_schema in protocols/openai/tools.rs, so
+    # parallel_tool_calls=false can still produce several calls. sglang_prepost.py
+    # is the only path that forwards the flag into its schema builder.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
@@ -202,9 +273,20 @@ def _build_assistant_guided_decoding(
 
     request_extra = request.model_extra or {}
     # Pick a single legacy guided_* constraint by precedence rather than merging
-    # several keys into one dict: vLLM/Rust treat guided_decoding as exactly one
-    # constraint (GuidedDecodingOptions::validate rejects more than one), and the
-    # elif chain above already honors that invariant for structured_outputs.
+    # several keys into one dict, because guided_decoding carries exactly one
+    # constraint and the elif chain above already honors that for
+    # structured_outputs.
+    #
+    # TODO: first-match-wins silently discards the other constraints the caller
+    # explicitly set, with no error and no annotation.
+    # GuidedDecodingOptions::validate in protocols/common.rs rejects the same
+    # request outright, so `guided_json` + `guided_regex` is a 400 through the Rust
+    # frontend and a silent single-constraint request here. Rejecting is the
+    # correct behavior; it is left as-is only to avoid adding a second new 400 to
+    # this change. Note that validate() also counts whitespace_pattern toward its
+    # exclusivity limit, so the {"json": ..., "whitespace_pattern": ...} pair built
+    # below is accepted here and rejected there -- whitespace_pattern modifies a
+    # grammar rather than being one, so that counter is the side that is wrong.
     legacy_guidance: dict[str, Any] = {}
     for key, value in (
         ("json", request_extra.get("guided_json")),
@@ -428,6 +510,11 @@ async def preprocess_chat_request(
         )
     )
     is_forced_tool_choice = _is_forced_tool_choice(validated_request.tool_choice)
+    # Must be read BEFORE _prepare_request: it calls ToolParser.adjust_request(),
+    # which mutates this same request object in place and can set
+    # structured_outputs itself. Reading it afterwards would treat a
+    # parser-generated constraint as one the caller sent and reject the request.
+    has_explicit_output_constraint = _has_explicit_output_constraint(validated_request)
     (
         request_for_sampling,
         tool_parser,
@@ -462,14 +549,22 @@ async def preprocess_chat_request(
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
     )
-    # A forced tool choice already constrains generation to a tool call, so an
-    # explicit response_format/guided_* constraint is contradictory. Reject it
-    # (InvalidArgument -> 400) rather than silently drop it, matching the Rust
-    # path (tool_choice.rs) and keeping the two frontends consistent.
-    if is_forced_tool_choice and assistant_guided_decoding is not None:
+    # A forced tool choice already claims the decoder's single grammar slot, so a
+    # caller-set guided_*/structured_outputs constraint over the same token stream
+    # cannot also be honored. Reject it (InvalidArgument -> 400) rather than
+    # silently drop it, matching has_explicit_guided_decoding in
+    # preprocessor/tool_choice.rs.
+    #
+    # response_format is NOT part of that test: it is scoped to the message the
+    # model returns to the user, not to tool calls, so it is dropped for a forced
+    # choice instead of rejected. That matches both preprocessor/tool_choice.rs
+    # (which clears gd.json) and vLLM's own ToolParser.adjust_request (which sets
+    # response_format = None), and it keeps a request both the OpenAI spec and
+    # vLLM accept from returning 400 here.
+    if is_forced_tool_choice and has_explicit_output_constraint:
         raise InvalidArgument(
             "tool_choice forces a tool call and cannot be combined with an "
-            "explicit response_format or guided_* constraint."
+            "explicit guided_* or structured_outputs constraint."
         )
     guided_decoding = (
         assistant_guided_decoding

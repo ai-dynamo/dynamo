@@ -1322,6 +1322,93 @@ class TestToolCallGuidedDecoding:
                 structural_tag_mode="on",
             )
 
+    # response_format is scoped to the message returned to the user, not to tool
+    # calls, so a forced tool choice drops it and keeps the tool constraint -- it
+    # is NOT the 400 that guided_*/structured_outputs get. This matches
+    # preprocessor/tool_choice.rs (clears gd.json) and vLLM's own
+    # ToolParser.adjust_request (sets response_format = None).
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+        ids=["required", "named"],
+    )
+    @pytest.mark.parametrize(
+        "response_format",
+        [
+            {"type": "json_object"},
+            {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+            },
+        ],
+        ids=["json_object", "json_schema"],
+    )
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_response_format_keeps_tool_guidance(
+        self, tokenizer, tool_choice, response_format
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": tool_choice,
+                "response_format": response_format,
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+            structural_tag_mode="on",
+        )
+
+        # The parser's tool grammar survives; response_format is dropped rather
+        # than rejected or allowed to win.
+        assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+
+    # response_format={"type": "structural_tag"} is not a content format -- vLLM
+    # normalizes it into structured_outputs.structural_tag, a grammar over the
+    # whole token stream. A forced choice must reject it rather than silently
+    # discard it the way the json_object/json_schema variants are dropped.
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_structural_tag_response_format_is_rejected(
+        self, tokenizer
+    ):
+        with pytest.raises(InvalidArgument):
+            await prepost_module.preprocess_chat_request(
+                {
+                    **TOOL_REQUEST,
+                    "tool_choice": "required",
+                    "response_format": {
+                        "type": "structural_tag",
+                        "format": {"type": "any_text"},
+                    },
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=_FakePassthroughToolParser,
+                structural_tag_mode="on",
+            )
+
+    # A malformed tool_choice object is not a named tool choice, so it must not be
+    # treated as forced and must not trigger the forced-choice conflict check.
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [{}, {"type": "function"}, {"type": "function", "function": {}}],
+        ids=["empty", "no_function", "no_name"],
+    )
+    def test_malformed_tool_choice_is_not_forced(self, tool_choice):
+        assert prepost_module._is_named_tool_choice(tool_choice) is False
+        assert prepost_module._is_forced_tool_choice(tool_choice) is False
+
     # Legacy guided_* must resolve to a single constraint, not a merged dict.
     @pytest.mark.asyncio
     async def test_legacy_guided_fields_yield_single_constraint(self, tokenizer):
