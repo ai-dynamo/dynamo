@@ -59,6 +59,7 @@ areas:
   - lib/kv-router/src/sequences/
   - lib/kv-router/src/zmq_wire/
   - lib/kv-router/tests/
+  - lib/router-policy/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
   - lib/llm/src/kv_router/indexer/
