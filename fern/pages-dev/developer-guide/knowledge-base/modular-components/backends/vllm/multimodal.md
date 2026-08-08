@@ -38,8 +38,15 @@ additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
 
 | Format         | Example                              | Description                |
 | -------------- | ------------------------------------ | -------------------------- |
-| **HTTP/HTTPS** | `http://example.com/image.jpg`       | Remote media files         |
+| **HTTP/HTTPS** | `https://example.com/image.jpg`      | Remote media files         |
 | **Data URL**   | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
+
+<Note>
+Media URLs are validated against a default-deny policy. `https://` and `data:` sources
+pass; plain `http://` and hostnames that resolve to private or loopback addresses are
+refused. To fetch media over the cluster's internal network, set
+`DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
+</Note>
 
 ## Deployment Patterns
 
