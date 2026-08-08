@@ -35,6 +35,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    video_decoder_missing,
+)
 from dynamo.common.multimodal.media_source import (
     is_local_media_url,
     read_local_media_bytes,
@@ -98,6 +102,18 @@ _NVDEC_UNSAFE_MODEL_TYPES = frozenset(
 # supported qwen2_5_vl model_type ignores ``video_metadata`` entirely; the value
 # only feeds the qwen3_vl timestamp branch, which is gated off today.
 _NVDEC_SHIM_FPS = 24.0
+
+
+def _software_video_decoder_imports() -> bool:
+    """True when SGLang's software video decoder (torchcodec or decord)
+    actually imports -- not merely resolves to a spec."""
+    for module in ("torchcodec", "decord"):
+        try:
+            importlib.import_module(module)
+            return True
+        except Exception:  # noqa: BLE001 - broken installs count as absent
+            continue
+    return False
 
 
 def _install_load_video_passthrough() -> None:
@@ -580,9 +596,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 content = await read_local_media_bytes(normalized, self._url_policy)
             else:
                 return None
-            if not should_use_nvdec(probe_video_codec(content)):
-                # Not a hardware codec, but the bytes are already here and were
-                # fetched under policy. Hand them over instead of the URL.
+            codec = probe_video_codec(content)
+            if not should_use_nvdec(codec):
+                # Not going to hardware. SGLang's software path needs
+                # torchcodec or decord, which the codec-compliant image strips
+                # -- without this preflight the failure happens deep inside
+                # SGLang as a bare "No module named 'decord'" with the whole
+                # video payload repr embedded in the message. Fail here, where
+                # the codec is known and the message can be actionable.
+                #
+                # Real import, not find_spec: a package whose files exist but
+                # whose native libraries cannot load has a spec and would pass
+                # a find_spec preflight only to fail deep in SGLang anyway.
+                if not _software_video_decoder_imports():
+                    raise video_decoder_missing("sglang", "decord2", "decord", codec)
+                # A software decoder exists; the bytes are already here and
+                # were fetched under policy. Hand them over instead of the URL.
                 return content
             # Constructing the decoder opens the container and reads its frame
             # index, so keep it off the event loop.
@@ -603,11 +632,25 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # handler already reports a bad request, so the caller surfaces it
             # as one instead of silently widening what the deployment accepts.
             raise
+        except MissingMediaDecoderError:
+            # The preflight above is the actionable error this path exists to
+            # raise. Letting the broad handler below catch it would return the
+            # bytes anyway and reproduce exactly the deep-SGLang failure it
+            # replaces.
+            raise
         except Exception as exc:  # noqa: BLE001 - additive; never blocks the path
             # If the fetch itself failed there are no bytes and the URL is all
             # the caller has. If it succeeded and only the decoder construction
             # failed, pass the validated bytes on rather than making SGLang
-            # fetch them again.
+            # fetch them again -- but only if SGLang can actually decode them:
+            # this fallback leg reaches SGLang's software path exactly like the
+            # non-hardware-codec leg above, so it needs the same preflight, or
+            # a host with broken NVDEC and no software decoder gets the deep
+            # payload-blob error back.
+            if content is not None and not _software_video_decoder_imports():
+                raise video_decoder_missing(
+                    "sglang", "decord2", "decord", probe_video_codec(content)
+                ) from exc
             logger.warning(
                 "NVDEC decode failed for video URL (%s); falling back to %s",
                 exc,
@@ -624,15 +667,34 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         ``NvdecVideoDecoder`` (H.264/H.265), the fetched bytes (any other codec,
         so SGLang does not re-download what we already validated and hold), or
         the original URL string when nothing was fetched.
-        Non-video modalities and disabled/ineligible cases return the URLs
-        unchanged.
+        Non-video modalities return the URLs unchanged. When NVDEC is disabled
+        or ineligible the URLs are returned policy-validated and normalized,
+        since SGLang fetches them with its own session.
 
         Called from both the cached and uncached encode paths. The embedding
         cache is disabled by default, so routing this only through the cached
         path would leave hardware decode unreachable in a stock deployment.
         """
-        if modality_name != "VIDEO" or not self._nvdec_video_enabled():
+        if modality_name != "VIDEO":
             return list(urls)
+        if not self._nvdec_video_enabled():
+            # NVDEC off (CPU image, DYN_DISABLE_NVDEC, or a gated model type):
+            # these URLs go straight to SGLang's software path, which fetches
+            # them with its own session and never consults our url policy. Run
+            # the policy here so a source we would refuse is refused before
+            # SGLang can reach it -- and before we answer with anything about
+            # this deployment, since a request we reject is not the place to
+            # report which decoders are installed.
+            validated = [
+                await validate_media_url(url, self._url_policy) for url in urls
+            ]
+            # Without this preflight these deployments -- the ones MOST likely
+            # to lack a decoder entirely -- still get the deep
+            # "No module named 'decord'" with the payload repr embedded. No
+            # bytes were fetched here, so the codec cannot be named.
+            if urls and not _software_video_decoder_imports():
+                raise video_decoder_missing("sglang", "decord2", "decord", None)
+            return validated
         encode_inputs: list[Any] = []
         for url in urls:
             decoder = await self._maybe_nvdec_decoder(url)

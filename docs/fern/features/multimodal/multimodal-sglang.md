@@ -42,8 +42,14 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 | Format | Example | Description |
 |--------|---------|-------------|
-| **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
+| **HTTP/HTTPS** | `https://example.com/image.jpg` | Remote media files |
 | **file://** | `file:///tmp/test.mp4` | Local files accessible to the backend |
+
+> [!NOTE]
+> Media URLs are validated against a default-deny policy. `https://` and `data:` sources
+> pass; plain `http://` and hostnames that resolve to private or loopback addresses are
+> refused. To fetch media over the cluster's internal network, set
+> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
 
 ## Deployment Patterns
 
