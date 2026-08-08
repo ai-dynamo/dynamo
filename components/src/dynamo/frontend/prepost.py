@@ -249,9 +249,9 @@ def build_tool_call_guided_decoding(
             tool_parser, "supports_required_and_named", True
         ):
             return None
-        json_schema = get_json_schema_from_tools(
-            _typed_tool_choice(tool_choice), request.tools
-        )
+        # tool_choice is already the typed named param by here; see
+        # _validate_chat_completion_request.
+        json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
             return {"json": json_schema}
     return None
@@ -388,6 +388,15 @@ def _validate_chat_completion_request(
         or isinstance(validated_request.structured_outputs, dict)
     ):
         return ChatCompletionRequest.model_validate(request)
+    # model_construct leaves tool_choice as the raw client dict. Normalize it
+    # here, once, rather than at each consumer: vLLM's helpers branch on the
+    # typed ChatCompletionNamedToolChoiceParam, and a dict makes
+    # get_json_schema_from_tools silently return None while
+    # get_structural_tag raises AttributeError on .model_dump().
+    if _is_named_tool_choice(validated_request.tool_choice):
+        validated_request.tool_choice = _typed_tool_choice(
+            validated_request.tool_choice
+        )
     return validated_request
 
 

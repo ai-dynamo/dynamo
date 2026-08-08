@@ -1405,14 +1405,14 @@ class TestToolCallGuidedDecoding:
 
     # On the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, an already-typed `tools`
     # list means the request is never re-validated, so `tool_choice` stays a raw
-    # dict. vLLM's get_json_schema_from_tools only recognizes the typed named
-    # choice and returns None for a dict, which would leave a named forced call
-    # with no constraint at all.
-    def test_named_tool_choice_as_raw_dict_still_builds_json_schema(self, tokenizer):
+    # dict. vLLM branches on the typed named param: get_json_schema_from_tools
+    # returns None for a dict (no constraint at all) and get_structural_tag raises
+    # AttributeError on .model_dump(). Normalize once at the validation boundary.
+    def _fast_path_named_request(self, tokenizer):
         typed_tools = _prepare_request(
             TOOL_REQUEST, tokenizer=tokenizer, tool_parser_class=None
         )[0].tools
-        request = prepost_module._validate_chat_completion_request(
+        return prepost_module._validate_chat_completion_request(
             {
                 **TOOL_REQUEST,
                 "tools": typed_tools,
@@ -1422,13 +1422,36 @@ class TestToolCallGuidedDecoding:
                 },
             }
         )
-        # Precondition: the fast path really did leave it as a dict.
-        assert isinstance(request.tool_choice, dict)
 
-        guided = build_tool_call_guided_decoding(request, None)
+    def test_raw_named_tool_choice_is_normalized_at_the_boundary(self, tokenizer):
+        request = self._fast_path_named_request(tokenizer)
+        assert not isinstance(request.tool_choice, dict)
+        assert request.tool_choice.function.name == "get_weather"
 
+    def test_normalized_named_choice_still_builds_json_schema(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._fast_path_named_request(tokenizer), None
+        )
         assert guided is not None, "named forced choice must still be constrained"
         assert "json" in guided
+
+    def test_normalized_named_choice_does_not_break_structural_tag(self, tokenizer):
+        # Regression: a raw dict reached vLLM's structural-tag registry and raised
+        # AttributeError on .model_dump(), surfacing as a 500 rather than a
+        # constraint. Uses the REAL hermes parser -- a fake never reaches the
+        # registry, so it cannot reproduce this.
+        from vllm.tool_parsers import ToolParserManager
+
+        hermes_cls = ToolParserManager.get_tool_parser("hermes")
+        request = self._fast_path_named_request(tokenizer)
+        parser = hermes_cls(tokenizer, request.tools)
+
+        guided = build_tool_call_guided_decoding(
+            request, parser, structural_tag_mode="on"
+        )
+
+        assert guided is not None
+        assert "structural_tag" in guided
 
     # A malformed tool_choice object is not a named tool choice, so it must not be
     # treated as forced and must not trigger the forced-choice conflict check.
