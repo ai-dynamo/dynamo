@@ -24,6 +24,14 @@ from typing import Any, Dict, List, Optional
 import torch
 from transformers import AutoModel
 from vllm import LLM
+from vllm.inputs import mm_input
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+)
 from vllm.utils.system_utils import update_environment_variables
 
 logger = logging.getLogger(__name__)
@@ -304,3 +312,69 @@ def construct_qwen_decode_mm_data(
             "image_grid_thw": torch.tensor(image_grid_thw),
         }
     }
+
+
+def construct_qwen_decode_prompt(
+    prompt_token_ids_without_images: list[int],
+    image_token_id: int,
+    image_grid_thw: Optional[List[Any]],
+    image_placeholders: list[list[int]],
+    request_id: str,
+) -> Dict[str, Any]:
+    """Build a metadata-only Qwen input after a remote-prefill KV hit.
+
+    The decode worker needs the image grid to initialize mRoPE, but it does not
+    run the vision encoder because NIXL supplies the complete prefill KV state.
+    Rebuilding vLLM's expanded token IDs from compact insertion metadata avoids
+    allocating, hashing, and sending dense placeholder embeddings.
+    """
+    if image_grid_thw is None or len(image_grid_thw) == 0:
+        raise ValueError("No image grid provided for Qwen model.")
+    if len(image_grid_thw) != len(image_placeholders):
+        raise ValueError(
+            "image grid and placeholder counts differ for Qwen decode prompt"
+        )
+
+    prompt_token_ids: list[int] = []
+    compact_cursor = 0
+    for placeholder in image_placeholders:
+        offset, length = map(int, placeholder)
+        compact_count = offset - len(prompt_token_ids)
+        if compact_count < 0:
+            raise ValueError("Qwen image placeholders overlap or are out of order")
+        compact_end = compact_cursor + compact_count
+        prompt_token_ids.extend(
+            prompt_token_ids_without_images[compact_cursor:compact_end]
+        )
+        if len(prompt_token_ids) != offset:
+            raise ValueError("Qwen image placeholder offset exceeds prompt length")
+        prompt_token_ids.extend([image_token_id] * length)
+        compact_cursor = compact_end
+    prompt_token_ids.extend(prompt_token_ids_without_images[compact_cursor:])
+
+    items = []
+    ranges = []
+    hashes = []
+    for index, (grid, placeholder) in enumerate(
+        zip(image_grid_thw, image_placeholders)
+    ):
+        offset, length = map(int, placeholder)
+        items.append(
+            MultiModalKwargsItem(
+                {
+                    "image_grid_thw": MultiModalFieldElem(
+                        data=torch.tensor(grid),
+                        field=MultiModalBatchedField(keep_on_cpu=True),
+                    )
+                }
+            )
+        )
+        ranges.append(PlaceholderRange(offset=offset, length=length))
+        hashes.append(f"dynamo-pd-{request_id}-{index}")
+
+    return mm_input(
+        prompt_token_ids=prompt_token_ids,
+        mm_kwargs=MultiModalKwargsItems({"image": items}),
+        mm_hashes={"image": hashes},
+        mm_placeholders={"image": ranges},
+    )
