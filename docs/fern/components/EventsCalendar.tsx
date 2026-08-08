@@ -14,6 +14,7 @@ import {
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
+import { resolveToday } from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -96,11 +97,22 @@ function UpcomingEvent({ event }: { event: DynamoEvent }) {
 }
 
 export function EventsCalendar() {
-  const focusEvent = UPCOMING_EVENTS[0] ?? PAST_EVENTS[0];
-  const year = Number(focusEvent?.year ?? new Date().getUTCFullYear());
-  const month = MONTH_INDEX[focusEvent?.month ?? "Jan"] ?? 0;
-  const selectedDay = Number(focusEvent?.day ?? 1);
+  // The grid follows the current month, not the next event. Keying it off
+  // UPCOMING_EVENTS[0] meant an empty calendar fell back to PAST_EVENTS[0] and
+  // sat on a month that had already gone by.
+  const { year, month, day: selectedDay } = resolveToday();
   const days = buildMonthDays(year, month);
+
+  // Days in the displayed month that have something scheduled, so the grid
+  // still carries event information now that the highlight marks today.
+  const eventDays = new Set(
+    [...UPCOMING_EVENTS, ...PAST_EVENTS]
+      .filter(
+        (event) =>
+          Number(event.year) === year && MONTH_INDEX[event.month] === month,
+      )
+      .map((event) => Number(event.day)),
+  );
 
   return (
     <section
@@ -142,7 +154,15 @@ export function EventsCalendar() {
               ) : (
                 <span
                   key={day}
-                  className={day === selectedDay ? "is-selected" : undefined}
+                  className={
+                    [
+                      day === selectedDay ? "is-selected" : "",
+                      eventDays.has(day) ? "has-event" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ") || undefined
+                  }
+                  aria-current={day === selectedDay ? "date" : undefined}
                 >
                   {day}
                 </span>

@@ -8,6 +8,18 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+    # Docs-only pushes cannot change what this pipeline builds or tests, and
+    # they are already covered by the pre-merge Fern checks and fern-docs.yml.
+    # Same exclusion trigger_ci.yml carries, for the same reason.
+    #
+    # This is load-bearing for community-events-refresh.yml, which commits a
+    # regenerated events.generated.ts to main on a schedule: without it, a
+    # calendar refresh would wake the full GPU pipeline once a day.
+    paths-ignore:
+      - 'docs/**'
+      - 'fern/**'
+      - '**.md'
+      - '**.rst'
   workflow_dispatch:
     inputs:
       framework:
