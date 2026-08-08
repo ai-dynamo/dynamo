@@ -66,6 +66,7 @@ areas:
   - lib/llm/src/kv_router/publisher/
   - tests/router/
   - tests/router/configs/
+  - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'

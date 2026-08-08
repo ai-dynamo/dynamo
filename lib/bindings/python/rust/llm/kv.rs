@@ -34,7 +34,7 @@ use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest,
+    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyFactory,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -430,57 +430,75 @@ mod select_service_cli_tests {
     }
 }
 
+#[cfg(not(feature = "select-service"))]
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    #[cfg(feature = "select-service")]
-    {
-        let cli = SelectServiceCli::try_parse_from(
-            std::iter::once(OsString::from("python -m dynamo.select_service"))
-                .chain(args.into_iter().map(Into::into)),
-        )?;
+    let _ = args;
+    anyhow::bail!(
+        "dynamo.select_service is not available in this build; reinstall with --features select-service"
+    )
+}
 
-        init_standalone_logging();
+#[cfg(feature = "select-service")]
+pub(crate) fn run_select_service_cli_with_worker_selection_policy_factory<I, T, F>(
+    args: I,
+    resolve_policy: F,
+) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+    F: FnOnce(&KvRouterConfig) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>>,
+{
+    let cli = SelectServiceCli::try_parse_from(
+        std::iter::once(OsString::from("python -m dynamo.select_service"))
+            .chain(args.into_iter().map(Into::into)),
+    )?;
 
-        let rt = tokio::runtime::Runtime::new()?;
-        let mut kv_router_config =
-            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
-            kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
-        }
-        if let Some(algorithm) = cli.router_tracking_hash {
-            kv_router_config.router_tracking_hash = algorithm;
-        }
-        if let Some(key_file) = cli.router_tracking_key_file {
-            kv_router_config.router_tracking_key_file = Some(key_file);
-        }
-        if let Some(key_id) = cli.router_tracking_key_id {
-            kv_router_config.router_tracking_key_id = Some(key_id);
-        }
-        rt.block_on(selection::run_server(SelectionServiceConfig {
-            port: cli.port,
-            threads: cli.threads,
-            indexer_peers: cli.indexer_peers,
-            replica_sync_port: cli.replica_sync_port,
-            replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config,
-            selection_cache: selection_cache_config_from_overrides(
-                cli.selection_cache_ttl_secs,
-                cli.selection_cache_max_entries,
-                cli.selection_cache_max_bytes,
-            ),
-        }))
+    init_standalone_logging();
+
+    let mut kv_router_config =
+        try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+    if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
+        kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
     }
-
-    #[cfg(not(feature = "select-service"))]
-    {
-        let _ = args;
-        anyhow::bail!(
-            "dynamo.select_service is not available in this build; reinstall with --features select-service"
-        )
+    if let Some(algorithm) = cli.router_tracking_hash {
+        kv_router_config.router_tracking_hash = algorithm;
     }
+    if let Some(key_file) = cli.router_tracking_key_file {
+        kv_router_config.router_tracking_key_file = Some(key_file);
+    }
+    if let Some(key_id) = cli.router_tracking_key_id {
+        kv_router_config.router_tracking_key_id = Some(key_id);
+    }
+    let config = SelectionServiceConfig {
+        port: cli.port,
+        threads: cli.threads,
+        indexer_peers: cli.indexer_peers,
+        replica_sync_port: cli.replica_sync_port,
+        replica_sync_peers: cli.replica_sync_peers,
+        kv_router_config,
+        selection_cache: selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        ),
+    };
+    let factory = resolve_policy(&config.kv_router_config)?;
+    let builder = config.service_builder();
+    let builder = match factory {
+        Some(factory) => {
+            builder.worker_selection_policy_factory(move |router_config, worker_type, partition| {
+                factory(router_config, worker_type, partition)
+            })
+        }
+        None => builder,
+    };
+    let rt = tokio::runtime::Runtime::new()?;
+    let service = rt.block_on(builder.build())?;
+    rt.block_on(selection::run_server_with_service(config.port, service))
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -575,10 +593,20 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
-        let mut builder = SelectionServiceBuilder::new(kv_router_config)
+        let factory =
+            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
+        let builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);
+        let mut builder = match factory {
+            Some(factory) => builder.worker_selection_policy_factory(
+                move |router_config, worker_type, partition| {
+                    factory(router_config, worker_type, partition)
+                },
+            ),
+            None => builder,
+        };
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -1863,6 +1891,15 @@ impl KvRouter {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
+        }
+        if let Some(instance) = kv_router_config
+            .inner()
+            .selected_worker_selection_policy_instance()
+            .map_err(to_pyerr)?
+        {
+            return Err(PyValueError::new_err(format!(
+                "worker-selection instance {instance:?} is configured, but python -m dynamo.router does not support linked worker-selection policies; use python -m dynamo.frontend or a custom EPP binary"
+            )));
         }
         let prefill_load_estimator = aic_perf_config
             .map(|config| {

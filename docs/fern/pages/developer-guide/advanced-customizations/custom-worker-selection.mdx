@@ -1,0 +1,261 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Custom Worker Selection
+subtitle: Build a Rust scorer and picker, then run them with the Dynamo frontend or EPP
+---
+
+**Experimental.** Build a Rust policy that scores eligible workers by active request count and picks the lowest score. Run it with `python3 -m dynamo.frontend` and a custom Endpoint Picker Provider (EPP) binary.
+
+Dynamo handles discovery, eligibility, queueing, reservations, accounting, and metrics. Your policy scores the eligible workers and selects one.
+
+## What You Build
+
+Create these three crates next to a Dynamo source checkout:
+
+```text
+acme-routing/
+├── policy/                  # scorer, picker, and provider
+├── catalog/                 # registers policy types
+├── epp/                     # custom EPP binary
+└── worker-selection.yaml    # chooses one configured policy instance
+```
+
+The policy path is the same for both processes:
+
+```text
+eligible workers
+  -> LeastBusyScorer: cost = active_requests
+  -> LowestCostPicker: choose smallest cost
+  -> Dynamo reserves and routes to that worker
+```
+
+## Set Up the Project
+
+Use a Dynamo source checkout that matches the revision in your image. Create the custom project beside it.
+
+```bash
+export DYNAMO_DIR=/work/dynamo
+export POLICY_DIR=/work/acme-routing
+
+mkdir -p "$POLICY_DIR"
+cargo init --lib --name acme-least-busy "$POLICY_DIR/policy"
+cargo init --lib --name acme-routing-catalog "$POLICY_DIR/catalog"
+cargo init --bin --name acme-epp "$POLICY_DIR/epp"
+```
+
+Add the local Dynamo and catalog dependencies with `cargo add`.
+
+```bash
+cd "$POLICY_DIR/policy"
+cargo add --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+cargo add serde --features derive
+
+cd "$POLICY_DIR/catalog"
+cargo add --path "$POLICY_DIR/policy" acme-least-busy
+cargo add --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+
+cd "$POLICY_DIR/epp"
+cargo add anyhow
+cargo add tokio --features macros,rt-multi-thread
+cargo add --path "$POLICY_DIR/catalog" acme-routing-catalog
+cargo add --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+cargo add --path "$DYNAMO_DIR/deploy/inference-gateway/ext-proc" dynamo-ext-proc
+```
+
+## Write the Policy
+
+Replace `policy/src/lib.rs` with this code:
+
+```rust
+use std::sync::Arc;
+
+use dynamo_kv_router::{
+    KvRouterConfig, WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+};
+use dynamo_kv_router::services::selection::{
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    WorkerSelectionPolicyRegistryError,
+};
+
+struct LeastBusyScorer;
+
+impl WorkerScorer for LeastBusyScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
+
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        let load = candidate
+            .load()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+        Ok(load.active_requests() as f64)
+    }
+}
+
+struct LowestCostPicker;
+
+impl WorkerPicker for LowestCostPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        input
+            .candidates()
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+            .map(|(row, _)| row)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Parameters {}
+
+fn provider(
+    parameters: &WorkerSelectionPolicyParameters,
+) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
+    let _: Parameters = parameters.deserialize()?;
+
+    Ok(Arc::new(
+        |config: &KvRouterConfig, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type,
+                vec![Box::new(LeastBusyScorer)],
+                Box::new(LowestCostPicker),
+            )
+        },
+    ))
+}
+
+pub fn register(
+    registry: &mut WorkerSelectionPolicyRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    registry.register("least-busy", Arc::new(provider))
+}
+```
+
+`required_worker_inputs` requests the `LOAD` signal. The scorer runs once per eligible worker and returns a finite lower-is-better cost. The picker receives those costs and returns the lowest-cost row. The provider parses configuration at startup and Dynamo creates policy state once per routing partition.
+
+This policy accepts an empty YAML parameter map. Add and validate fields in `Parameters` when it needs settings.
+
+Check the policy before composing it into a catalog:
+
+```bash
+cd "$POLICY_DIR/policy"
+cargo check
+```
+
+## Register the Policy in a Catalog
+
+The catalog registers policy types. Replace `catalog/src/lib.rs` with:
+
+```rust
+use dynamo_kv_router::services::selection::{
+    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
+};
+
+pub fn register(
+    registry: &mut WorkerSelectionPolicyRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    acme_least_busy::register(registry)
+}
+```
+
+`least-busy` is the policy type. YAML selects a named instance of that type.
+
+## Configure the Instance
+
+Create `worker-selection.yaml`:
+
+```yaml
+worker_selection:
+  default: least-busy
+  instances:
+    - name: least-busy
+      type: least-busy
+      parameters: {}
+```
+
+Set `DYN_ROUTER_WORKER_SELECTION_POLICY` to override `worker_selection.default`. Set it to `default`, or omit `worker_selection`, to use Dynamo's built-in selector.
+
+## Run With the Python Frontend
+
+The Python frontend links the catalog into `dynamo._core`. Add your catalog to the Python binding manifest in the checkout used to build the frontend image.
+
+Replace the catalog dependency. Keep the `dynamo-worker-selection-policy-catalog` alias; use your catalog package name.
+
+```bash
+cd "$DYNAMO_DIR"
+cargo add \
+  --manifest-path lib/bindings/python/Cargo.toml \
+  --optional \
+  --rename dynamo-worker-selection-policy-catalog \
+  --path "$POLICY_DIR/catalog" \
+  acme-routing-catalog
+```
+
+Build the custom extension and start the normal frontend command. Keep your usual backend and runtime arguments; these flags select the custom policy for KV routing.
+
+```bash
+cd "$DYNAMO_DIR/lib/bindings/python"
+CARGO_TARGET_DIR="$DYNAMO_DIR/target" maturin develop --uv --features custom-policy
+
+cd "$DYNAMO_DIR"
+uv pip install -e .
+
+python3 -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config "$POLICY_DIR/worker-selection.yaml"
+```
+
+The frontend loads `least-busy` at startup and uses its factory for KV-router partitions. Invalid configuration or duplicate registration stops startup. Linked policies are supported by the frontend and custom EPP binaries, not `python3 -m dynamo.router`.
+
+## Run With EPP
+
+Build the `acme-epp` binary you created. Replace `epp/src/main.rs` with:
+
+```rust
+use dynamo_ext_proc::run_with_worker_selection_policy_registry;
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    acme_routing_catalog::register(&mut registry)?;
+    run_with_worker_selection_policy_registry(registry).await
+}
+```
+
+Run this binary with the normal standalone EPP configuration plus the policy YAML:
+
+```bash
+cd "$POLICY_DIR/epp"
+DYN_EPP_MODE=standalone \
+DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" \
+cargo run --release
+```
+
+Follow the [standalone EPP on-ramp](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for worker discovery, KV events, tokenization, Kubernetes resources, and the remaining EPP environment. Use `acme-epp` in place of the stock EPP executable. It uses the same ports, environment, and startup behavior.
+
+Linked policies require `DYN_EPP_MODE=standalone`. In `dynamo` mode, EPP delegates selection to the Dynamo runtime. The stock standalone `dynamo-ext-proc` binary uses Dynamo's default selector and rejects custom instances at startup.
+
+## Policy Contract
+
+- Return finite scorer costs. Dynamo rejects non-finite contributions and totals.
+- Return a row from `WorkerInputView::candidates()`. Dynamo validates the index before reservation and accounting.
+- Declare every signal a scorer or picker reads with `required_worker_inputs`. Request only the signals you use.
+- Treat candidate row order as unspecified. Break ties with a worker identity or another explicit signal if tie behavior matters.
+- Keep blocking I/O and panics out of `score` and `pick`. Both run in Dynamo's scheduler queue actor.
+
+For the built-in cost model, see [Routing Concepts](../knowledge-base/modular-components/router/routing-concepts.md). For the full standalone EPP deployment, see [Using GAIE with vanilla vLLM](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx).

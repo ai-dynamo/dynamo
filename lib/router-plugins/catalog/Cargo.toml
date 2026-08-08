@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+edition = "2024"
+license = "Apache-2.0"
+homepage = "https://github.com/ai-dynamo/dynamo"
+repository = "https://github.com/ai-dynamo/dynamo.git"
+description = "Default build-time worker-selection policy catalog for Dynamo"
+
+[dependencies]
+dynamo-kv-router = { path = "../../kv-router", version = "1.4.0", features = ["standalone-selection"] }
+
+[workspace]
+# Keep the optional catalog out of Dynamo's default workspace feature resolution.
