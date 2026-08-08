@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(dead_code)]
+
 //! Shared HTTP service and SSE helpers for agent-facing protocol tests.
 
 use std::collections::HashMap;
@@ -39,7 +41,6 @@ pub struct HarnessService {
     pub base_url: String,
     pub client: reqwest::Client,
     pub engine: Arc<ScriptedChatEngine>,
-    #[allow(dead_code)]
     pub metrics: Arc<Metrics>,
     pub completion_engine: Arc<ScriptedCompletionEngine>,
     cancel: CancellationToken,
