@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -58,6 +59,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
 			runtimeVersionSource:               runtimeVersionSource,
+			requestVersionSource:               runtimeVersionSource,
 			allowMissingRuntimeVersionOverride: true,
 		},
 	}
@@ -85,6 +87,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
 			runtimeVersionSource:               runtimeVersionSourceDisabled,
+			requestVersionSource:               runtimeVersionSource,
 			allowMissingRuntimeVersionOverride: true,
 		},
 	}
@@ -118,7 +121,27 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
+	allErrs := v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
+	if v.requestVersionSource != runtimeVersionSourceV1Beta1 {
+		return allErrs
+	}
+	failover := failoverFor(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	if failover == nil {
+		return allErrs
+	}
+	if effectiveGMSMode(failover.Mode) != nvidiacomv1beta1.GMSModeIntraPod {
+		return allErrs
+	}
+	return append(allErrs, twoShadowIntraPodFailoverProfileErrors(
+		effectiveNumShadows(failover),
+		dynamo.GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+		dcd.Spec.GetNumberOfNodes(),
+		dcd.Spec.BackendFramework,
+		effectiveVLLMExecutorBackend(
+			dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+		),
+		field.NewPath("spec", "experimental", "failover"),
+	)...)
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.

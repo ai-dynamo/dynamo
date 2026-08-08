@@ -269,11 +269,14 @@ type GMSClientPodSpec struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// The main container is cloned into two engine containers (active + standby)
-// sharing GPUs via DRA, and the standby acquires the flock when the active
-// engine fails. Failover requires that gpuMemoryService is also set, and that
-// failover.mode matches gpuMemoryService.mode. Also requires the
-// `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+// In IntraPod mode, the main container is cloned into one active and one or two
+// standby engine containers sharing GPUs via DRA. InterPod mode supports one
+// standby. Standbys acquire the flock after the active engine fails. Failover
+// with a second IntraPod shadow currently requires a single-node direct vLLM
+// launch without Ray or data parallel. Failover requires that gpuMemoryService
+// is also set, and that failover.mode matches gpuMemoryService.mode. Also
+// requires the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on
+// the DGD.
 // See ExperimentalSpec for the stability caveat.
 type FailoverSpec struct {
 	// mode selects the failover deployment topology. Must match
@@ -284,13 +287,12 @@ type FailoverSpec struct {
 	// +kubebuilder:default=IntraPod
 	// +kubebuilder:validation:Enum=IntraPod;InterPod
 	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
-	// numShadows is the number of shadow (standby) engine containers per
-	// rank. Reserved for future use; the operator currently creates exactly
-	// one shadow.
+	// numShadows is the number of shadow (standby) engines per rank. IntraPod
+	// mode supports 1 or 2; the second shadow currently requires a single-node
+	// direct vLLM launch without Ray or data parallel. InterPod mode supports 1.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1
 	NumShadows int32 `json:"numShadows,omitempty"`
 }
 

@@ -133,7 +133,12 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, expectedGVK)
-	warnings, err := validator.Validate(ctx, newDeployment, runtimeVersionSourceDisabled)
+	warnings, err := validator.validate(
+		ctx,
+		newDeployment,
+		runtimeVersionSourceDisabled,
+		runtimeVersionSource,
+	)
 	if err != nil {
 		return warnings, err
 	}

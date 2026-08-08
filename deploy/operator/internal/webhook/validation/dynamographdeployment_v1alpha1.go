@@ -35,6 +35,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 		field.NewPath("spec"),
 		dgd.Name,
 		dgd.Namespace,
+		dgd.Annotations,
 	)
 }
 
@@ -44,6 +45,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 	fldPath *field.Path,
 	dgdName string,
 	dgdNamespace string,
+	dgdAnnotations map[string]string,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pvcsPath := fldPath.Child("pvcs")
@@ -61,6 +63,22 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			servicePath,
 			dynamoNamespace,
 		)...)
+		if v.requestVersionSource == runtimeVersionSourceV1Alpha1 &&
+			service.Failover != nil && service.Failover.Enabled &&
+			service.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod {
+			allErrs = append(allErrs, twoShadowIntraPodFailoverProfileErrors(
+				service.Failover.NumShadows,
+				alphaMainContainer(service),
+				alphaNumberOfNodes(service),
+				spec.BackendFramework,
+				effectiveVLLMExecutorBackend(
+					alphaPodAnnotations(service),
+					dgdAnnotations,
+					spec.Annotations,
+				),
+				servicePath.Child("failover"),
+			)...)
+		}
 	}
 	return allErrs
 }

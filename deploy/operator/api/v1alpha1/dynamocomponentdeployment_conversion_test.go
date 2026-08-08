@@ -675,8 +675,9 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 					Mode:    GMSModeInterPod,
 				},
 				Failover: &FailoverSpec{
-					Enabled: true,
-					Mode:    GMSModeIntraPod,
+					Enabled:    true,
+					Mode:       GMSModeIntraPod,
+					NumShadows: 2,
 				},
 				Checkpoint: &ServiceCheckpointConfig{
 					Enabled: true,
@@ -699,6 +700,9 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 	if got := hub.Spec.Experimental.Failover.Mode; got != v1beta1.GMSModeIntraPod {
 		t.Fatalf("hub failover mode = %q, want %q", got, v1beta1.GMSModeIntraPod)
 	}
+	if got := hub.Spec.Experimental.Failover.NumShadows; got != 2 {
+		t.Fatalf("hub failover numShadows = %d, want 2", got)
+	}
 	if got := hub.Spec.Experimental.Checkpoint.Mode; got != v1beta1.CheckpointModeManual {
 		t.Fatalf("hub checkpoint mode = %q, want %q", got, v1beta1.CheckpointModeManual)
 	}
@@ -709,7 +713,7 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				Experimental: &v1beta1.ExperimentalSpec{
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod},
+					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod, NumShadows: 2},
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
 						Enabled: true,
 						Mode:    v1beta1.CheckpointModeAuto,
@@ -731,6 +735,9 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 	}
 	if got := spoke.Spec.Failover.Mode; got != GMSModeInterPod {
 		t.Fatalf("spoke failover mode = %q, want %q", got, GMSModeInterPod)
+	}
+	if got := spoke.Spec.Failover.NumShadows; got != 2 {
+		t.Fatalf("spoke failover numShadows = %d, want 2", got)
 	}
 	if got := spoke.Spec.Checkpoint.Mode; got != CheckpointModeAuto {
 		t.Fatalf("spoke checkpoint mode = %q, want %q", got, CheckpointModeAuto)

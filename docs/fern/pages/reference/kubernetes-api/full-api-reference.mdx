@@ -656,7 +656,7 @@ See [GPUMemoryServiceSpec](#gpumemoryservicespec).
 </ParamField>
 
 <ParamField path="failover" type="FailoverSpec">
-Failover configures GMS (GPU Memory Service) failover for this service.&lt;br /&gt;For intraPod mode: the main container is cloned into two engine containers (active + standby).&lt;br /&gt;For interPod mode: the operator creates a dedicated GMS weight server pod and&lt;br /&gt;multiple engine pods per rank that share GPUs via DRA resource claims.
+Failover configures GMS (GPU Memory Service) failover for this service.&lt;br /&gt;For intraPod mode: the main container is cloned into one active and one or&lt;br /&gt;two standby engine containers. The second shadow currently requires a&lt;br /&gt;single-node direct vLLM launch without Ray or data parallel.&lt;br /&gt;For interPod mode: the operator creates a dedicated GMS weight server pod and&lt;br /&gt;multiple engine pods per rank that share GPUs via DRA resource claims.
 See [FailoverSpec](#failoverspec).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
@@ -812,7 +812,7 @@ See [GPUMemoryServiceSpec](#gpumemoryservicespec).
 </ParamField>
 
 <ParamField path="failover" type="FailoverSpec">
-Failover configures GMS (GPU Memory Service) failover for this service.&lt;br /&gt;For intraPod mode: the main container is cloned into two engine containers (active + standby).&lt;br /&gt;For interPod mode: the operator creates a dedicated GMS weight server pod and&lt;br /&gt;multiple engine pods per rank that share GPUs via DRA resource claims.
+Failover configures GMS (GPU Memory Service) failover for this service.&lt;br /&gt;For intraPod mode: the main container is cloned into one active and one or&lt;br /&gt;two standby engine containers. The second shadow currently requires a&lt;br /&gt;single-node direct vLLM launch without Ray or data parallel.&lt;br /&gt;For interPod mode: the operator creates a dedicated GMS weight server pod and&lt;br /&gt;multiple engine pods per rank that share GPUs via DRA resource claims.
 See [FailoverSpec](#failoverspec).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
@@ -1376,7 +1376,9 @@ See [Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1
 <Accordion id="failoverspec" title="FailoverSpec">
 FailoverSpec configures active-passive failover for a worker component.
 For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
-into engine containers (active + standby) within the same pod.
+into one active and one or two standby engine containers within the same pod.
+The second shadow currently requires a single-node direct vLLM launch without
+Ray or data parallel.
 For interPod mode: the operator creates a dedicated GMS weight server pod and
 multiple engine pods per rank that share GPUs via DRA resource claims.
 
@@ -1395,7 +1397,7 @@ See [GPUMemoryServiceMode](#gpumemoryservicemode).
 </ParamField>
 
 <ParamField path="numShadows" type="integer" default="1">
-NumShadows is the number of shadow (standby) engine pods per rank.&lt;br /&gt;Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).&lt;br /&gt;NumShadows is only meaningful for mode=interPod; intraPod uses a fixed&lt;br /&gt;1 primary + 1 shadow sidecar layout and any value other than 1 is&lt;br /&gt;rejected at admission time.
+NumShadows is the number of shadow (standby) engines per rank.&lt;br /&gt;In intraPod mode, one or two shadows are supported; the second shadow&lt;br /&gt;currently requires a single-node direct vLLM launch without Ray or data&lt;br /&gt;parallel. InterPod mode supports one or more shadows.
 **Validation:** Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
@@ -3527,10 +3529,13 @@ See [ComponentCheckpointConfig](#componentcheckpointconfig).
 
 <Accordion id="v1beta1-failoverspec" title="FailoverSpec">
 FailoverSpec configures active-passive failover for a worker component.
-The main container is cloned into two engine containers (active + standby)
-sharing GPUs via DRA, and the standby acquires the flock when the active
-engine fails. Failover requires that gpuMemoryService is also set, and that
-failover.mode matches gpuMemoryService.mode. Also requires the
+In IntraPod mode, the main container is cloned into one active and one or two
+standby engine containers sharing GPUs via DRA. InterPod mode supports one
+standby. Standbys acquire the flock after the active engine fails. Failover
+with a second IntraPod shadow currently requires a single-node direct vLLM
+launch without Ray or data parallel. Failover requires that gpuMemoryService
+is also set, and that failover.mode matches
+gpuMemoryService.mode. Also requires the
 `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
 See ExperimentalSpec for the stability caveat.
 
@@ -3545,8 +3550,8 @@ See [GPUMemoryServiceMode](#v1beta1-gpumemoryservicemode).
 </ParamField>
 
 <ParamField path="numShadows" type="integer" default="1">
-numShadows is the number of shadow (standby) engine containers per&lt;br /&gt;rank. Reserved for future use; the operator currently creates exactly&lt;br /&gt;one shadow.
-**Validation:** Maximum: 1 &lt;br /&gt;Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+numShadows is the number of shadow (standby) engines per rank. IntraPod&lt;br /&gt;mode supports 1 or 2; the second shadow currently requires a single-node&lt;br /&gt;direct vLLM launch without Ray or data parallel. InterPod mode supports 1.
+**Validation:** Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 

@@ -452,6 +452,23 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "alpha intra-pod failover rejects more than two shadows",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 3,
+				},
+			}),
+			wantWebhookErrs: []string{`spec.failover.numShadows: Invalid value: 3: is invalid for mode="intraPod": supported values are 1 and 2`},
+		},
+		{
 			name: "v1beta1 checkpoint with inter-pod GMS and failover reports both errors",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
@@ -809,7 +826,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Failover: &nvidiacomv1alpha1.FailoverSpec{
 					Enabled:    true,
 					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-					NumShadows: 1,
+					NumShadows: 2,
 				},
 			}),
 			wantWebhookErrs: []string{`spec.experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "InterPod"`},
@@ -860,10 +877,39 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "intra-pod failover rejects multiple shadows",
+			name: "beta two-shadow direct vLLM with omitted backend is accepted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = ""
+				enableBetaTwoShadowIntraPod(
+					&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+					[]string{"python3"},
+					[]string{"-m", "dynamo.vllm"},
+				)
+			}),
+		},
+		{
+			name: "beta two-shadow shell launch is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				enableBetaTwoShadowIntraPod(
+					&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+					[]string{"sh", "-c"},
+					[]string{"python3 -m dynamo.vllm"},
+				)
+			}),
+			wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: two shadows currently require a single-node direct vLLM launch without Ray or data parallel"},
+		},
+		{
+			name: "two-shadow direct vLLM failover is accepted",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Image:   "registry.example/runtime:1.1.0",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm"},
+					},
+				},
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 					Enabled: true,
 					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
@@ -874,7 +920,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 2,
 				},
 			}),
-			wantWebhookErrs: []string{`spec.failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`},
 		},
 		{
 			name: "single-shadow intra-pod failover is accepted",
