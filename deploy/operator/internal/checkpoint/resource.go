@@ -19,7 +19,12 @@ package checkpoint
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -298,14 +303,14 @@ func ExpectedAutoCheckpoint(
 }
 
 type automaticCheckpointProvenance struct {
-	Name            string
-	Namespace       string
-	CheckpointID    string
-	AutomaticMarker string
-	ArtifactVersion string
-	DeletionPolicy  string
-	Controller      *metav1.OwnerReference
-	CaptureSpec     nvidiacomv1alpha1.DynamoCheckpointSpec
+	Name            string                                 `json:"name"`
+	Namespace       string                                 `json:"namespace"`
+	CheckpointID    string                                 `json:"checkpointID"`
+	AutomaticMarker string                                 `json:"automaticMarker"`
+	ArtifactVersion string                                 `json:"artifactVersion"`
+	DeletionPolicy  string                                 `json:"deletionPolicy"`
+	Controller      *metav1.OwnerReference                 `json:"controller,omitempty"`
+	CaptureSpec     nvidiacomv1alpha1.DynamoCheckpointSpec `json:"captureSpec"`
 }
 
 func automaticCheckpointProvenanceProjection(
@@ -362,6 +367,131 @@ func VerifyExpectedAutoCheckpoint(
 		return fmt.Errorf("checkpoint owner differs")
 	case !equality.Semantic.DeepEqual(actualProvenance.CaptureSpec, expectedProvenance.CaptureSpec):
 		return fmt.Errorf("checkpoint capture spec differs")
+	default:
+		return nil
+	}
+}
+
+const automaticCheckpointBindingVersion = "v1"
+
+type automaticCheckpointBinding struct {
+	UID        types.UID
+	Generation int64
+	Digest     [sha256.Size]byte
+}
+
+func automaticCheckpointBindingFor(
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) (automaticCheckpointBinding, error) {
+	if ckpt == nil {
+		return automaticCheckpointBinding{}, fmt.Errorf("automatic checkpoint binding requires an object")
+	}
+	if ckpt.UID == "" {
+		return automaticCheckpointBinding{}, fmt.Errorf("automatic checkpoint UID is missing")
+	}
+	if ckpt.Generation < 1 {
+		return automaticCheckpointBinding{}, fmt.Errorf("automatic checkpoint generation is missing")
+	}
+	provenance, err := automaticCheckpointProvenanceProjection(ckpt)
+	if err != nil {
+		return automaticCheckpointBinding{}, fmt.Errorf("automatic checkpoint provenance is invalid: %w", err)
+	}
+	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != provenance.CheckpointID {
+		return automaticCheckpointBinding{}, fmt.Errorf(
+			"automatic checkpoint ID label differs from canonical checkpoint ID",
+		)
+	}
+	canonical, err := json.Marshal(provenance)
+	if err != nil {
+		return automaticCheckpointBinding{}, fmt.Errorf("marshal automatic checkpoint provenance: %w", err)
+	}
+	return automaticCheckpointBinding{
+		UID:        ckpt.UID,
+		Generation: ckpt.Generation,
+		Digest:     sha256.Sum256(canonical),
+	}, nil
+}
+
+// AutomaticCheckpointBinding binds a workload to an automatic checkpoint's
+// Kubernetes identity and canonical provenance.
+func AutomaticCheckpointBinding(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
+	binding, err := automaticCheckpointBindingFor(ckpt)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"%s/%s/%d/%x",
+		automaticCheckpointBindingVersion,
+		binding.UID,
+		binding.Generation,
+		binding.Digest,
+	), nil
+}
+
+func parseAutomaticCheckpointBinding(value string) (automaticCheckpointBinding, error) {
+	const expectedFormat = `v1/<uid>/<generation>/<sha256>`
+	parts := strings.Split(value, "/")
+	if len(parts) != 4 {
+		return automaticCheckpointBinding{}, fmt.Errorf(
+			"automatic checkpoint binding has invalid format %q; expected %s",
+			value,
+			expectedFormat,
+		)
+	}
+	if parts[0] != automaticCheckpointBindingVersion {
+		return automaticCheckpointBinding{}, fmt.Errorf(
+			"automatic checkpoint binding version %q is unsupported",
+			parts[0],
+		)
+	}
+	if parts[1] == "" {
+		return automaticCheckpointBinding{}, fmt.Errorf("automatic checkpoint binding UID is missing")
+	}
+	generation, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || generation < 1 {
+		return automaticCheckpointBinding{}, fmt.Errorf(
+			"automatic checkpoint binding generation %q is invalid",
+			parts[2],
+		)
+	}
+	decodedDigest, err := hex.DecodeString(parts[3])
+	if err != nil || len(decodedDigest) != sha256.Size {
+		return automaticCheckpointBinding{}, fmt.Errorf(
+			"automatic checkpoint binding SHA-256 digest %q is invalid",
+			parts[3],
+		)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], decodedDigest)
+	return automaticCheckpointBinding{
+		UID:        types.UID(parts[1]),
+		Generation: generation,
+		Digest:     digest,
+	}, nil
+}
+
+func VerifyAutomaticCheckpointBinding(
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	expected string,
+) error {
+	if expected == "" {
+		return fmt.Errorf("automatic checkpoint binding is missing")
+	}
+	expectedBinding, err := parseAutomaticCheckpointBinding(expected)
+	if err != nil {
+		return err
+	}
+	actualBinding, err := automaticCheckpointBindingFor(ckpt)
+	if err != nil {
+		return err
+	}
+	switch {
+	case actualBinding.UID != expectedBinding.UID:
+		return fmt.Errorf("automatic checkpoint UID differs")
+	case actualBinding.Generation != expectedBinding.Generation:
+		return fmt.Errorf("automatic checkpoint generation differs")
+	case actualBinding.Digest != expectedBinding.Digest:
+		return fmt.Errorf("automatic checkpoint provenance differs")
 	default:
 		return nil
 	}

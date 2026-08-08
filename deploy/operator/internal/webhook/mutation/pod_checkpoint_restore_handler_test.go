@@ -12,6 +12,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -21,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -49,11 +51,31 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 	notReadyCheckpoint.Name = "pending-checkpoint"
 	notReadyCheckpoint.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: "checkpoint-456"}
 	notReadyCheckpoint.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
+	automaticCheckpoint := readyCheckpoint.DeepCopy()
+	automaticCheckpoint.Name = "automatic-checkpoint"
+	automaticCheckpoint.UID = types.UID("automatic-uid")
+	automaticCheckpoint.Generation = 2
+	automaticCheckpoint.Annotations[consts.CheckpointAutoAnnotation] = consts.KubeLabelValueTrue
+	automaticBinding, err := checkpoint.AutomaticCheckpointBinding(automaticCheckpoint)
+	require.NoError(t, err)
+	staleAutomaticCheckpoint := automaticCheckpoint.DeepCopy()
+	staleAutomaticCheckpoint.Generation--
+	staleAutomaticBinding, err := checkpoint.AutomaticCheckpointBinding(staleAutomaticCheckpoint)
+	require.NoError(t, err)
+	replacementCheckpoint := readyCheckpoint.DeepCopy()
+	replacementCheckpoint.Name = "replacement-checkpoint"
+	replacementCheckpoint.UID = types.UID("replacement-uid")
+	replacementCheckpoint.Generation = 1
+	replacementCheckpoint.Annotations[consts.CheckpointAutoAnnotation] = consts.KubeLabelValueTrue
+	originalReplacementCheckpoint := replacementCheckpoint.DeepCopy()
+	originalReplacementCheckpoint.UID = types.UID("original-uid")
+	originalReplacementBinding, err := checkpoint.AutomaticCheckpointBinding(originalReplacementCheckpoint)
+	require.NoError(t, err)
 
 	mutator := NewPodCheckpointRestoreMutator(
 		fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(readyCheckpoint, notReadyCheckpoint).
+			WithObjects(readyCheckpoint, notReadyCheckpoint, automaticCheckpoint, replacementCheckpoint).
 			Build(),
 		&configv1alpha1.OperatorConfiguration{
 			Checkpoint: configv1alpha1.CheckpointConfiguration{
@@ -102,6 +124,154 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 			"name":  "DYN_SNAPSHOT_RESTORE_STANDBY",
 			"value": "1",
 		})
+
+		t.Run("automatic checkpoint with matching binding restore-shapes pod", func(t *testing.T) {
+			pod := checkpointCandidatePod("automatic-checkpoint")
+			pod.Annotations[consts.CheckpointBindingAnnotation] = automaticBinding
+			req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+				Operation: admissionv1.Create,
+				Namespace: "default",
+				Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
+			}}
+
+			resp := mutator.Handle(ctx, req)
+			require.True(t, resp.Allowed)
+			require.NotEmpty(t, resp.Patches)
+			for _, patch := range resp.Patches {
+				assert.NotEqual(t,
+					"/metadata/annotations/nvidia.com~1dynamo-checkpoint-name",
+					patch.Path,
+				)
+				assert.NotEqual(t,
+					"/metadata/annotations/nvidia.com~1dynamo-checkpoint-binding",
+					patch.Path,
+				)
+			}
+		})
+
+		for _, tt := range []struct {
+			name           string
+			checkpointName string
+			binding        string
+		}{
+			{
+				name:           "DCD candidate rejects changed checkpoint generation",
+				checkpointName: "automatic-checkpoint",
+				binding:        staleAutomaticBinding,
+			},
+			{
+				name:           "Grove candidate rejects same-name checkpoint replacement",
+				checkpointName: "replacement-checkpoint",
+				binding:        originalReplacementBinding,
+			},
+			{
+				name:           "automatic candidate rejects missing binding",
+				checkpointName: "automatic-checkpoint",
+			},
+			{
+				name:           "bound candidate rejects missing checkpoint",
+				checkpointName: "deleted-checkpoint",
+				binding:        "deleted-uid/1",
+			},
+			{
+				name:           "bound candidate rejects unmarked checkpoint",
+				checkpointName: "worker-checkpoint",
+				binding:        "worker-uid/1",
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				pod := checkpointCandidatePod(tt.checkpointName)
+				if tt.binding != "" {
+					pod.Annotations[consts.CheckpointBindingAnnotation] = tt.binding
+				}
+				req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Namespace: "default",
+					Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
+				}}
+
+				resp := mutator.Handle(ctx, req)
+				require.False(t, resp.Allowed)
+				assert.Empty(t, resp.Patches)
+			})
+		}
+	})
+
+	t.Run("bound already-shaped restore targets verify checkpoint provenance", func(t *testing.T) {
+		cases := []struct {
+			name           string
+			checkpointName string
+			binding        string
+		}{
+			{name: "missing", checkpointName: "deleted-checkpoint", binding: "deleted-uid/1"},
+			{name: "unmarked", checkpointName: "worker-checkpoint", binding: "worker-uid/1"},
+			{name: "replaced", checkpointName: "replacement-checkpoint", binding: originalReplacementBinding},
+			{name: "stale", checkpointName: "automatic-checkpoint", binding: staleAutomaticBinding},
+		}
+
+		for _, provider := range []string{"DCD", "Grove"} {
+			for _, tt := range cases {
+				t.Run(provider+" "+tt.name, func(t *testing.T) {
+					t.Log("Build an already-shaped bound restore target")
+					pod := checkpointCandidatePod(tt.checkpointName)
+					pod.Labels[snapshotprotocol.CheckpointIDLabel] = "checkpoint-123"
+					pod.Labels[snapshotprotocol.RestoreTargetLabel] = consts.KubeLabelValueTrue
+					pod.Annotations[consts.CheckpointBindingAnnotation] = tt.binding
+					delete(pod.Annotations, consts.CheckpointRestoreCandidateAnnotation)
+					pod.Labels["test.nvidia.com/workload-provider"] = provider
+
+					t.Log("Reject before the already-shaped return")
+					resp := mutator.Handle(ctx, admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+						Operation: admissionv1.Create,
+						Namespace: "default",
+						Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
+					}})
+					require.False(t, resp.Allowed)
+					assert.Empty(t, resp.Patches)
+				})
+			}
+		}
+	})
+
+	t.Run("matching bound shaped target and true checkpoint source remain exempt", func(t *testing.T) {
+		t.Log("Allow a shaped restore target only after its exact binding verifies")
+		target := checkpointCandidatePod("automatic-checkpoint")
+		target.Labels[snapshotprotocol.CheckpointIDLabel] = "checkpoint-123"
+		target.Labels[snapshotprotocol.RestoreTargetLabel] = consts.KubeLabelValueTrue
+		target.Annotations[consts.CheckpointBindingAnnotation] = automaticBinding
+		targetResp := mutator.Handle(ctx, admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: "default",
+			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, target)},
+		}})
+		require.True(t, targetResp.Allowed)
+		assert.Empty(t, targetResp.Patches)
+
+		t.Log("Keep true checkpoint source Pods exempt from restore binding checks")
+		source := checkpointCandidatePod("deleted-checkpoint")
+		source.Labels[snapshotprotocol.CheckpointIDLabel] = "checkpoint-123"
+		source.Labels[snapshotprotocol.CheckpointSourceLabel] = consts.KubeLabelValueTrue
+		source.Annotations[consts.CheckpointBindingAnnotation] = "stale/1"
+		sourceResp := mutator.Handle(ctx, admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: "default",
+			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, source)},
+		}})
+		require.True(t, sourceResp.Allowed)
+		assert.Empty(t, sourceResp.Patches)
+
+		t.Log("Keep an unbound already-shaped non-candidate Pod unchanged")
+		unbound := checkpointCandidatePod("worker-checkpoint")
+		unbound.Labels[snapshotprotocol.CheckpointIDLabel] = "checkpoint-123"
+		unbound.Labels[snapshotprotocol.RestoreTargetLabel] = consts.KubeLabelValueTrue
+		delete(unbound.Annotations, consts.CheckpointRestoreCandidateAnnotation)
+		unboundResp := mutator.Handle(ctx, admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: "default",
+			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, unbound)},
+		}})
+		require.True(t, unboundResp.Allowed)
+		assert.Empty(t, unboundResp.Patches)
 	})
 
 	t.Run("not ready checkpoint leaves pod unchanged", func(t *testing.T) {

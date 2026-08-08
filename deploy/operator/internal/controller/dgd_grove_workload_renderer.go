@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -101,10 +102,238 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, err
 	}
 
+	// Stamp and validate the provider-specific durable checkpoint binding copies.
+	checkpointBindings := automaticCheckpointBindings(checkpointInfos)
+	if err := stampGroveCheckpointBindings(desired, checkpointBindings); err != nil {
+		return nil, err
+	}
+	if err := validateGroveCheckpointBindings(existingPodCliqueSet, desired); err != nil {
+		return nil, err
+	}
+	if err := r.verifyAutomaticCheckpointBindings(
+		ctx,
+		dgd.Namespace,
+		checkpointInfos,
+	); err != nil {
+		return nil, err
+	}
+
 	prepareGroveTopologyConstraintUpgrade(desired, existingPodCliqueSet)
 	preserveGrovePodCliqueSetOrder(desired, existingPodCliqueSet)
 	preserveGrovePodCliqueSetReplicas(desired, existingPodCliqueSet, checkpointInfos)
 	return desired, nil
+}
+
+func (r *groveWorkloadRenderer) verifyAutomaticCheckpointBindings(
+	ctx context.Context,
+	namespace string,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) error {
+	for _, info := range checkpointInfos {
+		if info == nil || !info.Enabled || info.CheckpointName == "" {
+			continue
+		}
+		if !info.Automatic && info.AutoBinding == "" {
+			continue
+		}
+		if info.AutoBinding == "" {
+			return fmt.Errorf(
+				"automatic checkpoint %q provenance differs: automatic checkpoint binding is missing",
+				info.CheckpointName,
+			)
+		}
+
+		// Re-read the automatic checkpoint before accepting its desired binding.
+		actual := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		if err := r.reader.Get(ctx, types.NamespacedName{
+			Namespace: namespace,
+			Name:      info.CheckpointName,
+		}, actual); err != nil {
+			return fmt.Errorf("get checkpoint %q: %w", info.CheckpointName, err)
+		}
+		if actual.Annotations[commonconsts.CheckpointAutoAnnotation] != commonconsts.KubeLabelValueTrue {
+			return fmt.Errorf("checkpoint %q is no longer operator-managed", info.CheckpointName)
+		}
+		if err := checkpoint.VerifyAutomaticCheckpointBinding(actual, info.AutoBinding); err != nil {
+			return fmt.Errorf("automatic checkpoint %q provenance differs: %w", info.CheckpointName, err)
+		}
+	}
+	return nil
+}
+
+func automaticCheckpointBindings(
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) map[string]string {
+	bindings := make(map[string]string)
+	for _, info := range checkpointInfos {
+		if info == nil || !info.Enabled || info.CheckpointName == "" || info.AutoBinding == "" {
+			continue
+		}
+		bindings[info.CheckpointName] = info.AutoBinding
+	}
+	return bindings
+}
+
+func validateGroveCheckpointBindings(
+	existing *grovev1alpha1.PodCliqueSet,
+	desired *grovev1alpha1.PodCliqueSet,
+) error {
+	if existing == nil || desired == nil {
+		return nil
+	}
+	desiredBindings, err := automaticCheckpointBindingsFromAnnotation(desired)
+	if err != nil {
+		return err
+	}
+	if len(desiredBindings) == 0 {
+		return nil
+	}
+
+	// Parse the durable top-level map before checking individual cliques.
+	storedBindings, err := automaticCheckpointBindingsFromAnnotation(existing)
+	if err != nil {
+		return fmt.Errorf(
+			"parse automatic checkpoint bindings on Grove PodCliqueSet %s/%s: %w",
+			existing.Namespace,
+			existing.Name,
+			err,
+		)
+	}
+
+	// Reject replacements of checkpoint names already recorded by the PCS.
+	for checkpointName, desiredBinding := range desiredBindings {
+		if storedBinding, ok := storedBindings[checkpointName]; ok &&
+			storedBinding != desiredBinding {
+			return groveCheckpointBindingMismatch(
+				existing,
+				checkpointName,
+				storedBinding,
+				desiredBinding,
+			)
+		}
+	}
+
+	// Index existing cliques so only a genuinely new clique may introduce a binding.
+	existingCliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec)
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique != nil {
+			existingCliques[clique.Name] = clique
+		}
+	}
+
+	// Require every existing restore clique to agree with both the PCS map and desired copy.
+	for _, desiredClique := range desired.Spec.Template.Cliques {
+		if desiredClique == nil {
+			continue
+		}
+		checkpointName := desiredClique.Annotations[commonconsts.CheckpointNameAnnotation]
+		desiredBinding := desiredClique.Annotations[commonconsts.CheckpointBindingAnnotation]
+		if desiredBinding == "" {
+			continue
+		}
+		if checkpointName == "" || desiredBindings[checkpointName] != desiredBinding {
+			return fmt.Errorf(
+				"desired automatic checkpoint binding copies disagree on Grove PodCliqueSet %s/%s clique %q",
+				desired.Namespace,
+				desired.Name,
+				desiredClique.Name,
+			)
+		}
+
+		existingClique, ok := existingCliques[desiredClique.Name]
+		if !ok {
+			continue
+		}
+		existingName := existingClique.Annotations[commonconsts.CheckpointNameAnnotation]
+		existingBinding := existingClique.Annotations[commonconsts.CheckpointBindingAnnotation]
+		if existingName == "" || existingBinding == "" {
+			return fmt.Errorf(
+				"automatic checkpoint binding copies are required on existing Grove PodCliqueSet %s/%s clique %q; recreate the workload",
+				existing.Namespace,
+				existing.Name,
+				existingClique.Name,
+			)
+		}
+		storedBinding, ok := storedBindings[existingName]
+		if !ok || storedBinding != existingBinding {
+			return fmt.Errorf(
+				"automatic checkpoint binding copies disagree on Grove PodCliqueSet %s/%s clique %q",
+				existing.Namespace,
+				existing.Name,
+				existingClique.Name,
+			)
+		}
+		if existingName != checkpointName || existingBinding != desiredBinding {
+			return groveCheckpointBindingMismatch(
+				existing,
+				checkpointName,
+				existingBinding,
+				desiredBinding,
+			)
+		}
+	}
+	return nil
+}
+
+func groveCheckpointBindingMismatch(
+	pcs *grovev1alpha1.PodCliqueSet,
+	checkpointName, existing, desired string,
+) error {
+	return fmt.Errorf(
+		"automatic checkpoint binding for Grove PodCliqueSet %s/%s checkpoint %q is immutable: existing %q, desired %q",
+		pcs.Namespace,
+		pcs.Name,
+		checkpointName,
+		existing,
+		desired,
+	)
+}
+
+func automaticCheckpointBindingsFromAnnotation(
+	pcs *grovev1alpha1.PodCliqueSet,
+) (map[string]string, error) {
+	if pcs == nil {
+		return nil, nil
+	}
+	raw := pcs.Annotations[commonconsts.GroveCheckpointBindingsAnnotation]
+	if raw == "" {
+		return nil, nil
+	}
+	bindings := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &bindings); err != nil {
+		return nil, err
+	}
+	if bindings == nil {
+		return nil, fmt.Errorf("expected a JSON object")
+	}
+	return bindings, nil
+}
+
+func stampGroveCheckpointBindings(
+	desired *grovev1alpha1.PodCliqueSet,
+	bindings map[string]string,
+) error {
+	// Remove obsolete whole-map copies from every clique.
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique != nil {
+			delete(clique.Annotations, commonconsts.GroveCheckpointBindingsAnnotation)
+		}
+	}
+	if len(bindings) == 0 {
+		delete(desired.Annotations, commonconsts.GroveCheckpointBindingsAnnotation)
+		return nil
+	}
+
+	// Store the canonical checkpoint-name map only on the top-level PCS.
+	canonical, err := json.Marshal(bindings)
+	if err != nil {
+		return fmt.Errorf("marshal automatic checkpoint bindings: %w", err)
+	}
+	if desired.Annotations == nil {
+		desired.Annotations = map[string]string{}
+	}
+	desired.Annotations[commonconsts.GroveCheckpointBindingsAnnotation] = string(canonical)
+	return nil
 }
 
 func groveRenderDeployment(

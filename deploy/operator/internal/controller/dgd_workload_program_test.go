@@ -113,6 +113,74 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 	}
 }
 
+func TestValidateCheckpointBindingRequiresMatchingCopies(t *testing.T) {
+	const annotation = commonconsts.CheckpointBindingAnnotation
+	dcd := func(metadata, template string) *nvidiacomv1beta1.DynamoComponentDeployment {
+		result := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "worker",
+				Namespace: "default",
+			},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					PodTemplate: &corev1.PodTemplateSpec{},
+				},
+			},
+		}
+		if metadata != "" {
+			result.Annotations = map[string]string{annotation: metadata}
+		}
+		if template != "" {
+			result.Spec.PodTemplate.Annotations = map[string]string{annotation: template}
+		}
+		return result
+	}
+
+	for _, tt := range []struct {
+		name    string
+		current *nvidiacomv1beta1.DynamoComponentDeployment
+		desired *nvidiacomv1beta1.DynamoComponentDeployment
+		wantErr string
+	}{
+		{name: "matching copies", current: dcd("uid/1", "uid/1"), desired: dcd("uid/1", "uid/1")},
+		{name: "existing copies absent", current: dcd("", ""), desired: dcd("uid/1", "uid/1"), wantErr: "copies are required"},
+		{name: "existing metadata absent", current: dcd("", "uid/1"), desired: dcd("uid/1", "uid/1"), wantErr: "copies are required"},
+		{name: "existing template absent", current: dcd("uid/1", ""), desired: dcd("uid/1", "uid/1"), wantErr: "copies are required"},
+		{name: "existing copies diverge", current: dcd("uid/1", "other/1"), desired: dcd("uid/1", "uid/1"), wantErr: "copies disagree"},
+		{name: "desired replacement", current: dcd("uid/1", "uid/1"), desired: dcd("replacement/1", "replacement/1"), wantErr: "is immutable"},
+		{name: "explicit checkpoint remains unbound", current: dcd("", ""), desired: dcd("", "")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Validate both durable DCD binding copies")
+			err := validateCheckpointBinding(tt.current, tt.desired)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestApplyCheckpointStartupPolicyStampsBindingCopies(t *testing.T) {
+	const bindingAnnotation = commonconsts.CheckpointBindingAnnotation
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	info := &checkpoint.CheckpointInfo{
+		Enabled:        true,
+		Exists:         true,
+		CheckpointName: "checkpoint-worker",
+		Automatic:      true,
+		AutoBinding:    "uid/1",
+	}
+
+	t.Log("Apply automatic checkpoint policy to a new DCD")
+	require.NoError(t, (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(dcd, info))
+
+	assert.Equal(t, "uid/1", dcd.Annotations[bindingAnnotation])
+	require.NotNil(t, dcd.Spec.PodTemplate)
+	assert.Equal(t, "uid/1", dcd.Spec.PodTemplate.Annotations[bindingAnnotation])
+}
+
 func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
