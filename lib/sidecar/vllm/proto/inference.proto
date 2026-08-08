@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 syntax = "proto3";
 package vllm;
 
 import "google/protobuf/struct.proto";
 
 
-service Generate {
+service Inference {
   // Generates text given a prompt
   rpc Generate (GenerateRequest) returns (GenerateResponse) {}
   // Generates text given a prompt, streaming the outputs
@@ -42,6 +45,14 @@ message GenerateRequest {
   uint32 truncate_prompt_tokens = 11;
 
   int32 priority = 12;
+
+  optional string session_id = 13;
+
+  // Multimodal inputs aligned with placeholder markers in token_ids.
+  repeated MediaItem media = 14;
+
+  // Global data-parallel rank advertised by the Control service.
+  optional uint32 data_parallel_rank = 15;
 }
 
 message RandomSampling {
@@ -107,6 +118,9 @@ message KVCacheParameters {
 
   // KV Connector transfer parameters
   google.protobuf.Struct kv_transfer_params = 3;
+
+  // Encoder cache connector transfer parameters
+  google.protobuf.Struct ec_transfer_params = 4;
 }
 
 // Controls which extra candidate tokens at each position should be returned
@@ -173,6 +187,7 @@ message FinishInfo {
 
   google.protobuf.Struct kv_transfer_params = 6;
   //uint64 seed = 7;
+  google.protobuf.Struct ec_transfer_params = 8;
 }
 
 // Info for candidate tokens other than the input/sampled
@@ -194,3 +209,24 @@ message TokenIds {
   repeated uint32 ids = 1;
 }
 
+// ======================================================================================
+// Media
+// ======================================================================================
+
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IMAGE = 1;
+  MODALITY_VIDEO = 2;
+  MODALITY_AUDIO = 3;
+}
+
+message MediaItem {
+  Modality modality = 1;
+  oneof source {
+    string url = 2;       // http:// or https://
+    string data_uri = 3;  // data:
+    bytes raw_bytes = 4;
+  }
+  string mime_type = 5;
+  string uuid = 6;
+}
