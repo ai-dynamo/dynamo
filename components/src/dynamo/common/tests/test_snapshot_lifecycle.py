@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 
 import pytest
@@ -10,10 +11,17 @@ from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
+    SNAPSHOT_RESTORE_CONTEXT_FILE,
+    SNAPSHOT_RESTORE_PAUSED_ENV,
 )
 from dynamo.common.snapshot.lifecycle import SnapshotConfig
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(30),
+    pytest.mark.pre_merge,
+]
 
 
 class _PauseController:
@@ -31,8 +39,17 @@ class _PauseController:
         pass
 
 
+def _write_restore_context(tmp_path, *, restore_paused: bool = False) -> None:
+    env = {SNAPSHOT_RESTORE_PAUSED_ENV: "1"} if restore_paused else {}
+    (tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE).write_text(
+        json.dumps({"env": env}),
+        encoding="utf-8",
+    )
+
+
 async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tmp_path):
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    _write_restore_context(tmp_path)
     controller = _PauseController()
     config = SnapshotConfig.from_env()
     assert config is not None
@@ -60,11 +77,38 @@ async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tm
                 await lifecycle
 
 
+async def test_snapshot_lifecycle_preserves_requested_pause(monkeypatch, tmp_path):
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    _write_restore_context(tmp_path, restore_paused=True)
+    controller = _PauseController()
+    config = SnapshotConfig.from_env()
+    assert config is not None
+
+    lifecycle = asyncio.create_task(config.run_lifecycle(controller))
+    try:
+        for _ in range(100):
+            if (tmp_path / READY_FOR_SNAPSHOT_FILE).exists():
+                break
+            await asyncio.sleep(0.01)
+        (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
+
+        assert await lifecycle is True
+        assert config.restore_paused is True
+        assert controller.paused is True
+        assert controller.resumed is False
+    finally:
+        if not lifecycle.done():
+            lifecycle.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await lifecycle
+
+
 async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    _write_restore_context(tmp_path)
     assert os.environ["HF_HUB_OFFLINE"] == "1"
 
     controller = _PauseController()

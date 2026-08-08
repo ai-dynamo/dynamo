@@ -966,13 +966,14 @@ class TestCreate:
         shutdown_event = asyncio.Event()
         shutdown_endpoints = []
         snapshot_engine = Mock()
+        snapshot_controller = Mock(engine=snapshot_engine)
 
         await factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
-            snapshot_engine=snapshot_engine,
+            snapshot_controller=snapshot_controller,
         )
 
         factory._create_realtime_worker.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -987,8 +988,20 @@ class TestCreate:
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
-    async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
-        config = _make_config(enable_multimodal=True)
+    @pytest.mark.parametrize(
+        ("mode", "method_name"),
+        [
+            (DisaggregationMode.AGGREGATED, "_create_decode_worker"),
+            (DisaggregationMode.PREFILL, "_create_prefill_worker"),
+        ],
+    )
+    async def test_passes_snapshot_controller(
+        self,
+        factory: WorkerFactory,
+        mode: DisaggregationMode,
+        method_name: str,
+    ) -> None:
+        config = _make_config(disaggregation_mode=mode)
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []
@@ -999,21 +1012,22 @@ class TestCreate:
             "/tmp/prometheus",
             Mock(),
         )
+        snapshot_controller = Mock(engine=snapshot_engine)
 
         await factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
-            snapshot_engine=snapshot_engine,
+            snapshot_controller=snapshot_controller,
         )
 
-        factory._create_decode_worker.assert_called_once_with(  # type: ignore[union-attr]
+        getattr(factory, method_name).assert_called_once_with(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
-            snapshot_engine=snapshot_engine,
+            snapshot_controller=snapshot_controller,
         )
 
 

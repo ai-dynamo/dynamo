@@ -17,6 +17,7 @@ SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_STANDBY_ENV = "DYN_SNAPSHOT_RESTORE_STANDBY"
+SNAPSHOT_RESTORE_PAUSED_ENV = "DYN_SNAPSHOT_RESTORE_PAUSED"
 
 # Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,
 # ReadyForSnapshotFile}.
@@ -44,6 +45,11 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Target identity and pause policy consumed after engine construction.
+    "ENGINE_ID",
+    "FAILOVER_LOCK_PATH",
+    "DYN_VLLM_GMS_SHADOW_MODE",
+    SNAPSHOT_RESTORE_PAUSED_ENV,
     # Optional non-secret platform endpoints that may be consumed after restore.
     "MODEL_EXPRESS_URL",
     "PROMETHEUS_ENDPOINT",

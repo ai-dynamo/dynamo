@@ -25,10 +25,6 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.model_fetch import fetch_model
-from dynamo.common.snapshot.restore_context import (
-    parse_snapshot_restore_runtime_config,
-    refresh_snapshot_restore_config,
-)
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
@@ -68,7 +64,7 @@ from .kv_connector_protocols import (
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
+from .snapshot import prepare_snapshot_engine, refresh_vllm_snapshot_restore_config
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -149,12 +145,11 @@ async def worker(argv: list[str] | None = None) -> None:
         setup_vllm_engine,
     )
 
-    snapshot_engine = None
     if snapshot_controller is not None:
-        snapshot_engine = snapshot_controller.engine
-        config = await refresh_snapshot_restore_config(
+        config = await refresh_vllm_snapshot_restore_config(
             config,
-            lambda: parse_snapshot_restore_runtime_config(argv),
+            argv,
+            restore_paused=snapshot_controller.snapshot_config.restore_paused,
         )
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
@@ -187,7 +182,7 @@ async def worker(argv: list[str] | None = None) -> None:
         config,
         shutdown_event,
         shutdown_endpoints,
-        snapshot_engine=snapshot_engine,
+        snapshot_controller=snapshot_controller,
     )
 
     logger.debug("Worker function completed, exiting...")

@@ -16,6 +16,7 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
 )
+from dynamo.common.snapshot.restore_context import _restore_should_remain_paused
 
 logger = logging.getLogger(__name__)
 EngineT = TypeVar("EngineT")
@@ -35,6 +36,11 @@ class SnapshotConfig:
     def __init__(self, control_dir: str):
         self.control_dir = control_dir
         self.ready_file = os.path.join(control_dir, READY_FOR_SNAPSHOT_FILE)
+        self._restore_paused = False
+
+    @property
+    def restore_paused(self) -> bool:
+        return self._restore_paused
 
     @classmethod
     def from_env(cls) -> "SnapshotConfig | None":
@@ -68,6 +74,11 @@ class SnapshotConfig:
 
         if event == "restore":
             logger.info("Restore sentinel detected")
+            self._restore_paused = _restore_should_remain_paused()
+            if self._restore_paused:
+                logger.info("Keeping restored model application-paused")
+                os.environ.pop("HF_HUB_OFFLINE", None)
+                return True
             logger.info("Resuming model after restore")
             await pause_controller.resume()
             pause_controller.mark_resumed()
