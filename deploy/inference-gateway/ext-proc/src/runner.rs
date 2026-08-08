@@ -45,7 +45,7 @@ enum StandaloneSelectionService {
     Default,
     Existing(SelectionService),
     LinkedWorkerSelectionPolicy {
-        kv_router_config: KvRouterConfig,
+        kv_router_config: Box<KvRouterConfig>,
         factory: WorkerSelectionPolicyFactory,
     },
 }
@@ -172,7 +172,7 @@ pub async fn run_with_worker_selection_policy_registry(
     run_inner(
         mode,
         StandaloneSelectionService::LinkedWorkerSelectionPolicy {
-            kv_router_config,
+            kv_router_config: Box::new(kv_router_config),
             factory,
         },
     )
@@ -262,7 +262,7 @@ async fn run_inner(
                 let service =
                     Selector::build_selection_service_with_worker_selection_policy_factory(
                         &selector_cfg,
-                        kv_router_config,
+                        *kv_router_config,
                         factory,
                     )
                     .await?;
