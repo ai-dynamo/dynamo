@@ -32,7 +32,7 @@ fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
 /// Overload / admission-control rejection status. Reads
 /// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
 /// environment is fixed at runtime and this is on the rejection path.
-pub(crate) fn overload_status_code() -> StatusCode {
+pub fn overload_status_code() -> StatusCode {
     static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
         let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
         parse_overload_status_code(value.as_deref())
