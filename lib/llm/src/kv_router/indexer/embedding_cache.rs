@@ -60,24 +60,25 @@ pub struct EmbeddingCacheIndexer {
     started: Arc<AtomicBool>,
 }
 
-static SHARED_INDEXERS: OnceLock<Mutex<HashMap<String, Arc<dyn MultimodalCacheIndex>>>> =
-    OnceLock::new();
+type SharedIndexerMap = HashMap<(u64, String), Arc<dyn MultimodalCacheIndex>>;
+
+static SHARED_INDEXERS: OnceLock<Mutex<SharedIndexerMap>> = OnceLock::new();
 
 pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn MultimodalCacheIndex>> {
-    let endpoint_id = endpoint.id().to_string();
+    let indexer_key = (endpoint.drt().connection_id(), endpoint.id().to_string());
     let mut indexers = SHARED_INDEXERS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .await;
 
-    if let Some(indexer) = indexers.get(&endpoint_id) {
+    if let Some(indexer) = indexers.get(&indexer_key) {
         return Some(Arc::clone(indexer));
     }
 
     match EmbeddingCacheIndexer::for_endpoint(endpoint).await {
         Ok(indexer) => {
             let indexer = Arc::new(indexer) as Arc<dyn MultimodalCacheIndex>;
-            indexers.insert(endpoint_id, Arc::clone(&indexer));
+            indexers.insert(indexer_key, Arc::clone(&indexer));
             Some(indexer)
         }
         Err(error) => {
