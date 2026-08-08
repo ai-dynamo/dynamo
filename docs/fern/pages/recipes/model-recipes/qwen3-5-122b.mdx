@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Both targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. FP8 weights fit a single 143 GB H200 at the full 262,144-token context. Aggregated runs two TP1 replicas with MTP speculative decoding; disaggregated splits one prefill worker from two decode workers over NIXL. Pick your topology; every command on this page updates to match.
+Both targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. FP8 weights fit a single 143 GB H200 at the full 262,144-token context. Aggregated runs two TP2 replicas with MTP speculative decoding; disaggregated splits one prefill worker from two decode workers over NIXL. Pick your topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -23,8 +23,8 @@ Both targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B 
 <div className="dynamo-target-picker-summary" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
-<span><b>GPUs</b> 1x H200 per replica, `replicas: 2`</span>
-<span><b>Parallelism</b> TP1</span>
+<span><b>GPUs</b> 2x H200 per replica, `replicas: 2`</span>
+<span><b>Parallelism</b> TP2</span>
 <span><b>Spec decode</b> MTP, 3 tokens</span>
 <span><b>Routing</b> KV-aware</span>
 </div>
@@ -77,7 +77,7 @@ kubectl wait --for=condition=Ready pod \
   -n ${NAMESPACE} --timeout=7200s
 ```
 
-Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. A full 8x H200 node runs `replicas: 8`.
+Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. Each replica is TP2, so a full 8x H200 node runs `replicas: 4`.
 
 </div>
 
@@ -134,17 +134,17 @@ Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loo
 
 | Target | GPUs | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|------|-------------|-------------------|------------|-------------------------|
-| Aggregated, 2x TP1 + MTP | 2 | 8 | 136.3 | 760 ms | 381.3 |
+| Aggregated, 2x TP2 + MTP | 4 | 64 | 52.9 | 313 ms | 720.3 |
 | Disaggregated 1P2D | 3 | 18 | 52.5 | 3087 ms | 256.5 |
 
 ## Compare All Targets
 
 | Target | Topology | GPUs | Spec decode | Reported point |
 |--------|----------|------|-------------|----------------|
-| `agg-h200-agentic` | Aggregated | 2 | MTP, 3 tokens | c8, TTFT-bound |
+| `agg-h200-agentic` | Aggregated | 4 | MTP, 3 tokens | c64, at the 50 tok/s/user floor |
 | `disagg-h200-agentic` | Disaggregated 1P2D | 3 | None | c18, at the 50 tok/s/user floor |
 
-Aggregated and disaggregated deliver near-identical total throughput (762 vs 769 output tok/s); disaggregated spends a third GPU on a dedicated prefill worker that emits no output tokens, which is why its per-GPU figure is lower. What disaggregation buys is capacity at the SLA — 18 concurrent users at the 50 tok/s/user floor, against roughly 8 for aggregated.
+Aggregated delivers 720.3 against 256.5 output tok/s per GPU at the same operating point, and 313 ms against 3087 ms TTFT. Disaggregated remains supported for deployments that scale prefill and decode independently.
 
 ## Notes
 
@@ -154,7 +154,9 @@ Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they d
 
 ## Limitations
 
-Aggregated cannot reach the 50 tok/s/user target on H200. FP8 weights leave roughly 20 GB for paged KV, capping the running batch near 8 requests, so added concurrency becomes queue delay rather than slower decode: 136 tok/s/user at c8 (TTFT 0.8 s), 112 at c14 (TTFT 9.2 s). Use disaggregated for that operating point.
+Aggregated ships TP2, not TP1. FP8 weights leave about 20 GB for paged KV on a TP1 worker, capping its batch near 8 requests; TP2 reaches 52.9 tok/s/user at 313 ms. TP4 is worse.
+
+Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
 
 Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
 

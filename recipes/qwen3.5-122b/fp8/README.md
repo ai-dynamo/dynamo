@@ -11,12 +11,12 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Configurations
 
-|                          | Aggregated (tp1 + MTP)         | Disaggregated (1P2D)          |
+|                          | Aggregated (tp2 + MTP)         | Disaggregated (1P2D)          |
 | ------------------------ | ------------------------------ | ----------------------------- |
-| **GPU**                  | 1x H200 per replica, `replicas: 2` | 1x prefill + 2x decode (3x)   |
+| **GPU**                  | 2x H200 per replica, `replicas: 2` (4x) | 1x prefill + 2x decode (3x)   |
 | **Framework**            | Dynamo 1.3.0 / vLLM 0.23       | Dynamo 1.3.0 / vLLM 0.23      |
 | **Precision**            | FP8 weights + FP8 KV           | FP8 weights + FP8 KV          |
-| **Parallelism**          | TP1                            | TP1 per worker                |
+| **Parallelism**          | TP2                            | TP1 per worker                |
 | **MoE backend**          | `triton`                       | `triton`                      |
 | **KV cache manager**     | Hybrid (DeltaNet SSM + attention) | Hybrid                     |
 | **Routing**              | KV-aware + worker KV events    | KV-aware + worker KV events   |
@@ -25,7 +25,7 @@ SPDX-License-Identifier: Apache-2.0
 | **KV transfer**          | n/a                            | NIXL/UCX over InfiniBand      |
 | **Async scheduling**     | enabled                        | disabled on decode — see Known issues |
 
-Scale aggregated to a full node with `replicas: 8`.
+Scale aggregated to a full node with `replicas: 4`.
 
 ## Supported features
 
@@ -110,7 +110,7 @@ Aggregated runs `replicas: 2`.
 
 | Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
-| `vllm/agg-h200-agentic/deploy.yaml` | H200 | AGG, 2x TP1 (2 GPU) | agentic | yes | 8 | 136.3 | 760 ms | 381.3 |
+| `vllm/agg-h200-agentic/deploy.yaml` | H200 | AGG, 2x TP2 (4 GPU) | agentic | yes | 64 | 52.9 | 313 ms | 720.3 |
 | `vllm/disagg-h200-agentic/deploy.yaml` | H200 | 1P2D (3 GPU) | agentic | no | 18 | 52.5 | 3087 ms | 256.5 |
 
 ## Known Issues
@@ -121,11 +121,11 @@ Aggregated runs `replicas: 2`.
    [vllm#45357](https://github.com/vllm-project/vllm/pull/45357) and
    [vllm#48481](https://github.com/vllm-project/vllm/pull/48481); the flag costs ~7%
    throughput and can be dropped on a runtime shipping vLLM >= 0.26.0.
-2. Aggregated cannot reach the 50 tok/s/user target on H200. FP8 weights leave ~20 GB for
-   paged KV, capping the running batch near 8 requests, so added concurrency becomes queue
-   delay: 136 tok/s/user at c8 (TTFT 0.8 s), 112 at c14 (TTFT 9.2 s). Use disaggregated for
-   that operating point.
-3. MTP is not supported with disaggregation on this architecture — NIXL's Mamba conv-state
+2. Aggregated ships TP2, not TP1. FP8 weights leave ~20 GB for paged KV on a TP1 worker,
+   capping its batch near 8 requests; TP2 reaches 52.9 tok/s/user at 313 ms. TP4 is worse.
+3. Prefill and decode must use the same tensor-parallel size when disaggregated —
+   asymmetric sharding fails NIXL transfer with a block-size mismatch.
+4. MTP is not supported with disaggregation on this architecture — NIXL's Mamba conv-state
    transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the
    `mamba_cache_mode='align'` that MTP + prefix caching forces
    ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).

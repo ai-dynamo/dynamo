@@ -14,7 +14,7 @@ model on the frontend, runs a short warmup, replays the configured trace at one
 
 | Profile | `ENDPOINT` |
 | --- | --- |
-| Aggregated (tp1 + MTP) | `qwen35-122b-agg-h200-agentic-frontend:8000` |
+| Aggregated (tp2 + MTP) | `qwen35-122b-agg-h200-agentic-frontend:8000` |
 | Disaggregated (1P2D)   | `qwen35-122b-disagg-h200-agentic-frontend:8000` |
 
 Both serve `Qwen/Qwen3.5-122B-A10B`. Deploy from
