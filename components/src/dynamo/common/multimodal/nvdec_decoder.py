@@ -157,11 +157,16 @@ def _gpu_id() -> int:
 
 
 def _frame_to_rgb_hwc(frame) -> np.ndarray:
-    """Copy a decoded (device) RGB frame to a host ``(H, W, 3)`` uint8 array.
+    """Copy a decoded RGB frame into an owned host ``(H, W, 3)`` uint8 array.
 
-    A 2.x ``DecodedFrame`` (``output_color_type=RGB``) holds a CUDA buffer and
-    supports the DLPack protocol, so torch wraps it zero-copy on the GPU and
-    ``.cpu()`` copies to host. Validated on PyNvVideoCodec 2.1.1 for H.264/H.265.
+    A 2.x ``DecodedFrame`` (``output_color_type=RGB``) supports the DLPack
+    protocol, so torch wraps its buffer zero-copy. The decoder is constructed
+    with ``use_device_memory=False``, so that buffer is already host memory:
+    ``.cpu()`` is a no-op and ``.numpy()`` would keep aliasing decoder-owned
+    memory, which the decoder is free to recycle for the next indexed read.
+    The explicit ``np.array(..., copy=True)`` is what guarantees every
+    collected frame owns its pixels (and normalizes dtype in the same step).
+    Validated on PyNvVideoCodec 2.1.1 for H.264/H.265.
     """
     import torch
 
@@ -169,10 +174,7 @@ def _frame_to_rgb_hwc(frame) -> np.ndarray:
         tensor = torch.from_dlpack(frame)
     except Exception:  # noqa: BLE001 - fall back to the CUDA-array-interface path
         tensor = torch.as_tensor(frame, device="cuda")
-    arr = tensor.cpu().numpy()
-    if arr.dtype != np.uint8:
-        arr = arr.astype(np.uint8)
-    return arr
+    return np.array(tensor.cpu().numpy(), dtype=np.uint8, copy=True)
 
 
 def _source_fps(decoder) -> float:
