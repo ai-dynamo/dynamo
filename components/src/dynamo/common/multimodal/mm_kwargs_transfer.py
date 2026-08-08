@@ -328,6 +328,7 @@ class MmKwargsNixlSender(MmKwargsSender):
         """
         if not items:
             return
+        completion_error: BaseException | None = None
         try:
             results = await asyncio.wait_for(
                 asyncio.gather(
@@ -353,14 +354,24 @@ class MmKwargsNixlSender(MmKwargsSender):
                     len(items),
                     failures[0],
                 )
+                # Surface a genuine transfer error rather than swallowing it.
+                # Deliberately skips CancelledError and friends: a cancelled
+                # sibling is not a fault worth converting into one here.
+                completion_error = next(
+                    (f for f in failures if isinstance(f, Exception)), None
+                )
             else:
                 logger.debug("[NIXL-Sender] all transfers completed")
         finally:
             release_error = self._release_all(items)
-        # Raised outside the finally so it can never mask an exception that was
-        # already propagating (e.g. cancellation).
+        # Raised outside the finally so neither can mask an exception that was
+        # already propagating (e.g. cancellation). A release failure takes
+        # precedence over a completion failure: it means a buffer is still
+        # registered, which is the condition this method exists to prevent.
         if release_error is not None:
             raise release_error
+        if completion_error is not None:
+            raise completion_error
 
 
 # ---------------------------------------------------------------------------

@@ -144,6 +144,7 @@ class TestMmKwargsNixlSenderCleanup:
             self.released = True
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
     async def test_cleanup_is_bounded_and_releases_when_never_read(self, monkeypatch):
         """A backend that never reads must not pin the buffer forever.
 
@@ -161,6 +162,7 @@ class TestMmKwargsNixlSenderCleanup:
         assert all(op.released for op in ops), "buffers must be released on timeout"
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
     async def test_cleanup_releases_on_normal_completion(self, monkeypatch):
         """The happy path still releases."""
         monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 5.0)
@@ -172,6 +174,7 @@ class TestMmKwargsNixlSenderCleanup:
         assert ops[0].released
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
     async def test_one_failing_op_does_not_release_a_still_pending_op_early(
         self, monkeypatch
     ):
@@ -206,12 +209,17 @@ class TestMmKwargsNixlSenderCleanup:
                 super().__exit__(exc_type, exc_value, traceback)
 
         slow = _SlowOp()
-        await sender.cleanup([_RaisingOp(), slow])
+        # The completion failure is re-raised, but only after every sibling has
+        # been awaited and every buffer released.
+        with pytest.raises(RuntimeError, match="transfer failed"):
+            await sender.cleanup([_RaisingOp(), slow])
 
         assert slow.done, "cleanup returned before the pending transfer finished"
         assert not released_while_pending, "released a buffer whose read was in flight"
+        assert slow.released, "sibling buffer was not released"
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
     async def test_release_failure_is_raised_after_every_item_is_attempted(self):
         """A failing release must not stop the remaining buffers being freed."""
         sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
@@ -232,6 +240,7 @@ class TestMmKwargsNixlSenderCleanup:
         ), "a later buffer was skipped after an earlier release failed"
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
     async def test_cleanup_with_no_items_is_a_noop(self):
         sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
         await sender.cleanup([])
