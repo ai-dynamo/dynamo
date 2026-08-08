@@ -661,32 +661,65 @@ impl SglangCore {
         let prefill_time =
             simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true)?;
 
+        let mut newly_prefilled = Vec::new();
         for mut req in admit.can_run {
             if req.materialized_tokens < req.current_sequence_len() {
                 cache_materialized_prefix(&mut req, &mut self.kv_manager, &self.config);
                 self.waiting.push_front(req);
             } else {
-                self.running.push(req);
+                newly_prefilled.push(req);
             }
         }
 
-        // Capture scheduled decode data before the decode step modifies running.
-        let scheduled_decode_lens: Vec<u64> = self
-            .running
-            .iter()
-            .filter(|req| req.remaining_output_tokens() > 0)
-            .map(|req| req.current_sequence_len() as u64)
-            .collect();
+        // SGLang schedules extend (prefill) batches ahead of decode: as long as
+        // a prefill batch can form, requests already in the running set get no
+        // forward pass (`enable_mixed_chunk` is off by default). Mirror that
+        // priority here. An extend pass advances only the requests whose
+        // prefill completed within it — their first token is produced by the
+        // extend forward itself — while every other running request waits for
+        // the next pass with no admissions, which runs a normal decode step.
+        // This is what lets a long multi-chunk prompt starve decode for
+        // several consecutive passes, exactly as observed on silicon.
+        let is_extend_pass = batch_size > 0;
+
+        // Capture scheduled decode data before the decode step modifies its pool.
+        let scheduled_decode_lens: Vec<u64> = if is_extend_pass {
+            newly_prefilled
+                .iter()
+                .filter(|req| req.remaining_output_tokens() > 0)
+                .map(|req| req.current_sequence_len() as u64)
+                .collect()
+        } else {
+            self.running
+                .iter()
+                .filter(|req| req.remaining_output_tokens() > 0)
+                .map(|req| req.current_sequence_len() as u64)
+                .collect()
+        };
 
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let mut decode = simulate_decode_step_with_sampler(
-            &mut self.running,
-            &mut self.kv_manager,
-            &self.config,
-            self.speculative_sampler.as_mut(),
-            decode_start_ms,
-            true,
-        )?;
+        let mut decode = if is_extend_pass {
+            let decode = simulate_decode_step_with_sampler(
+                &mut newly_prefilled,
+                &mut self.kv_manager,
+                &self.config,
+                self.speculative_sampler.as_mut(),
+                decode_start_ms,
+                true,
+            )?;
+            self.running.append(&mut newly_prefilled);
+            decode
+        } else {
+            debug_assert!(newly_prefilled.is_empty());
+            simulate_decode_step_with_sampler(
+                &mut self.running,
+                &mut self.kv_manager,
+                &self.config,
+                self.speculative_sampler.as_mut(),
+                decode_start_ms,
+                true,
+            )?
+        };
 
         for request in decode.completed_requests.drain(..) {
             self.complete_source(request);
