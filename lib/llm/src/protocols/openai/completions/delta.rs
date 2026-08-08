@@ -219,6 +219,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         if let Some(completion_usage) = delta.completion_usage.as_ref() {
             // Update prompt_tokens from worker if provided (e.g., for embeddings)
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
+            self.usage.completion_tokens = self
+                .usage
+                .completion_tokens
+                .max(completion_usage.completion_tokens);
 
             // Propagate completion token details if provided
             if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
@@ -327,7 +331,7 @@ mod tests {
     use super::*;
     use crate::protocols::common::{self, llm_backend::BackendOutput, timing::WORKER_TYPE_PREFILL};
     use crate::protocols::openai::DeltaGeneratorExt;
-    use dynamo_protocols::types::{CreateCompletionRequestArgs, Prompt};
+    use dynamo_protocols::types::{CompletionUsage, CreateCompletionRequestArgs, Prompt};
 
     fn create_test_request() -> NvCreateCompletionRequest {
         let inner = CreateCompletionRequestArgs::default()
@@ -375,6 +379,56 @@ mod tests {
             encoder_result: None,
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_completion_tokens_use_backend_usage_when_higher() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.token_ids.clear();
+        backend_output.tokens.clear();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
+    }
+
+    #[test]
+    fn test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-zero-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 0,
+            total_tokens: 5,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateCompletionRequest {

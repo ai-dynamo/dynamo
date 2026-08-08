@@ -40,6 +40,17 @@ logger = logging.getLogger(__name__)
 ToolCallParserType: TypeAlias = FunctionCallParser | JsonArrayParser
 
 
+def _trailing_stop_prefix_len(text: str, stop_strings: set[str]) -> int:
+    if not text or not stop_strings:
+        return 0
+    max_len = min(len(text), max(len(stop) for stop in stop_strings))
+    for suffix_len in range(max_len, 0, -1):
+        suffix = text[-suffix_len:]
+        if any(stop.startswith(suffix) for stop in stop_strings):
+            return suffix_len
+    return 0
+
+
 @dataclass
 class SglangPreprocessResult:
     """Result of SGLang preprocessing."""
@@ -974,6 +985,7 @@ class SglangStreamingPostProcessor:
         tool_call_parser_name: str | None = None,
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
+        stop_strings: set[str] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -995,6 +1007,8 @@ class SglangStreamingPostProcessor:
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
+        self._stop_strings = stop_strings or set()
+        self._pending_stop_text = ""
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1067,6 +1081,30 @@ class SglangStreamingPostProcessor:
         self._pending_decode_ids = []
         return delta_text
 
+    def _strip_stop_string_suffix(self, text: str, finish_reason: str | None) -> str:
+        if finish_reason != "stop" or not text or not self._stop_strings:
+            return text
+        # Compatibility guard for tokenizer/text paths that surface the matched
+        # stop string after detokenization while special tokens are preserved for
+        # reasoning/tool parsers.
+        for stop in sorted(self._stop_strings, key=len, reverse=True):
+            if stop and text.endswith(stop):
+                return text[: -len(stop)]
+        return text
+
+    def _filter_stop_string_delta(self, text: str, finish_reason: str | None) -> str:
+        text = self._pending_stop_text + text
+        self._pending_stop_text = ""
+        text = self._strip_stop_string_suffix(text, finish_reason)
+        if finish_reason or not text or not self._stop_strings:
+            return text
+
+        pending_len = _trailing_stop_prefix_len(text, self._stop_strings)
+        if pending_len:
+            self._pending_stop_text = text[-pending_len:]
+            return text[:-pending_len]
+        return text
+
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
     ) -> tuple[str | None, str]:
@@ -1137,6 +1175,7 @@ class SglangStreamingPostProcessor:
             if token_ids or finish_reason is not None
             else ""
         )
+        delta_text = self._filter_stop_string_delta(delta_text, finish_reason)
 
         if self._fast_plain_text:
             if delta_text:
