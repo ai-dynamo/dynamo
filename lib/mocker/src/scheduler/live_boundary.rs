@@ -322,7 +322,8 @@ impl PendingLivePass {
     pub(crate) fn suppress_request_outputs(&mut self, request_id: uuid::Uuid) {
         self.pass
             .output_signals
-            .retain(|signal| signal.uuid != request_id);
+            .retain_untracked(|signal| signal.uuid != request_id)
+            .expect("live scheduler pass must not carry replay keys");
         self.pass.completed_requests = self
             .pass
             .output_signals
@@ -330,7 +331,7 @@ impl PendingLivePass {
             .filter(|signal| signal.completed)
             .count();
         let (output_tokens, decode_forwards) =
-            crate::scheduler::accept_length_sample(&self.pass.output_signals);
+            crate::scheduler::accept_length_sample(self.pass.output_signals.as_slice());
         self.pass.accept_length_output_tokens = output_tokens;
         self.pass.accept_length_decode_forwards = decode_forwards;
     }
@@ -422,7 +423,7 @@ impl LiveEffectsPublisher {
                 .filter(|signal| signal.completed)
                 .count();
             let accept_length =
-                crate::scheduler::accept_length_sample(&pending.pass.output_signals);
+                crate::scheduler::accept_length_sample(pending.pass.output_signals.as_slice());
             debug_assert_eq!(pending.pass.completed_requests, completed_signals);
             debug_assert_eq!(
                 (
@@ -432,7 +433,7 @@ impl LiveEffectsPublisher {
                 accept_length
             );
         }
-        self.publish_outputs(core, pending.pass.output_signals)
+        self.publish_outputs(core, pending.pass.output_signals.into_untracked()?)
             .await?;
         // Live completion/accept accounting is carried by the admission and
         // output channels; the scalar replay counters have no separate live

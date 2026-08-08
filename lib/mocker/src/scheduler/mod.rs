@@ -18,6 +18,7 @@ pub(crate) use live_boundary::{
     LiveBoundaryCore, LivePassExecution, LiveSchedulerState, spawn_live_scheduler,
 };
 use rustc_hash::FxHashSet;
+use slotmap::new_key_type;
 pub(crate) use source_holds::{
     ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
     SourceHolds,
@@ -27,6 +28,147 @@ pub use source_holds::{
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+
+new_key_type! {
+    /// Generational handle for offline-replay request state.
+    pub(crate) struct ReplayRequestKey;
+}
+
+/// Request metadata carried only across the private engine boundary.
+pub(crate) struct EngineRequest(DirectRequest, Option<ReplayRequestKey>);
+
+impl EngineRequest {
+    pub(crate) fn untracked(request: DirectRequest) -> Self {
+        Self(request, None)
+    }
+
+    pub(crate) fn for_replay(request: DirectRequest, replay_request_key: ReplayRequestKey) -> Self {
+        Self(request, Some(replay_request_key))
+    }
+
+    pub(crate) fn into_parts(self) -> (DirectRequest, Option<ReplayRequestKey>) {
+        (self.0, self.1)
+    }
+
+    pub(crate) fn set_dp_rank(&mut self, dp_rank: u32) {
+        self.0.dp_rank = dp_rank;
+    }
+}
+
+/// Engine outputs with an all-or-nothing replay-key sidecar.
+///
+/// Live, disaggregated replay, and ordinary execution retain a plain
+/// `Vec<OutputSignal>` that can be moved directly to its existing processing
+/// or publication path. Aggregate replay carries exactly one generational key
+/// per signal.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EngineOutputs {
+    signals: Vec<OutputSignal>,
+    replay_request_keys: Option<Vec<ReplayRequestKey>>,
+}
+
+impl EngineOutputs {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            signals: Vec::with_capacity(capacity),
+            replay_request_keys: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn untracked(signals: Vec<OutputSignal>) -> Self {
+        Self {
+            signals,
+            replay_request_keys: None,
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        signal: OutputSignal,
+        replay_request_key: Option<ReplayRequestKey>,
+    ) -> anyhow::Result<()> {
+        match (&mut self.replay_request_keys, replay_request_key) {
+            (Some(keys), Some(key)) => keys.push(key),
+            (None, Some(key)) if self.signals.is_empty() => {
+                let mut keys = Vec::with_capacity(self.signals.capacity());
+                keys.push(key);
+                self.replay_request_keys = Some(keys);
+            }
+            (None, None) => {}
+            _ => anyhow::bail!("engine pass mixed replay-tracked and ordinary outputs"),
+        }
+        self.signals.push(signal);
+        Ok(())
+    }
+
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.signals.reserve(additional);
+        if let Some(keys) = &mut self.replay_request_keys {
+            keys.reserve(additional);
+        }
+    }
+
+    pub(crate) fn retain_untracked(
+        &mut self,
+        keep: impl FnMut(&OutputSignal) -> bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.replay_request_keys.is_none(),
+            "cannot suppress outputs from a replay-tracked pass"
+        );
+        self.signals.retain(keep);
+        Ok(())
+    }
+
+    pub(crate) fn into_untracked(self) -> anyhow::Result<Vec<OutputSignal>> {
+        anyhow::ensure!(
+            self.replay_request_keys.is_none(),
+            "replay-tracked outputs reached an ordinary publication boundary"
+        );
+        Ok(self.signals)
+    }
+
+    pub(crate) fn into_tracked(
+        self,
+    ) -> anyhow::Result<impl Iterator<Item = (OutputSignal, ReplayRequestKey)>> {
+        anyhow::ensure!(
+            self.replay_request_keys.is_some() || self.signals.is_empty(),
+            "ordinary outputs reached an aggregate replay completion boundary"
+        );
+        let keys = self.replay_request_keys.unwrap_or_default();
+        anyhow::ensure!(
+            self.signals.len() == keys.len(),
+            "aggregate replay output metadata is misaligned"
+        );
+        Ok(self.signals.into_iter().zip(keys))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.signals.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.signals.len()
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, OutputSignal> {
+        self.signals.iter()
+    }
+
+    pub(crate) fn as_slice(&self) -> &[OutputSignal] {
+        &self.signals
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replay_key_at(&self, index: usize) -> Option<ReplayRequestKey> {
+        self.replay_request_keys
+            .as_ref()
+            .and_then(|keys| keys.get(index))
+            .copied()
+    }
+}
 
 #[cfg(feature = "kvbm-offload")]
 pub(crate) struct OffloadTickEffects {
@@ -179,7 +321,7 @@ pub(crate) struct EnginePassResult {
     /// KVBM stall-advance) can extend `end_ms`.
     pub(crate) token_completion_ms: f64,
     pub(crate) completed_requests: usize,
-    pub(crate) output_signals: Vec<OutputSignal>,
+    pub(crate) output_signals: EngineOutputs,
     pub(crate) admissions: Vec<AdmissionEvent>,
     pub(crate) lifecycle_events: Vec<SchedulerLifecycleEvent>,
     pub(crate) mocker_metrics: MockerMetrics,
@@ -241,11 +383,17 @@ pub(crate) enum EngineCore {
 }
 
 impl EngineCore {
-    pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+    pub(crate) fn receive_engine(&mut self, request: EngineRequest) -> anyhow::Result<Uuid> {
         match self {
-            Self::Vllm(core) => core.receive(request),
-            Self::Sglang(core) => core.receive(request),
+            Self::Vllm(core) => core.receive_engine(request),
+            Self::Sglang(core) => core.receive_engine(request),
         }
+    }
+
+    #[cfg(test)]
+    fn receive(&mut self, request: DirectRequest) -> Uuid {
+        self.receive_engine(EngineRequest::untracked(request))
+            .expect("ordinary request ID must be unique")
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -718,6 +866,65 @@ mod tests {
         ];
 
         assert_eq!(accept_length_sample(&signals), (2, 1));
+    }
+
+    #[test]
+    fn engine_outputs_keep_live_storage_and_validate_replay_sidecars() {
+        let uuid = Uuid::from_u128(7);
+        let signal = || OutputSignal {
+            uuid,
+            token_id: Some(1),
+            completed: false,
+            rejected: false,
+            handoff_delay_ms: None,
+        };
+
+        let mut live = EngineOutputs::with_capacity(1);
+        live.push(signal(), None).unwrap();
+        let live_ptr = live.as_slice().as_ptr();
+        let published = live.into_untracked().unwrap();
+        assert_eq!(published.as_ptr(), live_ptr);
+
+        let mut keys = slotmap::SlotMap::<ReplayRequestKey, ()>::with_key();
+        let key = keys.insert(());
+        let mut replay = EngineOutputs::with_capacity(1);
+        replay.push(signal(), Some(key)).unwrap();
+        assert!(replay.retain_untracked(|_| true).is_err());
+        assert_eq!(replay.into_tracked().unwrap().next().unwrap().1, key);
+
+        let mut mixed = EngineOutputs::with_capacity(2);
+        mixed.push(signal(), Some(key)).unwrap();
+        assert!(mixed.push(signal(), None).is_err());
+        assert!(EngineOutputs::default().into_tracked().is_ok());
+        let mut ordinary = EngineOutputs::with_capacity(1);
+        ordinary.push(signal(), None).unwrap();
+        assert!(ordinary.into_tracked().is_err());
+    }
+
+    #[test]
+    fn replay_submission_uses_complete_request_id_validation() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut core = core(engine_type, WorkerType::Aggregated, 32);
+            let uuid = Uuid::from_u128(8_000 + case as u128);
+            let mut keys = slotmap::SlotMap::<ReplayRequestKey, ()>::with_key();
+            let key = keys.insert(());
+            core.receive_engine(EngineRequest::for_replay(
+                request(uuid, vec![1, 2, 3, 4]),
+                key,
+            ))
+            .unwrap();
+            assert!(
+                core.receive_engine(EngineRequest::for_replay(
+                    request(uuid, vec![5, 6, 7, 8]),
+                    key,
+                ))
+                .is_err(),
+                "{engine_type:?} accepted a duplicate replay request ID"
+            );
+        }
     }
 
     #[test]

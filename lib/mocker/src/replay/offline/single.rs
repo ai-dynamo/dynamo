@@ -236,7 +236,7 @@ impl SingleRuntime {
             || !pass.output_signals.is_empty()
             || !pass.kv_events.is_empty();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
-            for signal in &pass.output_signals {
+            for signal in pass.output_signals.iter() {
                 if let Some(token_id) = signal.token_id {
                     driver
                         .on_output_token(signal.uuid, token_id)

@@ -266,7 +266,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
             }));
 
         let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
-        for signal in pass.output_signals {
+        for signal in pass.output_signals.into_untracked()? {
             if let Some(token_id) = signal.token_id {
                 driver.on_output_token(signal.uuid, token_id)?;
             }

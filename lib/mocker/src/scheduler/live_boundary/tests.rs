@@ -4,7 +4,7 @@
 use super::*;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::ForwardPassSnapshot;
-use crate::scheduler::SchedulerCommandResult;
+use crate::scheduler::{EngineOutputs, SchedulerCommandResult};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -122,13 +122,13 @@ fn pass() -> EnginePassResult {
         end_ms: 1.0,
         token_completion_ms: 1.0,
         completed_requests: 1,
-        output_signals: vec![OutputSignal {
+        output_signals: EngineOutputs::untracked(vec![OutputSignal {
             uuid: request_id,
             token_id: Some(1),
             completed: true,
             rejected: false,
             handoff_delay_ms: None,
-        }],
+        }]),
         admissions: vec![AdmissionEvent {
             uuid: request_id,
             reused_input_tokens: 0,
@@ -252,7 +252,7 @@ async fn explicit_discard_suppresses_pending_output_after_noop_cancellation() {
 fn output_suppression_repairs_stale_accept_length_counters() {
     let mut pass = pass();
     let surviving = Uuid::from_u128(2);
-    pass.output_signals.extend([
+    for output in [
         OutputSignal {
             uuid: surviving,
             token_id: Some(2),
@@ -274,7 +274,9 @@ fn output_suppression_repairs_stale_accept_length_counters() {
             rejected: true,
             handoff_delay_ms: None,
         },
-    ]);
+    ] {
+        pass.output_signals.push(output, None).unwrap();
+    }
     pass.accept_length_output_tokens = 0;
     pass.accept_length_decode_forwards = 0;
     let mut pending = PendingLivePass {
@@ -288,6 +290,13 @@ fn output_suppression_repairs_stale_accept_length_counters() {
 
     assert_eq!(pending.pass.accept_length_output_tokens, 2);
     assert_eq!(pending.pass.accept_length_decode_forwards, 1);
+    assert!(
+        pending
+            .pass
+            .output_signals
+            .iter()
+            .all(|signal| signal.uuid == surviving)
+    );
 }
 
 #[tokio::test]
