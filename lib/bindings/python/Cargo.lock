@@ -2604,6 +2604,7 @@ dependencies = [
  "educe",
  "either",
  "etcd-client",
+ "fastrand",
  "figment",
  "futures",
  "humantime",
