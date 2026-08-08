@@ -88,11 +88,11 @@ kubectl apply -f recipes/qwen3.5-122b/fp8/perf/perf.yaml -n ${NAMESPACE}
 It waits for the model to serve, warms up, replays the whole trace, and writes artifacts to
 `/model-cache/perf/<epoch>_<job-name>/`. It aborts if the trace has no `timestamp` field.
 
-To drive AIPerf directly instead (image `nvcr.io/nvidia/ai-dynamo/aiperf:0.8.0`, mounts the
+To drive AIPerf directly instead (image `nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0`, mounts the
 PVC) run against the frontend service:
 
 ```bash
-aiperf profile Qwen/Qwen3.5-122B-A10B --tokenizer Qwen/Qwen3.5-122B-A10B-FP8 \
+aiperf profile Qwen/Qwen3.5-122B-A10B --tokenizer Qwen/Qwen3.5-122B-A10B \
   --url http://${ENDPOINT} --endpoint-type chat \
   --input-file ${TRACE_FILE} \
   --custom-dataset-type mooncake_trace --prompt-input-tokens-block-size 512 \
