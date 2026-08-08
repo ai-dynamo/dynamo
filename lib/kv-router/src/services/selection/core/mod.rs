@@ -796,6 +796,8 @@ impl SelectionCore {
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             router_config_override,
             lora_name: prompt.lora_name,
             priority_jump,

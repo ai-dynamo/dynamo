@@ -120,6 +120,7 @@ mod tests {
             device: MatchDetails {
                 overlap_scores: device,
                 last_matched_hashes: Default::default(),
+                router_hint_root_candidates: None,
             },
             lower_tier: HashMap::from([(StorageTier::HostPinned, host), (StorageTier::Disk, disk)]),
         };
