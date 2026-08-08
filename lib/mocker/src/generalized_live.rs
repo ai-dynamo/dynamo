@@ -11,6 +11,7 @@
 //! driver and consume [`GroupedLiveEvent`] values.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -320,8 +321,26 @@ struct GroupedLiveActor {
     deferred_commands: VecDeque<ControlEnvelope>,
 }
 
+#[derive(Debug)]
+struct PublishCancelled;
+
+impl fmt::Display for PublishCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("grouped live engine stopped while publishing effects")
+    }
+}
+
+impl std::error::Error for PublishCancelled {}
+
 impl GroupedLiveActor {
     async fn run(&mut self) -> Result<()> {
+        match self.run_until_stopped().await {
+            Err(error) if error.is::<PublishCancelled>() => Ok(()),
+            result => result,
+        }
+    }
+
+    async fn run_until_stopped(&mut self) -> Result<()> {
         loop {
             if self.cancel_token.is_cancelled() {
                 return Ok(());
@@ -386,10 +405,14 @@ impl GroupedLiveActor {
         tokio::select! {
             biased;
             result = self.event_tx.send(event) => {
-                result.map_err(|_| anyhow!("grouped live engine event lane is closed"))
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(_) if self.cancel_token.is_cancelled() => Err(PublishCancelled.into()),
+                    Err(_) => Err(anyhow!("grouped live engine event lane is closed")),
+                }
             },
             _ = self.cancel_token.cancelled() => {
-                bail!("grouped live engine stopped while publishing effects")
+                Err(PublishCancelled.into())
             },
         }
     }
@@ -700,6 +723,93 @@ mod tests {
 
     async fn next_event(events: &mut mpsc::Receiver<GroupedLiveEvent>) -> GroupedLiveEvent {
         events.recv().await.expect("live actor must remain active")
+    }
+
+    fn ready_actor(
+        event_tx: mpsc::Sender<GroupedLiveEvent>,
+        cancel_token: CancellationToken,
+    ) -> GroupedLiveActor {
+        let mut engine = EngineFactory::new(EngineConfig {
+            num_gpu_blocks: 128,
+            block_size: 4,
+            max_num_seqs: 8,
+            max_num_batched_tokens: 256,
+            timing_model: TimingModelConfig::Fixed {
+                prefill_ms: 100.0,
+                decode_ms: 0.0,
+            },
+            ..EngineConfig::default()
+        })
+        .unwrap()
+        .build(EngineIdentity::new(7), NonZeroU32::new(1).unwrap())
+        .unwrap();
+        engine
+            .apply_command_effects(
+                SchedulerCommand::new(0, Command::Submit(request(90, 4, 1))),
+                0.0,
+            )
+            .unwrap();
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (_cancellation_tx, cancellation_rx) = mpsc::channel(1);
+        GroupedLiveActor {
+            engine,
+            command_rx,
+            cancellation_rx,
+            event_tx,
+            cancel_token,
+            clock_origin: Instant::now(),
+            deferred_commands: VecDeque::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_blocked_publishing_is_orderly() {
+        let (event_tx, mut events) = mpsc::channel(1);
+        event_tx
+            .send(GroupedLiveEvent::CommandApplied {
+                command_id: 0,
+                pass_in_flight: false,
+                is_request_cancellation: false,
+                effects: EngineEffects::default(),
+            })
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let mut live_actor = ready_actor(event_tx, cancel.clone());
+        let actor = tokio::spawn(async move { live_actor.run().await });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !actor.is_finished(),
+            "the actor should be blocked on the full event lane"
+        );
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), actor)
+            .await
+            .expect("cancellation should release a blocked publication")
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(GroupedLiveEvent::CommandApplied { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unexpectedly_closed_event_lane_remains_an_error() {
+        let (event_tx, events) = mpsc::channel(1);
+        drop(events);
+        let error = ready_actor(event_tx, CancellationToken::new())
+            .run()
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("grouped live engine event lane is closed"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

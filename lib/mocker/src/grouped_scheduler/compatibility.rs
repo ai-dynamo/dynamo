@@ -202,13 +202,16 @@ impl HandoffMap {
             .by_dynamo
             .iter_mut()
             .filter_map(|(id, entry)| {
+                let mut matched = false;
                 if entry.source_request == Some(request_id) {
                     entry.source_request = None;
+                    matched = true;
                 }
                 if entry.destination_request == Some(request_id) {
                     entry.destination_request = None;
+                    matched = true;
                 }
-                (entry.source_request.is_none() && entry.destination_request.is_none())
+                (matched && entry.source_request.is_none() && entry.destination_request.is_none())
                     .then_some(*id)
             })
             .collect::<Vec<_>>();
@@ -236,9 +239,10 @@ impl HandoffMap {
             .by_dynamo
             .iter_mut()
             .filter_map(|(id, entry)| {
-                if entry.destination_request == Some(request_id) {
-                    entry.destination_request = None;
+                if entry.destination_request != Some(request_id) {
+                    return None;
                 }
+                entry.destination_request = None;
                 (entry.source_request.is_none() && entry.destination_request.is_none())
                     .then_some(*id)
             })
@@ -256,5 +260,46 @@ impl HandoffMap {
             return;
         }
         self.by_dynamo.remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handoff(value: u128) -> DynamoHandoffId {
+        DynamoHandoffId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn cancelling_request_does_not_remove_unrelated_empty_handoff() {
+        let mut handoffs = HandoffMap::default();
+        let target = handoff(1);
+        let unrelated = handoff(2);
+        let target_native = handoffs.native(target).unwrap();
+        let unrelated_native = handoffs.native(unrelated).unwrap();
+        let request_id = Uuid::from_u128(10);
+        handoffs.mark_source(target, request_id);
+
+        handoffs.cancel_request(request_id);
+
+        assert!(handoffs.dynamo(target_native).is_err());
+        assert_eq!(handoffs.dynamo(unrelated_native).unwrap(), unrelated);
+    }
+
+    #[test]
+    fn finishing_destination_request_does_not_remove_unrelated_empty_handoff() {
+        let mut handoffs = HandoffMap::default();
+        let target = handoff(3);
+        let unrelated = handoff(4);
+        let target_native = handoffs.native(target).unwrap();
+        let unrelated_native = handoffs.native(unrelated).unwrap();
+        let request_id = Uuid::from_u128(11);
+        handoffs.mark_destination(target, request_id);
+
+        handoffs.finish_destination_request(request_id);
+
+        assert!(handoffs.dynamo(target_native).is_err());
+        assert_eq!(handoffs.dynamo(unrelated_native).unwrap(), unrelated);
     }
 }

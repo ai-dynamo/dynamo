@@ -12,6 +12,7 @@ mod protocol;
 
 use crate::common::protocols::{DirectRequest, OutputSignal};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
@@ -58,6 +59,7 @@ pub(crate) enum SchedulerEventSender {
     Ordered {
         tx: mpsc::Sender<LiveEngineEvent>,
         forward_admissions: bool,
+        cancel: CancellationToken,
     },
 }
 
@@ -65,6 +67,7 @@ pub(crate) enum SchedulerEventSender {
 pub(crate) enum SchedulerEventSendError {
     OutputClosed(Vec<OutputSignal>),
     OrderedLaneClosed,
+    Cancelled,
 }
 
 impl SchedulerEventSender {
@@ -81,10 +84,21 @@ impl SchedulerEventSender {
                 forward_admissions: false,
                 ..
             } => Ok(()),
-            Self::Ordered { tx, .. } => tx
-                .send(LiveEngineEvent::Admissions(admissions.to_vec()))
-                .await
-                .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
+            Self::Ordered { tx, cancel, .. } => {
+                tokio::select! {
+                    biased;
+                    result = tx.send(LiveEngineEvent::Admissions(admissions.to_vec())) => {
+                        result.map_err(|_| {
+                            if cancel.is_cancelled() {
+                                SchedulerEventSendError::Cancelled
+                            } else {
+                                SchedulerEventSendError::OrderedLaneClosed
+                            }
+                        })
+                    }
+                    _ = cancel.cancelled() => Err(SchedulerEventSendError::Cancelled),
+                }
+            }
         }
     }
 
@@ -96,14 +110,34 @@ impl SchedulerEventSender {
             Self::Outputs(tx) => tx
                 .send(signals)
                 .map_err(|error| SchedulerEventSendError::OutputClosed(error.0)),
-            Self::Ordered { tx, .. } => {
+            Self::Ordered { tx, cancel, .. } => {
                 let (delivered, acknowledged) = oneshot::channel();
-                tx.send(LiveEngineEvent::Outputs { signals, delivered })
-                    .await
-                    .map_err(|_| SchedulerEventSendError::OrderedLaneClosed)?;
-                let failed = acknowledged
-                    .await
-                    .map_err(|_| SchedulerEventSendError::OrderedLaneClosed)?;
+                tokio::select! {
+                    biased;
+                    result = tx.send(LiveEngineEvent::Outputs { signals, delivered }) => {
+                        result.map_err(|_| {
+                            if cancel.is_cancelled() {
+                                SchedulerEventSendError::Cancelled
+                            } else {
+                                SchedulerEventSendError::OrderedLaneClosed
+                            }
+                        })?;
+                    }
+                    _ = cancel.cancelled() => return Err(SchedulerEventSendError::Cancelled),
+                }
+                let failed = tokio::select! {
+                    biased;
+                    result = acknowledged => {
+                        result.map_err(|_| {
+                            if cancel.is_cancelled() {
+                                SchedulerEventSendError::Cancelled
+                            } else {
+                                SchedulerEventSendError::OrderedLaneClosed
+                            }
+                        })?
+                    }
+                    _ = cancel.cancelled() => return Err(SchedulerEventSendError::Cancelled),
+                };
                 if failed.is_empty() {
                     Ok(())
                 } else {
@@ -166,6 +200,7 @@ mod tests {
         let sender = SchedulerEventSender::Ordered {
             tx,
             forward_admissions: false,
+            cancel: CancellationToken::new(),
         };
         let send = tokio::spawn(async move {
             sender
@@ -191,5 +226,67 @@ mod tests {
 
         delivered.send(Vec::new()).unwrap();
         send.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_ordered_output_ack_is_orderly_after_cancellation() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let sender = SchedulerEventSender::Ordered {
+            tx,
+            forward_admissions: false,
+            cancel: cancel.clone(),
+        };
+        let send = tokio::spawn(async move {
+            sender
+                .send_outputs(vec![OutputSignal {
+                    uuid: Uuid::from_u128(2),
+                    token_id: Some(3),
+                    completed: true,
+                    rejected: false,
+                    handoff_delay_ms: None,
+                }])
+                .await
+        });
+
+        let Some(LiveEngineEvent::Outputs { delivered, .. }) = rx.recv().await else {
+            panic!("expected an ordered output batch");
+        };
+        cancel.cancel();
+        drop(delivered);
+        assert!(matches!(
+            send.await.unwrap(),
+            Err(SchedulerEventSendError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_ordered_output_ack_without_cancellation_is_an_error() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sender = SchedulerEventSender::Ordered {
+            tx,
+            forward_admissions: false,
+            cancel: CancellationToken::new(),
+        };
+        let send = tokio::spawn(async move {
+            sender
+                .send_outputs(vec![OutputSignal {
+                    uuid: Uuid::from_u128(3),
+                    token_id: Some(4),
+                    completed: true,
+                    rejected: false,
+                    handoff_delay_ms: None,
+                }])
+                .await
+        });
+
+        let Some(LiveEngineEvent::Outputs { delivered, .. }) = rx.recv().await else {
+            panic!("expected an ordered output batch");
+        };
+        drop(delivered);
+        assert!(matches!(
+            send.await.unwrap(),
+            Err(SchedulerEventSendError::OrderedLaneClosed)
+        ));
     }
 }

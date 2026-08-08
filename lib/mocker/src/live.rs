@@ -268,6 +268,7 @@ impl LiveEngine {
                 event_tx: Some(SchedulerEventSender::Ordered {
                     tx: event_tx,
                     forward_admissions: options_for_rank.admission_tx.is_some(),
+                    cancel: cancel.clone(),
                 }),
                 kv_event_publishers: options_for_rank.kv_event_publishers.clone(),
                 fpm_publisher: options_for_rank.fpm_publisher.clone(),
@@ -351,6 +352,7 @@ impl LiveEngine {
             Some(SchedulerEventSender::Ordered {
                 tx: event_tx,
                 forward_admissions,
+                cancel: group_cancel.clone(),
             }),
             options.kv_event_publishers.clone(),
             Some(group_cancel.clone()),

@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,6 +47,65 @@ use aisimulate_replay::{
 
 mod composition;
 pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
+
+#[derive(Clone, Copy)]
+enum KvEventSummary {
+    Stored {
+        parent_hash: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        start_position: Option<u32>,
+        count: usize,
+        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+    },
+    Removed {
+        count: usize,
+        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+    },
+    Cleared,
+}
+
+impl KvEventSummary {
+    fn from_data(data: &dynamo_kv_router::protocols::KvCacheEventData) -> Self {
+        match data {
+            dynamo_kv_router::protocols::KvCacheEventData::Stored(stored) => Self::Stored {
+                parent_hash: stored.parent_hash,
+                start_position: stored.start_position,
+                count: stored.blocks.len(),
+                first: stored.blocks.first().map(|block| block.block_hash),
+                last: stored.blocks.last().map(|block| block.block_hash),
+            },
+            dynamo_kv_router::protocols::KvCacheEventData::Removed(removed) => Self::Removed {
+                count: removed.block_hashes.len(),
+                first: removed.block_hashes.first().copied(),
+                last: removed.block_hashes.last().copied(),
+            },
+            dynamo_kv_router::protocols::KvCacheEventData::Cleared => Self::Cleared,
+        }
+    }
+}
+
+impl fmt::Display for KvEventSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stored {
+                parent_hash,
+                start_position,
+                count,
+                first,
+                last,
+            } => write!(
+                formatter,
+                "stored parent={parent_hash:?} start={start_position:?} count={count} first={first:?} last={last:?}"
+            ),
+            Self::Removed { count, first, last } => write!(
+                formatter,
+                "removed count={count} first={first:?} last={last:?}"
+            ),
+            Self::Cleared => formatter.write_str("cleared"),
+        }
+    }
+}
 
 /// Serializable descriptor for the Dynamo-owned KV-router replay provider.
 ///
@@ -610,26 +670,10 @@ impl OfflineReplayRouter {
             let worker_id = event.worker_id;
             let event_id = event.event.event_id;
             let dp_rank = event.event.dp_rank;
-            let data = match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Stored(stored) => format!(
-                    "stored parent={:?} start={:?} count={} first={:?} last={:?}",
-                    stored.parent_hash,
-                    stored.start_position,
-                    stored.blocks.len(),
-                    stored.blocks.first().map(|block| block.block_hash),
-                    stored.blocks.last().map(|block| block.block_hash),
-                ),
-                dynamo_kv_router::protocols::KvCacheEventData::Removed(removed) => format!(
-                    "removed count={} first={:?} last={:?}",
-                    removed.block_hashes.len(),
-                    removed.block_hashes.first(),
-                    removed.block_hashes.last(),
-                ),
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => "cleared".to_string(),
-            };
+            let summary = KvEventSummary::from_data(&event.event.data);
             self.indexer.apply_event(event).with_context(|| {
                 format!(
-                    "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={data}"
+                    "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
                 )
             })?;
         }
