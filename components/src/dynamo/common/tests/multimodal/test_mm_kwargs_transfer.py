@@ -172,6 +172,66 @@ class TestMmKwargsNixlSenderCleanup:
         assert ops[0].released
 
     @pytest.mark.asyncio
+    async def test_one_failing_op_does_not_release_a_still_pending_op_early(
+        self, monkeypatch
+    ):
+        """A failing completion must not cut the wait short for its siblings.
+
+        Without ``return_exceptions=True``, ``gather`` propagates the first
+        error while the other completion coroutines are still running, and the
+        release below would then deregister a buffer whose backend read is
+        still in flight.
+        """
+        monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 5.0)
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+
+        released_while_pending = []
+
+        class _RaisingOp(TestMmKwargsNixlSenderCleanup._FakeOp):
+            async def wait_for_completion(self) -> None:
+                raise RuntimeError("transfer failed")
+
+        class _SlowOp(TestMmKwargsNixlSenderCleanup._FakeOp):
+            def __init__(self):
+                super().__init__(never_completes=False)
+                self.done = False
+
+            async def wait_for_completion(self) -> None:
+                await asyncio.sleep(0.2)
+                self.done = True
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                if not self.done:
+                    released_while_pending.append(self)
+                super().__exit__(exc_type, exc_value, traceback)
+
+        slow = _SlowOp()
+        await sender.cleanup([_RaisingOp(), slow])
+
+        assert slow.done, "cleanup returned before the pending transfer finished"
+        assert not released_while_pending, "released a buffer whose read was in flight"
+
+    @pytest.mark.asyncio
+    async def test_release_failure_is_raised_after_every_item_is_attempted(self):
+        """A failing release must not stop the remaining buffers being freed."""
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+
+        class _BadRelease(TestMmKwargsNixlSenderCleanup._FakeOp):
+            def __init__(self):
+                super().__init__(never_completes=False)
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                raise RuntimeError("deregister failed")
+
+        good = TestMmKwargsNixlSenderCleanup._FakeOp(never_completes=False)
+        with pytest.raises(RuntimeError, match="deregister failed"):
+            await sender.cleanup([_BadRelease(), good])
+
+        assert (
+            good.released
+        ), "a later buffer was skipped after an earlier release failed"
+
+    @pytest.mark.asyncio
     async def test_cleanup_with_no_items_is_a_noop(self):
         sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
         await sender.cleanup([])
