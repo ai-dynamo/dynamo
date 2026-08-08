@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated serving on Intel XPU using traditional device plugin (gpu.intel.com/xe)
+# This does not require DRA and is more stable than DRA-based deployment.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-xpu
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+    decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        hostIPC: true
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              gpu.intel.com/xe: "1"
+          env:
+            # XPU-specific environment variables for disaggregated KV transfer
+            # ZE_AFFINITY_MASK selects specific tile on the GPU
+            # Adjust values based on your GPU topology (different tiles for prefill/decode)
+            - name: ZE_AFFINITY_MASK
+              value: "2"
+            # UCX transport layer configuration for XPU
+            - name: UCX_TLS
+              value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --enable-metrics
+            - --device
+            - xpu
+            - --disable-cuda-graph
+            - --grammar-backend
+            - none
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"
+    prefill:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        hostIPC: true
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              gpu.intel.com/xe: "1"
+          env:
+            # XPU-specific environment variables for disaggregated KV transfer
+            # ZE_AFFINITY_MASK selects specific tile on the GPU
+            # Adjust values based on your GPU topology (different tiles for prefill/decode)
+            - name: ZE_AFFINITY_MASK
+              value: "0"
+            # UCX transport layer configuration for XPU
+            - name: UCX_TLS
+              value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --enable-metrics
+            - --device
+            - xpu
+            - --disable-cuda-graph
+            - --grammar-backend
+            - none
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "40000"
