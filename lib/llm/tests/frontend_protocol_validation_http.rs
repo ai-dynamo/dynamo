@@ -74,7 +74,8 @@ async fn assert_anthropic_501(response: reqwest::Response, message: &str) {
 async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
     temp_env::async_with_vars(BASE_ENV, async {
         let valid_script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start([valid_script]).await;
+        let svc =
+            HarnessService::start([valid_script.clone(), valid_script.clone(), valid_script]).await;
 
         for stream in [false, true] {
             let response = svc
@@ -270,7 +271,7 @@ async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
             );
         }
 
-        let anthropic_tool_name = "a".repeat(128);
+        let max_length_tool_name = "a".repeat(128);
         let response = svc
             .client
             .post(format!("{}/v1/messages", svc.base_url))
@@ -279,7 +280,7 @@ async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
                 "max_tokens": 16,
                 "messages": [{"role": "user", "content": "ping"}],
                 "tools": [{
-                    "name": anthropic_tool_name,
+                    "name": max_length_tool_name.clone(),
                     "input_schema": {"type": "object", "properties": {}}
                 }]
             }))
@@ -288,25 +289,23 @@ async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-        let too_long_anthropic_tool_name = "a".repeat(129);
         let response = svc
             .client
-            .post(format!("{}/v1/messages", svc.base_url))
+            .post(format!("{}/v1/responses", svc.base_url))
             .json(&json!({
                 "model": MODEL,
-                "max_tokens": 16,
-                "messages": [{"role": "user", "content": "ping"}],
+                "input": "ping",
                 "tools": [{
-                    "name": too_long_anthropic_tool_name,
-                    "input_schema": {"type": "object", "properties": {}}
+                    "type": "function",
+                    "name": max_length_tool_name.clone(),
+                    "parameters": {"type": "object", "properties": {}}
                 }]
             }))
             .send()
             .await
             .unwrap();
-        assert_anthropic_400(response, "128 character limit").await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-        let too_long_openai_tool_name = "a".repeat(97);
         let response = svc
             .client
             .post(format!("{}/v1/chat/completions", svc.base_url))
@@ -316,7 +315,7 @@ async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
                 "tools": [{
                     "type": "function",
                     "function": {
-                        "name": too_long_openai_tool_name,
+                        "name": max_length_tool_name,
                         "parameters": {"type": "object", "properties": {}}
                     }
                 }]
@@ -324,9 +323,63 @@ async fn protocol_adapter_errors_are_returned_before_streaming_headers() {
             .send()
             .await
             .unwrap();
-        assert_openai_400(response, "96 character limit").await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-        assert_eq!(svc.engine.take_requests().await.len(), 1);
+        let too_long_tool_name = "a".repeat(129);
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "name": too_long_tool_name.clone(),
+                    "input_schema": {"type": "object", "properties": {}}
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_anthropic_400(response, "128 character limit").await;
+
+        let response = svc
+            .client
+            .post(format!("{}/v1/responses", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "input": "ping",
+                "tools": [{
+                    "type": "function",
+                    "name": too_long_tool_name.clone(),
+                    "parameters": {"type": "object", "properties": {}}
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_openai_400(response, "128 character limit").await;
+
+        let response = svc
+            .client
+            .post(format!("{}/v1/chat/completions", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": too_long_tool_name,
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_openai_400(response, "128 character limit").await;
+
+        assert_eq!(svc.engine.take_requests().await.len(), 3);
         svc.shutdown().await;
     })
     .await;

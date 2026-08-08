@@ -90,8 +90,8 @@ pub const MAX_STOP_SEQUENCES: usize = 32;
 /// Maximum allowed number of tools.
 pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
-/// Maximum allowed length for function names
-pub const MAX_FUNCTION_NAME_LENGTH: usize = 96;
+/// Both `/v1/messages` and `/v1/responses` define a 128-character tool-name limit.
+pub const MAX_FUNCTION_NAME_LENGTH: usize = 128;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -514,14 +514,6 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
 pub fn validate_tools(
     tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
-    validate_tools_with_name_limit(tools, MAX_FUNCTION_NAME_LENGTH)
-}
-
-/// Validates tools with a protocol-specific function-name length limit.
-pub fn validate_tools_with_name_limit(
-    tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
-    max_function_name_length: usize,
-) -> Result<(), anyhow::Error> {
     let tools = match tools {
         Some(val) => val,
         None => return Ok(()),
@@ -536,11 +528,11 @@ pub fn validate_tools_with_name_limit(
     }
 
     for (i, tool) in tools.iter().enumerate() {
-        if tool.function.name.len() > max_function_name_length {
+        if tool.function.name.len() > MAX_FUNCTION_NAME_LENGTH {
             anyhow::bail!(
                 "Function name at index {} exceeds {} character limit, got {} characters",
                 i,
-                max_function_name_length,
+                MAX_FUNCTION_NAME_LENGTH,
                 tool.function.name.len()
             );
         }

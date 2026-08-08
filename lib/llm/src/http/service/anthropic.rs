@@ -37,6 +37,7 @@ use super::{
     },
     service_v2,
 };
+use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
@@ -131,8 +132,6 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
-
-const ANTHROPIC_MAX_TOOL_NAME_LENGTH: usize = 128;
 
 #[derive(Debug)]
 enum AnthropicMessageValidationError {
@@ -420,7 +419,7 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
-    if let Err(error) = chat_request.validate_with_tool_name_limit(ANTHROPIC_MAX_TOOL_NAME_LENGTH) {
+    if let Err(error) = chat_request.validate() {
         inflight_guard.mark_error(ErrorType::Validation);
         let error = invalid_argument(error.to_string());
         return Err(anthropic_error(
