@@ -92,10 +92,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				"EPP component must have exactly 1 replica",
 			))
 		}
-		if spec.EPPConfig == nil {
-			allErrs = append(allErrs, field.Required(fldPath.Child("eppConfig"), "is required for EPP components"))
-		}
 	}
+	// Validate deprecated Go-EPP eppConfig when present; absence selects Rust EPP.
 	if spec.EPPConfig != nil {
 		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
@@ -148,7 +146,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	return allErrs
 }
 
-// validateEPPConfig validates config. config and fldPath must not be nil.
+// validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
 func (v *sharedValidation) validateEPPConfig(
 	config *nvidiacomv1beta1.EPPConfig,
 	fldPath *field.Path,

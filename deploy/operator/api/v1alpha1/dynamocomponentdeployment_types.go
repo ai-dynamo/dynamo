@@ -158,8 +158,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
-	// EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+	// EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.
 	// Only applicable when ComponentType is "epp".
+	//
+	// Deprecated: omit this field for the native Rust EPP. Presence of eppConfig
+	// keeps the Go EPP Pod contract until migration clears it.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
@@ -474,6 +477,28 @@ type ModelReference struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+// EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+//
+// Deprecated: Go EPP is deprecated. New EPP components should omit eppConfig and
+// use the native Rust EPP. Kept for round-trip and upgrade compatibility.
+type EPPConfig struct {
+	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
+	// The ConfigMap should contain EndpointPickerConfig YAML.
+	// Mutually exclusive with Config.
+	// +optional
+	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
+	// The operator will marshal this to YAML and create a ConfigMap automatically.
+	// Mutually exclusive with ConfigMapRef.
+	// One of ConfigMapRef or Config must be specified (no default configuration).
+	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+	// +optional
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
+}
+
 // FrontendSidecarSpec configures the auto-generated frontend sidecar container.
 // The operator uses these fields together with built-in frontend defaults (command, probes, ports,
 // and Dynamo env vars) to produce a fully configured sidecar container.
@@ -497,24 +522,4 @@ type FrontendSidecarSpec struct {
 	// These are merged with (and can override) the auto-generated Dynamo env vars.
 	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
-}
-
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-// EPP is responsible for intelligent endpoint selection and KV-aware routing.
-type EPPConfig struct {
-	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
-	// The ConfigMap should contain EndpointPickerConfig YAML.
-	// Mutually exclusive with Config.
-	// +optional
-	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
-
-	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
-	// The operator will marshal this to YAML and create a ConfigMap automatically.
-	// Mutually exclusive with ConfigMapRef.
-	// One of ConfigMapRef or Config must be specified (no default configuration).
-	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
-	// +optional
-	// +kubebuilder:validation:Type=object
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
 }

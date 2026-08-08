@@ -625,11 +625,6 @@ See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="eppConfig" type="EPPConfig">
-EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.&lt;br /&gt;Only applicable when ComponentType is "epp".
-See [EPPConfig](#eppconfig).
-**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
 
 <ParamField path="frontendSidecar" type="FrontendSidecarSpec">
 FrontendSidecar configures an auto-generated frontend sidecar container.&lt;br /&gt;When specified, the operator injects a fully configured frontend container&lt;br /&gt;with all standard Dynamo environment variables, health probes, and ports.&lt;br /&gt;This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
@@ -781,11 +776,6 @@ See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="eppConfig" type="EPPConfig">
-EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.&lt;br /&gt;Only applicable when ComponentType is "epp".
-See [EPPConfig](#eppconfig).
-**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
 
 <ParamField path="frontendSidecar" type="FrontendSidecarSpec">
 FrontendSidecar configures an auto-generated frontend sidecar container.&lt;br /&gt;When specified, the operator injects a fully configured frontend container&lt;br /&gt;with all standard Dynamo environment variables, health probes, and ports.&lt;br /&gt;This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
@@ -1302,26 +1292,6 @@ TotalEndpoints is the total count of endpoints
 Conditions represents the latest available observations of the model's state
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
-</Accordion>
-
-<Accordion id="eppconfig" title="EPPConfig">
-EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-EPP is responsible for intelligent endpoint selection and KV-aware routing.
-
-
-**Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
-
-<ParamField path="configMapRef" type="ConfigMapKeySelector">
-ConfigMapRef references a user-provided ConfigMap containing EPP configuration.&lt;br /&gt;The ConfigMap should contain EndpointPickerConfig YAML.&lt;br /&gt;Mutually exclusive with Config.
-See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core).
-**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
-
-<ParamField path="config" type="EndpointPickerConfig">
-Config allows specifying EPP EndpointPickerConfig directly as a structured object.&lt;br /&gt;The operator will marshal this to YAML and create a ConfigMap automatically.&lt;br /&gt;Mutually exclusive with ConfigMapRef.&lt;br /&gt;One of ConfigMapRef or Config must be specified (no default configuration).&lt;br /&gt;Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
-**Validation:** Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
@@ -2911,11 +2881,6 @@ See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="eppConfig" type="EPPConfig">
-eppConfig holds EPP-specific configuration for Endpoint Picker Plugin&lt;br /&gt;components. Only meaningful when `type` is `epp`.
-See [EPPConfig](#v1beta1-eppconfig).
-**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
 
 <ParamField path="frontendSidecar" type="string">
 frontendSidecar optionally designates a container in&lt;br /&gt;`podTemplate.spec.containers` as the frontend sidecar. The value must&lt;br /&gt;match the `name` of a container in that list; the operator merges its&lt;br /&gt;frontend-sidecar defaults (auto-generated Dynamo env vars, ports,&lt;br /&gt;health probes) into that container the same way it merges into `"main"`.&lt;br /&gt;The full container definition (image, args, envFrom, env) lives in&lt;br /&gt;`podTemplate` -- this eliminates the redundant `image`, `args`,&lt;br /&gt;`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.&lt;br /&gt;The validation webhook rejects values that do not match any container&lt;br /&gt;name in `podTemplate.spec.containers`.
@@ -3009,11 +2974,6 @@ See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="eppConfig" type="EPPConfig">
-eppConfig holds EPP-specific configuration for Endpoint Picker Plugin&lt;br /&gt;components. Only meaningful when `type` is `epp`.
-See [EPPConfig](#v1beta1-eppconfig).
-**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
 
 <ParamField path="frontendSidecar" type="string">
 frontendSidecar optionally designates a container in&lt;br /&gt;`podTemplate.spec.containers` as the frontend sidecar. The value must&lt;br /&gt;match the `name` of a container in that list; the operator merges its&lt;br /&gt;frontend-sidecar defaults (auto-generated Dynamo env vars, ports,&lt;br /&gt;health probes) into that container the same way it merges into `"main"`.&lt;br /&gt;The full container definition (image, args, envFrom, env) lives in&lt;br /&gt;`podTemplate` -- this eliminates the redundant `image`, `args`,&lt;br /&gt;`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.&lt;br /&gt;The validation webhook rejects values that do not match any container&lt;br /&gt;name in `podTemplate.spec.containers`.
@@ -3471,25 +3431,6 @@ See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
 placement groups DGD-level scheduler placement signals (score, reporting&lt;br /&gt;state, and any future placement fields).
 See [PlacementStatus](#v1beta1-placementstatus).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
-</Accordion>
-
-<Accordion id="v1beta1-eppconfig" title="EPPConfig">
-EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-
-
-**Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
-
-<ParamField path="configMapRef" type="ConfigMapKeySelector">
-configMapRef references a user-provided ConfigMap containing EPP&lt;br /&gt;configuration. Mutually exclusive with `config`.
-See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core).
-**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
-</ParamField>
-
-<ParamField path="config" type="EndpointPickerConfig">
-config allows specifying EPP `EndpointPickerConfig` directly as a&lt;br /&gt;structured object. The operator marshals this to YAML and creates a&lt;br /&gt;ConfigMap automatically. Mutually exclusive with `configMapRef`. One of&lt;br /&gt;`configMapRef` or `config` must be specified.
-**Validation:** Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 

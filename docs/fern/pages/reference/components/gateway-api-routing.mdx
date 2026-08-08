@@ -13,7 +13,10 @@ Inference Extension (GAIE) and the Dynamo Endpoint Picker Plugin (EPP). For the 
 ## DGD EPP Fields
 
 The EPP is a DGD component with `type: epp`. The Dynamo operator creates the EPP workload, Service,
-configuration, and `InferencePool` from these fields.
+and `InferencePool` from these fields. The Dynamo EPP runs the full Dynamo KV-aware router natively
+and is configured through `DYN_*` environment variables. It implements the GAIE
+[Lightweight Endpoint Picker (LW-EPP)](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/lwepp/README.md)
+`ext_proc` interface and does not use a plugin or scheduling-profile config.
 
 <ParamField path="spec.components[].type" type="string" required={true}>
   Set to `epp` for the Endpoint Picker Plugin component. A DGD can contain at most one EPP component.
@@ -21,24 +24,16 @@ configuration, and `InferencePool` from these fields.
   <span className="enum-values"><span className="enum-label">Value:</span> <Badge intent="note" minimal>epp</Badge></span>
 </ParamField>
 
+<ParamField path="spec.components[].eppConfig" type="object">
+  Deprecated Go-EPP configuration. Omit for the native Rust EPP. When present, the operator keeps
+  the legacy Go EPP Pod contract (CLI flags and config mount) so existing DGDs survive operator
+  upgrades until you migrate by clearing this field and updating the image. See
+  [Route Requests with Gateway API](../../kubernetes/kv-aware-routing/gateway-api.mdx).
+</ParamField>
+
 <ParamField path="spec.components[].replicas" type="integer" default="1">
   Number of EPP pods. Increase this value when endpoint-picker request volume requires more EPP capacity.
 </ParamField>
-
-<ParamField path="spec.components[].eppConfig" type="EPPConfig" required={true}>
-  EPP configuration source. Set exactly one of `config` or `configMapRef`.
-</ParamField>
-
-<Indent>
-  <ParamField path="config" type="EndpointPickerConfig">
-    Inline endpoint-picker configuration. The operator serializes the object into a generated `ConfigMap`.
-    Mutually exclusive with `configMapRef`.
-  </ParamField>
-  <ParamField path="configMapRef" type="ConfigMapKeySelector">
-    Reference to a user-managed `ConfigMap` containing an `EndpointPickerConfig`. Mutually exclusive with
-    `config`.
-  </ParamField>
-</Indent>
 
 <ParamField path="spec.components[].frontendSidecar" type="string" required={true}>
   Name of the Frontend container in each routable worker pod. The named container must exist in
@@ -47,71 +42,6 @@ configuration, and `InferencePool` from these fields.
 
 For the complete component schema, see the
 [DynamoComponentDeployment Reference](../kubernetes-api/dynamo-component-deployment.mdx).
-
-## EndpointPickerConfig Fields
-
-<ParamField path="plugins" type="[]Plugin" required={true}>
-  Plugin instances available to scheduling profiles. A plugin can filter endpoints, score endpoints,
-  choose a result, or establish aggregated and disaggregated profiles.
-</ParamField>
-
-<Indent>
-  <ParamField path="name" type="string">
-    Local name used by `schedulingProfiles[].plugins[].pluginRef`. Omit only for a plugin that does not
-    need to be referenced directly, such as `disagg-profile-handler`.
-  </ParamField>
-  <ParamField path="type" type="string" required={true}>
-    Plugin implementation.
-
-    <span className="enum-values"><span className="enum-label">Common Dynamo values:</span> <Badge intent="note" minimal>disagg-profile-handler</Badge> <Badge intent="note" minimal>label-filter</Badge> <Badge intent="note" minimal>dyn-prefill-scorer</Badge> <Badge intent="note" minimal>dyn-decode-scorer</Badge> <Badge intent="note" minimal>max-score-picker</Badge></span>
-  </ParamField>
-  <ParamField path="parameters" type="object">
-    Plugin-specific configuration. The operator preserves this object without pruning unknown fields.
-  </ParamField>
-</Indent>
-
-<ParamField path="schedulingProfiles" type="[]SchedulingProfile" required={true}>
-  Ordered plugin chains for endpoint selection. Aggregated deployments use a `decode` profile.
-  Disaggregated deployments use both `prefill` and `decode` profiles.
-</ParamField>
-
-<Indent>
-  <ParamField path="name" type="string" required={true}>
-    Worker role handled by the profile.
-
-    <span className="enum-values"><span className="enum-label">Dynamo values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
-  </ParamField>
-  <ParamField path="plugins" type="[]PluginRef" required={true}>
-    Plugins applied by the profile.
-  </ParamField>
-  <Indent>
-    <ParamField path="pluginRef" type="string" required={true}>
-      Name of a plugin declared in the top-level `plugins` list.
-    </ParamField>
-    <ParamField path="weight" type="integer" default="1">
-      Relative influence of the plugin in the scheduling profile. Keep required filters and the final
-      picker enabled. Validate scorer-weight changes with production-like traffic.
-    </ParamField>
-  </Indent>
-</Indent>
-
-## Dynamo Plugin Parameters
-
-### Label Filter
-
-<ParamField path="parameters.label" type="string" required={true}>
-  Pod label used to identify eligible workers. For DGD v1beta1 components, use
-  `nvidia.com/dynamo-component-type`.
-</ParamField>
-
-<ParamField path="parameters.validValues" type="[]string" required={true}>
-  Accepted values for the selected label. Use `prefill` or `decode` to separate worker roles.
-</ParamField>
-
-<ParamField path="parameters.allowsNoLabel" type="boolean" default="false">
-  Whether pods without the selected label remain eligible. Aggregated profiles can set this to `true`
-  when worker pods do not carry a separate decode role. Disaggregated profiles should use `false`.
-</ParamField>
 
 ## EPP Runtime Environment
 
@@ -199,8 +129,8 @@ spec:
   - number: 8000
 ```
 
-Treat the generated `InferencePool`, EPP Service, Deployment, and inline configuration `ConfigMap` as
-operator-owned resources. Make persistent changes in the DGD.
+Treat the generated `InferencePool`, EPP Service, and Deployment as operator-owned resources. Make
+persistent changes in the DGD.
 
 ## HTTPRoute Contract
 
@@ -328,3 +258,11 @@ spec:
 
 `AgentgatewayParameters` is a local reference and must be in the Gateway namespace. Use a
 per-Gateway resource unless disabling injection is an intentional cluster-wide policy.
+
+## Developer References
+
+Image build commands belong with the component source, not in this user reference. Use this source
+location when developing or replacing the standard EPP image:
+
+- [Dynamo EPP source](https://github.com/ai-dynamo/dynamo/tree/main/deploy/inference-gateway/ext-proc)
+- [GAIE Lightweight Endpoint Picker (LW-EPP) reference](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/lwepp/README.md)

@@ -30,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -409,15 +408,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: extraClientPods is reserved for inter-pod GMS and is not implemented yet",
-		},
-		{
-			name: "v1beta1 EPP config on a worker is rejected by CEL",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-				}
-			}),
-			wantCELErr: "spec: Invalid value: eppConfig may only be set when type is epp",
 		},
 		{
 			name: "v1beta1 checkpoint job with checkpointRef is rejected by CEL",
@@ -931,7 +921,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.multinode: Forbidden: EPP component cannot be multinode",
-				"spec.eppConfig: Required value: is required for EPP components",
 			},
 		},
 		{
@@ -942,95 +931,20 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.replicas: Invalid value: 2: EPP component must have exactly 1 replica",
-				"spec.eppConfig: Required value: is required for EPP components",
 			},
 		},
 		{
-			name: "v1alpha1 EPP requires configuration",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
-		},
-		{
-			name: "v1beta1 EPP without configuration reaches and is rejected by the v1beta1 webhook",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
-		},
-		{
-			name: "v1alpha1 empty EPP config reaches and is rejected by the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				EPPConfig:     &nvidiacomv1alpha1.EPPConfig{},
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
-		},
-		{
-			name: "v1beta1 empty EPP config is rejected by source CEL",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{}
-			}),
-			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name: "v1alpha1 conflicting EPP config reaches and is rejected by the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				},
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
-		},
-		{
-			name: "v1beta1 conflicting EPP config is rejected by source CEL",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				}
-			}),
-			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name: "v1alpha1 EPP config map without a name reaches and is rejected by the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{},
-				},
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig.configMapRef.name: Required value: is required"},
-		},
-		{
-			name: "valid v1alpha1 EPP config reaches the webhook",
+			name: "valid v1alpha1 EPP component reaches the webhook",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &oneReplica,
-				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-				},
 			}),
 		},
 		{
-			name: "valid v1beta1 EPP config reaches the v1beta1 webhook",
+			name: "valid v1beta1 EPP component reaches the v1beta1 webhook",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-				}
 			}),
 		},
 

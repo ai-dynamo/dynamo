@@ -48,8 +48,26 @@ Copy your working DGD manifest to `$DGD_MANIFEST`, then make the changes in the 
 
 <Step title="Add the EPP component">
 
-Add one component with `type: epp` to `qwen-gateway.yaml`. The EPP configuration below selects
-aggregated or decode workers and scores them with the Dynamo decode scorer.
+Add one component with `type: epp` to `qwen-gateway.yaml`. The Dynamo EPP runs the full Dynamo
+KV-aware router natively and is configured through `DYN_*` environment variables. Disaggregated
+versus aggregated routing is determined automatically from the worker types registered through
+Dynamo discovery.
+
+<Warning>
+**Go EPP deprecation.** Dynamo no longer ships a Go-based EPP image. New EPP components omit
+`eppConfig` and use the native Rust EPP (bundled in the FrontEnd image). Existing DGDs that still
+set `eppConfig` keep the legacy Go EPP Pod contract across operator upgrades until you migrate
+explicitly.
+
+Supported migration:
+
+1. Create a new DGD (or EPP component) that omits `eppConfig` and uses the Rust EPP image.
+2. Verify the new EPP is Ready and that the InferencePool / Gateway route serves traffic.
+3. Scale down or delete the old Go-EPP DGD.
+
+Clearing `eppConfig` on an existing DGD and switching the image is the in-place signal that
+migration has started; do that only when you are ready to roll the EPP Pod.
+</Warning>
 
 ```yaml
 spec:
@@ -57,29 +75,6 @@ spec:
   - name: Epp
     type: epp
     replicas: 1
-    eppConfig:
-      config:
-        plugins:
-        - type: disagg-profile-handler
-        - name: decode-filter
-          type: label-filter
-          parameters:
-            label: nvidia.com/dynamo-component-type
-            validValues: [decode]
-            allowsNoLabel: true
-        - name: dyn-decode
-          type: dyn-decode-scorer
-        - name: picker
-          type: max-score-picker
-        schedulingProfiles:
-        - name: decode
-          plugins:
-          - pluginRef: decode-filter
-            weight: 1
-          - pluginRef: dyn-decode
-            weight: 1
-          - pluginRef: picker
-            weight: 1
     podTemplate:
       spec:
         containers:
@@ -99,10 +94,8 @@ If your deployment uses another Dynamo version, model, secret name, or backend b
 those values in the manifest. Keep the platform, EPP, Frontend sidecars, and workers on the same
 Dynamo release line. The EPP block size must match the backend block size.
 
-For a disaggregated graph, add separate prefill and decode filters, scorers, and scheduling profiles.
-Start from the repository's
-[disaggregated GAIE example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gaie/disagg.yaml)
-instead of extending the aggregated profile by hand.
+For a disaggregated graph, start from the repository's
+[disaggregated GAIE example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gaie/disagg.yaml).
 
 </Step>
 

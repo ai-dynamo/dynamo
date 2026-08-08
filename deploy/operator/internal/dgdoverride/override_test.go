@@ -187,10 +187,12 @@ kind: DynamoGraphDeployment
 spec:
   components:
   - name: Worker
-    eppConfig:
-      config:
-        customPluginConfig:
-          optionalValue: null
+    experimental:
+      checkpoint:
+        job:
+          podTemplate:
+            customPluginConfig:
+              optionalValue: null
 `))
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
@@ -198,8 +200,10 @@ spec:
 	worker := mustBetaWorker(t, result)
 	value, found, err := unstructured.NestedFieldNoCopy(
 		worker,
-		"eppConfig",
-		"config",
+		"experimental",
+		"checkpoint",
+		"job",
+		"podTemplate",
 		"customPluginConfig",
 		"optionalValue",
 	)
@@ -419,7 +423,7 @@ metadata:
 			wantError: "override metadata.annotations.existing must not be null",
 		},
 		{
-			name:      "explicit null in typed field below preserve unknown object",
+			name:      "explicit null in typed field",
 			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
 			override: func(t *testing.T) *unstructured.Unstructured {
 				return mustObject(t, `
@@ -428,12 +432,10 @@ kind: DynamoGraphDeployment
 spec:
   components:
   - name: Worker
-    eppConfig:
-      config:
-        apiVersion: null
+    replicas: null
 `)
 			},
-			wantError: "override spec.components[0].eppConfig.config.apiVersion must not be null",
+			wantError: "override spec.components[0].replicas must not be null",
 		},
 		{
 			name:      "status override",

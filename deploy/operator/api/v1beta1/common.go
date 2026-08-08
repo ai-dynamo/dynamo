@@ -135,7 +135,12 @@ type RestartStrategy struct {
 // the Scale subresource. Omitting the field opts the component out.
 type ScalingAdapter struct{}
 
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+// EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+//
+// Deprecated: Go EPP is deprecated. New EPP components should omit `eppConfig`
+// and use the native Rust EPP (env-var configuration only). Existing DGDs that
+// still set `eppConfig` keep the Go EPP Pod contract until they migrate
+// explicitly by clearing `eppConfig` (and updating the image).
 // +kubebuilder:validation:XValidation:rule="has(self.configMapRef) != has(self.config)",message="exactly one of configMapRef or config must be specified"
 type EPPConfig struct {
 	// configMapRef references a user-provided ConfigMap containing EPP

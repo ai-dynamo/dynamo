@@ -121,21 +121,6 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   </ParamField>
 </Indent>
 
-<ParamField path="eppConfig" type="EPPConfig">
-  EPP-specific configuration. Only valid when `type` is `epp`. Exactly one of `configMapRef` or `config` must be set. See the [Gateway API Routing Reference](../components/gateway-api-routing.mdx).
-</ParamField>
-
-<Indent>
-  <ParamField path="configMapRef" type="core/v1.ConfigMapKeySelector">
-    References a user-provided ConfigMap key containing EPP configuration. Mutually exclusive with `config`.
-
-    <a href="https://pkg.go.dev/k8s.io/api/core/v1#ConfigMapKeySelector" target="_blank">core/v1.ConfigMapKeySelector</a>
-  </ParamField>
-  <ParamField path="config" type="EndpointPickerConfig">
-    EPP `EndpointPickerConfig` supplied inline. The operator marshals it to YAML and creates the ConfigMap for you. Mutually exclusive with `configMapRef`.
-  </ParamField>
-</Indent>
-
 <ParamField path="topologyConstraint" type="TopologyConstraint">
   Component-level topology placement. See [Topology-Aware Scheduling](../../developer-guide/knowledge-base/kubernetes/multinode/topology-aware-scheduling.md).
 </ParamField>

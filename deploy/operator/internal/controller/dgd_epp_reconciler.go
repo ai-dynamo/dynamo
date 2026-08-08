@@ -69,7 +69,10 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 
 	logger.Info("Reconciling EPP resources", "componentName", componentName)
-	if eppService.EPPConfig == nil || eppService.EPPConfig.ConfigMapRef == nil {
+
+	// Legacy Go EPP: reconcile the ConfigMap when eppConfig is set and not a
+	// user-managed ConfigMapRef. Native Rust EPP needs no ConfigMap.
+	if epp.IsLegacyGoEPP(eppService.EPPConfig) && eppService.EPPConfig.ConfigMapRef == nil {
 		configMap, err := epp.GenerateConfigMap(ctx, dgd, componentName, eppService.EPPConfig)
 		if err != nil {
 			logger.Error(err, "Failed to generate EPP ConfigMap")
@@ -86,7 +89,7 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)

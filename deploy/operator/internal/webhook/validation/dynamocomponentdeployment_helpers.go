@@ -66,7 +66,6 @@ func hasDynamoComponentDeploymentV1alpha1CompatibilityFields(
 		hasDeprecatedAutoscaling ||
 		spec.Ingress != nil ||
 		len(spec.VolumeMounts) > 0 ||
-		spec.EPPConfig != nil ||
 		spec.FrontendSidecar != nil ||
 		spec.Failover != nil
 }
