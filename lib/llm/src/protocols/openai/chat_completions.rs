@@ -531,10 +531,12 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 }
 
-/// Implements `ValidateRequest` for `NvCreateChatCompletionRequest`,
-/// allowing us to validate the data.
-impl ValidateRequest for NvCreateChatCompletionRequest {
-    fn validate(&self) -> Result<(), anyhow::Error> {
+impl NvCreateChatCompletionRequest {
+    /// Validate the normalized chat request using the source protocol's tool-name limit.
+    pub(crate) fn validate_with_tool_name_limit(
+        &self,
+        max_tool_name_length: usize,
+    ) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
@@ -568,7 +570,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        validate::validate_tools(&self.inner.tools.as_deref())?;
+        validate::validate_tools_with_name_limit(
+            &self.inner.tools.as_deref(),
+            max_tool_name_length,
+        )?;
         validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
@@ -582,6 +587,14 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
 
         Ok(())
+    }
+}
+
+/// Implements `ValidateRequest` for `NvCreateChatCompletionRequest`,
+/// allowing us to validate the data.
+impl ValidateRequest for NvCreateChatCompletionRequest {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        self.validate_with_tool_name_limit(validate::MAX_FUNCTION_NAME_LENGTH)
     }
 }
 

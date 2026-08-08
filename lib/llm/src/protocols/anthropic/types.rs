@@ -119,6 +119,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
+            .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
@@ -935,6 +936,12 @@ mod tests {
             container: None,
             output_config: None,
         };
+
+        let mut empty_req = req.clone();
+        empty_req.stop_sequences = Some(vec![]);
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.stop.is_none());
+        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.stop.is_some());
