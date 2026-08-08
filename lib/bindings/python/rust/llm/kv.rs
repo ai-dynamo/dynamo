@@ -1753,7 +1753,7 @@ impl PendingReservationGuard {
     fn insert(
         reservations: Arc<DashMap<String, SharedReservationSlot>>,
         request_id: String,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, String> {
         let marker = Arc::new(());
         match reservations.entry(request_id.clone()) {
             Entry::Vacant(entry) => {
@@ -1762,9 +1762,9 @@ impl PendingReservationGuard {
                 });
             }
             Entry::Occupied(_) => {
-                return Err(PyValueError::new_err(format!(
+                return Err(format!(
                     "request_id {request_id:?} already has an active routing reservation"
-                )));
+                ));
             }
         }
 
@@ -1776,23 +1776,26 @@ impl PendingReservationGuard {
         })
     }
 
-    fn commit(mut self, reservation: RoutingReservation) -> PyResult<rs::pipeline::RouteTarget> {
+    fn commit(
+        mut self,
+        reservation: RoutingReservation,
+    ) -> Result<rs::pipeline::RouteTarget, String> {
         let target = reservation.target();
         let Some(mut slot) = self.reservations.get_mut(&self.request_id) else {
-            return Err(PyValueError::new_err(format!(
+            return Err(format!(
                 "routing reservation {:?} was released before selection completed",
                 self.request_id
-            )));
+            ));
         };
         let owns_slot = matches!(
             slot.value(),
             SharedReservationSlot::Pending { marker } if Arc::ptr_eq(marker, &self.marker)
         );
         if !owns_slot {
-            return Err(PyValueError::new_err(format!(
+            return Err(format!(
                 "routing reservation {:?} was replaced before selection completed",
                 self.request_id
-            )));
+            ));
         }
 
         *slot = SharedReservationSlot::Active {
@@ -2501,12 +2504,13 @@ impl KvRouter {
                 return Ok((target.worker_id, target.dp_rank, 0usize));
             };
 
-            let pending = PendingReservationGuard::insert(reservations, request_id)?;
+            let pending = PendingReservationGuard::insert(reservations, request_id)
+                .map_err(PyValueError::new_err)?;
             let reservation = router
                 .reserve_target(&request, None)
                 .await
                 .map_err(to_pyerr)?;
-            let target = pending.commit(reservation)?;
+            let target = pending.commit(reservation).map_err(PyValueError::new_err)?;
             Ok((target.worker_id, target.dp_rank, 0usize))
         })
     }
