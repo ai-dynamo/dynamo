@@ -2239,17 +2239,33 @@ mod forward_pass_metrics {
             ..Default::default()
         });
 
-        // Pass 2: r2 prefill + decode step runs on all running (r1 + r2)
+        // Pass 2: r2 forms an extend batch, which SGLang schedules ahead of
+        // decode. Only r2 advances (its first token comes from the extend
+        // forward); r1 is starved for this pass.
         let pass2 = core.execute_pass(&mut collector, 1.0);
         let fpm2 = pass2.fpm.expect("FPM should be present");
         assert_eq!(fpm2.num_prefill_requests, 1, "r2 is prefilling");
-        // In SGLang, after r2 prefill completes it joins running alongside r1,
-        // so the decode step sees both.
-        assert_eq!(fpm2.num_decode_requests, 2, "r1 + r2 both in decode step");
+        assert_eq!(
+            fpm2.num_decode_requests, 1,
+            "extend pass advances only the newly prefilled r2; r1 waits"
+        );
         assert!(
             fpm2.sum_decode_kv_tokens > 0,
             "decode requests should have KV context"
         );
+        assert!(
+            pass2
+                .output_signals
+                .iter()
+                .all(|signal| signal.uuid == Uuid::from_u128(2)),
+            "starved r1 must not emit a token during the extend pass"
+        );
+
+        // Pass 3: no admissions pending, so a normal decode step covers both.
+        let pass3 = core.execute_pass(&mut collector, pass2.end_ms);
+        let fpm3 = pass3.fpm.expect("FPM should be present");
+        assert_eq!(fpm3.num_prefill_requests, 0);
+        assert_eq!(fpm3.num_decode_requests, 2, "r1 + r2 both decode now");
     }
 
     #[test]
