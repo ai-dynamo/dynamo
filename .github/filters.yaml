@@ -87,6 +87,9 @@ ignore:
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Release-pin manifest (release-planning data). Validated by its own
+  # release-manifest-checks.yml workflow; no backend CI needed here.
+  - '.github/release-manifest.yaml'
 
 ci: &ci
   - '.github/workflows/**'
