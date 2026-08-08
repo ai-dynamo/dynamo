@@ -359,7 +359,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             eos_token_ids=None,
         )
 
-        assert result["routing"] == {"priority_jump": 1.0}
+        assert result["routing"] == {"priority": 1, "priority_jump": 1.0}
 
     @pytest.mark.parametrize("require_reasoning", [False, True])
     def test_require_reasoning_passthrough(self, require_reasoning):
