@@ -125,31 +125,22 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         factory: WorkerSelectionPolicyFactory,
     ) -> Result<SelectionService> {
-        Self::build_selection_service(cfg, kv_router_config, |builder| {
-            builder.worker_selection_policy_factory(move |config, worker_type, partition| {
-                factory(config, worker_type, partition)
-            })
-        })
-        .await
+        Self::build_selection_service(cfg, kv_router_config, Some(factory)).await
     }
 
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
     ) -> Result<Self> {
-        let service =
-            Self::build_selection_service(cfg, kv_router_config, |builder| builder).await?;
+        let service = Self::build_selection_service(cfg, kv_router_config, None).await?;
         Self::from_service(cfg, service).await
     }
 
-    async fn build_selection_service<F>(
+    async fn build_selection_service(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
-        configure: F,
-    ) -> Result<SelectionService>
-    where
-        F: FnOnce(SelectionServiceBuilder) -> SelectionServiceBuilder,
-    {
+        factory: Option<WorkerSelectionPolicyFactory>,
+    ) -> Result<SelectionService> {
         // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
         // Done once at startup to avoid validating on every reconcile.
         let queueing_enabled = kv_router_config
@@ -157,15 +148,16 @@ impl Selector {
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         Self::validate_queueing_requirements(cfg, queueing_enabled)?;
 
-        let mut builder =
-            SelectionServiceBuilder::new(kv_router_config).indexer_threads(cfg.selector_threads);
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
+            .indexer_threads(cfg.selector_threads)
+            .resolved_worker_selection_policy_factory(factory);
         let replication = Self::replication(cfg).await?;
 
         if let Some((_, peer_sync_port)) = &replication {
             builder = builder.replica_sync(*peer_sync_port, Vec::new());
         }
 
-        configure(builder)
+        builder
             .build()
             .await
             .map_err(|e| anyhow!("building embedded selection service: {e}"))
@@ -580,16 +572,14 @@ models:
         let service = Selector::build_selection_service(
             &test_config(),
             KvRouterConfig::default(),
-            |builder| {
-                builder.worker_selection_policy_factory(|config, worker_type, _partition| {
-                    WorkerSelectionPolicy::new(
-                        config.clone(),
-                        worker_type,
-                        Vec::new(),
-                        Box::new(FirstEligiblePicker),
-                    )
-                })
-            },
+            Some(Arc::new(|config, worker_type, _partition| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    worker_type,
+                    Vec::new(),
+                    Box::new(FirstEligiblePicker),
+                )
+            })),
         )
         .await
         .expect("custom selection service should build");

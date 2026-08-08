@@ -69,7 +69,7 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
+    pub fn worker_selection_policy_factory<F>(self, factory: F) -> Self
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
@@ -80,7 +80,15 @@ impl SelectionServiceBuilder {
             + Sync
             + 'static,
     {
-        self.worker_selection_policy_factory = Some(Arc::new(factory));
+        self.resolved_worker_selection_policy_factory(Some(Arc::new(factory)))
+    }
+
+    /// Use a factory already resolved from worker-selection configuration.
+    pub fn resolved_worker_selection_policy_factory(
+        mut self,
+        factory: Option<WorkerSelectionPolicyFactory>,
+    ) -> Self {
+        self.worker_selection_policy_factory = factory;
         self
     }
 

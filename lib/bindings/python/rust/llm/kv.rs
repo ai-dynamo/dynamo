@@ -486,16 +486,9 @@ where
             cli.selection_cache_max_bytes,
         ),
     };
-    let factory = resolve_policy(&config.kv_router_config)?;
-    let builder = config.service_builder();
-    let builder = match factory {
-        Some(factory) => {
-            builder.worker_selection_policy_factory(move |router_config, worker_type, partition| {
-                factory(router_config, worker_type, partition)
-            })
-        }
-        None => builder,
-    };
+    let builder = config
+        .service_builder()
+        .resolved_worker_selection_policy_factory(resolve_policy(&config.kv_router_config)?);
     let rt = tokio::runtime::Runtime::new()?;
     let service = rt.block_on(builder.build())?;
     rt.block_on(selection::run_server_with_service(config.port, service))
@@ -595,18 +588,11 @@ impl SelectionService {
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
         let factory =
             crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
-        let builder = SelectionServiceBuilder::new(kv_router_config)
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
-            .selection_cache(selection_cache.unwrap_or_default().inner);
-        let mut builder = match factory {
-            Some(factory) => builder.worker_selection_policy_factory(
-                move |router_config, worker_type, partition| {
-                    factory(router_config, worker_type, partition)
-                },
-            ),
-            None => builder,
-        };
+            .selection_cache(selection_cache.unwrap_or_default().inner)
+            .resolved_worker_selection_policy_factory(factory);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
