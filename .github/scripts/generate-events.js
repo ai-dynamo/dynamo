@@ -102,8 +102,19 @@ function toEvent(e, isPast) {
 async function main() {
   const events = await ical.async.fromURL(ICS_URL);
   const now = new Date();
-  // en-CA formats as YYYY-MM-DD, which is what the component parses.
-  const generatedOn = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  // Assemble YYYY-MM-DD from named parts. toLocaleDateString('en-CA') is not
+  // guaranteed to stay YYYY-MM-DD across ICU/CLDR updates (see node#45945).
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+      .formatToParts(now)
+      .map(({ type, value }) => [type, value]),
+  );
+  const generatedOn = `${parts.year}-${parts.month}-${parts.day}`;
 
   const all = Object.values(events)
     .filter((e) => e.type === 'VEVENT' && e.start && e.summary && String(e.status || '').toUpperCase() !== 'CANCELLED')
