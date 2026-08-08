@@ -9,7 +9,10 @@ use crate::invalid_argument;
 
 /// Validated plaintext gRPC endpoint containing only a scheme and authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GrpcEndpoint(String);
+pub struct GrpcEndpoint {
+    endpoint: String,
+    authority_host: String,
+}
 
 impl GrpcEndpoint {
     pub fn parse(raw: &str, argument: &str) -> Result<Self, DynamoError> {
@@ -39,11 +42,16 @@ impl GrpcEndpoint {
         let parsed = url::Url::parse(&normalized).map_err(|error| {
             invalid_argument(format!("invalid gRPC endpoint for `{argument}`: {error}"))
         })?;
-        if parsed.host().is_none() {
-            return Err(invalid_argument(format!(
-                "`{argument}` must include a host"
-            )));
-        }
+        let authority_host = match parsed.host() {
+            Some(url::Host::Domain(host)) => host.to_string(),
+            Some(url::Host::Ipv4(host)) => host.to_string(),
+            Some(url::Host::Ipv6(host)) => format!("[{host}]"),
+            None => {
+                return Err(invalid_argument(format!(
+                    "`{argument}` must include a host"
+                )));
+            }
+        };
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(invalid_argument(format!(
                 "`{argument}` must not include user information"
@@ -56,17 +64,25 @@ impl GrpcEndpoint {
         }
 
         let authority = &parsed[url::Position::BeforeHost..url::Position::AfterPort];
-        Ok(Self(format!("http://{authority}")))
+        Ok(Self {
+            endpoint: format!("http://{authority}"),
+            authority_host,
+        })
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.endpoint
+    }
+
+    /// Host formatted for use in a URI authority, including IPv6 brackets.
+    pub fn authority_host(&self) -> &str {
+        &self.authority_host
     }
 }
 
 impl fmt::Display for GrpcEndpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.endpoint)
     }
 }
 
@@ -96,6 +112,9 @@ mod tests {
                 .as_str(),
             "http://server:50051"
         );
+        let ipv6 = GrpcEndpoint::parse("http://[2001:db8::1]:50051", ARGUMENT).unwrap();
+        assert_eq!(ipv6.as_str(), "http://[2001:db8::1]:50051");
+        assert_eq!(ipv6.authority_host(), "[2001:db8::1]");
     }
 
     #[test]

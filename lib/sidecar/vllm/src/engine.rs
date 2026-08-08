@@ -362,7 +362,7 @@ impl LLMEngine for VllmSidecarEngine {
                 ));
             }
             sources.push(KvEventSource::Zmq {
-                endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint)?,
+                endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
             });
@@ -377,34 +377,16 @@ impl LLMEngine for VllmSidecarEngine {
     }
 }
 
-fn zmq_connect_endpoint(
-    endpoint: &str,
-    grpc_endpoint: &GrpcEndpoint,
-) -> Result<String, DynamoError> {
+fn zmq_connect_endpoint(endpoint: &str, grpc_endpoint: &GrpcEndpoint) -> String {
     let port = endpoint
         .strip_prefix("tcp://*:")
         .or_else(|| endpoint.strip_prefix("tcp://0.0.0.0:"))
         .or_else(|| endpoint.strip_prefix("tcp://[::]:"));
     let Some(port) = port else {
-        return Ok(endpoint.to_string());
+        return endpoint.to_string();
     };
 
-    let grpc_url = url::Url::parse(grpc_endpoint.as_str()).map_err(|error| {
-        client::protocol_error(format!(
-            "validated vLLM gRPC endpoint could not be parsed while resolving KV-event source: {error}"
-        ))
-    })?;
-    let host = match grpc_url.host() {
-        Some(url::Host::Domain(host)) => host.to_string(),
-        Some(url::Host::Ipv4(host)) => host.to_string(),
-        Some(url::Host::Ipv6(host)) => format!("[{host}]"),
-        None => {
-            return Err(client::protocol_error(
-                "validated vLLM gRPC endpoint has no host while resolving KV-event source",
-            ));
-        }
-    };
-    Ok(format!("tcp://{host}:{port}"))
+    format!("tcp://{}:{port}", grpc_endpoint.authority_host())
 }
 
 fn bootstrap_discover(
