@@ -22,7 +22,7 @@ from dynamo.common.utils.env import env_bool
 
 from . import envs
 from .args import Config
-from .constants import DisaggregationMode
+from .constants import DisaggregationMode, has_gms_failover_load_profile
 from .handlers import VllmEnginePauseController
 from .worker_factory import EngineSetupResult
 
@@ -43,8 +43,13 @@ def validate_snapshot_failover_clone_profile(
         violations.append("disaggregation_mode must resolve to aggregated")
     if config.request_plane != "tcp":
         violations.append("request_plane must be tcp")
-    if engine_args.load_format != "gms":
-        violations.append("load_format must be gms")
+    if not has_gms_failover_load_profile(
+        engine_args.load_format,
+        engine_args.worker_cls,
+    ):
+        violations.append(
+            "load profile must use gms with GMS V0 or auto with the GMS V1 worker"
+        )
     for name, value in (
         ("tensor_parallel_size", engine_args.tensor_parallel_size),
         ("pipeline_parallel_size", engine_args.pipeline_parallel_size),

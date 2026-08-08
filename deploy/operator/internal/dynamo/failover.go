@@ -398,7 +398,13 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 var intraPodFailoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failover.lock")
 
 const (
-	failoverEngineCount = 2
+	failoverEngineCount     = 2
+	vllmLoadFormatFlag      = "--load-format"
+	vllmWorkerClassFlag     = "--worker-cls"
+	gmsV0VLLMWorkerClass    = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+	gmsV0VLLMWorkerClassAlt = "gpu_memory_service.integrations.vllm.worker:GMSWorker"
+	gmsV1VLLMWorkerClass    = "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+	vllmAutomaticLoadFormat = "auto"
 )
 
 // PrepareVLLMAutomaticFailoverSnapshotSource marks the canonical checkpoint
@@ -415,7 +421,7 @@ func PrepareVLLMAutomaticFailoverSnapshotSource(container *corev1.Container) err
 	); err != nil {
 		return fmt.Errorf("automatic failover snapshot source: %w", err)
 	}
-	if err := upsertVLLMAutomaticSnapshotLoadFormat(updated); err != nil {
+	if err := configureVLLMAutomaticSnapshotLoadProfile(updated); err != nil {
 		return fmt.Errorf("automatic failover snapshot source: %w", err)
 	}
 	updated.Env = MergeEnvs(updated.Env, []corev1.EnvVar{
@@ -426,11 +432,11 @@ func PrepareVLLMAutomaticFailoverSnapshotSource(container *corev1.Container) err
 	return nil
 }
 
-// upsertVLLMAutomaticSnapshotLoadFormat intentionally supports only direct,
+// configureVLLMAutomaticSnapshotLoadProfile intentionally supports only direct,
 // tokenized Dynamo vLLM invocations. Automatic Snapshot sources are generated
 // from this canonical profile; accepting shell syntax here would require
 // rewriting arbitrary user commands and could silently change their behavior.
-func upsertVLLMAutomaticSnapshotLoadFormat(container *corev1.Container) error {
+func configureVLLMAutomaticSnapshotLoadProfile(container *corev1.Container) error {
 	if container == nil {
 		return fmt.Errorf("container is nil")
 	}
@@ -462,40 +468,79 @@ func upsertVLLMAutomaticSnapshotLoadFormat(container *corev1.Container) error {
 		return fmt.Errorf("arguments after -- are unsupported")
 	}
 
-	const flag = "--load-format"
-	flagIndex := -1
-	equalsForm := false
+	workerClass, _, _, _, err := tokenizedVLLMFlag(args, vllmWorkerClassFlag)
+	if err != nil {
+		return err
+	}
+
+	switch workerClass {
+	case gmsV1VLLMWorkerClass:
+		loadFormat, _, _, loadFormatFound, err := tokenizedVLLMFlag(args, vllmLoadFormatFlag)
+		if err != nil {
+			return err
+		}
+		if loadFormatFound && loadFormat != vllmAutomaticLoadFormat {
+			return fmt.Errorf(
+				"%s %s requires %s %s when explicitly set",
+				vllmWorkerClassFlag,
+				gmsV1VLLMWorkerClass,
+				vllmLoadFormatFlag,
+				vllmAutomaticLoadFormat,
+			)
+		}
+		return nil
+	case "", vllmAutomaticLoadFormat, gmsV0VLLMWorkerClass, gmsV0VLLMWorkerClassAlt:
+		container.Args, err = upsertTokenizedVLLMFlag(args, vllmLoadFormatFlag, "gms")
+		return err
+	default:
+		return fmt.Errorf("%s %q is unsupported for automatic snapshot failover", vllmWorkerClassFlag, workerClass)
+	}
+}
+
+func tokenizedVLLMFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
+	index = -1
 	for i, arg := range args {
 		switch {
 		case arg == flag:
-			if flagIndex >= 0 {
-				return fmt.Errorf("%s must appear at most once", flag)
+			if found {
+				return "", -1, false, false, fmt.Errorf("%s must appear at most once", flag)
 			}
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-				return fmt.Errorf("%s requires a value", flag)
+				return "", -1, false, false, fmt.Errorf("%s requires a value", flag)
 			}
-			flagIndex = i
+			value = args[i+1]
+			index = i
+			found = true
 		case strings.HasPrefix(arg, flag+"="):
-			if flagIndex >= 0 {
-				return fmt.Errorf("%s must appear at most once", flag)
+			if found {
+				return "", -1, false, false, fmt.Errorf("%s must appear at most once", flag)
 			}
 			if arg == flag+"=" {
-				return fmt.Errorf("%s requires a value", flag)
+				return "", -1, false, false, fmt.Errorf("%s requires a value", flag)
 			}
-			flagIndex = i
+			value = strings.TrimPrefix(arg, flag+"=")
+			index = i
 			equalsForm = true
+			found = true
 		}
 	}
+	return value, index, equalsForm, found, nil
+}
 
-	switch {
-	case flagIndex < 0:
-		container.Args = append(container.Args, flag, "gms")
-	case equalsForm:
-		container.Args[flagIndex] = flag + "=gms"
-	default:
-		container.Args[flagIndex+1] = "gms"
+func upsertTokenizedVLLMFlag(args []string, flag, value string) ([]string, error) {
+	_, flagIndex, equalsForm, found, err := tokenizedVLLMFlag(args, flag)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	switch {
+	case !found:
+		args = append(args, flag, value)
+	case equalsForm:
+		args[flagIndex] = flag + "=" + value
+	default:
+		args[flagIndex+1] = value
+	}
+	return args, nil
 }
 
 func removeExactLiteralEnv(container *corev1.Container, name, expected string) error {

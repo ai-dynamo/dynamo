@@ -306,6 +306,31 @@ func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
 			args:     []string{"-m", "dynamo.vllm", "--load-format=safetensors"},
 			wantArgs: []string{"-m", "dynamo.vllm", "--load-format=gms"},
 		},
+		{
+			name: "explicit V0 worker replacement",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV0VLLMWorkerClass,
+				vllmLoadFormatFlag, "safetensors",
+			},
+			wantArgs: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV0VLLMWorkerClass,
+				vllmLoadFormatFlag, "gms",
+			},
+		},
+		{
+			name: "documented V0 worker spelling",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV0VLLMWorkerClassAlt,
+			},
+			wantArgs: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV0VLLMWorkerClassAlt,
+				vllmLoadFormatFlag, "gms",
+			},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			container := &corev1.Container{
@@ -321,6 +346,40 @@ func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
 			assert.True(t, hasEnvVar(*container, "DYN_SNAPSHOT_FAILOVER_SOURCE", "1"))
 			assert.True(t, hasEnvVar(*container, "DYN_VLLM_GMS_SHADOW_MODE", "false"))
 			assert.False(t, hasEnvVar(*container, "DYN_FORWARDPASS_METRIC_PORT", ""))
+		})
+	}
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "V1 default load format",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+			},
+		},
+		{
+			name: "V1 explicit auto load format",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag + "=" + gmsV1VLLMWorkerClass,
+				vllmLoadFormatFlag + "=" + vllmAutomaticLoadFormat,
+			},
+		},
+	} {
+		t.Run(tt.name+" is preserved", func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"python3"},
+				Args:    tt.args,
+				Env: []corev1.EnvVar{{
+					Name:  "DYN_FORWARDPASS_METRIC_PORT",
+					Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+				}},
+			}
+			require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(container))
+			assert.Equal(t, tt.args, container.Args)
 		})
 	}
 
@@ -405,6 +464,37 @@ func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
 	}{
 		{name: "duplicate load format", args: []string{"-m", "dynamo.vllm", "--load-format", "gms", "--load-format=auto"}},
 		{name: "missing load format value", args: []string{"-m", "dynamo.vllm", "--load-format"}},
+		{
+			name: "V1 with GMS load format",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+				vllmLoadFormatFlag, "gms",
+			},
+		},
+		{
+			name: "V1 with unrelated load format",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+				vllmLoadFormatFlag, "safetensors",
+			},
+		},
+		{
+			name: "unrelated worker class",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, "example.CustomWorker",
+			},
+		},
+		{
+			name: "duplicate worker class",
+			args: []string{
+				"-m", "dynamo.vllm",
+				vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+				vllmWorkerClassFlag + "=" + gmsV1VLLMWorkerClass,
+			},
+		},
 	} {
 		t.Run(tt.name+" rolls back", func(t *testing.T) {
 			container := &corev1.Container{
@@ -798,6 +888,42 @@ func TestBuildFailoverPodWithComponent_CheckpointOneShadowUsesLegacyTopology(t *
 		assert.NotContains(t, envToMap(ps.Containers[i].Env), "DYN_FORWARDPASS_METRIC_PORT")
 	}
 	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
+}
+
+func TestBuildFailoverPodWithComponent_CheckpointPreservesGMSV1LoadProfile(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	main := &ps.Containers[0]
+	main.Command = []string{"python3"}
+	main.Args = []string{
+		"-m", "dynamo.vllm",
+		vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+	}
+	main.Env = append(main.Env, corev1.EnvVar{
+		Name:  "DYN_FORWARDPASS_METRIC_PORT",
+		Value: strconv.Itoa(commonconsts.DynamoFPMBasePort),
+	})
+	require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(main))
+
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{
+			Failover:   &v1beta1.FailoverSpec{NumShadows: 1},
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+		},
+	}
+	require.NoError(t, buildFailoverPodWithComponent(&ps, component, 1, BackendFrameworkVLLM))
+
+	require.Len(t, ps.Containers, 3)
+	for i := range 2 {
+		engine := &ps.Containers[i]
+		workerClass, _, _, found, err := tokenizedVLLMFlag(engine.Args, vllmWorkerClassFlag)
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, gmsV1VLLMWorkerClass, workerClass)
+		_, _, _, found, err = tokenizedVLLMFlag(engine.Args, vllmLoadFormatFlag)
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.True(t, hasEnvVar(*engine, "DYN_VLLM_GMS_SHADOW_MODE", "true"))
+	}
 }
 
 func TestBuildFailoverPodWithComponent_RollsBackInvalidPorts(t *testing.T) {

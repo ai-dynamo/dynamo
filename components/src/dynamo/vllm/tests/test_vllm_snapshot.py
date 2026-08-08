@@ -9,6 +9,7 @@ import pytest
 
 import dynamo.vllm.snapshot as snapshot_mod
 from dynamo.vllm.args import parse_args
+from dynamo.vllm.constants import GMS_V1_WORKER_CLASS
 from dynamo.vllm.worker_factory import WorkerFactory
 
 pytestmark = [
@@ -30,6 +31,14 @@ _BASE_ARGS = [
     "--request-plane",
     "tcp",
 ]
+_BASE_V1_ARGS = [
+    "--model",
+    "Qwen/Qwen3-0.6B",
+    "--worker-cls",
+    GMS_V1_WORKER_CLASS,
+    "--request-plane",
+    "tcp",
+]
 
 
 def test_snapshot_failover_clone_profile_accepts_canonical_source(monkeypatch):
@@ -44,6 +53,67 @@ def test_snapshot_failover_clone_profile_accepts_refreshed_target(monkeypatch):
     config = parse_args([*_BASE_ARGS, "--gms-shadow-mode"])
 
     snapshot_mod.validate_snapshot_failover_clone_profile(config, shadow=True)
+
+
+@pytest.mark.parametrize("shadow", [False, True])
+def test_snapshot_failover_clone_profile_accepts_gms_v1(monkeypatch, shadow):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    args = [*_BASE_V1_ARGS]
+    if shadow:
+        args.append("--gms-shadow-mode")
+
+    config = parse_args(args)
+
+    assert config.engine_args.load_format == "auto"
+    assert config.engine_args.worker_cls == GMS_V1_WORKER_CLASS
+    snapshot_mod.validate_snapshot_failover_clone_profile(config, shadow=shadow)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--worker-cls",
+            "example.CustomWorker",
+            "--load-format",
+            "gms",
+            "--gms-shadow-mode",
+        ],
+        [*_BASE_V1_ARGS, "--load-format", "safetensors", "--gms-shadow-mode"],
+        [*_BASE_V1_ARGS, "--load-format", "gms", "--gms-shadow-mode"],
+    ],
+)
+def test_gms_shadow_mode_rejects_unrelated_load_profiles(args):
+    with pytest.raises(ValueError, match="requires --load-format gms"):
+        parse_args(args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [*_BASE_V1_ARGS, "--load-format", "safetensors"],
+        [
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--worker-cls",
+            "example.CustomWorker",
+            "--load-format",
+            "gms",
+            "--request-plane",
+            "tcp",
+        ],
+    ],
+)
+def test_snapshot_failover_clone_profile_rejects_unrelated_load_profile(
+    monkeypatch, args
+):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    config = parse_args(args)
+
+    with pytest.raises(ValueError, match="load profile must use gms with GMS V0"):
+        snapshot_mod.validate_snapshot_failover_clone_profile(config, shadow=False)
 
 
 @pytest.mark.parametrize(

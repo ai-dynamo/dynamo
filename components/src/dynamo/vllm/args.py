@@ -25,7 +25,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
-from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.constants import DisaggregationMode, has_gms_failover_load_profile
 
 from . import envs
 
@@ -148,10 +148,13 @@ def cross_validate_config(
             engine_config.stream_interval,
         )
 
-    # Validate --gms-shadow-mode requires --load-format gms
-    if dynamo_config.gms_shadow_mode and engine_config.load_format != "gms":
+    if dynamo_config.gms_shadow_mode and not has_gms_failover_load_profile(
+        engine_config.load_format,
+        engine_config.worker_cls,
+    ):
         raise ValueError(
-            "--gms-shadow-mode requires --load-format gms. "
+            "--gms-shadow-mode requires --load-format gms or "
+            "the GMS V1 worker with --load-format auto. "
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
