@@ -211,6 +211,17 @@ jobs:
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
+    - name: Verify prometheus_names.py is in sync with Rust source
+      if: matrix.dir == '.'
+      working-directory: .
+      run: |
+        set -eux
+        cargo run -p dynamo-codegen --bin gen-python-prometheus-names
+        # The generator does not emit Black-compatible formatting, so format the
+        # generated file before comparing to the committed copy.
+        python -m pip install black==23.1.0
+        python -m black lib/bindings/python/src/dynamo/prometheus_names.py
+        git diff --exit-code lib/bindings/python/src/dynamo/prometheus_names.py
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
