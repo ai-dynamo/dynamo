@@ -593,17 +593,18 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
-        let factory = crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
+        let factory =
+            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
         let builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);
         let mut builder = match factory {
-            Some(factory) => {
-                builder.worker_selection_policy_factory(move |router_config, worker_type, partition| {
+            Some(factory) => builder.worker_selection_policy_factory(
+                move |router_config, worker_type, partition| {
                     factory(router_config, worker_type, partition)
-                })
-            }
+                },
+            ),
             None => builder,
         };
         if let Some(port) = replica_sync_port {
