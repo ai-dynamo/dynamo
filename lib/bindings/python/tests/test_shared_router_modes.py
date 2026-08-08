@@ -118,7 +118,21 @@ async def test_kv_router_generate_supports_every_mode(router_endpoint, mode):
         with pytest.raises(ValueError, match="explicit worker target"):
             await router.best_worker([1, 2, 3])
     else:
-        selected_worker, dp_rank, overlap = await router.best_worker([1, 2, 3])
+        selection_options = {}
+        if mode == RouterMode.DeviceAwareWeighted:
+            selection_options = {
+                "multi_modal_data": {
+                    "image_url": [{"RawUrl": "https://example.invalid/image.png"}]
+                },
+                "mm_routing_info": {
+                    "routing_token_ids": [1, 2, 3],
+                    "block_mm_infos": [None],
+                    "expanded_prompt_len": 3,
+                },
+            }
+        selected_worker, dp_rank, overlap = await router.best_worker(
+            [1, 2, 3], **selection_options
+        )
         assert selected_worker == worker_id
         assert dp_rank == (0 if mode == RouterMode.KV else None)
         assert overlap == 0
@@ -158,25 +172,6 @@ async def test_non_kv_reservations_are_atomic_and_reusable(router_endpoint):
         0,
     )
     await router.free("reservation")
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(30)
-async def test_device_aware_best_worker_accepts_multimodal_inputs(router_endpoint):
-    endpoint, worker_id = router_endpoint
-    router = KvRouter(endpoint, router_mode=RouterMode.DeviceAwareWeighted)
-
-    assert await router.best_worker(
-        [1, 2, 3],
-        multi_modal_data={
-            "image_url": [{"RawUrl": "https://example.invalid/image.png"}]
-        },
-        mm_routing_info={
-            "routing_token_ids": [1, 2, 3],
-            "block_mm_infos": [None],
-            "expanded_prompt_len": 3,
-        },
-    ) == (worker_id, None, 0)
 
 
 @pytest.mark.asyncio
