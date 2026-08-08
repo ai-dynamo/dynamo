@@ -213,7 +213,6 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - aisimulate/
-  - examples/aisimulate/
   - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'

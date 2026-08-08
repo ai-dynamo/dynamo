@@ -46,9 +46,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.core,
-    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
-    # runners with "Failed to infer device type" even for mock tests.
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # Building the vLLM argument parser resolves a device; on an accelerator-less
+    # host that raises unless a platform is pinned first.
+    pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
     pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -1202,6 +1203,66 @@ def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_
     for field in ("json", "regex", "grammar", "choice"):
         expected = constraint_value if field == constraint_name else None
         assert getattr(sp.structured_outputs, field) == expected
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#"},
+        json.dumps({"$ref": "#"}),
+        {
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"},
+            },
+            "$ref": "#/$defs/A",
+        },
+    ],
+)
+def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
+    from dynamo.llm import HttpError
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"json": schema}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    with pytest.raises(HttpError) as error:
+        build_sampling_params(request, default_sampling_params={})
+
+    assert error.value.code == 400
+
+
+def test_build_sampling_params_accepts_productive_recursive_guided_json():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    schema = {
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/Node"},
+                    }
+                },
+            }
+        },
+        "$ref": "#/$defs/Node",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"json": schema}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    sampling_params = build_sampling_params(request, default_sampling_params={})
+
+    assert sampling_params.structured_outputs.json == schema
 
 
 def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():

@@ -23,6 +23,14 @@ use crate::sequences::WorkerLoadProjection;
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
+/// Supplies the authoritative set of workers currently available for selection.
+///
+/// This is an inclusion set, unlike [`OverloadedWorkerProvider`]'s exclusion
+/// set. `None` means no hard-availability source is attached; `Some` is
+/// authoritative, so an empty set rejects every candidate.
+pub type WorkerAvailabilityProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
     #[error("worker selection policy failed: {0}")]

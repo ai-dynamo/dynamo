@@ -4843,28 +4843,37 @@ mod tests {
     }
 
     #[test]
-    fn test_resource_exhausted_error_response_from_anyhow() {
+    fn overload_errors_preserve_the_http_529_contract() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
         use dynamo_runtime::pipeline::error::PipelineError;
 
-        let cause = PipelineError::ServiceOverloaded(
-            "All workers are busy, please retry later".to_string(),
-        );
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
-            .message("All workers are busy, please retry later")
-            .cause(cause)
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0.as_u16(), 529);
-        assert_eq!(response.1.code, 529);
-        assert_eq!(response.1.error_type, "Overloaded");
-        assert_eq!(response.1.message, "Service temporarily overloaded");
-        assert!(
-            !response.1.message.contains("All workers are busy"),
-            "client response must not include the underlying engine message"
-        );
+        for (error_type, message) in [
+            (
+                ErrorType::ResourceExhausted,
+                "All workers are busy, please retry later",
+            ),
+            (
+                ErrorType::WorkerOverloaded,
+                "Selected worker is overloaded, please retry later",
+            ),
+        ] {
+            let cause = PipelineError::ServiceOverloaded(message.to_string());
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .cause(cause)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0.as_u16(), 529);
+            assert_eq!(response.1.code, 529);
+            assert_eq!(response.1.error_type, "Overloaded");
+            assert_eq!(response.1.message, "Service temporarily overloaded");
+            assert!(
+                !response.1.message.contains(message),
+                "client response must not include the underlying engine message"
+            );
+        }
     }
 
     #[test]

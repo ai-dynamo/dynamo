@@ -141,6 +141,7 @@ where
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
+        let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
@@ -150,13 +151,35 @@ where
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
-        let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
-        let return_routing_hashes =
-            !is_query_only && self.chooser.indexer().records_routing_decisions();
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
-        let explicit_pin = pinned_worker_hint(phase, routing);
+        let mut allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
+        let migration_excluded_worker_ids = request
+            .migration_state
+            .as_ref()
+            .map(|state| state.excluded_worker_ids())
+            .unwrap_or_default();
+        if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
+            let workers = self.chooser.workers_with_configs.borrow();
+            let eligible =
+                allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());
+            eligible.retain(|worker_id| {
+                workers.get(worker_id).is_some_and(|config| {
+                    routing_constraints.is_compatible_with_worker_taints(&config.taints)
+                }) && !migration_excluded_worker_ids.contains(worker_id)
+            });
+            if eligible.is_empty()
+                && let Some(error) = request
+                    .migration_state
+                    .as_ref()
+                    .and_then(|state| state.exhausted_error())
+            {
+                return Err(anyhow::anyhow!(error));
+            }
+        }
+        let return_routing_hashes =
+            !is_query_only && self.chooser.indexer().records_routing_decisions();
         let SelectionOptions {
             affinity_worker,
             policy_class,
