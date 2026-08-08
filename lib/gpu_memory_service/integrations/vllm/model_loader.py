@@ -245,6 +245,101 @@ def register_gms_loader(load_format: str = "gms") -> None:
 # =============================================================================
 
 
+# NVFP4 MoE backends whose step-5 (fused_experts.process_weights_after_loading)
+# is a pure in-place activation-scale fuse that the RW writer captures in the
+# committed weights, so the RO kernel rebuild (which skips step-5) is provably
+# correct: the experts __init__ recomputes any derived scales from the already
+# fused, committed quant config. FLASHINFER_TRTLLM is validated end-to-end;
+# FLASHINFER_CUTLASS is audited by inspection. Any other backend may do work
+# (workspace alloc, non-idempotent transforms, EPLB param registration) the RO
+# path does not reproduce -> refuse rather than silently serve wrong weights.
+# See failover-kimi/EPOCH-0251-PORT.md (R1). Override at your own risk with
+# DYN_GMS_ALLOW_UNVALIDATED_MOE_BACKEND=1.
+_RO_VALIDATED_NVFP4_BACKENDS = frozenset(
+    {"FLASHINFER_TRTLLM", "FLASHINFER_CUTLASS"}
+)
+
+
+def _rebuild_ro_moe_kernels(model: torch.nn.Module) -> int:
+    """Rebuild modular-MoE kernel objects on the RO (import) path.
+
+    The RW writer commits weights *after* the quant method's
+    ``process_weights_after_loading`` has run — i.e. the committed tensors are
+    already in final kernel format. The RO path builds the model on meta and
+    materializes those committed tensors, but the meta-side
+    ``process_weights_after_loading`` aborts on the first MoE layer (meta
+    tensors are unsupported), so every FusedMoE quant method is left with
+    ``moe_kernel is None`` and the MoE forward asserts.
+
+    Re-running the full ``process_weights_after_loading`` on RO would
+    double-transform the already-final weights. Instead we rebuild *only* the
+    kernel object (``get_fused_moe_quant_config`` + ``make_nvfp4_moe_kernel``)
+    from the materialized weights, and deliberately skip the weight
+    (re-)transform and the ``fused_experts.process_weights_after_loading``
+    repack the writer already committed. Analog of the 0.23.0 RO MoE-kernel
+    rebuild, adapted to 0.25.1's modular MoE.
+    """
+    try:
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            make_nvfp4_moe_kernel,
+        )
+    except Exception as e:
+        logger.debug("[GMS] No NVFP4 modular-MoE kernel builder available: %s", e)
+        return 0
+
+    built = 0
+    for layer in model.modules():
+        qm = getattr(layer, "quant_method", None)
+        if qm is None or getattr(qm, "moe_kernel", "missing") is not None:
+            # Not a quant method, or kernel already built.
+            continue
+        # NVFP4 modular FusedMoE method exposes these; skip everything else.
+        if not (
+            hasattr(qm, "nvfp4_backend")
+            and hasattr(qm, "experts_cls")
+            and hasattr(qm, "get_fused_moe_quant_config")
+        ):
+            continue
+        backend_name = getattr(qm.nvfp4_backend, "name", str(qm.nvfp4_backend))
+        if (
+            backend_name not in _RO_VALIDATED_NVFP4_BACKENDS
+            and os.environ.get("DYN_GMS_ALLOW_UNVALIDATED_MOE_BACKEND") != "1"
+        ):
+            raise RuntimeError(
+                f"[GMS] RO MoE-kernel rebuild is not validated for NVFP4 backend "
+                f"{backend_name!r} (validated: {sorted(_RO_VALIDATED_NVFP4_BACKENDS)}). "
+                f"The RO path skips fused_experts.process_weights_after_loading, which "
+                f"is only proven safe when step-5 is an in-place scale fuse captured in "
+                f"the commit. Set DYN_GMS_ALLOW_UNVALIDATED_MOE_BACKEND=1 to override at "
+                f"your own risk (may serve numerically wrong weights). See "
+                f"failover-kimi/EPOCH-0251-PORT.md (R1)."
+            )
+        if built == 0:
+            logger.info(
+                "[GMS] Read mode: rebuilding MoE kernels for NVFP4 backend %s",
+                backend_name,
+            )
+        try:
+            qm.moe_quant_config = qm.get_fused_moe_quant_config(layer)
+            qm.moe_kernel = make_nvfp4_moe_kernel(
+                moe_quant_config=qm.moe_quant_config,
+                moe_config=qm.moe,
+                experts_cls=qm.experts_cls,
+                backend=qm.nvfp4_backend,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
+            built += 1
+        except Exception:
+            logger.exception(
+                "[GMS] RO moe_kernel rebuild failed for %s",
+                layer.__class__.__name__,
+            )
+    if built:
+        logger.info("[GMS] Read mode: rebuilt %d MoE kernel(s)", built)
+    return built
+
+
 def _load_read_mode(
     gms_client: "GMSClientMemoryManager",
     vllm_config,
@@ -261,6 +356,11 @@ def _load_read_mode(
     try:
         model = _create_meta_model(vllm_config, model_config)
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+
+        # Modular-MoE kernels are not committed (they are runtime objects, not
+        # weights); rebuild them from the materialized weights. See
+        # _rebuild_ro_moe_kernels for why we skip the weight re-transform.
+        _rebuild_ro_moe_kernels(model)
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
