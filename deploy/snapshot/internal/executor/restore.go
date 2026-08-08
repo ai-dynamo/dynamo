@@ -126,7 +126,9 @@ func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPo
 	}
 	nsRestorePath, err := mp.Path("nsrestore")
 	if err != nil {
-		mp.Unmount(ctx)
+		if uerr := mp.Unmount(ctx); uerr != nil {
+			return nil, "", fmt.Errorf("resolve nsrestore path: %w (also failed to unmount: %v)", err, uerr)
+		}
 		return nil, "", fmt.Errorf("resolve nsrestore path: %w", err)
 	}
 	return mp, nsRestorePath, nil
