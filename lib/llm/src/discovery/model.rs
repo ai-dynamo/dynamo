@@ -296,6 +296,21 @@ impl Model {
             .collect()
     }
 
+    /// Build an immutable membership snapshot for request-plane publication.
+    ///
+    /// WorkerSets themselves are shared because their engines and routing lifecycle are
+    /// long-lived. The membership map is copied so later discovery mutations cannot leak
+    /// through an older published catalog.
+    pub(crate) fn snapshot(&self) -> Self {
+        let snapshot = Self::new(self.name.clone());
+        for entry in &self.worker_sets {
+            snapshot
+                .worker_sets
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+        snapshot
+    }
+
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
         self.worker_sets

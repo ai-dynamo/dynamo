@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
     PrefillLoadEstimator,
@@ -25,7 +26,7 @@ use super::{
 };
 
 use dynamo_runtime::{
-    component::{Endpoint, build_transport_type},
+    component::{Client, Endpoint, build_transport_type},
     discovery::{Discovery, DiscoverySpec},
     pipeline::network::RequestPlanePayloadCodec,
     prelude::DistributedRuntimeProvider,
@@ -132,6 +133,29 @@ pub enum ModelManagerError {
 /// implausible while keeping the value readable in Grafana dropdowns.
 pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
 
+#[derive(Default)]
+struct CommittedCatalog {
+    models: Arc<HashMap<String, Arc<Model>>>,
+    cards: Arc<HashMap<String, Arc<ModelDeploymentCard>>>,
+    aliases: Arc<HashMap<String, String>>,
+}
+
+struct CommittedDiscoveryGroup {
+    primary: String,
+    namespace: String,
+    worker_set_key: String,
+    aliases: Vec<String>,
+    cards: HashMap<String, ModelDeploymentCard>,
+    adapters: HashMap<String, ModelDeploymentCard>,
+    representative: ModelDeploymentCard,
+}
+
+pub(crate) struct RemovedDiscoveryGroup {
+    pub(crate) namespace: String,
+    pub(crate) representative: ModelDeploymentCard,
+    pub(crate) cards: Vec<ModelDeploymentCard>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -142,8 +166,15 @@ pub struct ModelManager {
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
+    /// Atomically published request-plane view. Discovery lifecycle changes are assembled in the
+    /// mutable maps above and become visible with one pointer swap.
+    catalog: ArcSwap<CommittedCatalog>,
+
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
-    cards: DashMap<String, ModelDeploymentCard>,
+    cards: DashMap<String, Arc<ModelDeploymentCard>>,
+
+    /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
+    discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
 
     /// Prefill router activation rendezvous, keyed by "model_name:namespace".
     prefill_router_activators: DashMap<String, PrefillActivationState>,
@@ -193,7 +224,9 @@ impl ModelManager {
     pub fn new() -> Self {
         Self {
             models: DashMap::new(),
+            catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
+            discovery_groups: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             encoder_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
@@ -207,6 +240,65 @@ impl ModelManager {
             alias_to_primary: DashMap::new(),
             reservation_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    fn publish_catalog_locked(&self) {
+        let models = self
+            .models
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::new(entry.value().snapshot())))
+            .collect();
+        let cards = self
+            .cards
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let aliases = self
+            .alias_to_primary
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        self.catalog.store(Arc::new(CommittedCatalog {
+            models: Arc::new(models),
+            cards: Arc::new(cards),
+            aliases: Arc::new(aliases),
+        }));
+    }
+
+    fn publish_cards_locked(&self) {
+        let current = self.catalog.load_full();
+        let cards = self
+            .cards
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        self.catalog.store(Arc::new(CommittedCatalog {
+            models: current.models.clone(),
+            cards: Arc::new(cards),
+            aliases: current.aliases.clone(),
+        }));
+    }
+
+    fn publish_models_and_cards_locked(&self, changed_models: &HashSet<String>) {
+        let current = self.catalog.load_full();
+        let mut models = (*current.models).clone();
+        for name in changed_models {
+            if let Some(model) = self.models.get(name) {
+                models.insert(name.clone(), Arc::new(model.snapshot()));
+            } else {
+                models.remove(name);
+            }
+        }
+        let cards = self
+            .cards
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        self.catalog.store(Arc::new(CommittedCatalog {
+            models: Arc::new(models),
+            cards: Arc::new(cards),
+            aliases: current.aliases.clone(),
+        }));
     }
 
     // -- Model access --
@@ -226,9 +318,21 @@ impl ModelManager {
             .map(|entry| entry.value().clone())
     }
 
+    pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
+        self.catalog.load().models.get(model_name).cloned()
+    }
+
+    fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
+        self.models
+            .get(model_name)
+            .map(|entry| entry.value().clone())
+    }
+
     /// Remove a Model if it has no remaining WorkerSets.
+    ///
+    /// The caller holds `reservation_lock` and publishes the resulting catalog update.
     /// Uses atomic remove_if to avoid TOCTOU race between checking is_empty and removing.
-    pub fn remove_model_if_empty(&self, model_name: &str) {
+    fn remove_model_if_empty(&self, model_name: &str) {
         if self
             .models
             .remove_if(model_name, |_, model| model.is_empty())
@@ -276,6 +380,7 @@ impl ModelManager {
         if let Some(topology_namespace) = topology_namespace {
             self.reconcile_prefill_router_topology(model_name, &topology_namespace);
         }
+        self.publish_catalog_locked();
         true
     }
 
@@ -291,6 +396,7 @@ impl ModelManager {
         namespace: &str,
         worker_set: Arc<WorkerSet>,
     ) -> bool {
+        let _reservation = self.reservation_lock.lock();
         // Collision check: if `model_name` already exists as a primary (i.e.
         // already has worker sets AND is not currently an alias), refuse to
         // clobber it. The two facts are read one map at a time — the `models`
@@ -313,6 +419,7 @@ impl ModelManager {
 
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), worker_set);
+        self.publish_catalog_locked();
         true
     }
 
@@ -364,6 +471,7 @@ impl ModelManager {
             }
             Entry::Vacant(slot) => {
                 slot.insert(primary.to_string());
+                self.publish_catalog_locked();
                 true
             }
         }
@@ -371,6 +479,7 @@ impl ModelManager {
 
     /// Remove a previously registered alias mapping once the alias has no WorkerSets.
     pub fn unregister_alias_if_empty(&self, alias: &str, primary: &str) {
+        let _reservation = self.reservation_lock.lock();
         if self
             .models
             .get(alias)
@@ -381,14 +490,17 @@ impl ModelManager {
 
         self.alias_to_primary
             .remove_if(alias, |_, existing| existing == primary);
+        self.publish_catalog_locked();
     }
 
     /// Return the primary (canonical) model name for `model`, resolving aliases.
     /// Returns `model` unchanged if it is not an alias.
     pub fn resolve_canonical_name(&self, model: &str) -> String {
-        self.alias_to_primary
+        self.catalog
+            .load()
+            .aliases
             .get(model)
-            .map(|v| v.value().clone())
+            .cloned()
             .unwrap_or_else(|| model.to_string())
     }
 
@@ -402,6 +514,7 @@ impl ModelManager {
 
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
     pub fn remove_worker_set(&self, model_name: &str, namespace: &str) -> Option<Arc<WorkerSet>> {
+        let _reservation = self.reservation_lock.lock();
         let model = self.models.get(model_name)?;
         let removed = model.remove_worker_set(namespace);
         let topology_namespace = removed.as_ref().and_then(|worker_set| {
@@ -419,50 +532,383 @@ impl ModelManager {
             self.reconcile_prefill_router_topology(model_name, &topology_namespace);
         }
         self.remove_model_if_empty(model_name);
+        self.publish_catalog_locked();
         removed
+    }
+
+    /// Commit a complete discovery group atomically.
+    ///
+    /// `before_publish` runs while `reservation_lock` is held and must not call methods that
+    /// acquire that lock.
+    pub(crate) fn commit_discovery_group<F>(
+        &self,
+        group_id: &str,
+        worker_set_key: &str,
+        worker_set: WorkerSet,
+        members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
+        before_publish: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce(),
+    {
+        let representative = members
+            .first()
+            .map(|(_, card)| card)
+            .ok_or_else(|| anyhow::anyhow!("cannot commit an empty discovery group"))?;
+        let primary = representative.name().to_string();
+        let aliases = representative
+            .aliases
+            .iter()
+            .filter(|alias| alias.as_str() != primary)
+            .cloned()
+            .collect::<Vec<_>>();
+        let namespace = worker_set.namespace().to_string();
+        let representative = representative.clone();
+
+        let _reservation = self.reservation_lock.lock();
+        anyhow::ensure!(
+            !self.discovery_groups.contains_key(group_id),
+            "discovery group {group_id:?} is already committed"
+        );
+        if let Some(owner) = self.alias_to_primary.get(&primary) {
+            anyhow::bail!(
+                "model name {primary:?} is reserved as an alias of {:?}",
+                owner.value()
+            );
+        }
+        anyhow::ensure!(
+            !self.discovery_groups.iter().any(|entry| entry
+                .adapters
+                .values()
+                .any(|adapter| adapter.name() == primary)),
+            "model name {primary:?} is reserved by a LoRA adapter"
+        );
+
+        for alias in &aliases {
+            if let Some(owner) = self.alias_to_primary.get(alias)
+                && owner.value() != &primary
+            {
+                anyhow::bail!("alias {alias:?} is already reserved by {:?}", owner.value());
+            }
+            let is_other_primary = self
+                .models
+                .get(alias)
+                .is_some_and(|model| !model.is_empty())
+                && self
+                    .alias_to_primary
+                    .get(alias)
+                    .is_none_or(|owner| owner.value() != &primary);
+            anyhow::ensure!(
+                !is_other_primary,
+                "alias {alias:?} collides with a registered primary model"
+            );
+        }
+        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+
+        let worker_set = Arc::new(worker_set);
+        self.get_or_create_model(&primary)
+            .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        for alias in &aliases {
+            self.alias_to_primary.insert(alias.clone(), primary.clone());
+            self.get_or_create_model(alias)
+                .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        }
+        for (_, adapter) in &adapters {
+            self.get_or_create_model(adapter.name())
+                .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        }
+
+        let cards = members.into_iter().collect::<HashMap<_, _>>();
+        for (key, card) in &cards {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+        let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
+        for (key, card) in &adapters {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+        self.discovery_groups.insert(
+            group_id.to_string(),
+            CommittedDiscoveryGroup {
+                primary: primary.clone(),
+                namespace: namespace.clone(),
+                worker_set_key: worker_set_key.to_string(),
+                aliases,
+                cards,
+                adapters,
+                representative,
+            },
+        );
+        before_publish();
+        self.reconcile_prefill_router_topology(&primary, &namespace);
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
+    fn validate_adapter_claims<'a>(
+        &self,
+        primary: &str,
+        adapters: impl Iterator<Item = &'a ModelDeploymentCard>,
+    ) -> anyhow::Result<()> {
+        for adapter in adapters {
+            let name = adapter.name();
+            anyhow::ensure!(
+                name != primary,
+                "LoRA adapter name {name:?} collides with its base model"
+            );
+            anyhow::ensure!(
+                !self.alias_to_primary.contains_key(name),
+                "LoRA adapter name {name:?} collides with a registered alias"
+            );
+            let owned_by_same_base = self.discovery_groups.iter().any(|entry| {
+                entry.primary == primary
+                    && entry
+                        .adapters
+                        .values()
+                        .any(|existing| existing.name() == name)
+            });
+            let collides_with_primary =
+                self.models.get(name).is_some_and(|model| !model.is_empty()) && !owned_by_same_base;
+            anyhow::ensure!(
+                !collides_with_primary,
+                "LoRA adapter name {name:?} collides with a registered model"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_discovery_group_member(
+        &self,
+        group_id: &str,
+        key: String,
+        card: ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        let _reservation = self.reservation_lock.lock();
+        let mut group = self
+            .discovery_groups
+            .get_mut(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        group.cards.insert(key.clone(), card.clone());
+        self.cards.insert(key, Arc::new(card));
+        drop(group);
+        self.publish_cards_locked();
+        Ok(())
+    }
+
+    pub(crate) fn remove_discovery_group_member(
+        &self,
+        group_id: &str,
+        key: &str,
+    ) -> Option<ModelDeploymentCard> {
+        let _reservation = self.reservation_lock.lock();
+        let mut group = self.discovery_groups.get_mut(group_id)?;
+        let removed = group.cards.remove(key)?;
+        self.cards.remove(key);
+        drop(group);
+        self.publish_cards_locked();
+        Some(removed)
+    }
+
+    pub(crate) fn sync_discovery_group_adapters(
+        &self,
+        group_id: &str,
+        desired: Vec<(String, ModelDeploymentCard)>,
+    ) -> anyhow::Result<()> {
+        let _reservation = self.reservation_lock.lock();
+        let group = self
+            .discovery_groups
+            .get(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        let primary = group.primary.clone();
+        let worker_set_key = group.worker_set_key.clone();
+        drop(group);
+
+        self.validate_adapter_claims(&primary, desired.iter().map(|(_, card)| card))?;
+        let worker_set = self
+            .models
+            .get(&primary)
+            .and_then(|model| model.get_worker_set(&worker_set_key))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "committed discovery group {group_id:?} lost WorkerSet {worker_set_key:?}"
+                )
+            })?;
+        let desired = desired.into_iter().collect::<HashMap<_, _>>();
+        let desired_names = desired
+            .values()
+            .map(|card| card.name().to_string())
+            .collect::<HashSet<_>>();
+        let mut group = self
+            .discovery_groups
+            .get_mut(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        let removed_names = group
+            .adapters
+            .iter()
+            .filter(|(key, _)| !desired.contains_key(*key))
+            .map(|(_, card)| card.name().to_string())
+            .collect::<HashSet<_>>();
+        for key in group
+            .adapters
+            .keys()
+            .filter(|key| !desired.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            group.adapters.remove(&key);
+            self.cards.remove(&key);
+        }
+        for (key, card) in desired {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+            group.adapters.insert(key, card);
+        }
+        drop(group);
+
+        for name in &desired_names {
+            self.get_or_create_model(name)
+                .add_worker_set(worker_set_key.clone(), worker_set.clone());
+        }
+        for name in removed_names.difference(&desired_names) {
+            if let Some(model) = self.models.get(name) {
+                model.remove_worker_set(&worker_set_key);
+            }
+            self.remove_model_if_empty(name);
+        }
+        let changed_models = desired_names
+            .union(&removed_names)
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.publish_models_and_cards_locked(&changed_models);
+        Ok(())
+    }
+
+    pub(crate) fn discovery_group_adapter_cards(&self, group_id: &str) -> Vec<ModelDeploymentCard> {
+        self.discovery_groups
+            .get(group_id)
+            .map(|group| group.adapters.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove a complete discovery group atomically.
+    ///
+    /// `before_publish` runs while `reservation_lock` is held and must not call methods that
+    /// acquire that lock.
+    pub(crate) fn remove_discovery_group<F>(
+        &self,
+        group_id: &str,
+        before_publish: F,
+    ) -> Option<RemovedDiscoveryGroup>
+    where
+        F: FnOnce(&RemovedDiscoveryGroup),
+    {
+        let _reservation = self.reservation_lock.lock();
+        let (_, group) = self.discovery_groups.remove(group_id)?;
+        let representative = group.representative.clone();
+        let topology_namespace = group.namespace.clone();
+
+        for key in group.cards.keys() {
+            self.cards.remove(key);
+        }
+        for key in group.adapters.keys() {
+            self.cards.remove(key);
+        }
+        if let Some(model) = self.models.get(&group.primary) {
+            model.remove_worker_set(&group.worker_set_key);
+        }
+        self.remove_model_if_empty(&group.primary);
+        for alias in &group.aliases {
+            if let Some(model) = self.models.get(alias) {
+                model.remove_worker_set(&group.worker_set_key);
+            }
+            self.remove_model_if_empty(alias);
+            if self.models.get(alias).is_none_or(|model| model.is_empty()) {
+                self.alias_to_primary
+                    .remove_if(alias, |_, owner| owner == &group.primary);
+            }
+        }
+        for adapter in group.adapters.values() {
+            if let Some(model) = self.models.get(adapter.name()) {
+                model.remove_worker_set(&group.worker_set_key);
+            }
+            self.remove_model_if_empty(adapter.name());
+        }
+        let cards = group
+            .cards
+            .into_values()
+            .chain(group.adapters.into_values())
+            .collect();
+        let removed = RemovedDiscoveryGroup {
+            namespace: group.namespace,
+            representative,
+            cards,
+        };
+        before_publish(&removed);
+        self.reconcile_prefill_router_topology(&group.primary, &topology_namespace);
+        self.publish_catalog_locked();
+        Some(removed)
     }
 
     // -- Model cards --
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.iter().map(|r| r.value().clone()).collect()
+        self.catalog
+            .load()
+            .cards
+            .values()
+            .map(|card| (**card).clone())
+            .collect()
     }
 
-    /// Return owned discovery instance keys for the locally recorded cards.
-    /// Reconciliation must not hold DashMap guards while it performs
-    /// asynchronous cleanup.
+    /// Return owned keys for cards in the published catalog.
     pub fn get_model_card_keys(&self) -> Vec<String> {
-        self.cards.iter().map(|r| r.key().clone()).collect()
+        self.catalog.load().cards.keys().cloned().collect()
     }
 
-    /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
-    /// deleted.
+    /// Compatibility path for explicit in-process callers. Discovery uses the atomic group
+    /// lifecycle methods above and never publishes a card independently.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.insert(key.to_string(), card);
+        let _reservation = self.reservation_lock.lock();
+        self.cards.insert(key.to_string(), Arc::new(card));
+        self.publish_catalog_locked();
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.get(key).map(|r| r.value().clone())
+        self.catalog
+            .load()
+            .cards
+            .get(key)
+            .map(|card| (**card).clone())
     }
 
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.remove(key).map(|(_, v)| v)
+        let _reservation = self.reservation_lock.lock();
+        let removed = self.cards.remove(key).map(|(_, value)| (*value).clone());
+        if removed.is_some() {
+            self.publish_catalog_locked();
+        }
+        removed
     }
 
     // -- Engine accessors (delegate through Model → WorkerSet) --
 
     /// Check if a decode model (chat or completions) is registered
     pub fn has_decode_model(&self, model: &str) -> bool {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .is_some_and(|m| m.has_decode_engine())
     }
 
     /// Check if a prefill model is registered
     pub fn has_prefill_model(&self, model: &str) -> bool {
-        self.models.get(model).is_some_and(|m| m.has_prefill())
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .is_some_and(|m| m.has_prefill())
     }
 
     /// Check if any model (decode or prefill) is registered.
@@ -475,7 +921,7 @@ impl ModelManager {
     /// [`has_model_any`](Self::has_model_any), which checks specifically for a
     /// decode or prefill engine.
     pub fn has_registered_model(&self, model: &str) -> bool {
-        self.models.contains_key(model)
+        self.catalog.load().models.contains_key(model)
     }
 
     /// Resolve the model name to use in frontend Prometheus metrics.
@@ -496,7 +942,9 @@ impl ModelManager {
     /// Whether `model` has at least one WorkerSet that can serve an inference
     /// request right now. See [`Model::is_ready_to_serve`].
     pub fn is_model_ready_to_serve(&self, model: &str) -> bool {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .is_some_and(|m| m.is_ready_to_serve())
     }
@@ -504,16 +952,20 @@ impl ModelManager {
     /// Whether any registered model can serve at least one inference request
     /// right now. See [`Model::is_ready_to_serve`].
     pub fn has_any_ready_model(&self) -> bool {
-        self.models
-            .iter()
-            .any(|entry| entry.value().is_ready_to_serve())
+        self.catalog
+            .load()
+            .models
+            .values()
+            .any(|model| model.is_ready_to_serve())
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().is_displayable())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.is_displayable())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
@@ -524,118 +976,143 @@ impl ModelManager {
     /// deployment (e.g. decode-only with no prefill peer) is neither advertised
     /// nor chosen as an implicit default.
     pub fn serving_ready_display_names(&self) -> HashSet<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| {
-                let model = entry.value();
-                model.is_displayable() && model.has_ready_workers()
-            })
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.is_displayable() && model.has_ready_workers())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_chat_completions_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_chat_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_chat_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_completions_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_completions_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_completions_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_embeddings_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_embeddings_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_embeddings_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_classify_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_classify_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_classify_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_pooling_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_pooling_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_pooling_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_tensor_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_tensor_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_tensor_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_images_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_images_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_images_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_audios_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_audios_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_audios_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_videos_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_videos_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_videos_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_realtime_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_realtime_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_realtime_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_generate_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_generate_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_generate_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     /// List Generate models with an engine that advertises `capability`.
     pub fn list_generate_models_for_capability(&self, capability: &str) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_generate_engine_for_capability(capability))
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_generate_engine_for_capability(capability))
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_prefill_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_prefill())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_prefill())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
@@ -643,7 +1120,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_embeddings_engine()
@@ -653,7 +1132,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_classify_engine()
@@ -663,7 +1144,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_pooling_engine()
@@ -673,7 +1156,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine()
@@ -683,7 +1168,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine()
@@ -693,7 +1180,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_tensor_engine()
@@ -703,7 +1192,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_images_engine()
@@ -713,7 +1204,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_videos_engine()
@@ -723,7 +1216,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
@@ -733,7 +1228,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_realtime_engine()
@@ -743,7 +1240,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine()
@@ -754,7 +1253,9 @@ impl ModelManager {
         model: &str,
         capability: &str,
     ) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_for_capability(capability)
@@ -772,7 +1273,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine_with_parsing()
@@ -788,7 +1291,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine_with_parsing()
@@ -804,7 +1309,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_with_parsing()
@@ -834,6 +1341,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -846,6 +1354,7 @@ impl ModelManager {
         );
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -855,6 +1364,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_completions_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -867,6 +1377,7 @@ impl ModelManager {
         );
         ws.completions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -876,6 +1387,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_embeddings_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -888,6 +1400,7 @@ impl ModelManager {
         );
         ws.embeddings_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -897,6 +1410,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIClassifyStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_classify_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -909,6 +1423,7 @@ impl ModelManager {
         );
         ws.classify_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -918,6 +1433,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIPoolingStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_pooling_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -930,6 +1446,7 @@ impl ModelManager {
         );
         ws.pooling_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -939,6 +1456,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_tensor_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -951,6 +1469,7 @@ impl ModelManager {
         );
         ws.tensor_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -960,6 +1479,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIImagesStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_images_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -972,6 +1492,7 @@ impl ModelManager {
         );
         ws.images_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -981,6 +1502,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIVideosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_videos_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -993,6 +1515,7 @@ impl ModelManager {
         );
         ws.videos_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -1002,6 +1525,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1014,6 +1538,7 @@ impl ModelManager {
         );
         ws.audios_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -1023,6 +1548,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: RealtimeBidirectionalEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_realtime_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1035,6 +1561,7 @@ impl ModelManager {
         );
         ws.realtime_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -1044,6 +1571,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: GenerateStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_generate_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1057,6 +1585,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.generate_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -1065,6 +1594,7 @@ impl ModelManager {
         model: &str,
         card_checksum: &str,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_prefill() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1075,6 +1605,7 @@ impl ModelManager {
         card.needs = vec![vec![crate::worker_type::WorkerType::Decode]];
         let ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -1083,7 +1614,12 @@ impl ModelManager {
     /// Remove a model entirely (all its WorkerSets).
     /// Returns the removed Model, or None if not found.
     pub fn remove_model(&self, model: &str) -> Option<Arc<Model>> {
-        self.models.remove(model).map(|(_, m)| m)
+        let _reservation = self.reservation_lock.lock();
+        let removed = self.models.remove(model).map(|(_, value)| value);
+        if removed.is_some() {
+            self.publish_catalog_locked();
+        }
+        removed
     }
 
     // Per-type remove methods for in-process models (used by Python bindings).
@@ -1280,6 +1816,38 @@ impl ModelManager {
         Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
     {
         let client = endpoint.client().await?;
+        self.kv_chooser_for_with_selector_and_client(
+            endpoint,
+            client,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn kv_chooser_for_with_selector_and_client<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        client: Client,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
@@ -1511,7 +2079,7 @@ impl ModelManager {
         namespace: &str,
         decode_endpoint: &EndpointId,
     ) -> anyhow::Result<Option<oneshot::Receiver<Endpoint>>> {
-        if let Some(model) = self.get_model(model_name)
+        if let Some(model) = self.get_model_internal(model_name)
             && let Err(error) =
                 model.prefill_router_topology_with_decode_candidate(namespace, decode_endpoint)
         {
@@ -1569,7 +2137,7 @@ impl ModelManager {
     }
 
     fn deactivate_prefill_router_topology(&self, model_name: &str, namespace: &str) {
-        let Some(model) = self.get_model(model_name) else {
+        let Some(model) = self.get_model_internal(model_name) else {
             return;
         };
         for worker_set in model.prefill_routed_decode_worker_sets_in_namespace(namespace) {
@@ -1580,7 +2148,7 @@ impl ModelManager {
     }
 
     fn reconcile_prefill_router_topology(&self, model_name: &str, namespace: &str) {
-        let Some(model) = self.get_model(model_name) else {
+        let Some(model) = self.get_model_internal(model_name) else {
             return;
         };
         let worker_set = match model.unique_prefill_routed_worker_set_in_namespace(namespace) {
@@ -1650,7 +2218,7 @@ impl ModelManager {
         // state. Endpoint-scoped WorkerSets are leaves, but a model namespace
         // supports only one P/D pairing; discovery order must not choose among
         // multiple prefill-routed decode endpoints.
-        let reactivation_target = if let Some(model) = self.get_model(model_name) {
+        let reactivation_target = if let Some(model) = self.get_model_internal(model_name) {
             match model.unique_prefill_routed_worker_set_in_namespace(namespace) {
                 Ok(worker_set) => worker_set,
                 Err(error) => {
@@ -1769,7 +2337,7 @@ impl ModelManager {
     /// Called by the watcher when all prefill workers in a namespace are removed.
     /// After deactivation, requests fall back to aggregated mode.
     pub fn deactivate_prefill_router_for_decode(&self, model_name: &str, namespace: &str) {
-        let Some(model) = self.get_model(model_name) else {
+        let Some(model) = self.get_model_internal(model_name) else {
             return;
         };
 
@@ -1793,7 +2361,7 @@ impl ModelManager {
     /// The cached endpoint remains usable when that removal resolves a
     /// duplicate leaf; it is dropped only after the final prefill leaf leaves.
     pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
-        if self.get_model(model_name).is_some_and(|model| {
+        if self.get_model_internal(model_name).is_some_and(|model| {
             model.worker_sets().into_iter().any(|worker_set| {
                 worker_set.namespace() == namespace
                     && worker_set.card().worker_type
@@ -1953,7 +2521,7 @@ impl ModelManager {
     }
 
     fn reactivate_encoder_routers(&self, model_name: &str, namespace: &str) {
-        if let Some(model) = self.get_model(model_name) {
+        if let Some(model) = self.get_model_internal(model_name) {
             for ws in model.worker_sets() {
                 if ws.namespace() == namespace
                     && let Some(ref router) = ws.encoder_router
@@ -1981,7 +2549,7 @@ impl ModelManager {
     }
 
     pub fn deactivate_encoder_router_for_consumers(&self, model_name: &str, namespace: &str) {
-        if let Some(model) = self.get_model(model_name) {
+        if let Some(model) = self.get_model_internal(model_name) {
             for ws in model.worker_sets() {
                 if ws.namespace() == namespace
                     && let Some(ref router) = ws.encoder_router
@@ -2728,6 +3296,18 @@ mod tests {
         assert!(Arc::ptr_eq(&m1, &m2));
     }
 
+    #[test]
+    fn public_get_model_retains_live_mutation_semantics() {
+        let manager = ModelManager::new();
+        manager.add_worker_set("llama", "first", make_worker_set("first", "same"));
+        let model = manager.get_model("llama").unwrap();
+
+        manager.add_worker_set("llama", "second", make_worker_set("second", "same"));
+
+        assert!(model.has_worker_set("second"));
+        assert!(Arc::ptr_eq(&model, &manager.get_model("llama").unwrap()));
+    }
+
     // -- Model listing and filtering tests --
 
     #[test]
@@ -2875,6 +3455,105 @@ mod tests {
     fn test_remove_model_card_nonexistent() {
         let mm = ModelManager::new();
         assert!(mm.remove_model_card("nonexistent").is_none());
+    }
+
+    #[test]
+    fn discovery_group_commit_is_all_or_nothing_across_aliases_and_cards() {
+        let manager = ModelManager::new();
+        manager.add_worker_set("taken", "existing", make_worker_set("existing", "old"));
+
+        let mut blocked_card = ModelDeploymentCard::with_name_only("candidate");
+        blocked_card.aliases = vec!["taken".to_string()];
+        let blocked_worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            blocked_card.mdcsum().to_string(),
+            blocked_card.clone(),
+        );
+        let error = manager
+            .commit_discovery_group(
+                "blocked-group",
+                "candidate-workers",
+                blocked_worker_set,
+                vec![("instance-1".to_string(), blocked_card)],
+                Vec::new(),
+                || {},
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("collides"));
+        assert!(manager.get_model("candidate").is_none());
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_model("taken").is_some());
+
+        let mut card = ModelDeploymentCard::with_name_only("committed");
+        card.aliases = vec!["alias".to_string()];
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                "ready-group",
+                "committed-workers",
+                worker_set,
+                vec![("instance-2".to_string(), card)],
+                Vec::new(),
+                || {},
+            )
+            .unwrap();
+
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert!(manager.get_model("committed").is_some());
+        assert!(manager.get_model("alias").is_some());
+        assert_eq!(manager.resolve_canonical_name("alias"), "committed");
+
+        manager
+            .remove_discovery_group("ready-group", |_| {})
+            .unwrap();
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_model("committed").is_none());
+        assert!(manager.get_model("alias").is_none());
+        assert_eq!(manager.resolve_canonical_name("alias"), "alias");
+    }
+
+    #[test]
+    fn discovery_group_projects_adapter_cards_onto_the_base_worker_set() {
+        let manager = ModelManager::new();
+        let base = ModelDeploymentCard::with_name_only("base");
+        let mut adapter = ModelDeploymentCard::with_name_only("adapter");
+        adapter.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            base.mdcsum().to_string(),
+            base.clone(),
+        );
+
+        manager
+            .commit_discovery_group(
+                "adapter-group",
+                "base-workers",
+                worker_set,
+                vec![("base-instance".to_string(), base)],
+                vec![("adapter-instance".to_string(), adapter)],
+                || {},
+            )
+            .unwrap();
+
+        assert_eq!(manager.get_model_cards().len(), 2);
+        assert!(
+            manager
+                .get_committed_model("adapter")
+                .is_some_and(|model| model.has_worker_set("base-workers"))
+        );
+
+        manager
+            .remove_discovery_group("adapter-group", |_| {})
+            .unwrap();
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_committed_model("adapter").is_none());
     }
 
     // -- Prefill router rendezvous tests --

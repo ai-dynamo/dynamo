@@ -607,6 +607,92 @@ impl Client {
         self.routing_instances.instance_avail_watcher()
     }
 
+    /// Create a client view whose routable instances are restricted by a caller-owned
+    /// admission set.
+    ///
+    /// Endpoint discovery remains the source of connection metadata and hard availability. The
+    /// returned client publishes only the intersection of that endpoint membership and
+    /// `admitted_ids`, allowing a higher-level controller to keep discovered-but-unvalidated
+    /// instances out of a routing group. The view has independent overload and fault-inhibition
+    /// state, just like a freshly constructed client.
+    pub fn with_admitted_instances(
+        &self,
+        admitted_ids: tokio::sync::watch::Receiver<Vec<u64>>,
+    ) -> Self {
+        self.with_admitted_instances_and_cancellation(
+            admitted_ids,
+            self.endpoint.drt().primary_token(),
+        )
+    }
+
+    /// Like [`Self::with_admitted_instances`], with a lifecycle token for construction-time
+    /// cancellation by an owning controller.
+    pub fn with_admitted_instances_and_cancellation(
+        &self,
+        mut admitted_ids: tokio::sync::watch::Receiver<Vec<u64>>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let mut endpoint_instances = self.instance_source.as_ref().clone();
+        let initial = Self::filter_admitted_instances(
+            endpoint_instances.borrow().as_slice(),
+            admitted_ids.borrow().as_slice(),
+        );
+        let initial_ids = initial.iter().map(Instance::id).collect::<Vec<_>>();
+        let (instance_tx, instance_rx) = tokio::sync::watch::channel(initial);
+        let updater_cancel = cancel_token.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = updater_cancel.cancelled() => break,
+                    _ = instance_tx.closed() => break,
+                    result = endpoint_instances.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    result = admitted_ids.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                let next = Self::filter_admitted_instances(
+                    endpoint_instances.borrow_and_update().as_slice(),
+                    admitted_ids.borrow_and_update().as_slice(),
+                );
+                let changed = *instance_tx.borrow() != next;
+                if changed && instance_tx.send(next).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let client = Self {
+            endpoint: self.endpoint.clone(),
+            endpoint_discovery_source: self.endpoint_discovery_source.clone(),
+            instance_source: Arc::new(instance_rx),
+            routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
+            reconcile_interval: self.reconcile_interval,
+        };
+        client.monitor_instance_source_with_cancellation(cancel_token);
+        client
+    }
+
+    fn filter_admitted_instances(instances: &[Instance], admitted_ids: &[u64]) -> Vec<Instance> {
+        if admitted_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let admitted = admitted_ids.iter().copied().collect::<HashSet<_>>();
+        instances
+            .iter()
+            .filter(|instance| admitted.contains(&instance.id()))
+            .cloned()
+            .collect()
+    }
+
     /// Subscribe to raw discovery events for this endpoint.
     ///
     /// Unlike `instance_source`, this feed does not coalesce remove→add pairs,
@@ -709,8 +795,15 @@ impl Client {
     /// `instance_source`. This ensures instances removed via `report_instance_down`
     /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
-        let reconcile_interval = self.reconcile_interval;
         let cancel_token = self.endpoint.drt().primary_token();
+        self.monitor_instance_source_with_cancellation(cancel_token);
+    }
+
+    fn monitor_instance_source_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        let reconcile_interval = self.reconcile_interval;
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
@@ -1262,6 +1355,41 @@ mod tests {
         // Note: We need to check if changed() was signaled
         let current = watcher.borrow().clone();
         assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn admitted_client_never_routes_unadmitted_endpoint_instances() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_admitted_client".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let endpoint_client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = endpoint_client.wait_for_instances().await.unwrap()[0].id();
+
+        let (admission_tx, admission_rx) = tokio::sync::watch::channel(Vec::new());
+        let admitted_client = endpoint_client.with_admitted_instances(admission_rx);
+        let mut admitted = admitted_client.instance_avail_watcher();
+        assert!(admitted.borrow().is_empty());
+
+        admission_tx.send_replace(vec![worker_id]);
+        tokio::time::timeout(Duration::from_secs(1), admitted.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.borrow_and_update().clone(), vec![worker_id]);
+
+        admission_tx.send_replace(Vec::new());
+        tokio::time::timeout(Duration::from_secs(1), admitted.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admitted.borrow_and_update().is_empty());
 
         rt.shutdown();
     }
