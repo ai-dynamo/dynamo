@@ -10,7 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from gpu_memory_service.failover_lock import FailoverLockError
+from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
+import dynamo.vllm.publisher as publisher_mod
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
@@ -232,6 +235,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
         component="backend",
         endpoint="generate",
         enable_rl=False,
+        gms_shadow_mode=False,
         engine_args=SimpleNamespace(enable_lora=False),
         enable_multimodal=True,
         custom_encoder_class="encoder.Backend",
@@ -245,6 +249,227 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     if failure_stage == "configure":
         handler_constructor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failover_election_retains_real_lock_through_wake(monkeypatch, tmp_path):
+    lock_path = str(tmp_path / "failover.lock")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", lock_path)
+    monkeypatch.setenv("ENGINE_ID", "2")
+    pause_controller = Mock()
+    pause_controller.pause = AsyncMock()
+    during_resume, after_return = (FlockFailoverLock(lock_path) for _ in range(2))
+    owner = None
+
+    async def resume():
+        with pytest.raises(FailoverLockError, match="Timed out acquiring flock"):
+            await during_resume.acquire(
+                "during-resume", poll_interval=0.005, timeout=0.02
+            )
+
+    pause_controller.resume = resume
+    factory = WorkerFactory(Mock(), Mock(), AsyncMock(), Mock(), Mock())
+    try:
+        was_failover, owner = await factory._wake_with_failover_lock(
+            pause_controller,
+            Mock(),
+            SimpleNamespace(gms_shadow_mode=True),
+        )
+
+        assert was_failover is False
+        assert isinstance(owner, FlockFailoverLock)
+        pause_controller.pause.assert_awaited_once_with(1)
+        pause_controller.mark_resumed.assert_called_once_with()
+        with pytest.raises(FailoverLockError, match="Timed out acquiring flock"):
+            await after_return.acquire(
+                "after-return", poll_interval=0.005, timeout=0.02
+            )
+
+        await owner.release()
+        owner = None
+        await after_return.acquire("after-release", timeout=0.1)
+    finally:
+        if owner is not None:
+            await owner.release()
+        await during_resume.release()
+        await after_return.release()
+
+
+@pytest.mark.asyncio
+async def test_decode_shadow_elects_before_worker_publication(monkeypatch):
+    election_entered = asyncio.Event()
+    release_election = asyncio.Event()
+    metrics_endpoint_created = asyncio.Event()
+
+    async def blocked_election(*_args, **_kwargs):
+        election_entered.set()
+        await release_election.wait()
+        return True, Mock()
+
+    metrics_publisher = Mock()
+
+    async def create_metrics_endpoint(_endpoint):
+        metrics_endpoint_created.set()
+
+    metrics_publisher.create_endpoint = AsyncMock(side_effect=create_metrics_endpoint)
+    metrics_publisher.publish = Mock()
+    monkeypatch.setattr(
+        publisher_mod, "WorkerMetricsPublisher", Mock(return_value=metrics_publisher)
+    )
+
+    engine_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_client = Mock()
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        engine_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    kv_setup = AsyncMock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", kv_setup
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    kv_publisher, fpm_relay, routes = Mock(), Mock(), Mock()
+    model_registration = AsyncMock()
+    model_discovery = AsyncMock(side_effect=RuntimeError("stop-after-election"))
+
+    def setup_engine(_config, stat_logger_factory, **_kwargs):
+        stat_logger_factory.component_gauges = engine_setup[-1]
+        stat_logger_factory.create_stat_logger(dp_rank=0)
+        return engine_setup
+
+    factory = WorkerFactory(
+        setup_engine,
+        kv_publisher,
+        model_registration,
+        fpm_relay,
+        Mock(),
+    )
+    factory._wake_with_failover_lock = blocked_election  # type: ignore[assignment]
+    factory._maybe_create_failover_metrics = Mock()  # type: ignore[assignment]
+    factory._maybe_get_encode_worker_client = model_discovery  # type: ignore[assignment]
+    factory.register_engine_routes = routes  # type: ignore[assignment]
+
+    endpoint = Mock(connection_id=Mock(return_value="cid"))
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock(endpoint=Mock(return_value=endpoint))
+    config = _make_config(
+        gms_shadow_mode=True,
+        namespace="dyn",
+        component="decode",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    task = asyncio.create_task(
+        factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+    )
+
+    await asyncio.wait_for(election_entered.wait(), timeout=1)
+    for operation in (
+        kv_setup,
+        model_discovery,
+        kv_publisher,
+        fpm_relay,
+        routes,
+        model_registration,
+        endpoint.serve_endpoint,
+    ):
+        operation.assert_not_called()
+    metrics_publisher.create_endpoint.assert_not_awaited()
+    assert not metrics_endpoint_created.is_set()
+
+    release_election.set()
+    with pytest.raises(RuntimeError, match="stop-after-election"):
+        await task
+    await asyncio.wait_for(metrics_endpoint_created.wait(), timeout=1)
+    metrics_publisher.create_endpoint.assert_awaited_once_with(endpoint)
+    model_discovery.assert_awaited_once()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_prefill_shadow_elects_before_worker_publication(monkeypatch):
+    election_entered = asyncio.Event()
+    release_election = asyncio.Event()
+
+    async def blocked_election(*_args, **_kwargs):
+        election_entered.set()
+        await release_election.wait()
+        return True, Mock()
+
+    engine_config = SimpleNamespace(
+        additional_config={},
+        model_config=SimpleNamespace(max_model_len=1024),
+    )
+    engine_setup: EngineSetupResult = (
+        Mock(),
+        engine_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    kv_setup = AsyncMock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", kv_setup
+    )
+
+    model_discovery = AsyncMock(side_effect=RuntimeError("stop-after-election"))
+    kv_publisher, fpm_relay, routes = Mock(), Mock(), Mock()
+    model_registration = AsyncMock()
+    factory = WorkerFactory(
+        Mock(return_value=engine_setup),
+        kv_publisher,
+        model_registration,
+        fpm_relay,
+        Mock(),
+    )
+    factory._wake_with_failover_lock = blocked_election  # type: ignore[assignment]
+    factory._maybe_create_failover_metrics = Mock()  # type: ignore[assignment]
+    factory._maybe_get_encode_worker_client = model_discovery  # type: ignore[assignment]
+    factory.register_engine_routes = routes  # type: ignore[assignment]
+
+    endpoint = Mock(connection_id=Mock(return_value="cid"))
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock(endpoint=Mock(return_value=endpoint))
+    config = _make_config(
+        gms_shadow_mode=True,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    task = asyncio.create_task(
+        factory._create_prefill_worker(runtime, config, asyncio.Event(), [])
+    )
+
+    await asyncio.wait_for(election_entered.wait(), timeout=1)
+    for operation in (
+        kv_setup,
+        model_discovery,
+        kv_publisher,
+        fpm_relay,
+        routes,
+        model_registration,
+        endpoint.serve_endpoint,
+    ):
+        operation.assert_not_called()
+
+    release_election.set()
+    with pytest.raises(RuntimeError, match="stop-after-election"):
+        await task
+    model_discovery.assert_awaited_once()
 
 
 def _single_rank_benchmark_payload(
@@ -851,7 +1076,9 @@ class TestPrefillRegistrationContract:
             setup_metrics_collection_fn=Mock(),
         )
         factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
-        factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+        factory._wake_with_failover_lock = AsyncMock(  # type: ignore[assignment]
+            return_value=(False, None)
+        )
         factory.register_engine_routes = Mock()  # type: ignore[assignment]
 
         # embedding_cache_manager=None skips register_embedding_cache_metrics.
@@ -935,7 +1162,9 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         setup_metrics_collection_fn=Mock(),
     )
     factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
-    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory._wake_with_failover_lock = AsyncMock(  # type: ignore[assignment]
+        return_value=(False, None)
+    )
     factory.register_engine_routes = Mock()  # type: ignore[assignment]
 
     handler = Mock(embedding_cache_manager=None)

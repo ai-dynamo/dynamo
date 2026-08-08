@@ -11,8 +11,9 @@ so it is also the seam where the embedding worker must short-circuit
 the chat-shaped pipeline.
 """
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -125,3 +126,43 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["endpoint"] is endpoint
     assert constructed[0]["dp_rank"] == 3
     assert constructed[0]["component_gauges"] is component_gauges
+    assert constructed[0]["publication_gate"] is factory.publication_gate
+
+
+@pytest.mark.asyncio
+async def test_factory_publication_gate_defaults_open(monkeypatch):
+    inner = Mock(create_endpoint=AsyncMock())
+    monkeypatch.setattr(
+        publisher_mod, "WorkerMetricsPublisher", Mock(return_value=inner)
+    )
+    factory = StatLoggerFactory(
+        endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    logger = factory.create_stat_logger(dp_rank=0)
+    await logger._endpoint_task
+
+    inner.create_endpoint.assert_awaited_once_with(factory.endpoint)
+
+
+@pytest.mark.asyncio
+async def test_factory_can_defer_publication(monkeypatch):
+    inner = Mock(create_endpoint=AsyncMock())
+    monkeypatch.setattr(
+        publisher_mod, "WorkerMetricsPublisher", Mock(return_value=inner)
+    )
+    factory = StatLoggerFactory(
+        endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+        defer_publication=True,
+    )
+
+    logger = factory.create_stat_logger(dp_rank=0)
+    await asyncio.sleep(0)
+    inner.create_endpoint.assert_not_awaited()
+
+    factory.enable_publication()
+    await logger._endpoint_task
+
+    inner.create_endpoint.assert_awaited_once_with(factory.endpoint)
