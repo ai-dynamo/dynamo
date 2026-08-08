@@ -21,16 +21,24 @@ const RestoreLogFilename = "restore.log"
 const (
 	netNsPath        = "/proc/1/ns/net"
 	placeholderFDDir = "/proc/1/fd"
+	// defaultBundleDir is the fallback when the caller does not supply a BundleDir.
+	defaultBundleDir = "/tmp/snapshot-binaries"
 )
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
 // resources, and calls go-criu Restore. Returns the namespace-relative PID.
+// bundleDir is the path where the agent bundle is mounted in this namespace;
+// if empty, defaultBundleDir is used.
 func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
+	bundleDir string,
 	log logr.Logger,
 ) (int32, func(), error) {
+	if bundleDir == "" {
+		bundleDir = defaultBundleDir
+	}
 	settings := m.CRIUDump.CRIU
 
 	// Return the FD closers as cleanup() rather than deferring them here, so the
@@ -66,12 +74,20 @@ func ExecuteRestore(
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
 	}
 
-	c := criulib.MakeCriu()
-	if _, err := os.Stat(settings.BinaryPath); err != nil {
+	if err := rewriteCRIULibDir(criuOpts, settings.WorkDir, bundleDir, log); err != nil {
 		cleanup()
-		return 0, nil, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
+		return 0, nil, err
 	}
-	c.SetCriuPath(settings.BinaryPath)
+
+	c := criulib.MakeCriu()
+	// criu is always sourced from the injected binary bundle — never from the
+	// checkpoint-time BinaryPath, which refers to the agent filesystem.
+	criuBin := filepath.Join(bundleDir, "criu")
+	if _, err := os.Stat(criuBin); err != nil {
+		cleanup()
+		return 0, nil, fmt.Errorf("criu binary not found at %s (injected from agent): %w", criuBin, err)
+	}
+	c.SetCriuPath(criuBin)
 
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {
@@ -177,6 +193,52 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 
 	log.V(1).Info("Registered inherited stdio pipes", "count", len(openFiles))
 	return openFiles
+}
+
+// rewriteCRIULibDir rewrites the libdir line in criu.conf so CRIU loads plugins
+// from the injected bundle rather than the dump-time path
+// (/usr/local/lib/snapshot/criu-plugins), which only exists on the agent, not in
+// the placeholder namespace. The override is written to the work dir (runtime state)
+// so the original dump-time config is left intact.
+func rewriteCRIULibDir(criuOpts *criurpc.CriuOpts, workDir, criuBundleDir string, log logr.Logger) error {
+	if criuOpts.ConfigFile == nil {
+		return nil
+	}
+	if workDir == "" {
+		log.Info("criu WorkDir unset; skipping libdir override — criu will use dump-time plugin path")
+		return nil
+	}
+	data, err := os.ReadFile(criuOpts.GetConfigFile())
+	if err != nil {
+		log.Error(err, "failed to read criu config file; skipping libdir override", "path", criuOpts.GetConfigFile())
+		return nil
+	}
+	overridePath := filepath.Join(workDir, "criu-restore.conf")
+	conf := overrideLibDir(string(data), filepath.Join(criuBundleDir, "criu-plugins"))
+	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
+		return fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
+	}
+	criuOpts.ConfigFile = proto.String(overridePath)
+	return nil
+}
+
+func overrideLibDir(conf, libDir string) string {
+	lines := strings.Split(conf, "\n")
+	replaced := false
+	for i, line := range lines {
+		if isLibDirLine(line) {
+			lines[i] = "libdir " + libDir
+			replaced = true
+		}
+	}
+	if !replaced {
+		lines = append(lines, "libdir "+libDir)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isLibDirLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "libdir ")
 }
 
 func closeFiles(files []*os.File) {

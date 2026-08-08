@@ -34,6 +34,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -50,6 +51,7 @@ type NodeController struct {
 	client       client.Client
 	dynClient    dynamic.Interface
 	runtime      snapshotruntime.Runtime
+	injector     executor.Mounter
 	log          logr.Logger
 	holderID     string
 	checkpointFn func(ctx context.Context, params CheckpointParams) error
@@ -112,12 +114,18 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
+	injector, err := nsmount.New("/snapshot-binaries", "/tmp/snapshot-binaries", log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create binary injector: %w", err)
+	}
+
 	w := &NodeController{
 		config:    cfg,
 		clientset: clientset,
 		client:    typedClient,
 		dynClient: dynClient,
 		runtime:   rt,
+		injector:  injector,
 		log:       log,
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
@@ -570,21 +578,20 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
 
-	// Run the restore orchestrator (inspect + nsrestore).
+	// Run the restore orchestrator (inspect + mount agent bundle + nsrestore).
 	req := executor.RestoreRequest{
 		CheckpointID:                checkpointID,
 		CheckpointLocation:          checkpointLocation.HostPath,
 		ContainerCheckpointLocation: checkpointLocation.ContainerPath,
 		ContainerID:                 containerID,
 		StartedAt:                   startedAt,
-		NSRestorePath:               w.config.Restore.NSRestorePath,
 		PodName:                     pod.Name,
 		PodNamespace:                pod.Namespace,
 		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}
-	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
+	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req, w.injector)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())

@@ -21,6 +21,9 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
+	// BundleDir is the path where the agent's binary bundle is mounted inside
+	// this namespace. Defaults to /tmp/snapshot-binaries if empty.
+	BundleDir string
 }
 
 type RestoreInNamespaceResult struct {
@@ -122,7 +125,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -13,9 +13,18 @@ import (
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
-const (
-	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
+// cudaCheckpointHelperBinary is the path to the cuda-checkpoint-helper binary.
+// Defaults to the agent-side installation; cmd/nsrestore calls SetHelperBinaryPath
+// to redirect it to the injected bundle before any CUDA restore operation.
+var cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
 
+// SetHelperBinaryPath overrides the cuda-checkpoint-helper binary path.
+// Must be called before any CUDA checkpoint or restore operation.
+func SetHelperBinaryPath(path string) {
+	cudaCheckpointHelperBinary = path
+}
+
+const (
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
 	actionRestore    = "restore"
