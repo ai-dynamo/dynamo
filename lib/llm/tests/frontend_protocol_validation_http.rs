@@ -75,6 +75,22 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
                 .unwrap();
             assert_openai_400(response, "messages").await;
         }
+        for stream in [false, true] {
+            let response = svc
+                .client
+                .post(format!("{}/v1/responses", svc.base_url))
+                .json(&json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "stream": stream,
+                    "tools": [],
+                    "tool_choice": "required"
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_openai_400(response, "tool_choice is \"required\"").await;
+        }
         for field in [json!({"temperature": 3.0}), json!({"top_p": 2.0})] {
             for stream in [false, true] {
                 let mut body = json!({"model": MODEL, "input": "ping", "stream": stream});
@@ -108,6 +124,23 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
                 .await
                 .unwrap();
             assert_anthropic_400(response, "content blocks must be objects").await;
+        }
+        for stream in [false, true] {
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .header("x-api-key", "dummy")
+                .header("anthropic-version", "2023-06-01")
+                .json(&json!({
+                    "model": MODEL,
+                    "max_tokens": 10,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": []}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_anthropic_400(response, "must contain at least one content block").await;
         }
         for field in [json!({"temperature": 3.0}), json!({"top_p": 2.0})] {
             for stream in [false, true] {
@@ -153,7 +186,7 @@ async fn protocol_adapter_validation_is_400_before_streaming_headers() {
                         &Status::Error,
                         &ErrorType::Validation,
                     ),
-                    3,
+                    4,
                     "validation errors were not metered for {endpoint}/{request_type}"
                 );
                 assert_eq!(

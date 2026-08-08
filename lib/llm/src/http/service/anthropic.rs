@@ -145,6 +145,11 @@ fn validate_anthropic_messages(
         let AnthropicMessageContent::Blocks { content } = &message.content else {
             continue;
         };
+        if content.is_empty() {
+            return Err(invalid_argument(format!(
+                "messages[{message_index}].content: must contain at least one content block"
+            )));
+        }
         for (block_index, block) in content.iter().enumerate() {
             if let AnthropicContentBlock::Other(value) = block
                 && !value.is_object()

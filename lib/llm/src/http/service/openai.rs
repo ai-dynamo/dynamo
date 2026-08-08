@@ -3063,6 +3063,11 @@ async fn responses(
     let (orig_request, context) = request.into_parts();
 
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert NvCreateResponse to UnifiedRequest",
+        );
         let err_response = ErrorMessage::from_anyhow(
             invalid_argument(format!("Failed to convert responses request: {e}")).into(),
             "Failed to convert responses request",
