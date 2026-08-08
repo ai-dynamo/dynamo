@@ -24,6 +24,7 @@ use dynamo_runtime::engine::AsyncEngine;
 use dynamo_runtime::pipeline::{Context as PipelineContext, Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
+use crate::preprocessor::prompt::{ToolArgumentsMode, normalize_tool_call_arguments};
 use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::chat_completions::{
@@ -38,11 +39,18 @@ use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 /// exact prefix the next user turn will see.
 pub struct SpeculativePrefillRequest {
     messages: Vec<ChatCompletionRequestMessage>,
+    tool_arguments_mode: ToolArgumentsMode,
 }
 
 impl SpeculativePrefillRequest {
-    pub fn new(messages: Vec<ChatCompletionRequestMessage>) -> Self {
-        Self { messages }
+    pub fn new(
+        messages: Vec<ChatCompletionRequestMessage>,
+        tool_arguments_mode: ToolArgumentsMode,
+    ) -> Self {
+        Self {
+            messages,
+            tool_arguments_mode,
+        }
     }
 }
 
@@ -52,7 +60,10 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
     }
 
     fn messages(&self) -> Value {
-        let json = serde_json::to_value(&self.messages).unwrap();
+        let mut json = serde_json::to_value(&self.messages).unwrap();
+        if self.tool_arguments_mode == ToolArgumentsMode::ParsedObject {
+            normalize_tool_call_arguments(&mut json);
+        }
         Value::from_serialize(&json)
     }
 
@@ -80,6 +91,7 @@ pub fn maybe_wrap_stream(
     >,
     formatter: &Arc<dyn OAIPromptFormatter>,
     tokenizer: &Arc<dyn Tokenizer>,
+    tool_arguments_mode: ToolArgumentsMode,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
     let enabled = request
         .nvext
@@ -102,7 +114,16 @@ pub fn maybe_wrap_stream(
         let Ok(response_text) = rx.await else {
             return;
         };
-        if let Err(e) = prefill_task(next, formatter, tokenizer, messages, response_text).await {
+        if let Err(e) = prefill_task(
+            next,
+            formatter,
+            tokenizer,
+            messages,
+            response_text,
+            tool_arguments_mode,
+        )
+        .await
+        {
             tracing::warn!(error = %e, "Speculative prefill failed");
         }
     });
@@ -139,6 +160,7 @@ async fn prefill_task(
     tokenizer: Arc<dyn Tokenizer>,
     original_messages: Vec<ChatCompletionRequestMessage>,
     response_text: String,
+    tool_arguments_mode: ToolArgumentsMode,
 ) -> Result<()> {
     let assistant_msg =
         ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
@@ -151,7 +173,7 @@ async fn prefill_task(
     let mut messages = original_messages;
     messages.push(assistant_msg);
 
-    let prefill_request = SpeculativePrefillRequest::new(messages);
+    let prefill_request = SpeculativePrefillRequest::new(messages, tool_arguments_mode);
     let formatted_prompt = formatter.render(&prefill_request)?;
     let encoding = tokenizer.encode(&formatted_prompt)?;
     let token_ids = encoding.token_ids().to_vec();
