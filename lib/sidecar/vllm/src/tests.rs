@@ -529,6 +529,45 @@ async fn collect(
         .await
 }
 
+#[test]
+fn discovery_rejects_incompatible_model_metadata() {
+    let mut unsupported_api = server_info();
+    unsupported_api.api_version = "unsupported".to_string();
+
+    let mut missing_model_id = model_info();
+    missing_model_id.model_id.clear();
+
+    let mut missing_served_name = model_info();
+    missing_served_name.served_model_name.clear();
+
+    let mut unsupported_input = model_info();
+    unsupported_input.supports_token_ids_input = false;
+
+    for (case, model, server) in [
+        ("unsupported API", model_info(), unsupported_api),
+        ("missing model ID", missing_model_id, server_info()),
+        ("missing served name", missing_served_name, server_info()),
+        ("unsupported input", unsupported_input, server_info()),
+    ] {
+        assert!(
+            DiscoveredModel::from_proto(model, server).is_err(),
+            "{case} metadata should be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn startup_rejects_model_identity_change_after_bootstrap() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+
+    let mut changed = model_info();
+    changed.served_model_name = "changed-served-model".to_string();
+    *server.service.model_info_override.lock().await = Some(changed);
+
+    assert!(engine.start(0).await.is_err());
+}
+
 #[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
     let server = FakeServer::start(FakeVllm::default()).await;
