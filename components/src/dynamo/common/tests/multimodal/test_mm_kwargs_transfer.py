@@ -6,8 +6,11 @@
 import pickle
 from unittest.mock import MagicMock
 
+import asyncio
+
 import pytest
 
+from dynamo.common.multimodal import mm_kwargs_transfer
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsShmReceiver,
@@ -122,6 +125,57 @@ class TestMmKwargsNixlSender:
         assert feats[0].mm_hash == "hash_0"
         assert feats[1].data is None
         assert feats[2].mm_hash == "hash_2"
+
+
+class TestMmKwargsNixlSenderCleanup:
+    """cleanup() must be bounded and must always release registered buffers."""
+
+    class _FakeOp:
+        """Stands in for ReadableOperation: completion never resolves."""
+
+        def __init__(self, never_completes: bool = True):
+            self.released = False
+            self._never_completes = never_completes
+
+        async def wait_for_completion(self) -> None:
+            if self._never_completes:
+                await asyncio.Event().wait()  # pends forever
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            self.released = True
+
+    @pytest.mark.asyncio
+    async def test_cleanup_is_bounded_and_releases_when_never_read(self, monkeypatch):
+        """A backend that never reads must not pin the buffer forever.
+
+        Before this was bounded, cleanup() awaited the completion future
+        indefinitely; the pending coroutine held the operation alive and its
+        NIXL registration was never dropped, so the frontend leaked the full
+        payload for every un-read request.
+        """
+        monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 0.05)
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+        ops = [self._FakeOp(), self._FakeOp()]
+
+        await asyncio.wait_for(sender.cleanup(ops), timeout=5)
+
+        assert all(op.released for op in ops), "buffers must be released on timeout"
+
+    @pytest.mark.asyncio
+    async def test_cleanup_releases_on_normal_completion(self, monkeypatch):
+        """The happy path still releases."""
+        monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 5.0)
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+        ops = [self._FakeOp(never_completes=False)]
+
+        await sender.cleanup(ops)
+
+        assert ops[0].released
+
+    @pytest.mark.asyncio
+    async def test_cleanup_with_no_items_is_a_noop(self):
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+        await sender.cleanup([])
 
 
 class TestMmKwargsShmTransfer:
