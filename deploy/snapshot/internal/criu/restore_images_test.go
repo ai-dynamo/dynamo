@@ -11,6 +11,7 @@ import (
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	"github.com/checkpoint-restore/go-criu/v8/crit/images/fdinfo"
 	"github.com/checkpoint-restore/go-criu/v8/crit/images/fown"
+	sk_inet "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-inet"
 	sk_opts "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-opts"
 	sk_unix "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-unix"
 	"golang.org/x/sys/unix"
@@ -182,7 +183,7 @@ func TestPrepareRestoreImageDirConcurrentSocketScopesAreIndependent(t *testing.T
 		if result.err != nil {
 			t.Fatalf("prepare restore view for socket scope %d: %v", result.socketScope, result.err)
 		}
-		defer result.cleanup()
+		t.Cleanup(result.cleanup)
 		paths = append(paths, result.path)
 		entries := readFilesImage(t, result.path)
 		want := []byte("\x00cuda-uvmfd-" + strconv.FormatUint(result.socketScope, 10) + "-855")
@@ -200,6 +201,155 @@ func TestPrepareRestoreImageDirConcurrentSocketScopesAreIndependent(t *testing.T
 	}
 	if !bytes.Equal(gotCanonicalFilesImage, canonicalFilesImage) {
 		t.Fatal("canonical files.img was modified by concurrent restores")
+	}
+}
+
+func TestPrepareRestoreImageDirRewritesEstablishedIPv6ClientPort(t *testing.T) {
+	checkpointPath := t.TempDir()
+	entries := newTCPRestoreTopology()
+	other := newIPv6TCPSocketEntry(4, 104, 40001, 40002)
+	other.Isk.State = proto.Uint32(7)
+	other.Isk.Family = proto.Uint32(unix.AF_INET)
+	other.Isk.SrcAddr, other.Isk.DstAddr = []uint32{0}, []uint32{0}
+	entries = append(entries, other)
+	canonicalFilesImage := writeFilesImage(t, checkpointPath, entries)
+	writeTCPStreamImages(t, checkpointPath, 102, 103)
+
+	imageDir, cleanup, err := prepareRestoreImageDirForSocketScope(checkpointPath, 987654321)
+	if err != nil {
+		t.Fatalf("prepareRestoreImageDirForSocketScope: %v", err)
+	}
+	defer cleanup()
+	if imageDir == checkpointPath {
+		t.Fatal("established TCP pair should use a private image directory")
+	}
+
+	privateEntries := readFilesImage(t, imageDir)
+	clientPort := privateEntries[1].Isk.GetSrcPort()
+	if clientPort == 0 || clientPort > 65535 {
+		t.Fatalf("rewritten client port = %d, want 1..65535", clientPort)
+	}
+	for _, forbidden := range []uint32{46730, 52103, 40001, 40002} {
+		if clientPort == forbidden {
+			t.Fatalf("rewritten client port = %d, matches canonical port %d", clientPort, forbidden)
+		}
+	}
+	if got := privateEntries[2].Isk.GetDstPort(); got != clientPort {
+		t.Fatalf("rewritten server destination port = %d, want client port %d", got, clientPort)
+	}
+
+	for i, original := range entries {
+		want := proto.Clone(original).(*fdinfo.FileEntry)
+		if i == 1 {
+			want.Isk.SrcPort = proto.Uint32(clientPort)
+		}
+		if i == 2 {
+			want.Isk.DstPort = proto.Uint32(clientPort)
+		}
+		if !proto.Equal(privateEntries[i], want) {
+			t.Errorf("private entry %d changed outside the expected port rewrite:\n got: %v\nwant: %v", i, privateEntries[i], want)
+		}
+	}
+	gotCanonical, err := os.ReadFile(filepath.Join(checkpointPath, filesImageFilename))
+	if err != nil || !bytes.Equal(gotCanonical, canonicalFilesImage) {
+		t.Fatalf("canonical files image changed: %v", err)
+	}
+
+	if fd, err := bindDualStackTCPPort(clientPort, false); err == nil {
+		_ = unix.Close(fd)
+		t.Fatalf("strict bind to reserved TCP port %d unexpectedly succeeded", clientPort)
+	}
+	reuseFD, err := bindDualStackTCPPort(clientPort, true)
+	if err != nil {
+		t.Fatalf("CRIU-like bind to reserved TCP port %d: %v", clientPort, err)
+	}
+	_ = unix.Close(reuseFD)
+
+	cleanup()
+	fd, err := bindDualStackTCPPort(clientPort, false)
+	if err != nil {
+		t.Fatalf("bind to released TCP port %d: %v", clientPort, err)
+	}
+	cleanup()
+	if _, err := unix.Getsockname(fd); err != nil {
+		t.Fatalf("repeated cleanup closed reused socket FD: %v", err)
+	}
+	_ = unix.Close(fd)
+}
+
+func TestPrepareRestoreImageDirTCPRewriteFailsClosed(t *testing.T) {
+	wildcard := []uint32{0, 0, 0, 0}
+	for _, name := range []string{"nonreciprocal", "ambiguous", "indeterminate roles"} {
+		t.Run(name, func(t *testing.T) {
+			entries := newTCPRestoreTopology()
+			switch name {
+			case "nonreciprocal":
+				entries = entries[:2]
+			case "ambiguous":
+				duplicate := proto.Clone(entries[2]).(*fdinfo.FileEntry)
+				duplicate.Id = proto.Uint32(4)
+				duplicate.Isk.Id = proto.Uint32(4)
+				duplicate.Isk.Ino = proto.Uint32(104)
+				entries = append(entries, duplicate)
+			case "indeterminate roles":
+				listener := newIPv6TCPSocketEntry(4, 104, 46730, 0)
+				listener.Isk.State = proto.Uint32(linuxTCPStateListen)
+				listener.Isk.SrcAddr, listener.Isk.DstAddr = wildcard, wildcard
+				entries = append(entries, listener)
+			}
+			checkpointPath := t.TempDir()
+			writeFilesImage(t, checkpointPath, entries)
+			for _, entry := range entries {
+				if entry.Isk.GetState() == linuxTCPStateEstablished {
+					writeTCPStreamImages(t, checkpointPath, entry.Isk.GetIno())
+				}
+			}
+
+			imageDir, cleanup, err := prepareRestoreImageDirForSocketScope(checkpointPath, 987654321)
+			if err != nil {
+				t.Fatalf("prepareRestoreImageDirForSocketScope: %v", err)
+			}
+			defer cleanup()
+			if imageDir != checkpointPath {
+				t.Fatalf("unsupported TCP graph used private image directory %q", imageDir)
+			}
+		})
+	}
+}
+
+func TestPrepareRestoreImageDirConcurrentTCPPortsAreIndependent(t *testing.T) {
+	checkpointPath := t.TempDir()
+	writeFilesImage(t, checkpointPath, newTCPRestoreTopology())
+	writeTCPStreamImages(t, checkpointPath, 102, 103)
+
+	type result struct {
+		path    string
+		cleanup func()
+		err     error
+	}
+	results := make(chan result, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			path, cleanup, err := prepareRestoreImageDirForSocketScope(checkpointPath, 987654321)
+			results <- result{path, cleanup, err}
+		}()
+	}
+
+	ports := make(map[uint32]struct{})
+	for range 3 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("prepare restore view: %v", result.err)
+		}
+		t.Cleanup(result.cleanup)
+		port := readFilesImage(t, result.path)[1].Isk.GetSrcPort()
+		if _, exists := ports[port]; exists {
+			t.Fatalf("concurrent restore views shared rewritten TCP port %d", port)
+		}
+		ports[port] = struct{}{}
+	}
+	if len(ports) != 3 {
+		t.Fatalf("concurrent restores used %d TCP ports, want 3", len(ports))
 	}
 }
 
@@ -249,6 +399,81 @@ func newUnixSocketEntry(id uint32, name []byte, inode, peer uint32) *fdinfo.File
 	}
 }
 
+func newTCPRestoreTopology() []*fdinfo.FileEntry {
+	wildcard := []uint32{0, 0, 0, 0}
+	podAddress := []uint32{0, 0, 0xffff0000, 0x0100007f}
+	entries := []*fdinfo.FileEntry{
+		newIPv6TCPSocketEntry(1, 101, 52103, 0),
+		newIPv6TCPSocketEntry(2, 102, 46730, 52103),
+		newIPv6TCPSocketEntry(3, 103, 52103, 46730),
+	}
+	entries[0].Isk.State = proto.Uint32(linuxTCPStateListen)
+	entries[0].Isk.SrcAddr, entries[0].Isk.DstAddr = wildcard, wildcard
+	entries[1].Isk.SrcAddr, entries[1].Isk.DstAddr = podAddress, podAddress
+	entries[2].Isk.SrcAddr, entries[2].Isk.DstAddr = podAddress, podAddress
+	return entries
+}
+
+func newIPv6TCPSocketEntry(id, inode, srcPort, dstPort uint32) *fdinfo.FileEntry {
+	base := newUnixSocketEntry(id, nil, inode, 0).Usk
+	return &fdinfo.FileEntry{
+		Type: fdinfo.FdTypes_INETSK.Enum(),
+		Id:   proto.Uint32(id),
+		Isk: &sk_inet.InetSkEntry{
+			Id:      proto.Uint32(id),
+			Ino:     proto.Uint32(inode),
+			Family:  proto.Uint32(uint32(unix.AF_INET6)),
+			Type:    proto.Uint32(uint32(unix.SOCK_STREAM)),
+			Proto:   proto.Uint32(uint32(unix.IPPROTO_TCP)),
+			State:   proto.Uint32(linuxTCPStateEstablished),
+			SrcPort: proto.Uint32(srcPort),
+			DstPort: proto.Uint32(dstPort),
+			Flags:   base.Flags,
+			Backlog: base.Backlog,
+			Fown:    base.Fown,
+			Opts:    base.Opts,
+			V6Only:  proto.Bool(false),
+			NsId:    proto.Uint32(9),
+		},
+	}
+}
+
+func writeTCPStreamImages(t *testing.T, dir string, inodes ...uint32) {
+	t.Helper()
+	for _, inode := range inodes {
+		name := filepath.Join(dir, "tcp-stream-"+strconv.FormatUint(uint64(inode), 16)+".img")
+		if err := os.WriteFile(name, []byte("tcp stream"), 0600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+func bindDualStackTCPPort(port uint32, reuse bool) (int, error) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
+	if err != nil {
+		return -1, err
+	}
+	if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	address := &unix.SockaddrInet6{Port: int(port)}
+	if reuse {
+		for _, option := range []int{unix.SO_REUSEADDR, unix.SO_REUSEPORT} {
+			if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, option, 1); err != nil {
+				_ = unix.Close(fd)
+				return -1, err
+			}
+		}
+		address.Addr = [16]byte{10: 0xff, 11: 0xff, 12: 127, 15: 1}
+	}
+	if err := unix.Bind(fd, address); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
 func writeFilesImage(t *testing.T, dir string, entries []*fdinfo.FileEntry) []byte {
 	t.Helper()
 
@@ -286,7 +511,11 @@ func readFilesImage(t *testing.T, dir string) []*fdinfo.FileEntry {
 	if err != nil {
 		t.Fatalf("open files image: %v", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close files image: %v", err)
+		}
+	}()
 	image, err := crit.New(file, nil, "", false, false).Decode(&fdinfo.FileEntry{})
 	if err != nil {
 		t.Fatalf("decode files image: %v", err)
