@@ -346,8 +346,15 @@ The report — and the equivalent Python APIs `dynamo.replay.run_trace_replay(..
 - virtual duration and wall-clock runtime
 - request and token throughput
 - prefix cache reuse ratio
-- TTFT, TTST, TPOT, ITL, and end-to-end latency summaries
+- TTFT, TTST, TPOT, ITL, token-gap, and end-to-end latency summaries
 - output-token-throughput-per-user summaries
+
+ITL and output-token-throughput-per-user follow AIPerf's request-level definitions so the report can
+be compared field-for-field with an AIPerf run: `itl = (request_latency - ttft) /
+(output_sequence_length - 1)` per request, and `output_token_throughput_per_user = 1000 / itl_ms`
+per request. The `token_gap` summary keeps the raw distribution over individual consecutive-token
+gaps pooled across requests — its tail exposes engine stalls (for example chunked-prefill
+interference) that request-level averaging smooths out.
 
 ## Related pages
 

@@ -228,7 +228,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn test_replay_itl_uses_per_token_gaps() {
+    fn test_replay_itl_matches_aiperf_request_semantics() {
         fn assert_ddsketch_relative_error(actual: f64, expected: f64) {
             assert!((actual - expected).abs() <= expected.abs() * 0.001 + f64::EPSILON);
         }
@@ -246,22 +246,26 @@ mod tests {
 
         let report = collector.finish();
 
+        // Request-level ITL matches AIPerf: (last - first) / (osl - 1) = 100/3.
         assert!((report.latency.tpot.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
         assert!((report.latency.itl.distribution.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.median_ms, 1.0);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.p75_ms, 98.0);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.p90_ms, 98.0);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.p95_ms, 98.0);
-        assert_eq!(report.latency.itl.max_ms, 98.0);
+        assert!((report.latency.itl.distribution.median_ms - (100.0 / 3.0)).abs() < 1e-9);
+        assert!((report.latency.itl.max_ms - (100.0 / 3.0)).abs() < 1e-9);
+        // The raw per-gap distribution keeps the individual 1/1/98 ms gaps.
+        assert!((report.latency.token_gap.distribution.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
+        assert_ddsketch_relative_error(report.latency.token_gap.distribution.median_ms, 1.0);
+        assert_ddsketch_relative_error(report.latency.token_gap.distribution.p75_ms, 98.0);
+        assert_ddsketch_relative_error(report.latency.token_gap.distribution.p90_ms, 98.0);
+        assert_ddsketch_relative_error(report.latency.token_gap.distribution.p95_ms, 98.0);
+        assert_eq!(report.latency.token_gap.max_ms, 98.0);
         assert_eq!(report.latency.ttst.min_ms, 1.0);
         assert_eq!(report.latency.ttst.max_ms, 1.0);
-        assert_eq!(
-            report.latency.output_token_throughput_per_user.min_ms,
-            1000.0 / 98.0
+        // Per-user throughput matches AIPerf: 1 / request-level ITL.
+        assert!(
+            (report.latency.output_token_throughput_per_user.min_ms - 30.0).abs() < 1e-9
         );
-        assert_eq!(
-            report.latency.output_token_throughput_per_user.max_ms,
-            1000.0
+        assert!(
+            (report.latency.output_token_throughput_per_user.max_ms - 30.0).abs() < 1e-9
         );
     }
 

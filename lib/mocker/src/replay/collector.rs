@@ -109,8 +109,17 @@ pub struct TraceLatencyStats {
     pub ttft: TraceDistributionStats,
     pub ttst: TraceDistributionStats,
     pub tpot: TraceDistributionStats,
+    /// Per-request average inter-token latency, matching AIPerf's
+    /// `inter_token_latency` definition:
+    /// `(request_latency - ttft) / (output_sequence_length - 1)`.
     pub itl: TraceInterTokenLatencyStats,
+    /// Distribution over individual consecutive-token gaps (all requests
+    /// pooled). This is the stricter per-gap view previously published as
+    /// `itl`; it has no AIPerf counterpart.
+    pub token_gap: TraceInterTokenLatencyStats,
     pub e2e: TraceDistributionStats,
+    /// Per-request `1000 / itl_ms`, matching AIPerf's
+    /// `output_token_throughput_per_user` definition (`1 / ITL`).
     pub output_token_throughput_per_user: TraceDistributionStats,
 }
 
@@ -279,6 +288,8 @@ impl Serialize for TraceSimulationReport {
         serialize_distribution(&mut map, "tpot", &self.latency.tpot)?;
         serialize_distribution(&mut map, "itl", &self.latency.itl.distribution)?;
         map.serialize_entry("max_itl_ms", &self.latency.itl.max_ms)?;
+        serialize_distribution(&mut map, "token_gap", &self.latency.token_gap.distribution)?;
+        map.serialize_entry("max_token_gap_ms", &self.latency.token_gap.max_ms)?;
         serialize_distribution(&mut map, "e2e_latency", &self.latency.e2e)?;
         serialize_rate_distribution(
             &mut map,
@@ -658,8 +669,7 @@ pub(crate) struct TraceCollector {
     requests: FxHashMap<Uuid, TraceRequestStats>,
     /// Global per-token distributions are folded in as requests terminate, so
     /// completed requests no longer retain one timestamp per emitted token.
-    itl_distribution: StreamingDistribution,
-    output_token_throughput_per_user: StreamingDistribution,
+    token_gap_distribution: StreamingDistribution,
     /// Keep completed token timelines until `finish()` instead of folding them
     /// synchronously in `on_terminal`.
     defer_token_timeline_finalization: bool,
@@ -736,8 +746,7 @@ impl TraceRequestStats {
     fn finalize_token_timeline(
         &mut self,
         include_in_distributions: bool,
-        itl_distribution: &mut StreamingDistribution,
-        output_token_throughput_per_user: &mut StreamingDistribution,
+        token_gap_distribution: &mut StreamingDistribution,
     ) {
         let TokenTimeline::Recording(times) = &self.token_timeline else {
             return;
@@ -745,11 +754,8 @@ impl TraceRequestStats {
 
         if include_in_distributions {
             for window in times.windows(2) {
-                let itl_ms = (window[1] - window[0]).max(0.0);
-                itl_distribution.add(itl_ms);
-                if itl_ms > 0.0 {
-                    output_token_throughput_per_user.add(1000.0 / itl_ms);
-                }
+                let gap_ms = (window[1] - window[0]).max(0.0);
+                token_gap_distribution.add(gap_ms);
             }
         }
 
@@ -1113,8 +1119,7 @@ impl TraceCollector {
     ) {
         let Self {
             requests,
-            itl_distribution,
-            output_token_throughput_per_user,
+            token_gap_distribution,
             defer_token_timeline_finalization,
             ..
         } = self;
@@ -1126,8 +1131,7 @@ impl TraceCollector {
             if !*defer_token_timeline_finalization {
                 stats.finalize_token_timeline(
                     status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some(),
-                    itl_distribution,
-                    output_token_throughput_per_user,
+                    token_gap_distribution,
                 );
             }
         }
@@ -1232,16 +1236,14 @@ impl TraceCollector {
     pub(crate) fn finish(mut self) -> TraceSimulationReport {
         let Self {
             requests,
-            itl_distribution,
-            output_token_throughput_per_user,
+            token_gap_distribution,
             ..
         } = &mut self;
         for stats in requests.values_mut() {
             stats.finalize_token_timeline(
                 stats.terminal_status == Some(ReplayTerminalStatus::Completed)
                     && stats.first_admit_ms.is_some(),
-                itl_distribution,
-                output_token_throughput_per_user,
+                token_gap_distribution,
             );
         }
 
@@ -1261,13 +1263,14 @@ impl TraceCollector {
         let accumulated_decode_worker_seconds = self.decode_worker_seconds;
         let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
         let decode_gpus_per_worker = self.decode_gpus_per_worker;
-        let itl_distribution = self.itl_distribution.finish();
-        let output_token_throughput_per_user = self.output_token_throughput_per_user.finish();
+        let token_gap_max_ms = self.token_gap_distribution.max;
+        let token_gap_distribution = self.token_gap_distribution.finish();
         let requests = self.requests;
         let request_count = requests.len();
         let mut ttfts = Vec::with_capacity(request_count);
         let mut ttsts = Vec::with_capacity(request_count);
         let mut tpots = Vec::with_capacity(request_count);
+        let mut output_tokens_per_s_per_user = Vec::with_capacity(request_count);
         let mut e2e_latencies = Vec::with_capacity(request_count);
         let mut duration_ms = 0.0_f64;
         let mut total_input_tokens = 0usize;
@@ -1325,6 +1328,9 @@ impl TraceCollector {
 
             if let Some(tpot_ms) = stats.mean_tpot_ms() {
                 tpots.push(tpot_ms);
+                if tpot_ms > 0.0 {
+                    output_tokens_per_s_per_user.push(1000.0 / tpot_ms);
+                }
             }
         }
 
@@ -1383,13 +1389,26 @@ impl TraceCollector {
             latency: TraceLatencyStats {
                 ttft: build_distribution_stats(ttfts),
                 ttst: build_distribution_stats(ttsts),
-                tpot: build_distribution_stats(tpots),
-                itl: TraceInterTokenLatencyStats {
-                    max_ms: itl_distribution.max_ms,
-                    distribution: itl_distribution,
+                tpot: build_distribution_stats(tpots.clone()),
+                itl: {
+                    let distribution = build_distribution_stats(tpots);
+                    TraceInterTokenLatencyStats {
+                        max_ms: distribution.max_ms,
+                        distribution,
+                    }
+                },
+                token_gap: TraceInterTokenLatencyStats {
+                    max_ms: if token_gap_max_ms.is_finite() {
+                        token_gap_max_ms
+                    } else {
+                        0.0
+                    },
+                    distribution: token_gap_distribution,
                 },
                 e2e: build_distribution_stats(e2e_latencies),
-                output_token_throughput_per_user,
+                output_token_throughput_per_user: build_distribution_stats(
+                    output_tokens_per_s_per_user,
+                ),
             },
             goodput,
             per_request,
@@ -2247,8 +2266,14 @@ mod tests {
         assert_eq!(collector.retained_token_timestamps(), 3);
 
         let report = collector.finish();
+        // Request-level ITL (AIPerf semantics): (15 - 10) / 2 gaps = 2.5.
         assert_eq!(report.latency.itl.distribution.mean_ms, 2.5);
-        assert_eq!(report.latency.itl.distribution.min_ms, 2.0);
-        assert_eq!(report.latency.itl.distribution.max_ms, 3.0);
+        assert_eq!(report.latency.itl.distribution.min_ms, 2.5);
+        assert_eq!(report.latency.itl.distribution.max_ms, 2.5);
+        // Raw per-gap view: gaps of 2 ms and 3 ms.
+        assert_eq!(report.latency.token_gap.distribution.mean_ms, 2.5);
+        assert_eq!(report.latency.token_gap.distribution.min_ms, 2.0);
+        assert_eq!(report.latency.token_gap.distribution.max_ms, 3.0);
+        assert_eq!(report.latency.token_gap.max_ms, 3.0);
     }
 }

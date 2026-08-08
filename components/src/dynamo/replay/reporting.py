@@ -63,6 +63,7 @@ def _build_rows(report: dict[str, object]) -> list[list[str]]:
     _append_stat_row(rows, report, "Time to Second Token (ms)", "ttst_ms")
     _append_stat_row(rows, report, "Request Latency (ms)", "e2e_latency_ms")
     _append_stat_row(rows, report, "Inter Token Latency (ms)", "itl_ms")
+    _append_stat_row(rows, report, "Token Gap (ms)", "token_gap_ms")
     _append_stat_row(
         rows,
         report,
