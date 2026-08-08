@@ -1,0 +1,2 @@
+{"custom_id":"dynamo-batch-1","method":"POST","url":"/v1/chat/completions","body":{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Reply with exactly: batch one"}],"max_tokens":16,"chat_template_kwargs":{"enable_thinking":false}}}
+{"custom_id":"dynamo-batch-2","method":"POST","url":"/v1/chat/completions","body":{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Reply with exactly: batch two"}],"max_tokens":16,"chat_template_kwargs":{"enable_thinking":false}}}
