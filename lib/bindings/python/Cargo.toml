@@ -22,8 +22,7 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["python-module"]
-python-module = []
+default = []
 # Links a policy catalog selected by the dependency alias below. Private images replace
 # that dependency with their catalog crate; the stock image does not enable this feature.
 custom-policy = [

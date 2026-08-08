@@ -293,14 +293,14 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 }
 
 /// The extension-module entrypoint for a custom policy image.
-#[cfg(all(feature = "python-module", feature = "custom-policy"))]
+#[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_core_with_custom_worker_selection_policy(m)
 }
 
 /// The stock extension-module entrypoint.
-#[cfg(all(feature = "python-module", not(feature = "custom-policy")))]
+#[cfg(not(feature = "custom-policy"))]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_core(m)
