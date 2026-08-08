@@ -51,6 +51,10 @@ use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
     agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
 };
+use crate::protocols::common::input_trigger::{
+    attach_input_trigger, classify_chat_request, classify_completion_request,
+    classify_response_request,
+};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
@@ -691,7 +695,9 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    let input_trigger = classify_completion_request(request.content());
+    attach_input_trigger(&mut request, input_trigger);
     let context = request.context();
 
     // create the connection handles
@@ -1858,6 +1864,8 @@ async fn handler_chat_completions(
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
     let mut request = context_from_headers(request, request_id, &headers)?;
+    let input_trigger = classify_chat_request(request.content());
+    attach_input_trigger(&mut request, input_trigger);
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2939,6 +2947,8 @@ async fn handler_responses(
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
     let mut request = context_from_headers(request, request_id, &headers)?;
+    let input_trigger = classify_response_request(request.content());
+    attach_input_trigger(&mut request, input_trigger);
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4727,6 +4737,7 @@ mod tests {
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
                 kv_hints: None,
+                input_trigger: None,
             },
         );
 
