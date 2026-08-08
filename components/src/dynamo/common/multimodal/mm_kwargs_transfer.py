@@ -39,6 +39,11 @@ from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on how long cleanup() waits for the backend to read a transferred
+# payload before releasing the NIXL-registered buffer anyway. Unbounded waiting
+# pins the buffer for the process lifetime when the read never happens.
+MM_NIXL_CLEANUP_TIMEOUT_S = float(os.environ.get("DYN_MM_NIXL_CLEANUP_TIMEOUT_S", "60"))
+
 
 # ---------------------------------------------------------------------------
 # Wire protocol
@@ -243,7 +248,10 @@ class MmKwargsNixlSender(MmKwargsSender):
             dtype_str="uint8",
             serialized_request=readable_op.metadata().model_dump(),
         )
-        return spec, readable_op.wait_for_completion()
+        # Hand back the operation itself, not just its completion awaitable:
+        # cleanup() must be able to release the registered memory region even
+        # when the remote side never reads it.
+        return spec, readable_op
 
     def _assemble_extra_args(
         self,
@@ -263,14 +271,47 @@ class MmKwargsNixlSender(MmKwargsSender):
         return {"mm_kwargs_nixl": metadata.model_dump()}
 
     async def cleanup(self, items: list[Any]) -> None:
-        """Await NIXL completion futures so memory regions can be deregistered."""
+        """Await NIXL completion, then release the registered memory regions.
+
+        The wait is bounded. ``ReadableOperation.wait_for_completion()`` only
+        resolves once the backend actually reads the buffer, so a request that
+        is cancelled, rejected, or routed to a worker that dies leaves it
+        pending forever. Because the pending coroutine holds a reference to the
+        operation, the NIXL-registered buffer is never deregistered and the
+        frontend's RSS grows by the size of every un-read payload for the
+        lifetime of the process.
+
+        Releasing in ``finally`` is the part that actually fixes the leak: the
+        timeout alone would stop the hang while still pinning the memory.
+        """
         if not items:
             return
         try:
-            await asyncio.gather(*items)
+            await asyncio.wait_for(
+                asyncio.gather(*(op.wait_for_completion() for op in items)),
+                timeout=MM_NIXL_CLEANUP_TIMEOUT_S,
+            )
             logger.debug("[NIXL-Sender] all transfers completed")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[NIXL-Sender] %d transfer(s) not read within %.1fs; "
+                "releasing buffers anyway",
+                len(items),
+                MM_NIXL_CLEANUP_TIMEOUT_S,
+            )
         except Exception:
             logger.warning("[NIXL-Sender] transfer completion failed", exc_info=True)
+        finally:
+            for op in items:
+                try:
+                    # ReadableOperation.__exit__ -> _release() -> deregister.
+                    # _release() skips descriptors that are already
+                    # deregistered, so this stays safe alongside __del__.
+                    op.__exit__(None, None, None)
+                except Exception:
+                    logger.debug(
+                        "[NIXL-Sender] failed to release transfer", exc_info=True
+                    )
 
 
 # ---------------------------------------------------------------------------
