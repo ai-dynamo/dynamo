@@ -828,9 +828,24 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 valid checkpoint configuration reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
+			}),
+		},
+		{
+			name: "v1beta1 two-shadow checkpoint failover reaches the webhook",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaTwoShadowIntraPod(
+					worker,
+					[]string{"python3"},
+					[]string{"-m", "dynamo.vllm"},
+				)
+				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
 		},
 		{

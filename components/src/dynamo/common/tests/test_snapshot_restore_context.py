@@ -12,6 +12,7 @@ from dynamo.common.snapshot.constants import (
     KUBERNETES_REQUIRED_ENV_NAMES,
     RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR_ENV,
+    SNAPSHOT_FAILOVER_SOURCE_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
     SNAPSHOT_RESTORE_PAUSED_ENV,
     SNAPSHOT_RESTORE_STANDBY_ENV,
@@ -50,6 +51,7 @@ def write_restore_context(monkeypatch, tmp_path, env):
 
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):
+    monkeypatch.setenv(SNAPSHOT_FAILOVER_SOURCE_ENV, "1")
     monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
     write_restore_context(
         monkeypatch,
@@ -69,6 +71,7 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     }
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
+    assert SNAPSHOT_FAILOVER_SOURCE_ENV not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
 
 

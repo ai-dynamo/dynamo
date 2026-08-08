@@ -132,7 +132,22 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
-		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {
+		backendFramework := dynamoDeployment.Spec.BackendFramework
+
+		// Resolve backend policy only for components that opted into checkpoint failover.
+		if checkpoint.HasCheckpointEnabledFailover(component) {
+			resolvedBackend, backendErr := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
+			if backendErr != nil {
+				compatibilityErrs = append(compatibilityErrs, backendErr)
+				continue
+			}
+			backendFramework = string(resolvedBackend)
+		}
+		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(
+			component,
+			backendFramework,
+			checkpoint.CompatibilityContextDGDSource,
+		) {
 			compatibilityErrs = append(
 				compatibilityErrs,
 				fmt.Errorf("component %q: %w", component.ComponentName, compatibilityErr),

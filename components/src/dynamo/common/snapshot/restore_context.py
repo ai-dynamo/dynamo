@@ -16,6 +16,7 @@ from dynamo.common.snapshot.constants import (
     RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
+    SNAPSHOT_FAILOVER_SOURCE_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
     SNAPSHOT_RESTORE_PAUSED_ENV,
     SNAPSHOT_RESTORE_STANDBY_ENV,
@@ -116,6 +117,9 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 
 def apply_snapshot_restore_env() -> dict[str, str | None]:
     """Load restore-context JSON and apply its runtime env to ``os.environ``."""
+
+    # Source-only validation must not leak into restored targets.
+    os.environ.pop(SNAPSHOT_FAILOVER_SOURCE_ENV, None)
 
     env_config, source = _load_snapshot_restore_env()
     return _apply_restore_env(env_config, source=source)

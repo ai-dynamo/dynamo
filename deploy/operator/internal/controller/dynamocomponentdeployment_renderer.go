@@ -32,8 +32,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -112,6 +114,100 @@ func (r *dcdWorkloadRenderer) verifyAutomaticCheckpointBinding(
 		binding,
 	); err != nil {
 		return fmt.Errorf("automatic checkpoint provenance differs: %w", err)
+	}
+	return nil
+}
+
+func (r *dcdWorkloadRenderer) verifyAutomaticFailoverCheckpoint(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	info *checkpoint.CheckpointInfo,
+) error {
+	owner := metav1.GetControllerOf(dcd)
+	if owner == nil ||
+		owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() ||
+		owner.Kind != "DynamoGraphDeployment" {
+		return fmt.Errorf("automatic failover restore requires a DynamoGraphDeployment controller")
+	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := r.reader.Get(ctx, types.NamespacedName{
+		Namespace: dcd.Namespace,
+		Name:      owner.Name,
+	}, dgd); err != nil {
+		return fmt.Errorf("failed to get owning DynamoGraphDeployment: %w", err)
+	}
+	if dgd.UID != owner.UID {
+		return fmt.Errorf("owning DynamoGraphDeployment UID differs")
+	}
+	componentName := dynamo.GetDCDComponentName(dcd)
+	workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd)
+	if workerHash == "" {
+		return fmt.Errorf("automatic failover restore requires a worker generation")
+	}
+	expectedID := checkpoint.DGDCheckpointID(
+		dcd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		componentName,
+		workerHash,
+	)
+	expectedName := "checkpoint-" + expectedID
+	if info.CheckpointName != expectedName {
+		return fmt.Errorf(
+			"automatic checkpoint reference %q differs from worker generation checkpoint %q",
+			info.CheckpointName,
+			expectedName,
+		)
+	}
+	actual := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	if err := r.reader.Get(ctx, types.NamespacedName{
+		Namespace: dcd.Namespace,
+		Name:      info.CheckpointName,
+	}, actual); err != nil {
+		return fmt.Errorf("failed to get automatic checkpoint: %w", err)
+	}
+	actualOwner := metav1.GetControllerOf(actual)
+	if actualOwner == nil ||
+		actualOwner.APIVersion != nvidiacomv1beta1.GroupVersion.String() ||
+		actualOwner.Kind != "DynamoGraphDeployment" ||
+		actualOwner.Name != dgd.Name ||
+		actualOwner.UID != dgd.UID {
+		return fmt.Errorf("automatic checkpoint owner differs")
+	}
+	actualID, err := checkpoint.CheckpointID(actual)
+	if err != nil {
+		return fmt.Errorf("failed to read automatic checkpoint ID: %w", err)
+	}
+	if actual.Name != expectedName || actualID != expectedID {
+		return fmt.Errorf("automatic checkpoint identity differs")
+	}
+	if actual.Annotations[commonconsts.CheckpointAutoAnnotation] != commonconsts.KubeLabelValueTrue {
+		return fmt.Errorf("automatic checkpoint marker differs")
+	}
+	if actual.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] !=
+		snapshotprotocol.DefaultCheckpointArtifactVersion {
+		return fmt.Errorf("automatic checkpoint artifact version differs")
+	}
+	backendFramework, err := dynamo.GetBackendFrameworkFromDynamoComponent(dcd)
+	if err != nil {
+		return fmt.Errorf("failed to determine automatic failover backend framework: %w", err)
+	}
+	expectedIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
+		Model:                fmt.Sprintf("%s/%s", dcd.Namespace, dgd.Name),
+		BackendFramework:     string(backendFramework),
+		TensorParallelSize:   1,
+		PipelineParallelSize: 1,
+		ExtraParameters: map[string]string{
+			"dgdUID":       string(dgd.UID),
+			"component":    componentName,
+			"checkpointID": expectedID,
+		},
+	}
+	if !equality.Semantic.DeepEqual(actual.Spec.Identity, expectedIdentity) {
+		return fmt.Errorf("automatic checkpoint identity contract differs")
+	}
+	if actual.Spec.Job.TargetContainerName != commonconsts.MainContainerName {
+		return fmt.Errorf("automatic checkpoint target container differs")
 	}
 	return nil
 }
@@ -237,6 +333,10 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
 		if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+			if err := r.verifyAutomaticFailoverCheckpoint(ctx, dcd, info); err != nil {
+				return nil, errors.Wrap(err, "failed to verify automatic failover checkpoint")
+			}
+			info.RestorePaused = true
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames(
 				&dcd.Spec.DynamoComponentDeploymentSharedSpec,
 			)
@@ -271,6 +371,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	}
 	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
 		if checkpointInfo == nil ||
+			checkpointInfo.RestorePaused ||
 			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
 			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 				ctx,
@@ -298,6 +399,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	}
 
 	if checkpointInfo != nil &&
+		!checkpointInfo.RestorePaused &&
 		(checkpointInfo.StartupPolicy == "" ||
 			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
 		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {

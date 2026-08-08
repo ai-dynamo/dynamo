@@ -877,15 +877,39 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
 	})
 
-	t.Run("paused restore shapes only named target containers", func(t *testing.T) {
+	t.Run("failover targets shape every engine container", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "engine-0", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 				{Name: "engine-1", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 				{Name: "engine-2", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
-				{Name: "gms-server", Image: "gms:latest", Command: []string{"gms-server"}, Args: []string{"--serve"}, Env: []corev1.EnvVar{{Name: "GMS", Value: "server"}}},
-				{Name: "gms-loader", Image: "gms:latest", Command: []string{"gms-loader"}, Args: []string{"--load"}, Env: []corev1.EnvVar{{Name: "GMS", Value: "loader"}}},
-				{Name: "user-helper", Image: "helper:latest", Command: []string{"helper"}, Args: []string{"run"}, Env: []corev1.EnvVar{{Name: "HELPER", Value: "true"}}},
+				{
+					Name:         "gms-server",
+					Image:        "gms:latest",
+					Command:      []string{"gms-server"},
+					Args:         []string{"--serve"},
+					Env:          []corev1.EnvVar{{Name: "GMS", Value: "server"}},
+					VolumeMounts: []corev1.VolumeMount{{Name: "gms", MountPath: "/gms"}},
+				},
+				{
+					Name:    "gms-loader",
+					Image:   "gms:latest",
+					Command: []string{"gms-loader"},
+					Args:    []string{"--load"},
+					Env:     []corev1.EnvVar{{Name: "GMS", Value: "loader"}},
+				},
+				{
+					Name:    "user-helper",
+					Image:   "helper:latest",
+					Command: []string{"helper"},
+					Args:    []string{"run"},
+					Env:     []corev1.EnvVar{{Name: "HELPER", Value: "true"}},
+					StartupProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"helper", "ready"}},
+						},
+					},
+				},
 			},
 		}
 		nonTargets := make(map[string]corev1.Container)
@@ -893,20 +917,20 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			nonTargets[name] = *findContainer(podSpec, name).DeepCopy()
 		}
 		info := &CheckpointInfo{
-			Enabled: true,
-			Ready:   true,
-			Hash:    testHash,
+			Enabled:                 true,
+			Ready:                   true,
+			Hash:                    testHash,
+			RestoreTargetContainers: []string{"engine-0", "engine-1", "engine-2"},
+			RestorePaused:           true,
 			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 				Enabled: true,
 				Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
 			},
-			RestoreTargetContainers: []string{"engine-0", "engine-1", "engine-2"},
-			RestorePaused:           true,
 		}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		for _, name := range info.RestoreTargetContainers {
+		for _, name := range []string{"engine-0", "engine-1", "engine-2"} {
 			c := findContainer(podSpec, name)
 			require.NotNil(t, c, "container %q not found", name)
 			assertRestoreStandbyMode(t, c, []string{"python3"}, []string{"-m", "dynamo.vllm"})

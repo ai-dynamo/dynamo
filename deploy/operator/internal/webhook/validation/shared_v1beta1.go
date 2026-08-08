@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -242,12 +241,6 @@ func (v *sharedValidation) validateExperimentalSpec(
 		)...)
 	}
 
-	for _, err := range checkpoint.ValidateCheckpointCompatibility(experimental) {
-		allErrs = append(allErrs, field.Forbidden(
-			fldPath.Child("checkpoint"),
-			err.Error(),
-		))
-	}
 	return allErrs
 }
 
