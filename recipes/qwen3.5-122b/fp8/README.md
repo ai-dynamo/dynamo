@@ -121,11 +121,9 @@ Aggregated runs `replicas: 2`.
    [vllm#45357](https://github.com/vllm-project/vllm/pull/45357) and
    [vllm#48481](https://github.com/vllm-project/vllm/pull/48481); the flag costs ~7%
    throughput and can be dropped on a runtime shipping vLLM >= 0.26.0.
-2. Aggregated ships TP2, not TP1. FP8 weights leave ~20 GB for paged KV on a TP1 worker,
-   capping its batch near 8 requests; TP2 reaches 52.9 tok/s/user at 313 ms. TP4 is worse.
-3. Prefill and decode must use the same tensor-parallel size when disaggregated —
+2. Prefill and decode must use the same tensor-parallel size when disaggregated —
    asymmetric sharding fails NIXL transfer with a block-size mismatch.
-4. MTP is not supported with disaggregation on this architecture — NIXL's Mamba conv-state
+3. MTP is not supported with disaggregation on this architecture — NIXL's Mamba conv-state
    transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the
    `mamba_cache_mode='align'` that MTP + prefix caching forces
    ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).

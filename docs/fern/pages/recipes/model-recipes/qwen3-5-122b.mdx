@@ -154,8 +154,6 @@ Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they d
 
 ## Limitations
 
-Aggregated ships TP2, not TP1. FP8 weights leave about 20 GB for paged KV on a TP1 worker, capping its batch near 8 requests; TP2 reaches 52.9 tok/s/user at 313 ms. TP4 is worse.
-
 Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
 
 Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
