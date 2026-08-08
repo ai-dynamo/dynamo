@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
@@ -86,6 +86,40 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
 _MM_ROUTING_MODEL_TYPES = frozenset({"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "kimi_k25"})
+
+
+def _resolve_native_kv_events_config(
+    engine_args: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Resolve the native TRT-LLM ZMQ subscriber configuration."""
+    raw_config = engine_args.get("kv_events_config")
+    if raw_config is None:
+        return None
+    if hasattr(raw_config, "model_dump"):
+        raw_config = raw_config.model_dump()
+    if not isinstance(raw_config, dict):
+        raise TypeError(
+            "kv_events_config must be a dict or KVEventsConfig, "
+            f"got {type(raw_config).__name__}"
+        )
+
+    config = dict(raw_config)
+    enabled = bool(config.get("enable_kv_cache_events", False))
+    publisher = config.get("publisher")
+    if publisher is None:
+        publisher = "zmq" if enabled else "null"
+    config["publisher"] = publisher
+
+    if not enabled or publisher == "null":
+        return None
+    if publisher != "zmq":
+        raise ValueError(f"Unsupported native KV event publisher: {publisher!r}")
+    endpoint = config.get("endpoint", "tcp://*:5557")
+    if not isinstance(endpoint, str) or not endpoint:
+        raise ValueError("Native KV event endpoint must be a non-empty string")
+    config["endpoint"] = endpoint
+    config.setdefault("topic", "")
+    return config
 
 
 def _resolve_model_dir(config: Config) -> str:
@@ -350,11 +384,6 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
-        # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
-        # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
-        # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
-        "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -391,6 +420,19 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    if config.publish_events_and_metrics:
+        arg_map.setdefault("return_perf_metrics", True)
+        arg_map.setdefault("enable_iter_perf_stats", True)
+    elif arg_map.get("return_perf_metrics", False):
+        # Keep TRT iteration stats aligned with explicitly requested request
+        # performance metrics without coupling them to legacy KV event polling.
+        arg_map.setdefault("enable_iter_perf_stats", True)
+    perf_metrics_enabled = bool(
+        arg_map.get("return_perf_metrics", False)
+        or arg_map.get("enable_iter_perf_stats", False)
+    )
+    native_kv_events_config = _resolve_native_kv_events_config(arg_map)
 
     _sync_config_from_engine_args(config, arg_map)
     _strip_postprocess_workers(arg_map)
@@ -460,7 +502,7 @@ async def init_llm_worker(
             should_enable_consolidator,
         )
 
-        if should_enable_consolidator(arg_map):
+        if config.publish_events_and_metrics and should_enable_consolidator(arg_map):
             # get_consolidator_endpoints returns (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
             consolidator_endpoints = get_consolidator_endpoints()
             trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
@@ -702,7 +744,9 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
-        runtime_config.kv_event_publishing_enabled = config.publish_events_and_metrics
+        runtime_config.kv_event_publishing_enabled = bool(
+            config.publish_events_and_metrics or native_kv_events_config is not None
+        )
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
@@ -733,7 +777,7 @@ async def init_llm_worker(
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
         metrics_collector = None
         additional_metrics = None
-        if config.publish_events_and_metrics:
+        if perf_metrics_enabled:
             try:
                 model_name_for_metrics = config.served_model_name or config.model
                 metrics_collector = MetricsCollector(
@@ -881,9 +925,14 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
         ).to_dict()
 
-        if config.publish_events_and_metrics:
-            # Initialize and pass in the publisher to the request handler to
-            # publish events and metrics.
+        publisher_enabled = bool(
+            config.publish_events_and_metrics
+            or native_kv_events_config is not None
+            or perf_metrics_enabled
+        )
+        if publisher_enabled:
+            # Initialize the metrics publisher and either the legacy polling
+            # path or native direct-ZMQ subscribers.
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
@@ -900,7 +949,7 @@ async def init_llm_worker(
             # Create worker-side publisher for consolidated events if consolidator is enabled
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
             consolidator_publisher = None
-            if consolidator_output_endpoint:
+            if config.publish_events_and_metrics and consolidator_output_endpoint:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
                     endpoint=endpoint,
@@ -930,6 +979,9 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
+                native_kv_events_config=native_kv_events_config,
+                native_kv_events_gpus_per_node=gpus_per_node,
+                publish_legacy_kv_events=config.publish_events_and_metrics,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
