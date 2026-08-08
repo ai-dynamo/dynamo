@@ -343,6 +343,7 @@ async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
             event_tx: Some(SchedulerEventSender::Ordered {
                 tx: event_tx,
                 forward_admissions: true,
+                cancel: cancel.clone(),
             }),
             kv_event_publishers: KvEventPublishers::default(),
             fpm_publisher: FpmPublisher::default(),
@@ -404,6 +405,57 @@ async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
 
     cancel.cancel();
     actor.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_while_waiting_for_ordered_output_ack_is_orderly() {
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let cancel = CancellationToken::new();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler_with_event_senders(
+        args(1),
+        vec![GroupedSchedulerRankEventSinks {
+            event_tx: Some(SchedulerEventSender::Ordered {
+                tx: event_tx,
+                forward_admissions: true,
+                cancel: cancel.clone(),
+            }),
+            kv_event_publishers: KvEventPublishers::default(),
+            fpm_publisher: FpmPublisher::default(),
+        }],
+        Some(cancel.clone()),
+    )
+    .unwrap();
+    let (reply, response) = oneshot::channel();
+    schedulers[0]
+        .command_sender()
+        .send(SchedulerCommandEnvelope {
+            command: SchedulerCommand::Submit(request(103, 0)),
+            reply,
+        })
+        .await
+        .unwrap();
+    response.await.unwrap().unwrap();
+
+    let delivered = loop {
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("grouped output publication timed out")
+            .expect("ordered event lane closed before output")
+        {
+            LiveEngineEvent::Admissions(_) => {}
+            LiveEngineEvent::Outputs { delivered, .. } => break delivered,
+        }
+    };
+    cancel.cancel();
+    drop(delivered);
+
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("grouped scheduler should stop after cancellation")
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

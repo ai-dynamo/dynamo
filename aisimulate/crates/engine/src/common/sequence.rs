@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::hashing::{
-    BlockHash, SequenceHash, compute_block_hash_for_tokens, compute_next_sequence_hash,
+    BlockHash, SequenceHash, XXH3_SEED, compute_block_hash_for_tokens, compute_next_sequence_hash,
 };
 use rand::random;
-
-const MOCKER_SALT_HASH: u64 = 1337;
 
 #[derive(Debug)]
 struct FlatTokens {
@@ -142,7 +140,7 @@ impl RequestSequence {
         let mut parent_hash = None;
         for block in tokens.chunks_exact(block_size) {
             let (sequence_hash, local_hash) = if enable_prefix_caching {
-                let local_hash = compute_block_hash_for_tokens(block, MOCKER_SALT_HASH);
+                let local_hash = compute_block_hash_for_tokens(block, XXH3_SEED);
                 let sequence_hash = parent_hash
                     .map(|parent| compute_next_sequence_hash(parent, local_hash))
                     .unwrap_or(local_hash);
@@ -243,7 +241,7 @@ impl RequestSequence {
                 local_hash: None,
             };
         }
-        let local_hash = compute_block_hash_for_tokens(tokens, MOCKER_SALT_HASH);
+        let local_hash = compute_block_hash_for_tokens(tokens, XXH3_SEED);
         let sequence_hash = parent_hash
             .map(|parent| compute_next_sequence_hash(parent, local_hash))
             .unwrap_or(local_hash);

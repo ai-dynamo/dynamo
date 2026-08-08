@@ -536,6 +536,24 @@ def _materialize_engine_role(
             and timing_model.get("provider") == "aic"
         )
         if uses_aic_timing:
+            timing_config = (
+                timing_model.get("config") if isinstance(timing_model, dict) else None
+            )
+            timing_backend_version = (
+                timing_config.get("backend_version")
+                if isinstance(timing_config, dict)
+                else None
+            )
+            if (
+                timing_backend_version is not None
+                and timing_backend_version != deployment_backend_version
+            ):
+                raise ValueError(
+                    f"engine provider {role} timing_model.config.backend_version="
+                    f"{timing_backend_version!r} conflicts with "
+                    "BackendDeploymentSpec backend_version="
+                    f"{deployment_backend_version!r}"
+                )
             aic_timing_overrides["backend_version"] = deployment_backend_version
 
     nextn = _pop_alias(rank, "aic_nextn", ("aic_nextn", "nextn"))
@@ -611,6 +629,11 @@ def _materialize_engine_role(
         timing_config = dict(timing_model["config"])
         timing_overrides = memory_fraction_overrides | aic_timing_overrides
         duplicates = timing_overrides.keys() & timing_config.keys()
+        if (
+            "backend_version" in duplicates
+            and timing_overrides["backend_version"] == timing_config["backend_version"]
+        ):
+            duplicates.remove("backend_version")
         if duplicates:
             duplicate = ", ".join(sorted(duplicates))
             raise ValueError(
