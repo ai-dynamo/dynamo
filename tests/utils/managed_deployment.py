@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
 
+import aiohttp
+import httpx
 import kr8s
 import requests
 import yaml
@@ -35,6 +37,34 @@ def _get_workspace_dir() -> str:
 
     # Fallback: assume workspace is 3 levels up from tests/utils/
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# Connection-level errors from the K8s API clients (kr8s -> httpx,
+# kubernetes_asyncio -> aiohttp) when the vCluster port-forward (127.0.0.1:8443)
+# briefly drops mid-test before its watchdog restarts it.
+_API_CONNECTION_ERRORS = (
+    ConnectionError,
+    aiohttp.ClientConnectionError,
+    httpx.TransportError,
+)
+
+
+def _retry_api_call(
+    fn,
+    *,
+    logger: logging.Logger,
+    attempts: int = 5,
+    delay: float = 2.0,
+):
+    """Retry ``fn`` on a port-forward connection blip; other errors propagate."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except _API_CONNECTION_ERRORS as e:
+            if attempt == attempts:
+                raise
+            logger.debug("K8s API call failed (port-forward blip?), retrying: %s", e)
+            time.sleep(delay)
 
 
 # Supported DynamoGraphDeployment CRD schemas. v1alpha1 uses ``spec.services``
@@ -1390,9 +1420,15 @@ class ManagedDeployment:
 
             pods: list[Pod] = []
 
-            for pod in kr8s.get(
-                "pods", namespace=self.namespace, label_selector=label_selector
-            ):
+            # Materialize inside the retry so a tunnel drop is retried here, not
+            # partway through the caller's iteration.
+            fetched = _retry_api_call(
+                lambda ls=label_selector: list(
+                    kr8s.get("pods", namespace=self.namespace, label_selector=ls)
+                ),
+                logger=self._logger,
+            )
+            for pod in fetched:
                 pods.append(pod)  # type: ignore[arg-type]
 
             result[original_name] = pods
@@ -1540,14 +1576,21 @@ class ManagedDeployment:
         the async cleanup may fail, which is expected and can be safely ignored.
         """
         try:
-            # Create port forward - this runs in a background thread
-            # Use 127.0.0.1 (localhost) instead of 0.0.0.0 to prevent port conflicts
-            port_forward = pod.portforward(
-                remote_port=remote_port,
-                local_port=0,  # Auto-assign an available port
-                address="127.0.0.1",  # Use localhost for better isolation and conflict prevention
+            # Runs in a background thread; 127.0.0.1 avoids port conflicts.
+            # Opening it talks to the K8s API, so retry if the tunnel is briefly down.
+            def _open_port_forward():
+                pf = pod.portforward(
+                    remote_port=remote_port,
+                    local_port=0,  # Auto-assign an available port
+                    address="127.0.0.1",  # localhost for isolation/conflict prevention
+                )
+                pf.start()
+                return pf
+
+            port_forward = _retry_api_call(
+                _open_port_forward,
+                logger=self._logger,
             )
-            port_forward.start()
 
             # Try to connect with exponential backoff
             backoff_delay = 0.5  # Start with 500ms
@@ -1596,14 +1639,12 @@ class ManagedDeployment:
                     self._active_port_forwards.append(port_forward)
                 # Create a fresh portforward object so local_port=0 picks a new
                 # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
+                # port that may still be in TIME_WAIT. Reuse the retry helper so a
+                # tunnel blip during the reopen is retried, not treated as fatal.
                 try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
+                    port_forward = _retry_api_call(
+                        _open_port_forward, logger=self._logger
                     )
-                    port_forward.start()
                 except Exception as e:
                     self._logger.debug(
                         f"Error restarting port forward for pod {pod.name}: {e}"
