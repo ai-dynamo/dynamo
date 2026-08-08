@@ -364,11 +364,17 @@ vllm_configs = {
             pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(330),  # 3x measured 109s runtime
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            metric_payload_default(
+                min_num_requests=1,
+                backend="vllm",
+                port=DefaultPort.SYSTEM2.value,
+            ),
         ],
     ),
     "disaggregated_same_gpu": VLLMConfig(

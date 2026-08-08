@@ -12,7 +12,7 @@ the chat-shaped pipeline.
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -63,7 +63,7 @@ def test_factory_returns_noop_logger_for_embedding_worker(monkeypatch):
     # downstream ``init_publish`` / ``set_num_gpu_blocks_all`` calls in
     # the chat path are safe no-ops if anyone ever wires them on the
     # embedding branch by mistake.
-    assert factory.created_logger is None
+    assert not factory.created_loggers
 
 
 def test_noop_stat_logger_record_is_safe_with_none_stats():
@@ -125,3 +125,49 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["endpoint"] is endpoint
     assert constructed[0]["dp_rank"] == 3
     assert constructed[0]["component_gauges"] is component_gauges
+
+
+@pytest.mark.asyncio
+async def test_snapshot_factory_defers_endpoint_and_publishes_gauges(monkeypatch):
+    inners = [Mock(create_endpoint=AsyncMock()), Mock(create_endpoint=AsyncMock())]
+    monkeypatch.setattr(
+        publisher_mod,
+        "WorkerMetricsPublisher",
+        Mock(side_effect=inners),
+    )
+    component_gauges = Mock()
+    factory = StatLoggerFactory(component_gauges=component_gauges)
+
+    loggers = [
+        factory.create_stat_logger(dp_rank=0),
+        factory.create_stat_logger(dp_rank=1),
+    ]
+    assert all(isinstance(logger, DynamoStatLoggerPublisher) for logger in loggers)
+    assert factory.created_loggers == loggers
+    assert all(logger._endpoint_task is None for logger in loggers)
+
+    factory.set_num_gpu_blocks_all(48)
+    factory.init_publish()
+    loggers[0].record(Mock(kv_cache_usage=0.25), None)
+    loggers[1].record(Mock(kv_cache_usage=0.5), None)
+
+    inners[0].publish.assert_has_calls(
+        [call(0, kv_used_blocks=0), call(0, kv_used_blocks=12)]
+    )
+    inners[1].publish.assert_has_calls(
+        [call(1, kv_used_blocks=0), call(1, kv_used_blocks=24)]
+    )
+    component_gauges.set_total_blocks.assert_has_calls(
+        [call("0", 48), call("1", 48), call("0", 48), call("1", 48)]
+    )
+    component_gauges.set_gpu_cache_usage.assert_has_calls(
+        [call("0", 0.0), call("1", 0.0), call("0", 0.25), call("1", 0.5)]
+    )
+
+    endpoint = SimpleNamespace()
+    factory.bind_endpoint(endpoint)
+    assert all(logger._endpoint_task is not None for logger in loggers)
+    await loggers[0]._endpoint_task
+    await loggers[1]._endpoint_task
+    for inner in inners:
+        inner.create_endpoint.assert_awaited_once_with(endpoint)

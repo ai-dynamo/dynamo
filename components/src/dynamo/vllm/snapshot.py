@@ -14,15 +14,16 @@ from dynamo.common.snapshot.lifecycle import (
 
 from .args import Config
 from .handlers import VllmEnginePauseController
-from .worker_factory import EngineSetupResult
+from .publisher import StatLoggerFactory
+from .worker_factory import EngineSetupResult, SnapshotEngineState
 
 logger = logging.getLogger(__name__)
 
 
 async def prepare_snapshot_engine(
     config: Config,
-    setup_vllm_engine: Callable[[Config], EngineSetupResult],
-) -> EngineSnapshotController[EngineSetupResult] | None:
+    setup_vllm_engine: Callable[..., EngineSetupResult],
+) -> EngineSnapshotController[SnapshotEngineState] | None:
     snapshot_config = SnapshotConfig.from_env()
     if snapshot_config is None:
         return None
@@ -38,10 +39,15 @@ async def prepare_snapshot_engine(
     logger.info("Snapshot mode enabled (watcher-driven signals)")
     config.engine_args.enable_sleep_mode = True
 
-    engine = setup_vllm_engine(config)
+    # Install the stat logger before capture so vLLM retains it in the restored
+    # logger manager. Its Dynamo endpoint is bound only after the runtime is
+    # created, keeping the captured process free of runtime connections.
+    stat_logger = StatLoggerFactory(embedding_worker=config.embedding_worker)
+    engine = setup_vllm_engine(config, stat_logger)
+    snapshot_state = SnapshotEngineState(engine=engine, stat_logger=stat_logger)
     gc.collect()
     snapshot_controller = EngineSnapshotController(
-        engine=engine,
+        engine=snapshot_state,
         pause_controller=VllmEnginePauseController(engine[0]),
         snapshot_config=snapshot_config,
         pause_args=(None,),

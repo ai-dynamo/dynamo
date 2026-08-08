@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -13,8 +14,11 @@ import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.publisher import StatLoggerFactory
+from dynamo.vllm.snapshot import prepare_snapshot_engine
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
+    SnapshotEngineState,
     WorkerFactory,
     _wait_and_load_benchmark,
 )
@@ -47,6 +51,35 @@ def _make_config(**overrides) -> Mock:
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_setup_preserves_unbound_stat_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_config = Mock(run_lifecycle=AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "dynamo.vllm.snapshot.SnapshotConfig.from_env",
+        Mock(return_value=snapshot_config),
+    )
+    monkeypatch.setattr("dynamo.vllm.snapshot.configure_snapshot_capture_env", Mock())
+    engine: EngineSetupResult = (Mock(), Mock(), Mock(), Mock(), Mock())
+    setup_vllm_engine = Mock(return_value=engine)
+    config = _make_config(
+        headless=False,
+        engine_args=SimpleNamespace(enable_sleep_mode=False),
+    )
+
+    controller = await prepare_snapshot_engine(config, setup_vllm_engine)
+
+    assert controller is not None
+    stat_logger = setup_vllm_engine.call_args.args[1]
+    assert isinstance(stat_logger, StatLoggerFactory)
+    assert stat_logger.endpoint is None
+    assert controller.engine == SnapshotEngineState(
+        engine=engine,
+        stat_logger=stat_logger,
+    )
 
 
 def _single_rank_benchmark_payload(
@@ -569,12 +602,15 @@ class TestCreate:
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []
-        snapshot_engine: EngineSetupResult = (
-            Mock(),
-            Mock(),
-            Mock(),
-            "/tmp/prometheus",
-            Mock(),
+        snapshot_engine = SnapshotEngineState(
+            engine=(
+                Mock(),
+                Mock(),
+                Mock(),
+                "/tmp/prometheus",
+                Mock(),
+            ),
+            stat_logger=Mock(),
         )
 
         await factory.create(
@@ -716,21 +752,34 @@ class TestPrefillRegistrationContract:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lora_enabled", [True, False])
-async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+@pytest.mark.parametrize("snapshot_mode", [True, False])
+async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     lora_enabled: bool,
+    snapshot_mode: bool,
 ) -> None:
     engine_client = Mock()
-    vllm_config = Mock(additional_config={})
+    stat_logger = Mock()
+    vllm_config = Mock(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=96),
+    )
     engine_tuple: EngineSetupResult = (
         engine_client,
         vllm_config,
         Mock(),
-        "/tmp/prom",
+        tmp_path,
         Mock(),
     )
+    snapshot_engine = (
+        SnapshotEngineState(engine=engine_tuple, stat_logger=stat_logger)
+        if snapshot_mode
+        else None
+    )
+    setup_vllm_engine = Mock(return_value=engine_tuple)
     factory = WorkerFactory(
-        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=Mock(return_value=None),
         register_vllm_model_fn=AsyncMock(),
         setup_fpm_relay_fn=Mock(return_value=None),
@@ -756,6 +805,13 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
 
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 2)
+    )
+    stat_logger_factory = Mock(return_value=stat_logger)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", stat_logger_factory
     )
 
     endpoints: dict[str, Mock] = {}
@@ -789,7 +845,25 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         config,
         asyncio.Event(),
         shutdown_endpoints,
+        snapshot_engine=snapshot_engine,
     )
+
+    if snapshot_mode:
+        stat_logger_factory.assert_not_called()
+        setup_vllm_engine.assert_not_called()
+        stat_logger.bind_endpoint.assert_called_once_with(
+            endpoints["dyn.prefill.generate"]
+        )
+    else:
+        stat_logger_factory.assert_called_once_with(
+            endpoint=endpoints["dyn.prefill.generate"]
+        )
+        setup_vllm_engine.assert_called_once_with(
+            config, stat_logger, fpm_worker_id="cid"
+        )
+        stat_logger.bind_endpoint.assert_not_called()
+    stat_logger.set_num_gpu_blocks_all.assert_called_once_with(48)
+    stat_logger.init_publish.assert_called_once_with()
 
     lifecycle_names = {
         "dyn.prefill.load_lora",
