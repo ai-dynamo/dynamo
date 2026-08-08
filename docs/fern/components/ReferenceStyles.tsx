@@ -174,6 +174,53 @@ const REFERENCE_CSS = `
     font-weight: 600;
 }
 
+/* Shared surface tone for nested content blocks (import blocks, package
+   groups, monospace signatures) — one dark/light pair so every reference
+   component reads as one system. */
+:root {
+    --dynref-nested-bg: rgba(120, 120, 120, 0.06);
+    --dynref-nested-border: var(--border, var(--grayscale-a5));
+}
+
+.dark {
+    --dynref-nested-bg: #161616;
+    --dynref-nested-border: #2b2b2b;
+}
+
+/* Shared "index page title" for the reference landing components. 20px keeps
+   the compact-index visual density. */
+.dynref-index-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8px 16px;
+    margin-bottom: 12px;
+}
+
+.dynref-index-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    color: var(--pst-color-text-base);
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.dynref-index-meta {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12.5px;
+}
+
+.dynref-index-meta a {
+    color: inherit;
+    text-decoration: underline;
+}
+
 /* Category chips — palette replicated from main.css .dynamo-chip-*. */
 .dynref-chip {
     display: inline-flex;

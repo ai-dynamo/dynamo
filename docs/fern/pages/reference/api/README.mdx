@@ -1,0 +1,60 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: API Reference
+subtitle: Language-by-language public surface for Dynamo, discovered from the source tree
+---
+
+<CardGroup cols={3}>
+<Card title="Python" href="python/README.mdx">Worker decorators, HTTP frontend, planner / router / mocker configuration, and the Rust-backed runtime bindings.</Card>
+<Card title="Rust" href="rust/README.mdx">Distributed runtime crates published on crates.io, pinned to the current release.</Card>
+<Card title="Kubernetes" href="../kubernetes-api/full-api-reference.mdx">DynamoGraphDeployment, DynamoGraphDeploymentRequest, and DynamoComponentDeployment custom-resource fields.</Card>
+</CardGroup>
+
+The API Reference is a machine-generated view of Dynamo's public surface, kept
+honest by static analysis of the source tree. Each module page lists every
+class and function, expands into per-symbol signatures and public methods,
+and deep-links to the exact file and line on `main`.
+
+## Coverage
+
+- **Python** — the [Python API landing page](python/README.mdx) indexes every
+  curated module. Class methods and function signatures are pulled directly
+  from the source; there are no hand-maintained tables.
+- **Rust** — see the published [`ai-dynamo` crates on crates.io][crates] and
+  the [release artifact inventory](../general/release-artifacts.mdx) for
+  currently shipped crate versions.
+- **Kubernetes** — the [Kubernetes API reference](../kubernetes-api/full-api-reference.mdx)
+  documents the full DynamoGraphDeployment / DynamoComponentDeployment
+  custom-resource surface. Trimmed per-CRD references (DGD, DGDR, DCD) live
+  as siblings under the same section so every deep link resolves.
+
+## How It Stays Current
+
+The `docs/fern/scripts/gen_python_api.py` script parses the Dynamo Python
+source with [griffe][griffe] — no import, no build, no runtime dependency on
+backend containers. From one parse it writes:
+
+- the [Python API landing page](python/README.mdx) at
+  `docs/fern/pages/reference/api/python/README.mdx`, a card index of every
+  curated module.
+- `docs/fern/pages/reference/api/python/<module>.mdx` — one page per curated
+  module, with an anchored accordion per symbol carrying its import
+  statement, signature, and public methods.
+
+Every page is plain MDX built from Fern's own components, so the whole
+surface is indexed for search and Fern derives the Markdown and `llms.txt`
+twins from it directly.
+
+Run the generator locally after editing the Python source or the module list:
+
+```bash
+python3 docs/fern/scripts/gen_python_api.py            # write / refresh
+python3 docs/fern/scripts/gen_python_api.py --check    # drift check (exit 1 if stale)
+```
+
+`--check` is what CI runs against every commit to catch stale generated
+content before it ships.
+
+[griffe]: https://mkdocstrings.github.io/griffe/
+[crates]: https://crates.io/search?q=ai-dynamo

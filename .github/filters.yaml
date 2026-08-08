@@ -42,6 +42,23 @@ docs:
   # Sidecar documentation is not part of the Fern docs site.
   - '!lib/sidecar/**'
 
+api_docs:
+  - '.github/filters.yaml'
+  - '.github/workflows/fern-docs.yml'
+  - '.github/workflows/pre-merge.yml'
+  - 'pyproject.toml'
+  - 'docs/fern/scripts/**'
+  - 'docs/fern/components/**'
+  - 'docs/fern/pages/reference/api/**'
+  - 'docs/fern/index.yml'
+  - 'docs/fern/docs.yml'
+  - 'docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx'
+  - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
+  - 'deploy/operator/docs/footer.md'
+  - 'lib/bindings/python/src/**'
+  - 'components/src/dynamo/**'
+  - '**/Cargo.toml'
+
 examples:
   - 'recipes/**'
   - 'examples/**'
