@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -20,7 +20,8 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::discovery::KvEventSource as DiscoveredKvEventSource;
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
+    indexer::{start_worker_kv_query_endpoint, worker_kv_query_endpoint},
     metrics::KvPublisherMetrics,
 };
 
@@ -191,6 +192,8 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
+    /// Address of the worker-local recovery endpoint once its publisher ID is known.
+    local_indexer_query_endpoint: Arc<RwLock<Option<Endpoint>>>,
 }
 
 impl KvEventPublisher {
@@ -344,6 +347,8 @@ impl KvEventPublisher {
 
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
+        let local_indexer_query_endpoint = Arc::new(RwLock::new(None));
+        let local_indexer_query_endpoint_clone = local_indexer_query_endpoint.clone();
 
         tracing::info!("Using event plane for KV event publishing");
         let endpoint_clone = endpoint.clone();
@@ -365,6 +370,10 @@ impl KvEventPublisher {
             let publisher_id = event_publisher.publisher_id();
 
             let recovery_endpoint = if let Some(local_indexer) = local_indexer_clone.as_ref() {
+                let endpoint = worker_kv_query_endpoint(&component, publisher_id);
+                if let Ok(mut stored_endpoint) = local_indexer_query_endpoint_clone.write() {
+                    *stored_endpoint = Some(endpoint);
+                }
                 match start_worker_kv_query_endpoint(
                     component.clone(),
                     publisher_id,
@@ -465,7 +474,19 @@ impl KvEventPublisher {
             worker_id,
             tx,
             next_event_id,
+            local_indexer_query_endpoint,
         })
+    }
+
+    /// Return the worker-local recovery endpoint address once it has been assigned.
+    ///
+    /// `Some` identifies the address selected by the publisher, but does not by
+    /// itself guarantee that endpoint registration has completed.
+    pub fn local_indexer_query_endpoint(&self) -> Option<Endpoint> {
+        self.local_indexer_query_endpoint
+            .read()
+            .ok()
+            .and_then(|endpoint| endpoint.clone())
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
