@@ -57,6 +57,10 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
     }
 }
 
+fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
+    AffinityTarget::new(worker.worker_id, Some(worker.dp_rank))
+}
+
 fn monitor_response_stream<Sel>(
     mut response_stream: ManyOut<Annotated<LLMEngineOutput>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -274,7 +278,7 @@ where
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let block_size = self.chooser.block_size() as usize;
-        let selected_worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
+        let selected_worker = selection.worker;
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
             self.request_metrics.clone(),
@@ -316,8 +320,8 @@ where
                 if let Err(error) = record_result {
                     tracing::warn!(
                         request_id = %context_id,
-                        worker_id = selection.instance_id,
-                        dp_rank = selection.dp_rank,
+                        worker_id = selection.worker.worker_id,
+                        dp_rank = selection.worker.dp_rank,
                         error = %error,
                         "Failed to record routing decision"
                     );
@@ -329,8 +333,8 @@ where
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
                 tracker.record_worker(
-                    selection.instance_id,
-                    Some(selection.dp_rank),
+                    selection.worker.worker_id,
+                    Some(selection.worker.dp_rank),
                     self.chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
@@ -372,18 +376,18 @@ where
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
+        backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start();
 
         let dispatch = async {
             if exact {
                 self.inner
-                    .dispatch_exact(updated_request, selection.instance_id)
+                    .dispatch_exact(updated_request, selection.worker.worker_id)
                     .await
             } else {
                 self.inner
-                    .direct(updated_request, selection.instance_id)
+                    .direct(updated_request, selection.worker.worker_id)
                     .await
             }
         };
@@ -392,8 +396,8 @@ where
             dispatch.instrument(tracing::info_span!(
                 "kv_router.route_request",
                 request_id = %context_id,
-                worker_id = selection.instance_id,
-                dp_rank = selection.dp_rank,
+                worker_id = selection.worker.worker_id,
+                dp_rank = selection.worker.dp_rank,
                 overlap_blocks = selection.overlap_amount,
                 phase = ?phase,
             )),
@@ -434,7 +438,7 @@ where
             .chooser
             .workers_with_configs
             .borrow()
-            .get(&selection.instance_id)
+            .get(&selection.worker.worker_id)
             .and_then(|config| {
                 config
                     .get_engine_specific::<bool>(OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY)
@@ -448,8 +452,8 @@ where
 
         tracing::warn!(
             replay_key,
-            worker_id = selection.instance_id,
-            dp_rank = selection.dp_rank,
+            worker_id = selection.worker.worker_id,
+            dp_rank = selection.worker.dp_rank,
             "request has output token replay annotation but selected worker has not declared replay-token consumption"
         );
     }
@@ -479,10 +483,7 @@ where
                 return Err(error);
             }
         };
-        let selected_target = AffinityTarget {
-            worker_id: selection.instance_id,
-            dp_rank: Some(selection.dp_rank),
-        };
+        let selected_target = route_target(selection.worker);
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -559,8 +560,8 @@ where
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
                 tracker.record_worker(
-                    selection.instance_id,
-                    Some(selection.dp_rank),
+                    selection.worker.worker_id,
+                    Some(selection.worker.dp_rank),
                     self.chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
@@ -576,7 +577,7 @@ where
 
             tracing::trace!(
                 ?phase,
-                worker_id = selection.instance_id,
+                worker_id = selection.worker.worker_id,
                 ?worker_id_info,
                 "Returning worker selection (query-only mode)"
             );
@@ -602,10 +603,7 @@ where
             }
         };
         drop(route_guard);
-        let selected_target = AffinityTarget {
-            worker_id: selection.instance_id,
-            dp_rank: Some(selection.dp_rank),
-        };
+        let selected_target = route_target(selection.worker);
         let stream = match self
             .dispatch_selection(request, selection, guard, operation.is_some())
             .await
@@ -803,8 +801,7 @@ mod tests {
             .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        let failed_worker =
-            WorkerWithDpRank::new(failed_selection.instance_id, failed_selection.dp_rank);
+        let failed_worker = failed_selection.worker;
         let failed_guard = router
             .track_selection(&failed_request, &mut failed_selection, false)
             .await
@@ -841,10 +838,7 @@ mod tests {
             .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        assert_eq!(
-            WorkerWithDpRank::new(retry_selection.instance_id, retry_selection.dp_rank),
-            failed_worker
-        );
+        assert_eq!(retry_selection.worker, failed_worker);
         let mut retry_guard = router
             .track_selection(&retry_request, &mut retry_selection, false)
             .await
@@ -986,7 +980,7 @@ mod tests {
             .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        let failed_worker = failed_selection.instance_id;
+        let failed_worker = failed_selection.worker.worker_id;
         let failed_dispatch_guard = router
             .track_selection(&failed_request, &mut failed_selection, false)
             .await
@@ -1211,7 +1205,7 @@ mod tests {
             .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        assert_eq!(selection.instance_id, 8);
+        assert_eq!(selection.worker.worker_id, 8);
         router.chooser.free(retry_request.id()).await.unwrap();
         drop(operation);
 
@@ -1291,7 +1285,7 @@ mod tests {
             .select_with_affinity(&pinned_request, RequestPhase::Aggregated, true)
             .await
             .unwrap();
-        assert_eq!(selection.instance_id, 7);
+        assert_eq!(selection.worker.worker_id, 7);
 
         drop(router);
         runtime.shutdown();

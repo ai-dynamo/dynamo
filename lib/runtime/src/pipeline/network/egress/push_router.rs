@@ -17,12 +17,13 @@ use crate::{
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
+    routing_policy::{
+        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
+        RouteTarget,
+    },
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
-use dynamo_router_policy::{
-    CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy, RouteTarget,
-};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::{

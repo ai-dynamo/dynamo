@@ -35,7 +35,7 @@ use crate::{
     },
 };
 
-pub type AffinityTarget = dynamo_router_policy::RouteTarget;
+pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 
 enum AffinityEntry {
     Initializing {

@@ -30,7 +30,6 @@ nvtx = ["dep:cudarc"]
 [dependencies]
 # repo
 dynamo-truthy = { workspace = true }
-dynamo-router-policy = { workspace = true }
 
 # Use workspace dependencies where available
 anyhow = { workspace = true }
@@ -48,6 +47,7 @@ derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
+fastrand = "2"
 futures = { workspace = true }
 humantime = { workspace = true }
 parking_lot = { workspace = true }

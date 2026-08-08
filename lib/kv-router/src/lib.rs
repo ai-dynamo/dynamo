@@ -50,7 +50,6 @@ pub use config::{
     ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
     RouterQueuePolicy, SharedCacheType,
 };
-pub use dynamo_router_policy::RouteTarget;
 pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
 #[allow(deprecated)]
 pub use indexer::{

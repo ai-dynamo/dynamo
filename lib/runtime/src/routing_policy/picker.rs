@@ -3,134 +3,31 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RouteTarget {
-    pub worker_id: u64,
-    pub dp_rank: Option<u32>,
-}
-
-impl RouteTarget {
-    pub const fn worker(worker_id: u64) -> Self {
-        Self {
-            worker_id,
-            dp_rank: None,
-        }
-    }
-
-    pub const fn new(worker_id: u64, dp_rank: Option<u32>) -> Self {
-        Self { worker_id, dp_rank }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RoutePolicy {
-    RoundRobin,
-    Random,
-    PowerOfTwoChoices,
-    LeastLoaded,
-    DeviceAwareWeighted,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RouteDevice {
-    Cpu,
-    #[default]
-    Accelerator,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteCandidate {
-    pub target: RouteTarget,
-    pub device: RouteDevice,
-    pub cache_hits: usize,
-}
-
-impl RouteCandidate {
-    pub const fn worker(worker_id: u64) -> Self {
-        Self {
-            target: RouteTarget::worker(worker_id),
-            device: RouteDevice::Accelerator,
-            cache_hits: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum CandidateView<'a> {
-    Workers(&'a [u64]),
-    DeviceAware(&'a [RouteCandidate]),
-}
-
-impl CandidateView<'_> {
-    #[inline(always)]
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Workers(workers) => workers.len(),
-            Self::DeviceAware(candidates) => candidates.len(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    #[inline(always)]
-    fn target(&self, index: usize) -> RouteTarget {
-        match self {
-            Self::Workers(workers) => RouteTarget::worker(workers[index]),
-            Self::DeviceAware(candidates) => candidates[index].target,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct RouteContext {
-    pub required_cache_hits: usize,
-    pub non_cpu_to_cpu_ratio: usize,
-}
-
-impl Default for RouteContext {
-    fn default() -> Self {
-        Self {
-            required_cache_hits: 0,
-            non_cpu_to_cpu_ratio: 8,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdmissionKind {
-    None,
-    Occupancy,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteDecision {
-    pub target: RouteTarget,
-    pub admission: AdmissionKind,
-}
+use super::{
+    AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
+    RoutePolicy, RouteTarget,
+};
 
 #[derive(Debug)]
-pub struct RoutePicker {
+pub(crate) struct RoutePicker {
     policy: RoutePolicy,
     round_robin_cursor: AtomicU64,
 }
 
 impl RoutePicker {
-    pub const fn new(policy: RoutePolicy) -> Self {
+    pub(crate) const fn new(policy: RoutePolicy) -> Self {
         Self {
             policy,
             round_robin_cursor: AtomicU64::new(0),
         }
     }
 
-    pub const fn policy(&self) -> RoutePolicy {
+    pub(crate) const fn policy(&self) -> RoutePolicy {
         self.policy
     }
 
     #[inline(always)]
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,
@@ -144,7 +41,7 @@ impl RoutePicker {
     }
 
     #[inline(always)]
-    pub fn select(
+    pub(crate) fn select(
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,

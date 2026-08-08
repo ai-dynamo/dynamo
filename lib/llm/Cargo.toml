@@ -68,7 +68,6 @@ dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-router-policy = { workspace = true }
 dynamo-tokenizers = { workspace = true }
 dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }

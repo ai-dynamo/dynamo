@@ -11,14 +11,14 @@ use std::{
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_router_policy::{
-    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
-};
 use futures::StreamExt;
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
+use crate::routing_policy::{
+    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
+};
 use crate::traits::DistributedRuntimeProvider;
 
 /// Shared occupancy state for routing modes that track per-worker in-flight requests.
