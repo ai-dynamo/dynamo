@@ -11,7 +11,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 
-from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -42,8 +46,19 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
     ships none, and without this stub the handler's decoder preflight fires
     before the cache logic these tests exercise. Tests about decoder ABSENCE
     override the stub explicitly.
+
+    URL validation is stubbed out for the same reason: it resolves the
+    hostname (``loop.getaddrinfo``) to check the address against the blocked
+    ranges, and the CPU test container has no DNS, so a real lookup blocks
+    until the job is killed rather than failing. Tests about validation
+    itself restore the real function.
     """
     monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
+
+    async def _passthrough_url(url, _policy):
+        return url
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", _passthrough_url)
 
     class _DummyEncoder:
         def __init__(self) -> None:
@@ -788,6 +803,9 @@ async def test_disabled_nvdec_validates_url_before_reporting_decoders(
         f"{_HANDLER_MOD}._software_video_decoder_imports",
         lambda: software_decoder_present,
     )
+    # Undo the fixture's passthrough: validation is what this test asserts.
+    # The URL below is refused on scheme, so this still performs no lookup.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", validate_media_url)
 
     with pytest.raises(UrlValidationError):
         await nvdec_handler._build_encode_inputs([_BLOCKED_URL], "VIDEO")
