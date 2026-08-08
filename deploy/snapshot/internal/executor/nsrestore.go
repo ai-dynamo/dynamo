@@ -45,6 +45,9 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
+	if err := cuda.ValidateVMMArtifact(opts.CheckpointPath, m.CUDA.VMMInterpose); err != nil {
+		return nil, fmt.Errorf("invalid CUDA VMM checkpoint artifact: %w", err)
+	}
 	manifestReadDuration := time.Since(manifestReadStart)
 	log.V(1).Info("Loaded checkpoint manifest",
 		"ext_mounts", len(m.CRIUDump.ExtMnt),
@@ -126,9 +129,8 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if err != nil {
 		return nil, 0, err
 	}
-	// Run the restore's FD cleanup at return, after cuda unlock and the
-	// restore-complete sentinel below, so nothing but the required PID resolve
-	// sits between the CRIU restore and unlock. Runs on any return, incl. errors.
+	// Keep the restore FDs through PID resolution and CUDA restore. Run cleanup
+	// on every return, including restore failures.
 	defer cleanup()
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
@@ -166,9 +168,31 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
-		if err != nil {
+		if err := cuda.RestoreProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log); err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
+		}
+		if m.CUDA.VMMInterpose {
+			processes, err := cuda.RestoreVMMProcesses(restorePIDs, m.CUDA.PIDs)
+			if err != nil {
+				return nil, 0, err
+			}
+			if err := cuda.RestoreVMM(
+				ctx,
+				processes,
+				m.CUDA.VMMGeneration,
+				m.CUDA.VMMStateDigest,
+				opts.CheckpointPath,
+				func() error {
+					return cuda.UnlockProcessTree(ctx, restorePIDs, log)
+				},
+				log,
+			); err != nil {
+				return nil, 0, fmt.Errorf("restore CUDA VMM mappings: %w", err)
+			}
+		} else {
+			if err := cuda.UnlockProcessTree(ctx, restorePIDs, log); err != nil {
+				return nil, 0, fmt.Errorf("CUDA unlock failed: %w", err)
+			}
 		}
 	}
 	timings.cudaDuration = time.Since(cudaStart)
