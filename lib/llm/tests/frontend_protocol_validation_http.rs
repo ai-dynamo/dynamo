@@ -165,6 +165,115 @@ async fn responses_conversion_distinguishes_invalid_from_unsupported() {
 
 #[tokio::test]
 #[serial]
+async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (stream, tool_choice) in [
+            (false, None),
+            (true, Some(json!({"type": "tool", "name": "web_search"}))),
+        ] {
+            let mut body = json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "type": "web_search_20260209",
+                    "name": "web_search"
+                }]
+            });
+            if let Some(tool_choice) = tool_choice {
+                body["tool_choice"] = tool_choice;
+            }
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_anthropic_501(
+                response,
+                "server tool type \"web_search_20260209\" is not supported",
+            )
+            .await;
+        }
+
+        for stream in [false, true] {
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tools": [{"name": "get_weather"}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_anthropic_400(response, "tools[0].input_schema: field required").await;
+        }
+
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages/count_tokens", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "type": "web_search_20260209",
+                    "name": "web_search"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_anthropic_501(response, "server tool type \"web_search_20260209\"").await;
+
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages/count_tokens", svc.base_url))
+            .json(&json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{"type": "custom", "name": "get_weather"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_anthropic_400(response, "tools[0].input_schema: field required").await;
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            for (error_type, expected) in [
+                (ErrorType::NotImplemented, 1),
+                (ErrorType::Validation, 1),
+                (ErrorType::Internal, 0),
+            ] {
+                assert_eq!(
+                    svc.metrics.get_request_counter(
+                        MODEL,
+                        &Endpoint::AnthropicMessages,
+                        &request_type,
+                        &Status::Error,
+                        &error_type,
+                    ),
+                    expected,
+                    "unexpected {error_type:?} count for {request_type}"
+                );
+            }
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 // `reqwest::send` completes when response headers arrive. Asserting 4xx/5xx
 // status for `stream: true` proves the adapter rejected the request before
 // committing the HTTP 200 SSE response.

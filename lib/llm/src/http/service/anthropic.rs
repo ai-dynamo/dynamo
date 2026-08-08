@@ -42,7 +42,7 @@ use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
-    AnthropicMessageContent, SystemContent, chat_completion_to_anthropic_response,
+    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -134,12 +134,12 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-enum AnthropicMessageValidationError {
+enum AnthropicRequestValidationError {
     InvalidArgument(String),
     NotImplemented(String),
 }
 
-impl AnthropicMessageValidationError {
+impl AnthropicRequestValidationError {
     fn status(&self) -> StatusCode {
         match self {
             Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
@@ -170,9 +170,9 @@ impl AnthropicMessageValidationError {
 
 fn validate_anthropic_messages(
     messages: &[AnthropicMessage],
-) -> Result<(), AnthropicMessageValidationError> {
+) -> Result<(), AnthropicRequestValidationError> {
     if messages.is_empty() {
-        return Err(AnthropicMessageValidationError::InvalidArgument(
+        return Err(AnthropicRequestValidationError::InvalidArgument(
             "messages: field required".to_string(),
         ));
     }
@@ -182,14 +182,14 @@ fn validate_anthropic_messages(
             continue;
         };
         if content.is_empty() {
-            return Err(AnthropicMessageValidationError::InvalidArgument(format!(
+            return Err(AnthropicRequestValidationError::InvalidArgument(format!(
                 "messages[{message_index}].content: must contain at least one content block"
             )));
         }
         for (block_index, block) in content.iter().enumerate() {
             if let AnthropicContentBlock::Other(value) = block {
                 if !value.is_object() {
-                    return Err(AnthropicMessageValidationError::InvalidArgument(format!(
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
                         "messages[{message_index}].content[{block_index}]: content blocks must be objects"
                     )));
                 }
@@ -198,12 +198,39 @@ fn validate_anthropic_messages(
                     .and_then(serde_json::Value::as_str)
                     .filter(|block_type| !block_type.is_empty())
                 else {
-                    return Err(AnthropicMessageValidationError::InvalidArgument(format!(
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
                         "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
                     )));
                 };
-                return Err(AnthropicMessageValidationError::NotImplemented(format!(
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
                     "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_anthropic_tools(
+    tools: Option<&[AnthropicTool]>,
+) -> Result<(), AnthropicRequestValidationError> {
+    for (tool_index, tool) in tools.unwrap_or_default().iter().enumerate() {
+        match tool.tool_type.as_deref() {
+            Some("") => {
+                return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                    "tools[{tool_index}].type: must be a non-empty string"
+                )));
+            }
+            Some("custom") | None => {
+                if tool.input_schema.is_none() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "tools[{tool_index}].input_schema: field required for client tools"
+                    )));
+                }
+            }
+            Some(tool_type) => {
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
+                    "tools[{tool_index}]: server tool type \"{tool_type}\" is not supported"
                 )));
             }
         }
@@ -233,6 +260,14 @@ async fn handler_anthropic_messages(
     );
 
     if let Err(error) = validate_anthropic_messages(&request.messages) {
+        inflight_guard.mark_error(error.metric_error_type());
+        return Err(anthropic_error(
+            error.status(),
+            error.anthropic_error_type(),
+            error.message(),
+        ));
+    }
+    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
         inflight_guard.mark_error(error.metric_error_type());
         return Err(anthropic_error(
             error.status(),
@@ -709,6 +744,13 @@ async fn handler_count_tokens(
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
     if let Err(error) = validate_anthropic_messages(&request.messages) {
+        return Err(anthropic_error(
+            error.status(),
+            error.anthropic_error_type(),
+            error.message(),
+        ));
+    }
+    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
         return Err(anthropic_error(
             error.status(),
             error.anthropic_error_type(),
