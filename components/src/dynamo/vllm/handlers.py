@@ -1000,7 +1000,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     - `_lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
     These are required by `_resolve_lora_request()` and other LoRA methods.
-    See VllmWorkerHandler and OmniHandler for reference implementations.
+    The concrete decode, prefill, and Omni handlers provide examples.
     """
 
     _benchmark_results: Optional[dict] = None
@@ -1995,8 +1995,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         - `self._lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
         Subclasses that forget to define these will get AttributeError at runtime
-        when this method is called. See VllmWorkerHandler (llm_engine.py) and
-        OmniHandler (omni_handler.py) for implementation examples.
+        when this method is called. The concrete decode, prefill, and Omni handlers
+        provide examples.
         """
         return self._lora_state.resolve_request(
             model_name,
@@ -2053,7 +2053,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
         """Publish a loaded LoRA adapter to discovery.
 
-        Default implementation mirrors the legacy BaseWorkerHandler behavior.
+        Default implementation mirrors the BaseWorkerHandler behavior.
         """
         if self.generate_endpoint is None:
             logger.debug(
@@ -2775,7 +2775,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        # Legacy vLLM handler always emits when vLLM returned a dict.
+        # Emit whenever vLLM returns a dictionary.
         return _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,

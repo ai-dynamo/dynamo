@@ -35,7 +35,7 @@ The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of
 | `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
 
 **Command-line flags:** `--model-path` sets the model path; `--enable-otel` enables OpenTelemetry
-tracing; `--unified` uses the unified backend entry point.
+tracing.
 
 **Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
 
@@ -207,8 +207,7 @@ The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of
 | `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
 | `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
 
-**Command-line flags:** `--unified` uses the unified backend entry point; `--enable-otel` enables
-OpenTelemetry tracing.
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing.
 
 ```bash
 ./launch/disagg.sh

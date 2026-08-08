@@ -4,7 +4,7 @@
 title: vLLM Multimodal
 ---
 
-This document provides a comprehensive guide for multimodal inference using the vLLM backend in Dynamo.
+This page describes multimodal inference with the Dynamo vLLM backend.
 
 > [!WARNING]
 > **Security Requirement**: All multimodal workers require the
@@ -19,7 +19,7 @@ This document provides a comprehensive guide for multimodal inference using the 
 
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
-| **Image** | Yes | Yes | Legacy entry point only |
+| **Image** | Yes | Yes | Yes |
 | **Video** | Yes, H.264/H.265 | Yes, H.264/H.265 | Processed by the language-model worker |
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
 
@@ -53,7 +53,7 @@ The main multimodal vLLM launchers in this repo are:
 
 ### Custom Vision Encoders
 
-The legacy aggregated vLLM worker can load an author-provided vision tower in
+The aggregated vLLM worker can load an author-provided vision tower in
 process, batch images across concurrent requests, and splice the resulting
 embeddings into the language-model prompt. See [Custom Vision
 Encoders](../../../../advanced-customizations/custom-vision-encoders.md) for the backend contract, launch instructions,
@@ -284,7 +284,7 @@ model families use the expanded prompt token IDs produced during prefill.
 > The P/D handoff does not carry video embeddings. Video and audio inputs are
 > loaded again on the decode worker. This preserves current behavior but adds
 > media download and processing work. Mixed image-and-video P/D requests retain
-> the same model-specific limitations as the legacy vLLM path.
+> the same model-specific limitations as the aggregated vLLM path.
 
 ### E/PD Serving (Encode + PD)
 
