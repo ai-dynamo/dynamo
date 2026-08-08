@@ -25,7 +25,7 @@ from gpu_memory_service.v1.session import _GMSClientSession
 logger = logging.getLogger(__name__)
 
 _SessionFactory = Callable[
-    [str, RequestedLockType, tuple[str, str] | None],
+    [str, RequestedLockType],
     _GMSClientSession,
 ]
 
@@ -53,7 +53,6 @@ class GMSClientMemoryManager:
         self._device = device
         self._session_factory = session_factory
         self._session: _GMSClientSession | None = None
-        self._identity: tuple[str, str] | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
         self._lock = threading.RLock()
         self._failure: RuntimeError | None = None
@@ -79,16 +78,10 @@ class GMSClientMemoryManager:
             try:
                 device_identity.invalidate_device_uuid_cache()
                 device_uuid = device_identity.get_device_uuid(self._device)
-                session = self._session_factory(
-                    self._socket_path,
-                    lock_type,
-                    self._identity,
-                )
+                session = self._session_factory(self._socket_path, lock_type)
                 if session.identity[1] != device_uuid:
                     session.close()
                     raise RuntimeError("GMS sidecar is on another physical GPU")
-                if self._identity is None:
-                    self._identity = session.identity
                 self._session = session
             except Exception as exc:
                 raise self._latch("GMS connect failed", exc) from exc

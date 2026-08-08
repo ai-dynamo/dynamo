@@ -83,6 +83,7 @@ setup(
         "gpu_memory_service.snapshot",
         "gpu_memory_service.snapshot.backends",
         "gpu_memory_service.v1",
+        "gpu_memory_service.v1.snapshot",
         "gpu_memory_service.v1.integrations",
         "gpu_memory_service.v1.integrations.vllm",
     ],
