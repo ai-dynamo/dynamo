@@ -86,7 +86,13 @@ controllerManager:
       requests:
         cpu: 512m
         memory: 1Gi
-  replicas: 1
+  # Run 2 replicas so a single pod restart/reschedule never leaves the admission
+  # webhook without a serving endpoint (the cause of intermittent
+  # "dial tcp ...:443: connect: connection refused" DGD-admission failures).
+  # Safe with >1 replica: leader election elects one active manager; the webhook
+  # is stateless and served by all replicas. Paired with a PodDisruptionBudget
+  # (poddisruptionbudget.yaml) and a RollingUpdate strategy (deployment.yaml).
+  replicas: 2
   serviceAccount:
     annotations: {}
 
