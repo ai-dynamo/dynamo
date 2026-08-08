@@ -1274,6 +1274,38 @@ jobs:
       - name: Post to Workflow Summary
         run: cat coverage-summary.md >> $GITHUB_STEP_SUMMARY
 
+      # Experimental: publish the merged coverage to Datadog's Code Coverage product.
+      # Separate from the Datadog Test Visibility step in shared-test.yml (which uploads
+      # test results, not coverage) and independent of ITR, which stays disabled.
+      - name: Upload Coverage to Datadog
+        if: always()
+        continue-on-error: true
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: us3.datadoghq.com
+        run: |
+          if [[ -z "${DD_API_KEY}" ]]; then
+            echo "ℹ️  DD_API_KEY not available; skipping Datadog coverage upload."
+            exit 0
+          fi
+          npm install -g @datadog/datadog-ci
+          UPLOAD_PATHS=()
+          if [[ -f coverage-merged.xml ]]; then
+            UPLOAD_PATHS+=(coverage-merged.xml)
+          else
+            echo "⚠️  coverage-merged.xml not found (no Python coverage to upload)."
+          fi
+          # Per-crate Rust LCOV files (coverage-rust.lcov) live under this dir; best-effort.
+          if find coverage-rust-artifacts/ -name 'coverage-rust.lcov' -type f 2>/dev/null | grep -q .; then
+            UPLOAD_PATHS+=(coverage-rust-artifacts/)
+          fi
+          if [[ ${#UPLOAD_PATHS[@]} -eq 0 ]]; then
+            echo "⚠️  No coverage reports to upload to Datadog."
+            exit 0
+          fi
+          echo "📤 Uploading to Datadog: ${UPLOAD_PATHS[*]}"
+          datadog-ci coverage upload "${UPLOAD_PATHS[@]}"
+
       - name: Upload Coverage Reports
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
