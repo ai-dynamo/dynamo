@@ -88,6 +88,30 @@ user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_g
 `recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
 exploration or selection step before the baseline deployment.
 
+## Long-Running Runs And Harness Compatibility
+
+An optimization loop is long-running, unattended work. An interactive harness ends its turn whenever the agent stops
+calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
+notices. Two rules:
+
+1. **Operators: launch unattended runs inside your harness's goal mode.** Goal mode is an operator action at launch,
+   not something these instructions can enable mid-run. On Codex CLI, wrap the run in `/goal` with a token budget. On
+   Claude Code (v2.1.139+), wrap it in `/goal`; its completion condition is model-evaluated and may include a bound
+   such as "or stop after N turns" as part of the condition text (a soft limit, not a hard budget). If an unattended
+   run is requested and no goal mode or external loop is in place, say so at the start rather than discovering it at
+   the first stall.
+2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
+   background work that will re-invoke you, or return the specific blocking question you need answered.
+
+**Harness tiers.** These roles and skills are developed and tested on Claude Code and Codex CLI. Isolated role
+configurations currently ship for Codex only (`.codex/agents/*.toml`); on Claude Code the roles run in-context within
+one session (no `.claude/agents/` configurations yet), so adversarial review there is same-context review, not an
+independent reviewer. The skills follow the Agent Skills open standard and load on other compliant harnesses (for
+example, OpenCode includes `.agents/skills/` among its standard skill search paths), with the same in-context role
+caveat plus two more degradations: no native goal mode (run lights-out sessions under an external loop), and every
+rule in this pack is prompt-enforced, so discipline depends on the driver model. If you hit an instruction gap on any
+harness, prepare a sanitized issue describing the gap and ask your operator to approve filing it on this repository.
+
 ## Ecosystem
 
 Sibling repositories this repo integrates with:
