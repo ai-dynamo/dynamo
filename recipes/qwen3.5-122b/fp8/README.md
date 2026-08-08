@@ -15,7 +15,7 @@ SPDX-License-Identifier: Apache-2.0
 | ------------------------ | ------------------------------ | ----------------------------- |
 | **GPU**                  | 2x H200 per replica, `replicas: 2` (4x) | 1x prefill + 2x decode (3x)   |
 | **Framework**            | Dynamo 1.3.0 / vLLM 0.23       | Dynamo 1.3.0 / vLLM 0.23      |
-| **Precision**            | FP8 weights + FP8 KV           | FP8 weights + FP8 KV          |
+| **Precision**            | FP8 weights + BF16 KV (`auto`) | FP8 weights + FP8 KV          |
 | **Parallelism**          | TP2                            | TP1 per worker                |
 | **MoE backend**          | `triton`                       | `triton`                      |
 | **KV cache manager**     | Hybrid (DeltaNet SSM + attention) | Hybrid                     |
