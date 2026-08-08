@@ -21,6 +21,16 @@ struct PendingRankPublication {
     metrics: Metrics,
 }
 
+enum OutputPublication {
+    Delivered(Vec<Uuid>),
+    Cancelled,
+}
+
+enum CompletionDispatch {
+    Completed,
+    Cancelled,
+}
+
 #[derive(Default)]
 pub(super) struct DeferredCommandPublication {
     pub(super) kv: Vec<KvEvent>,
@@ -85,6 +95,7 @@ pub(super) async fn run_effect_dispatcher(
                     &ranks,
                     &compatibility,
                     &mut deferred_commands,
+                    &cancel,
                     &completion_tracker,
                 )
                 .await?;
@@ -105,6 +116,7 @@ async fn dispatch_pass_completion(
     ranks: &[RankDispatch],
     compatibility: &CompatibilityState,
     deferred_commands: &mut [DeferredCommandPublication],
+    cancel: &CancellationToken,
     completion_tracker: &CompletionBoundaryTracker,
 ) -> Result<()> {
     let dispatch_result = async {
@@ -127,13 +139,16 @@ async fn dispatch_pass_completion(
                 .into_iter()
                 .map(|output| compatibility.output_signal(output))
                 .collect();
-            delivery_failures.extend(
-                dispatch
-                    .publish_outputs(outputs)
-                    .await?
-                    .into_iter()
-                    .map(|request_id| (rank.dp_rank, request_id)),
-            );
+            match dispatch.publish_outputs(outputs).await? {
+                OutputPublication::Delivered(failed_requests) => {
+                    delivery_failures.extend(
+                        failed_requests
+                            .into_iter()
+                            .map(|request_id| (rank.dp_rank, request_id)),
+                    );
+                }
+                OutputPublication::Cancelled => return Ok(CompletionDispatch::Cancelled),
+            }
             let lifecycle = effects
                 .lifecycle_events
                 .into_iter()
@@ -175,18 +190,36 @@ async fn dispatch_pass_completion(
             dispatch.publish_lifecycle(publication.lifecycle).await;
             dispatch.publish_metrics(publication.metrics);
         }
-        Ok(())
+        Ok(CompletionDispatch::Completed)
     }
     .await;
 
     // Always release the actor, including sink/conversion error paths. The
     // primary publication error remains the one returned to the supervisor.
-    completion_tracker.before_finish().await;
-    let finish_result = boundary.finish().await;
-    match (dispatch_result, finish_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+    // A cancellation observed by the ordered output lane means the actor is
+    // already shutting down, so there is no boundary left to release.
+    let finish_result = if matches!(&dispatch_result, Ok(CompletionDispatch::Cancelled)) {
+        Ok(())
+    } else {
+        completion_tracker.before_finish().await;
+        finish_boundary_or_cancel(boundary.finish(), cancel).await
+    };
+    match dispatch_result {
+        Err(error) => Err(error),
+        Ok(CompletionDispatch::Cancelled) => Ok(()),
+        Ok(CompletionDispatch::Completed) => finish_result,
+    }
+}
+
+async fn finish_boundary_or_cancel<F>(finish: F, cancel: &CancellationToken) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    tokio::pin!(finish);
+    tokio::select! {
+        biased;
+        result = &mut finish => result,
+        _ = cancel.cancelled() => Ok(()),
     }
 }
 
@@ -367,38 +400,41 @@ impl RankDispatch {
                 reused_input_tokens: admission.reused_input_tokens,
             })
             .collect::<Vec<_>>();
-        sender
-            .send_admissions(&admissions)
-            .await
-            .map_err(|error| match error {
-                SchedulerEventSendError::OrderedLaneClosed => {
-                    anyhow!("grouped live ordered admission lane is closed")
-                }
-                SchedulerEventSendError::OutputClosed(_) => {
-                    anyhow!("grouped live admission unexpectedly used an output-only lane")
-                }
-            })
+        match sender.send_admissions(&admissions).await {
+            Ok(()) | Err(SchedulerEventSendError::Cancelled) => Ok(()),
+            Err(SchedulerEventSendError::OrderedLaneClosed) => {
+                bail!("grouped live ordered admission lane is closed")
+            }
+            Err(SchedulerEventSendError::OutputClosed(_)) => {
+                bail!("grouped live admission unexpectedly used an output-only lane")
+            }
+        }
     }
 
     /// Publish output and return requests whose output-only consumer closed.
-    async fn publish_outputs(&self, outputs: Vec<OutputSignal>) -> Result<Vec<Uuid>> {
+    async fn publish_outputs(&self, outputs: Vec<OutputSignal>) -> Result<OutputPublication> {
         let Some(sender) = self.event_tx.as_ref() else {
-            return Ok(Vec::new());
+            return Ok(OutputPublication::Delivered(Vec::new()));
         };
         if outputs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(OutputPublication::Delivered(Vec::new()));
         }
         match sender.send_outputs(outputs).await {
-            Ok(()) => Ok(Vec::new()),
-            Err(SchedulerEventSendError::OutputClosed(signals)) => Ok(signals
-                .into_iter()
-                .map(|signal| signal.uuid)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()),
+            Ok(()) => Ok(OutputPublication::Delivered(Vec::new())),
+            Err(SchedulerEventSendError::OutputClosed(signals)) => {
+                Ok(OutputPublication::Delivered(
+                    signals
+                        .into_iter()
+                        .map(|signal| signal.uuid)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ))
+            }
             Err(SchedulerEventSendError::OrderedLaneClosed) => {
                 bail!("grouped live ordered output lane is closed")
             }
+            Err(SchedulerEventSendError::Cancelled) => Ok(OutputPublication::Cancelled),
         }
     }
 
@@ -465,5 +501,35 @@ impl RankDispatch {
             sglang_cache_hit_tokens: metrics.sglang_cache_hit_tokens,
             sglang_cache_total_tokens: metrics.sglang_cache_total_tokens,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ready_boundary_error_wins_over_cancellation() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = finish_boundary_or_cancel(
+            async { Err(anyhow!("unexpected boundary failure")) },
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unexpected boundary failure"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_ends_a_pending_boundary_wait_orderly() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        finish_boundary_or_cancel(std::future::pending(), &cancel)
+            .await
+            .unwrap();
     }
 }

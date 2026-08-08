@@ -246,6 +246,69 @@ def test_runner_threads_canonical_backend_version_into_aic_timing():
     assert timing["config"]["backend_version"] == "0.11.1"
 
 
+def test_runner_accepts_matching_backend_version_in_explicit_aic_timing():
+    runtime = RecordingRuntime()
+    timing = {
+        "type": "external",
+        "provider": "aic",
+        "config": {
+            "model": "test-model",
+            "backend": "vllm",
+            "system": "test-system",
+            "tp": 2,
+            "attention_dp": 1,
+            "backend_version": "0.11.1",
+        },
+    }
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.1",
+        agg_engine_args=_engine_args(timing=timing),
+        num_workers=2,
+    )
+
+    EngineReplayRunnerFactory(runtime=runtime).create(0).run(
+        _spec(deployment=deployment)
+    )
+
+    timing_config = runtime.execution_spec["engine"]["rank"]["timing_model"]["config"]
+    assert timing_config["backend_version"] == "0.11.1"
+
+
+def test_runner_rejects_conflicting_backend_version_in_explicit_aic_timing():
+    timing = {
+        "type": "external",
+        "provider": "aic",
+        "config": {
+            "model": "test-model",
+            "backend": "vllm",
+            "system": "test-system",
+            "tp": 2,
+            "attention_dp": 1,
+            "backend_version": "0.10.0",
+        },
+    }
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.1",
+        agg_engine_args=_engine_args(timing=timing),
+        num_workers=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"timing_model\.config\.backend_version='0\.10\.0' conflicts with "
+            r"BackendDeploymentSpec backend_version='0\.11\.1'"
+        ),
+    ):
+        EngineReplayRunnerFactory(runtime=RecordingRuntime()).create(0).run(
+            _spec(deployment=deployment)
+        )
+
+
 def test_runner_rejects_parallel_config_that_conflicts_with_engine_args():
     deployment = BackendDeploymentSpec(
         deployment_mode="agg",
