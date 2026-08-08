@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
@@ -79,6 +80,25 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
 
 def _is_forced_tool_choice(tool_choice: Any) -> bool:
     return tool_choice == "required" or _is_named_tool_choice(tool_choice)
+
+
+def _typed_tool_choice(tool_choice: Any) -> Any:
+    """Normalize a raw named tool choice into the type vLLM's helpers expect.
+
+    vLLM's get_json_schema_from_tools only recognizes a typed
+    ChatCompletionNamedToolChoiceParam. On the DYN_VLLM_SKIP_REQUEST_VALIDATION
+    fast path tool_choice can still be the raw client dict when the request
+    already carries typed tools, and that helper silently returns None for it --
+    leaving a named forced tool call with no constraint at all, which is the
+    defect this whole path exists to fix. Callers reach this only after
+    _is_named_tool_choice has confirmed the shape, so the name is present.
+    """
+    if isinstance(tool_choice, dict):
+        return ChatCompletionNamedToolChoiceParam(
+            type="function",
+            function=ChatCompletionNamedFunction(name=tool_choice["function"]["name"]),
+        )
+    return tool_choice
 
 
 def _has_explicit_output_constraint(request: ChatCompletionRequest) -> bool:
@@ -229,7 +249,9 @@ def build_tool_call_guided_decoding(
             tool_parser, "supports_required_and_named", True
         ):
             return None
-        json_schema = get_json_schema_from_tools(tool_choice, request.tools)
+        json_schema = get_json_schema_from_tools(
+            _typed_tool_choice(tool_choice), request.tools
+        )
         if json_schema is not None:
             return {"json": json_schema}
     return None
