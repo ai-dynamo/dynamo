@@ -15,62 +15,19 @@ use crate::loadgen::ReplayRequestHashes;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn native_g1_parent_chain_artifact(block_size: usize) -> ReplayWorkerArtifacts {
-    use crate::common::protocols::{G1Backend, KvEventPublishers};
-    use crate::common::sequence::RequestSequence;
-    use crate::kv_manager::{BlockRequestLease, G1Acquire, G1Manager};
-    use crate::scheduler::capture_router_event_sink;
-
-    assert!(block_size >= 2, "block size must be at least 2");
-    let computed_after = block_size
+    let prompt_len = block_size
         .checked_mul(3)
+        .and_then(|tokens| tokens.checked_sub(2))
         .expect("ordering regression token count overflow");
-    let prompt_len = computed_after - 2;
-    let prompt_len_u32 =
-        u32::try_from(prompt_len).expect("ordering regression prompt length must fit in u32");
-    let mut tokens = (0..prompt_len_u32).collect::<Vec<_>>();
-    let (mut sequence, identities) = RequestSequence::new(
-        tokens.clone(),
-        2,
-        2,
-        block_size,
-        true,
-        true,
-        false,
-        Some(vec![prompt_len_u32, prompt_len_u32 + 1]),
-    );
-    let owner = Uuid::from_u128(1);
-    let mut lease = BlockRequestLease::new(owner, identities);
-    let (events, sink) = capture_router_event_sink(1);
-    let publishers = KvEventPublishers::new(Some(sink), None);
-    let mut manager = G1Manager::new_with_backend(3, block_size, publishers, 0, G1Backend::Native);
-    assert!(matches!(
-        manager.allocate_native(owner, &mut lease, prompt_len, 0),
-        G1Acquire::Ready(3)
-    ));
-    let prompt_complete = prompt_len / block_size * block_size;
-    manager.finalize_native_computed_prefix(owner, 0, prompt_complete, &mut sequence, &mut lease);
-
-    for token in [prompt_len_u32, prompt_len_u32 + 1] {
-        let (generated, opened_partial) = sequence.generate_token();
-        assert_eq!(generated, token);
-        assert!(!opened_partial);
-        tokens.push(token);
-    }
-    manager.finalize_native_computed_prefix(
-        owner,
-        prompt_complete,
-        computed_after,
-        &mut sequence,
-        &mut lease,
-    );
-
-    let kv_events = events
-        .drain()
+    let tokens = (0..u32::try_from(prompt_len + 2)
+        .expect("ordering regression token length must fit in u32"))
+        .collect::<Vec<_>>();
+    let kv_events = aisimulate_engine::g1_parent_chain_events(block_size)
         .into_iter()
         .enumerate()
         .map(|(ordinal, event)| ReplayTimedKvEvent {
-            event: event.event,
-            storage_tier: event.storage_tier,
+            event: crate::engine_observations::dynamo_kv_event(event).0,
+            storage_tier: StorageTier::Device,
             timestamp_us: ordinal as u64,
         })
         .collect::<Vec<_>>();
@@ -78,7 +35,7 @@ pub fn native_g1_parent_chain_artifact(block_size: usize) -> ReplayWorkerArtifac
 
     ReplayWorkerArtifacts {
         requests: vec![ReplayTimedRequest {
-            uuid: owner,
+            uuid: Uuid::from_u128(1),
             timestamp_us: request_timestamp,
             scheduled_ready_at_ms: request_timestamp as f64 / 1000.0,
             input_length: tokens.len(),

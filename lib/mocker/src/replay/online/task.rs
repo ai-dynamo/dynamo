@@ -14,13 +14,15 @@ use crate::common::protocols::DirectRequest;
 use crate::live::LiveEngine;
 use crate::replay::ReplayTerminalStatus;
 
-use super::ReplayRouter;
 use super::recorder::{RecorderSender, TerminalObservation};
 use super::state::{SharedLiveRuntimeStats, WorkloadDispatchState, now_ms, request_uuid};
+use super::{ReplayPlacement, ReplayRouter};
 
 #[derive(Clone)]
 pub(super) struct RequestTaskContext {
     pub(super) engines: Arc<[LiveEngine]>,
+    pub(super) num_workers: usize,
+    pub(super) dp_size: usize,
     pub(super) router: Arc<ReplayRouter>,
     pub(super) recorder: RecorderSender,
     pub(super) stats: Arc<SharedLiveRuntimeStats>,
@@ -92,23 +94,40 @@ pub(super) async fn run_request_task(
         bail!("online replay cancelled");
     }
     let uuid = request_uuid(&request)?;
-    let worker_idx = ctx
+    let ReplayPlacement {
+        worker_idx,
+        dp_rank,
+    } = ctx
         .router
-        .select_worker(&request, ctx.engines.len())
+        .select_worker(&request, ctx.num_workers, ctx.dp_size)
         .await?;
     if ctx.cancel.is_cancelled() {
         bail!("online replay cancelled");
     }
     ensure!(
-        worker_idx < ctx.engines.len(),
+        worker_idx < ctx.num_workers,
         "online replay selected unknown worker index {worker_idx}"
     );
+    ensure!(
+        dp_rank < ctx.dp_size,
+        "online replay selected unknown DP rank {dp_rank} for worker {worker_idx}"
+    );
+    let engine_idx = worker_idx
+        .checked_mul(ctx.dp_size)
+        .and_then(|base| base.checked_add(dp_rank))
+        .ok_or_else(|| anyhow::anyhow!("online replay rank-handle index overflow"))?;
+    ensure!(
+        engine_idx < ctx.engines.len(),
+        "online replay has no rank handle for worker {worker_idx}, DP rank {dp_rank}"
+    );
 
-    let mut live_request = ctx.engines[worker_idx]
+    let mut live_request = ctx.engines[engine_idx]
         .submit(request)
         .await
         .with_context(|| {
-            format!("online replay failed to submit request {uuid} to worker {worker_idx}")
+            format!(
+                "online replay failed to submit request {uuid} to worker {worker_idx}, DP rank {dp_rank}"
+            )
         })?;
     if ctx.cancel.is_cancelled() {
         bail!("online replay cancelled");

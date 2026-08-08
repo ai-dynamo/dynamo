@@ -107,12 +107,20 @@ pub(super) fn replay_slots(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
-    #[cfg(feature = "replay-bench")]
-    if super::canonical_replay_active() {
-        return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
-    }
+    replay_selector_with_seed(config, None)
+}
 
-    DefaultWorkerSelector::new(Some(config.clone()), "replay")
+pub(super) fn replay_selector_with_seed(
+    config: &KvRouterConfig,
+    selector_seed: Option<u64>,
+) -> DefaultWorkerSelector {
+    match selector_seed {
+        #[cfg(feature = "replay-bench")]
+        Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
+        #[cfg(not(feature = "replay-bench"))]
+        Some(_) => unreachable!("canonical KV Router replay requires the replay-bench feature"),
+        None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
+    }
 }
 
 pub(crate) fn replay_router_config(

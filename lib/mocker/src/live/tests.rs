@@ -1,14 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
 use crate::common::handoff::HandoffId;
-use crate::common::protocols::{EngineType, WorkerType};
+use crate::common::protocols::{EngineType, FpmPublisher, FpmSink, WorkerType};
 use dynamo_kv_router::protocols::StorageTier;
 
 struct NoopKvSink;
+
+#[derive(Default)]
+struct CountingFpmSink(AtomicUsize);
+
+impl FpmSink for CountingFpmSink {
+    fn publish(
+        &self,
+        _snapshot: crate::common::protocols::ForwardPassSnapshot,
+    ) -> anyhow::Result<()> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
 
 impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
     fn publish(&self, _event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
@@ -66,6 +81,48 @@ async fn wait_for_idle(engine: &LiveEngine) {
     })
     .await
     .expect("live request state should return to idle");
+}
+
+#[tokio::test]
+async fn attention_dp_live_handles_share_one_grouped_engine() {
+    let mut grouped_args = args(EngineType::Vllm);
+    grouped_args.dp_size = 2;
+    let engines = LiveEngine::start_grouped_with_configs(
+        grouped_args,
+        vec![LiveEngineConfig::default(), LiveEngineConfig::default()],
+    )
+    .unwrap();
+
+    assert_eq!(engines.len(), 2);
+    assert!(Arc::ptr_eq(
+        &engines[0].inner.group,
+        &engines[1].inner.group
+    ));
+
+    let rank0 = engines[0].submit(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![101]),
+        dp_rank: 0,
+        ..Default::default()
+    });
+    let rank1 = engines[1].submit(DirectRequest {
+        tokens: vec![5, 6, 7, 8],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![202]),
+        dp_rank: 1,
+        ..Default::default()
+    });
+    let (mut rank0, mut rank1) = tokio::join!(rank0, rank1);
+    let rank0 = rank0.as_mut().unwrap().recv().await.unwrap();
+    let rank1 = rank1.as_mut().unwrap().recv().await.unwrap();
+    assert_eq!(rank0.token_id, Some(101));
+    assert_eq!(rank1.token_id, Some(202));
+    assert!(rank0.completed);
+    assert!(rank1.completed);
+
+    engines[0].shutdown().await.unwrap();
+    engines[1].shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -361,7 +418,7 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
         .unwrap();
         let handoff_id = HandoffId::from(Uuid::new_v4());
         let (old_control, mut old_events) = engine.register_handoff(handoff_id).unwrap();
-        let (old_registration, old_request) = engine
+        let (old_registration, mut old_request) = engine
             .prepare_request(DirectRequest {
                 tokens: vec![1, 2, 3, 4],
                 max_output_tokens: 1,
@@ -380,6 +437,17 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
         ));
         old_control.activate_destination().await.unwrap();
 
+        // Completion is not visible until the gated route has acknowledged
+        // the terminal output. Keep the LiveRequest object itself alive so
+        // dropping it after handoff-ID reuse still exercises the stale
+        // cancellation guard.
+        gate_tx.send(true).unwrap();
+        let old_output = tokio::time::timeout(Duration::from_secs(1), old_request.recv())
+            .await
+            .expect("old destination output timed out")
+            .expect("old destination output stream closed");
+        assert!(old_output.completed);
+
         let mut metrics = engine.metrics_receiver();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -392,6 +460,7 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
         })
         .await
         .expect("old destination should finish before handoff ID reuse");
+        gate_tx.send(false).unwrap();
         drop(old_events);
         drop(old_control);
 
@@ -436,13 +505,12 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
 }
 
 #[tokio::test]
-async fn queued_output_does_not_reach_a_reused_request_id() {
+async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let engine =
         LiveEngine::start_with_output_gate(args(EngineType::Vllm), 0, Some(gate_rx), 2).unwrap();
-    let mut metrics = engine.metrics_receiver();
     let uuid = Uuid::from_u128(8);
-    let old = engine
+    let mut old = engine
         .submit(DirectRequest {
             tokens: vec![1],
             max_output_tokens: 1,
@@ -453,18 +521,27 @@ async fn queued_output_does_not_reach_a_reused_request_id() {
         .await
         .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            metrics.changed().await.unwrap();
-            let metrics = metrics.borrow();
-            if metrics.running_requests == 0 && metrics.waiting_requests == 0 {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("old terminal output should be queued before ID reuse");
-    assert!(!engine.cancel(uuid).await.unwrap());
+    // Let the scheduler enqueue the terminal output behind the closed gate.
+    // A cancellation cannot cross that pass boundary until the request-route
+    // dispatcher acknowledges actual delivery.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let cancel_engine = engine.clone();
+    let cancellation = tokio::spawn(async move { cancel_engine.cancel(uuid).await });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !cancellation.is_finished(),
+        "the grouped actor released a pass after enqueue, before route delivery"
+    );
+
+    gate_tx.send(true).unwrap();
+    let old_output = tokio::time::timeout(Duration::from_secs(1), old.recv())
+        .await
+        .expect("gated output cleanup timed out");
+    assert!(
+        old_output.is_none(),
+        "cancellation abandons the old stream before route cleanup"
+    );
+    assert!(!cancellation.await.unwrap().unwrap());
     drop(old);
 
     let mut replacement = engine
@@ -477,8 +554,6 @@ async fn queued_output_does_not_reach_a_reused_request_id() {
         })
         .await
         .unwrap();
-    gate_tx.send(true).unwrap();
-
     let output = tokio::time::timeout(std::time::Duration::from_secs(3), replacement.recv())
         .await
         .expect("replacement should produce its planned token")
@@ -490,7 +565,17 @@ async fn queued_output_does_not_reach_a_reused_request_id() {
 
 #[tokio::test]
 async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request() {
-    let engine = LiveEngine::start_with_output_gate(args(EngineType::Vllm), 0, None, 1).unwrap();
+    let fpm = Arc::new(CountingFpmSink::default());
+    let engine = LiveEngine::start_with_options(
+        args(EngineType::Vllm),
+        0,
+        LiveEngineOptions {
+            request_output_capacity: Some(NonZeroUsize::MIN),
+            fpm_publisher: FpmPublisher::new(Some(Arc::clone(&fpm) as Arc<dyn FpmSink>)),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
     let mut slow = engine
         .submit(DirectRequest {
             tokens: vec![1],
@@ -521,6 +606,11 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
     assert_eq!(slow.recv().await.unwrap().token_id, Some(7));
     assert!(slow.recv().await.is_none());
     wait_for_idle(&engine).await;
+    assert_eq!(
+        fpm.0.load(Ordering::Relaxed),
+        2,
+        "a full route must be cancelled at its completion boundary before a third pass starts"
+    );
 }
 
 #[tokio::test]

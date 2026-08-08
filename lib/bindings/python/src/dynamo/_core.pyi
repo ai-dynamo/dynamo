@@ -1949,18 +1949,7 @@ class MockEngineArgs:
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
-        num_g2_blocks: Optional[int] = None,
-        num_g3_blocks: Optional[int] = None,
-        offload_batch_size: Optional[int] = None,
-        bandwidth_g1_to_g2_gbps: Optional[float] = None,
-        bandwidth_g2_to_g1_gbps: Optional[float] = None,
-        bandwidth_g2_to_g3_gbps: Optional[float] = None,
-        bandwidth_g3_to_g2_gbps: Optional[float] = None,
-        enable_g4_storage: bool = False,
-        bandwidth_g2_to_g4_gbps: Optional[float] = None,
-        bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
-        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1995,9 +1984,6 @@ class MockEngineArgs:
     def enable_prefix_caching(self, value: bool) -> None: ...
 
     @property
-    def g1_backend(self) -> str: ...
-
-    @property
     def enable_local_indexer(self) -> bool: ...
 
     @property
@@ -2017,36 +2003,6 @@ class MockEngineArgs:
 
     @property
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
-
-    @property
-    def num_g2_blocks(self) -> Optional[int]: ...
-
-    @property
-    def num_g3_blocks(self) -> Optional[int]: ...
-
-    @property
-    def offload_batch_size(self) -> Optional[int]: ...
-
-    @property
-    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def enable_g4_storage(self) -> bool: ...
-
-    @property
-    def bandwidth_g2_to_g4_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g4_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
