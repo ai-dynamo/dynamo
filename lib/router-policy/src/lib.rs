@@ -64,6 +64,7 @@ pub enum CandidateView<'a> {
 }
 
 impl CandidateView<'_> {
+    #[inline(always)]
     pub fn len(&self) -> usize {
         match self {
             Self::Workers(workers) => workers.len(),
@@ -71,10 +72,12 @@ impl CandidateView<'_> {
         }
     }
 
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    #[inline(always)]
     fn target(&self, index: usize) -> RouteTarget {
         match self {
             Self::Workers(workers) => RouteTarget::worker(workers[index]),
@@ -128,26 +131,35 @@ impl RoutePicker {
         self.policy
     }
 
+    #[inline(always)]
     pub fn peek(
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
+        if self.policy == RoutePolicy::Random {
+            return random_decision(candidates);
+        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, false, &mut samples)
     }
 
+    #[inline(always)]
     pub fn select(
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
+        if self.policy == RoutePolicy::Random {
+            return random_decision(candidates);
+        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, true, &mut samples)
     }
 
+    #[inline(always)]
     fn choose_with_samples(
         &self,
         candidates: CandidateView<'_>,
@@ -221,34 +233,75 @@ trait SampleSource {
 struct RandomSamples;
 
 impl SampleSource for RandomSamples {
+    #[inline(always)]
     fn index(&mut self, upper: usize) -> usize {
-        rand::rng().random_range(0..upper)
+        rand::rng().random::<u64>() as usize % upper
     }
 }
 
+#[inline(always)]
+fn random_decision(candidates: CandidateView<'_>) -> Option<RouteDecision> {
+    let upper = candidates.len();
+    if upper == 0 {
+        return None;
+    }
+    let index = rand::rng().random::<u64>() as usize % upper;
+    let target = match candidates {
+        CandidateView::Workers(workers) => RouteTarget::worker(workers[index]),
+        CandidateView::DeviceAware(candidates) => candidates[index].target,
+    };
+    Some(RouteDecision {
+        target,
+        admission: AdmissionKind::None,
+    })
+}
+
+#[inline(always)]
 fn lowest_load(
     candidates: CandidateView<'_>,
     load: &impl Fn(u64) -> u64,
     samples: &mut impl SampleSource,
 ) -> Option<RouteTarget> {
-    let mut best = None;
-    let mut best_load = u64::MAX;
-    let mut ties = 0usize;
-    for index in 0..candidates.len() {
-        let target = candidates.target(index);
-        let target_load = load(target.worker_id);
-        if target_load < best_load {
-            best = Some(target);
-            best_load = target_load;
-            ties = 1;
-        } else if target_load == best_load {
-            ties += 1;
-            if samples.index(ties) == 0 {
-                best = Some(target);
+    match candidates {
+        CandidateView::Workers(workers) => {
+            let mut best = None;
+            let mut best_load = u64::MAX;
+            let mut ties = 0usize;
+            for &worker_id in workers {
+                let target_load = load(worker_id);
+                if target_load < best_load {
+                    best = Some(RouteTarget::worker(worker_id));
+                    best_load = target_load;
+                    ties = 1;
+                } else if target_load == best_load {
+                    ties += 1;
+                    if samples.index(ties) == 0 {
+                        best = Some(RouteTarget::worker(worker_id));
+                    }
+                }
             }
+            best
+        }
+        CandidateView::DeviceAware(candidates) => {
+            let mut best = None;
+            let mut best_load = u64::MAX;
+            let mut ties = 0usize;
+            for candidate in candidates {
+                let target_load = load(candidate.target.worker_id);
+                if target_load < best_load {
+                    best = Some(candidate.target);
+                    best_load = target_load;
+                    ties = 1;
+                } else if target_load == best_load {
+                    ties += 1;
+                    if samples.index(ties) == 0 {
+                        best = Some(candidate.target);
+                    }
+                }
+            }
+            best
         }
     }
-    best
 }
 
 #[derive(Default)]
@@ -261,6 +314,7 @@ struct DeviceGroup {
 }
 
 impl DeviceGroup {
+    #[inline(always)]
     fn consider(&mut self, target: RouteTarget, target_load: u64, samples: &mut impl SampleSource) {
         self.count += 1;
         self.total_load = self.total_load.saturating_add(target_load);
@@ -277,6 +331,7 @@ impl DeviceGroup {
     }
 }
 
+#[inline(always)]
 fn device_aware(
     candidates: &[RouteCandidate],
     context: RouteContext,
