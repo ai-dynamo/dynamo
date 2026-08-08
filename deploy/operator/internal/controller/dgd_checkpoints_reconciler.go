@@ -307,15 +307,13 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		r.Client,
 		dynamoDeployment.Namespace,
 		checkpointID,
-		nvidiacomv1alpha1.DynamoCheckpointIdentity{
-			Model:            fmt.Sprintf("%s/%s", dynamoDeployment.Namespace, dynamoDeployment.Name),
-			BackendFramework: string(backendFramework),
-			ExtraParameters: map[string]string{
-				"dgdUID":       string(dynamoDeployment.UID),
-				"component":    componentName,
-				"checkpointID": checkpointID,
-			},
-		},
+		expectedAutomaticCheckpointIdentity(
+			dynamoDeployment,
+			componentName,
+			checkpointID,
+			checkpointConfig.Identity,
+			backendFramework,
+		),
 		podTemplate,
 		targetContainerName,
 		deletionPolicy,
@@ -331,6 +329,36 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		}
 	}
 	return ckpt, nil
+}
+
+func expectedAutomaticCheckpointIdentity(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	checkpointID string,
+	configured *nvidiacomv1beta1.DynamoCheckpointIdentity,
+	backendFramework dynamo.BackendFramework,
+) nvidiacomv1alpha1.DynamoCheckpointIdentity {
+	identity := nvidiacomv1alpha1.DynamoCheckpointIdentity{}
+	if configured != nil {
+		identity = *dynamo.ToAlphaCheckpointIdentity(configured).DeepCopy()
+	}
+	if identity.Model == "" {
+		identity.Model = fmt.Sprintf("%s/%s", dgd.Namespace, dgd.Name)
+	}
+	identity.BackendFramework = string(backendFramework)
+	if identity.TensorParallelSize == 0 {
+		identity.TensorParallelSize = 1
+	}
+	if identity.PipelineParallelSize == 0 {
+		identity.PipelineParallelSize = 1
+	}
+	if identity.ExtraParameters == nil {
+		identity.ExtraParameters = map[string]string{}
+	}
+	identity.ExtraParameters["dgdUID"] = string(dgd.UID)
+	identity.ExtraParameters["component"] = componentName
+	identity.ExtraParameters["checkpointID"] = checkpointID
+	return identity
 }
 
 func checkpointGMSResourceClaimTemplateName(checkpointID string) string {

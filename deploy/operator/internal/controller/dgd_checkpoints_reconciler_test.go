@@ -183,6 +183,86 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 	}
 }
 
+func TestDGDCheckpointsReconciler_CreatePreservesConfiguredIdentity(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+	configuredIdentity := &v1beta1.DynamoCheckpointIdentity{
+		Model:                "Qwen/Qwen3-0.6B",
+		BackendFramework:     string(dynamo.BackendFrameworkSGLang),
+		DynamoVersion:        "1.2.3",
+		TensorParallelSize:   2,
+		PipelineParallelSize: 1,
+		Dtype:                "bf16",
+		MaxModelLen:          32768,
+		ExtraParameters: map[string]string{
+			"custom":       "preserved",
+			"dgdUID":       "user-value",
+			"component":    "user-value",
+			"checkpointID": "user-value",
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "checkpoint-writer:latest",
+					}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:  true,
+						Mode:     v1beta1.CheckpointModeAuto,
+						Identity: configuredIdentity,
+					},
+				},
+			}},
+		},
+	}
+
+	t.Log("Create an automatic checkpoint from the configured identity")
+	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(
+		ctx,
+		dgd,
+		"worker",
+		&dgd.Spec.Components[0],
+	)
+	require.NoError(t, err)
+
+	checkpointID := ckpt.Labels[snapshotprotocol.CheckpointIDLabel]
+	assert.Equal(t, v1alpha1.DynamoCheckpointIdentity{
+		Model:                "Qwen/Qwen3-0.6B",
+		BackendFramework:     string(dynamo.BackendFrameworkVLLM),
+		DynamoVersion:        "1.2.3",
+		TensorParallelSize:   2,
+		PipelineParallelSize: 1,
+		Dtype:                "bf16",
+		MaxModelLen:          32768,
+		ExtraParameters: map[string]string{
+			"custom":       "preserved",
+			"dgdUID":       "dgd-uid",
+			"component":    "worker",
+			"checkpointID": checkpointID,
+		},
+	}, ckpt.Spec.Identity)
+	assert.Equal(t, "user-value", configuredIdentity.ExtraParameters["dgdUID"])
+	assert.Equal(t, string(dynamo.BackendFrameworkSGLang), configuredIdentity.BackendFramework)
+}
+
 func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *testing.T) {
 	t.Log("Build a legacy checkpoint and ResourceClaimTemplate with existing ownership")
 	ctx := context.Background()
@@ -639,7 +719,10 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 	ckpt := &v1alpha1.DynamoCheckpoint{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
 	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
+	assert.Equal(t, "default/test-dgd", ckpt.Spec.Identity.Model)
 	assert.Equal(t, string(dynamo.BackendFrameworkVLLM), ckpt.Spec.Identity.BackendFramework)
+	assert.Equal(t, int32(1), ckpt.Spec.Identity.TensorParallelSize)
+	assert.Equal(t, int32(1), ckpt.Spec.Identity.PipelineParallelSize)
 	assert.Equal(t, checkpointStatuses["worker"].CheckpointID, ckpt.Spec.Identity.ExtraParameters["checkpointID"])
 }
 
