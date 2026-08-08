@@ -208,6 +208,19 @@ pub fn monitor_for_disconnects(
     )
 }
 
+fn openai_sanitized_error_type(error: SanitizedError) -> &'static str {
+    match error {
+        SanitizedError::Cancelled => "request_cancelled",
+        SanitizedError::Overloaded | SanitizedError::Unavailable => "service_unavailable",
+        SanitizedError::PreserveServerError(status) if matches!(status.as_u16(), 503 | 529) => {
+            "service_unavailable"
+        }
+        SanitizedError::Internal | SanitizedError::PreserveServerError(_) => {
+            "internal_server_error"
+        }
+    }
+}
+
 fn monitor_for_disconnects_with_timeout(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -258,7 +271,7 @@ fn monitor_for_disconnects_with_timeout(
                             let err_json = serde_json::json!({
                                 "error": {
                                     "message": sanitized.to_string(),
-                                    "type": sanitized.openai_type_slug(),
+                                    "type": openai_sanitized_error_type(sanitized),
                                     "code": sanitized.status().as_u16(),
                                 }
                             });
@@ -331,6 +344,7 @@ fn monitor_for_disconnects_with_timeout(
 mod tests {
     use super::*;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+    use axum::http::StatusCode;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -722,7 +736,7 @@ mod tests {
         );
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
-            Some(expected.openai_type_slug()),
+            Some(openai_sanitized_error_type(expected)),
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
         assert_eq!(
@@ -739,6 +753,20 @@ mod tests {
             "[{case}] SSE body leaked raw backend error detail to the client. \
              Expected `{leaked_detail}` to be absent. Body:\n{text}"
         );
+    }
+
+    #[test]
+    fn sanitized_server_statuses_keep_openai_error_types() {
+        for (status, expected) in [
+            (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"),
+            (StatusCode::from_u16(529).unwrap(), "service_unavailable"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_server_error"),
+        ] {
+            assert_eq!(
+                openai_sanitized_error_type(SanitizedError::PreserveServerError(status)),
+                expected
+            );
+        }
     }
 
     /// Upstream worker killed mid-stream → mpsc channel reports `Disconnected` to the
