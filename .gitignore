@@ -139,8 +139,10 @@ core.*
 /.cursor
 /.claude/*
 !/.claude/skills
+!/.claude/workflows
 /.agents/*
 !/.agents/skills
+!/.agents/workflows
 /.codex
 /CLAUDE.md
 /CLAUDE.md.bak
