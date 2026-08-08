@@ -239,8 +239,8 @@ impl DemandDrivenResponseStream {
 
 pub(super) fn process_request_to_stream<'p>(
     py: Python<'p>,
-    inner: Arc<RsKvPushRouter>,
-    request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+    inner: RsRouterEngine,
+    request: RsPreprocessedRequest,
     tracker: Option<Arc<RequestTracker>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {

@@ -2814,24 +2814,31 @@ class KvDcRelay:
 
 class KvRouter:
     """
-    A KV-aware router that performs intelligent routing based on KV cache overlap.
+    A router supporting KV-aware and shared worker-picker routing modes.
     """
 
     def __init__(
         self,
         endpoint: Endpoint,
-        block_size: int,
-        kv_router_config: KvRouterConfig,
+        block_size: Optional[int] = None,
+        kv_router_config: Optional[KvRouterConfig] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        session_affinity_ttl_secs: Optional[int] = None,
+        *,
+        router_mode: RouterMode = RouterMode.KV,
+        enable_multimodal_cache_indexer: bool = False,
     ) -> None:
         """
         Create a new KvRouter instance.
 
         Args:
             endpoint: The endpoint to connect to for routing requests
-            block_size: The KV cache block size
-            kv_router_config: Configuration for the KV router
+            block_size: KV cache block size, required only for KV routing
+            kv_router_config: KV router configuration, required only for KV routing
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            session_affinity_ttl_secs: Optional session-affinity lifetime
+            router_mode: Routing mode; defaults to KV for compatibility
+            enable_multimodal_cache_indexer: Enable device-aware embedding-cache selection
         """
         ...
 
@@ -2853,7 +2860,7 @@ class KvRouter:
         response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
-        Generate text using the KV-aware router.
+        Generate text using the configured routing mode.
 
         Args:
             token_ids: Input token IDs
@@ -2923,7 +2930,9 @@ class KvRouter:
         strict_priority: int = 0,
         policy_class: Optional[str] = None,
         cache_namespace: Optional[str] = None,
-    ) -> Tuple[int, int, int]:
+        multi_modal_data: Optional[JsonLike] = None,
+        mm_routing_info: Optional[JsonLike] = None,
+    ) -> Tuple[int, Optional[int], int]:
         """
         Find the best matching worker for the given tokens.
 
@@ -2944,12 +2953,32 @@ class KvRouter:
             policy_class: Requested policy family, or an exact explicit class.
                           Missing, unknown, and ordinary physical-class names use the
                           configured default family before cache-bucket resolution.
+            multi_modal_data: Optional multimodal payload for device-aware cache selection.
+            mm_routing_info: Optional routing-only multimodal metadata.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
                 - worker_id: The ID of the best matching worker
-                - dp_rank: The data parallel rank of the selected worker
+                - dp_rank: The selected data-parallel rank in KV mode; None for
+                  worker-level shared picker modes
                 - overlap_blocks: The number of overlapping blocks found
+
+        Mode behavior:
+            KV mode preserves KV-overlap selection and accepts the KV-specific
+            override, indexer, LoRA, constraint, priority, policy-class, and
+            cache-namespace arguments. Shared worker-picker modes reject those
+            arguments. Direct mode raises because it cannot choose a worker
+            without an explicit target.
+
+            Without request_id, selection is advisory. With request_id, RR and
+            random commit a selection and retain a duplicate-ID marker, while
+            P2C, least-loaded, and device-aware also retain an occupancy lease.
+            Call free(request_id) to release retained shared-mode state.
+
+        Raises:
+            ValueError: If Direct mode is used, if KV-only arguments are supplied
+                        outside KV mode, or if shared multimodal arguments are
+                        supplied in KV mode.
         """
         ...
 
@@ -2981,6 +3010,9 @@ class KvRouter:
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
             If you need aggregated loads per worker_id, sum the values manually.
+
+        Raises:
+            ValueError: If the router is not in KV routing mode.
         """
         ...
 
@@ -3009,6 +3041,9 @@ class KvRouter:
             A dictionary containing block_size, num_blocks, shared_cache, and
             workers. Each worker row is keyed by worker_id and dp_rank and
             reports device, host-pinned, disk, and shared-cache overlap blocks.
+
+        Raises:
+            ValueError: If the router is not in KV routing mode.
         """
         ...
 
@@ -3018,6 +3053,9 @@ class KvRouter:
 
         Returns:
             A JSON string containing all indexer events
+
+        Raises:
+            ValueError: If the router is not in KV routing mode.
         """
         ...
 
@@ -3027,6 +3065,7 @@ class KvRouter:
 
         This signals that the request has finished its prefill phase and is now
         in the decode phase. Used to update router state for accurate load tracking.
+        In shared worker-picker modes this method is a no-op.
 
         Args:
             request_id: The ID of the request that completed prefill
@@ -3044,6 +3083,11 @@ class KvRouter:
 
         This should be called when a request completes to update the router's
         tracking of active blocks and ensure accurate load balancing.
+
+        In KV mode this releases chooser lifecycle state. In shared worker-picker
+        modes it releases the duplicate-ID marker and any occupancy lease retained
+        by best_worker(request_id=...). The operation is idempotent; shared-mode
+        state remains retained until it is called.
 
         Args:
             request_id: The ID of the request to free

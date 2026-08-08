@@ -17,11 +17,14 @@ use crate::{
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
+    routing_policy::{
+        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
+        RouteTarget,
+    },
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
 use futures::Stream;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -71,14 +74,25 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
+    counter: Arc<AtomicU64>,
     armed: bool,
 }
 
 impl OccupancyPermit {
-    fn new(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
+    fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
+        let counter = state.increment(instance_id);
+        Self::from_counter(state, instance_id, counter)
+    }
+
+    fn from_counter(
+        state: Arc<RoutingOccupancyState>,
+        instance_id: u64,
+        counter: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             state,
             instance_id,
+            counter,
             armed: true,
         }
     }
@@ -87,19 +101,20 @@ impl OccupancyPermit {
         if self.instance_id == instance_id {
             return;
         }
-        self.state.increment(instance_id);
-        self.state.decrement(self.instance_id);
+        let counter = self.state.increment(instance_id);
+        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
         self.instance_id = instance_id;
+        self.counter = counter;
     }
 
-    fn into_tracked_stream<U: Data>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
+    fn into_tracked_stream<U: Data + MaybeError>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
         self.armed = false;
         let engine_ctx = stream.context();
         ResponseStream::new(
             Box::pin(OccupancyTrackedStream {
                 inner: stream,
-                state: self.state.clone(),
                 instance_id: self.instance_id,
+                counter: self.counter.clone(),
                 released: false,
             }),
             engine_ctx,
@@ -110,8 +125,27 @@ impl OccupancyPermit {
 impl Drop for OccupancyPermit {
     fn drop(&mut self) {
         if self.armed {
-            self.state.decrement(self.instance_id);
+            RoutingOccupancyState::decrement_counter(self.counter.as_ref());
         }
+    }
+}
+
+/// A committed worker selection and its optional runtime-owned occupancy lease.
+///
+/// Dropping the reservation releases exactly the counter generation acquired by
+/// this selection, even if discovery removes and later re-adds the same worker ID.
+pub struct RoutingReservation {
+    target: RouteTarget,
+    _permit: Option<OccupancyPermit>,
+}
+
+impl RoutingReservation {
+    pub const fn target(&self) -> RouteTarget {
+        self.target
+    }
+
+    pub fn has_occupancy(&self) -> bool {
+        self._permit.is_some()
     }
 }
 
@@ -150,8 +184,13 @@ where
     /// dynamo-llm's KV Routing does this.
     router_mode: RouterMode,
 
-    /// Number of round robin requests handled. Used to decide which server is next.
-    round_robin_counter: Arc<AtomicU64>,
+    /// Shared, scheduler-independent policy state. KV and Direct have no picker.
+    picker: Option<Arc<RoutePicker>>,
+
+    /// Policy-specific state for callers that explicitly request static routing,
+    /// independently of the router's configured generate mode.
+    round_robin_picker: Arc<RoutePicker>,
+    random_picker: Arc<RoutePicker>,
 
     /// The final hop: after selecting an instance, `PushRouter` hands it to this
     /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
@@ -206,10 +245,9 @@ enum TransportFallback<'a> {
 }
 
 struct DeviceAwareCandidates {
-    candidates: Vec<u64>,
-    device_type_map: HashMap<u64, Option<DeviceType>>,
+    candidates: Vec<RouteCandidate>,
+    context: RouteContext,
     embedding_cache_hit: bool,
-    full_embedding_cache_hit: bool,
     request_cache_keys: usize,
 }
 
@@ -221,93 +259,45 @@ impl RouterMode {
     pub fn is_direct_routing(&self) -> bool {
         *self == RouterMode::Direct
     }
+
+    fn route_policy(self) -> Option<RoutePolicy> {
+        match self {
+            Self::RoundRobin => Some(RoutePolicy::RoundRobin),
+            Self::Random => Some(RoutePolicy::Random),
+            Self::PowerOfTwoChoices => Some(RoutePolicy::PowerOfTwoChoices),
+            Self::LeastLoaded => Some(RoutePolicy::LeastLoaded),
+            Self::DeviceAwareWeighted => Some(RoutePolicy::DeviceAwareWeighted),
+            Self::KV | Self::Direct => None,
+        }
+    }
+}
+
+fn route_pickers(
+    router_mode: RouterMode,
+) -> (Arc<RoutePicker>, Arc<RoutePicker>, Option<Arc<RoutePicker>>) {
+    let round_robin = Arc::new(RoutePicker::new(RoutePolicy::RoundRobin));
+    let random = Arc::new(RoutePicker::new(RoutePolicy::Random));
+    let configured = match router_mode {
+        RouterMode::RoundRobin => Some(round_robin.clone()),
+        RouterMode::Random => Some(random.clone()),
+        mode => mode.route_policy().map(RoutePicker::new).map(Arc::new),
+    };
+    (round_robin, random, configured)
 }
 
 /// Pick the instance with lower in-flight count from two random candidates.
 /// Returns the single instance if only one is available.
+#[cfg(test)]
 fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]) -> u64 {
-    let count = instance_ids.len();
-    if count == 1 {
-        let worker_id = instance_ids[0];
-        tracing::info!(
-            router_mode = "power-of-two-choices",
-            worker_id,
-            candidate_count = count,
-            load = occupancy_state.load(worker_id),
-            "Selected worker"
-        );
-        return worker_id;
-    }
-    let mut rng = rand::rng();
-    let idx1 = rng.random_range(0..count);
-    let idx2 = (idx1 + 1 + rng.random_range(0..count - 1)) % count;
-    let id1 = instance_ids[idx1];
-    let id2 = instance_ids[idx2];
-    let load1 = occupancy_state.load(id1);
-    let load2 = occupancy_state.load(id2);
-    let selected = if load1 <= load2 { id1 } else { id2 };
-    tracing::info!(
-        router_mode = "power-of-two-choices",
-        worker_id = selected,
-        candidate_count = count,
-        load = std::cmp::min(load1, load2),
-        candidate_a = id1,
-        candidate_a_load = load1,
-        candidate_b = id2,
-        candidate_b_load = load2,
-        "Selected worker"
-    );
-    selected
-}
-
-/// Select the target device group for the next request in `DeviceAwareWeighted` mode.
-///
-/// If only one class exists (all CPU or all non-CPU), returns that class directly.
-/// If both classes exist, compares capability-normalized load and returns the less-loaded group.
-///
-/// Budget check (integer form):
-/// `allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
-/// and choose CPU when `total_cpu_inflight < allowed_cpu_inflight`.
-///
-/// `ratio` is `non_cpu_to_cpu_ratio` (from `DYN_ENCODER_CUDA_TO_CPU_RATIO`,
-/// default `8` in `device_aware_weighted`).
-fn device_aware_candidate_group(
-    state: &RoutingOccupancyState,
-    instance_ids: &[u64],
-    device_type_map: &HashMap<u64, Option<DeviceType>>,
-    non_cpu_to_cpu_ratio: usize,
-) -> Vec<u64> {
-    let cpu_ids: Vec<u64> = instance_ids
-        .iter()
-        .copied()
-        .filter(|id| matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
-        .collect();
-    let non_cpu_ids: Vec<u64> = instance_ids
-        .iter()
-        .copied()
-        .filter(|id| !matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
-        .collect();
-
-    if cpu_ids.is_empty() {
-        return non_cpu_ids;
-    }
-    if non_cpu_ids.is_empty() {
-        return cpu_ids;
-    }
-
-    // Both classes exist: compute a budget for CPU in-flight requests.
-    let total_non_cpu_inflight: u64 = non_cpu_ids.iter().map(|id| state.load(*id)).sum();
-    let total_cpu_inflight: u64 = cpu_ids.iter().map(|id| state.load(*id)).sum();
-    let cpu_count = cpu_ids.len() as u64;
-    let non_cpu_count = non_cpu_ids.len() as u64;
-    let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
-        / ((non_cpu_to_cpu_ratio as u64).saturating_mul(non_cpu_count));
-
-    if total_cpu_inflight < allowed_cpu_inflight {
-        cpu_ids
-    } else {
-        non_cpu_ids
-    }
+    RoutePicker::new(RoutePolicy::PowerOfTwoChoices)
+        .peek(
+            CandidateView::Workers(instance_ids),
+            RouteContext::default(),
+            |id| occupancy_state.load(id),
+        )
+        .expect("p2c selection requires at least one candidate")
+        .target
+        .worker_id
 }
 
 /// At most one `list_and_watch` per endpoint, across all `PushRouter`
@@ -562,12 +552,15 @@ where
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
+        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         Ok(PushRouter {
             client,
             addressed,
             router_mode,
-            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            picker,
+            round_robin_picker,
+            random_picker,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -633,12 +626,15 @@ where
                 client.endpoint.drt().primary_token(),
             );
         }
+        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         let router = PushRouter {
             client,
             addressed,
             router_mode,
-            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            picker,
+            round_robin_picker,
+            random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -678,12 +674,15 @@ where
             dispatch.clone(),
             client.endpoint.drt().primary_token(),
         );
+        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         Ok(PushRouter {
             client,
             addressed: dispatch,
             router_mode,
-            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            picker,
+            round_robin_picker,
+            random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -717,6 +716,28 @@ where
             .into()
     }
 
+    fn picker(&self) -> anyhow::Result<&RoutePicker> {
+        self.picker.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} routing does not use a worker picker",
+                self.router_mode
+            )
+        })
+    }
+
+    fn select_untracked_worker(&self, picker: &RoutePicker) -> anyhow::Result<(u64, usize)> {
+        let routing_instances = self.client.routing_instances();
+        let candidates = routing_instances.free_ids();
+        let decision = picker
+            .select(
+                CandidateView::Workers(candidates),
+                RouteContext::default(),
+                |_| 0,
+            )
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        Ok((decision.target.worker_id, candidates.len()))
+    }
+
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         self.round_robin_prepared(request, |_, _| Ok(()))
@@ -732,16 +753,8 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-
-        let (instance_id, candidate_count) = {
-            let routing_instances = self.client.routing_instances();
-            let count = routing_instances.free_ids().len();
-            if count == 0 {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            (routing_instances.free_ids()[counter % count], count)
-        };
+        let (instance_id, candidate_count) =
+            self.select_untracked_worker(self.round_robin_picker.as_ref())?;
         tracing::info!(
             router_mode = "round-robin",
             worker_id = instance_id,
@@ -768,15 +781,8 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let (instance_id, candidate_count) = {
-            let routing_instances = self.client.routing_instances();
-            let count = routing_instances.free_ids().len();
-            if count == 0 {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            let counter = rand::rng().random::<u64>() as usize;
-            (routing_instances.free_ids()[counter % count], count)
-        };
+        let (instance_id, candidate_count) =
+            self.select_untracked_worker(self.random_picker.as_ref())?;
         tracing::info!(
             router_mode = "random",
             worker_id = instance_id,
@@ -805,15 +811,30 @@ where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
         let state = self.occupancy_state()?;
-        let instance_id = {
+        let (instance_id, counter, candidate_count) = {
             let routing_instances = self.client.routing_instances();
-            if routing_instances.free_ids().is_empty() {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            p2c_select_from(state.as_ref(), routing_instances.free_ids())
+            let candidates = routing_instances.free_ids();
+            let (decision, counter) = state
+                .select_and_admit(
+                    self.picker()?,
+                    CandidateView::Workers(candidates),
+                    RouteContext::default(),
+                )
+                .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+            (
+                decision.target.worker_id,
+                counter.expect("P2C selection always requests occupancy admission"),
+                candidates.len(),
+            )
         };
-        state.increment(instance_id);
-        let permit = OccupancyPermit::new(state, instance_id);
+        tracing::info!(
+            router_mode = "power-of-two-choices",
+            worker_id = instance_id,
+            candidate_count,
+            load = state.load(instance_id),
+            "Selected worker"
+        );
+        let permit = OccupancyPermit::from_counter(state, instance_id, counter);
         self.dispatch_selected(instance_id, request, Some(permit), prepare)
             .await
     }
@@ -1006,7 +1027,7 @@ where
     {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
+        let instance_ids = routing_instances.free_ids();
 
         if instance_ids.is_empty() {
             return Err(self.empty_free_pool_error(&routing_instances));
@@ -1015,28 +1036,23 @@ where
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
-        let selection =
-            self.device_aware_candidates(request.content(), state.as_ref(), &instance_ids);
+        let selection = self.device_aware_candidates(request.content(), instance_ids);
 
         // Only full cache hits bypass weighted accounting; partial hits still follow the
         // device-aware ratio because some image encoding remains for this request.
-        let instance_id = if selection.full_embedding_cache_hit {
-            state.select_exact_min(&selection.candidates).await
-        } else {
-            state
-                .select_exact_min_and_increment(&selection.candidates)
-                .await
-        }
-        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = if selection.full_embedding_cache_hit {
-            None
-        } else {
-            Some(OccupancyPermit::new(state.clone(), instance_id))
-        };
-        let is_cpu = matches!(
-            selection.device_type_map.get(&instance_id),
-            Some(Some(DeviceType::Cpu))
-        );
+        let (decision, counter) = state
+            .select_and_admit(
+                self.picker()?,
+                CandidateView::DeviceAware(&selection.candidates),
+                selection.context,
+            )
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        let instance_id = decision.target.worker_id;
+        let permit = counter
+            .map(|counter| OccupancyPermit::from_counter(state.clone(), instance_id, counter));
+        let is_cpu = selection.candidates.iter().any(|candidate| {
+            candidate.target.worker_id == instance_id && candidate.device == RouteDevice::Cpu
+        });
         tracing::info!(
             router_mode = "device-aware-weighted",
             worker_id = instance_id,
@@ -1053,18 +1069,20 @@ where
             .await
     }
 
-    fn device_aware_candidates(
-        &self,
-        request: &T,
-        state: &RoutingOccupancyState,
-        instance_ids: &[u64],
-    ) -> DeviceAwareCandidates {
+    fn device_aware_candidates(&self, request: &T, instance_ids: &[u64]) -> DeviceAwareCandidates {
         let device_type_map = self
             .client
             .instances()
             .iter()
-            .map(|instance| (instance.instance_id, instance.device_type.clone()))
-            .collect();
+            .map(|instance| {
+                let device = if matches!(instance.device_type, Some(DeviceType::Cpu)) {
+                    RouteDevice::Cpu
+                } else {
+                    RouteDevice::Accelerator
+                };
+                (instance.instance_id, device)
+            })
+            .collect::<HashMap<_, _>>();
         let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -1090,28 +1108,29 @@ where
             };
 
         let embedding_cache_hit = !cache_matched_candidates.is_empty();
+        let cache_hits = cache_matched_candidates
+            .into_iter()
+            .collect::<HashMap<_, _>>();
         let request_cache_key_count = request_cache_keys
             .iter()
             .collect::<std::collections::HashSet<_>>()
             .len();
-        let full_cache_candidates = cache_matched_candidates
+        let candidates = instance_ids
             .iter()
-            .filter_map(|(worker_id, hits)| {
-                (*hits >= request_cache_key_count).then_some(*worker_id)
+            .map(|worker_id| RouteCandidate {
+                target: RouteTarget::worker(*worker_id),
+                device: device_type_map.get(worker_id).copied().unwrap_or_default(),
+                cache_hits: cache_hits.get(worker_id).copied().unwrap_or_default(),
             })
             .collect::<Vec<_>>();
-        let full_embedding_cache_hit = !full_cache_candidates.is_empty();
-        let candidates = if full_embedding_cache_hit {
-            full_cache_candidates
-        } else {
-            device_aware_candidate_group(state, instance_ids, &device_type_map, cuda_to_cpu_ratio)
-        };
 
         DeviceAwareCandidates {
             candidates,
-            device_type_map,
+            context: RouteContext {
+                required_cache_hits: request_cache_key_count,
+                non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+            },
             embedding_cache_hit,
-            full_embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
         }
     }
@@ -1133,12 +1152,20 @@ where
     {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
-        let instance_id = state
-            .select_exact_min_and_increment(&instance_ids)
-            .await
+        let instance_ids = routing_instances.free_ids();
+        let (decision, counter) = state
+            .select_and_admit(
+                self.picker()?,
+                CandidateView::Workers(instance_ids),
+                RouteContext::default(),
+            )
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = OccupancyPermit::new(state.clone(), instance_id);
+        let instance_id = decision.target.worker_id;
+        let permit = OccupancyPermit::from_counter(
+            state.clone(),
+            instance_id,
+            counter.expect("least-loaded selection always requests occupancy admission"),
+        );
         tracing::info!(
             router_mode = "least-loaded",
             worker_id = instance_id,
@@ -1156,20 +1183,16 @@ where
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
         let routing_instances = self.client.routing_instances();
-        let count = routing_instances.free_ids().len();
-        if count == 0 {
-            return None;
-        }
-
         match self.router_mode {
-            RouterMode::RoundRobin => {
-                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                Some(routing_instances.free_ids()[counter % count])
-            }
-            RouterMode::Random => {
-                let counter = rand::rng().random::<u64>() as usize;
-                Some(routing_instances.free_ids()[counter % count])
-            }
+            RouterMode::RoundRobin | RouterMode::Random => self
+                .picker
+                .as_deref()?
+                .select(
+                    CandidateView::Workers(routing_instances.free_ids()),
+                    RouteContext::default(),
+                    |_| 0,
+                )
+                .map(|decision| decision.target.worker_id),
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
             | RouterMode::LeastLoaded
@@ -1191,29 +1214,31 @@ where
     pub fn peek_next_worker(&self) -> Option<u64> {
         // Select among free (admission-eligible) workers — see select_next_worker
         // for the per-mode selection rationale.
-        let instance_ids = self.client.routing_instances().free_ids().to_vec();
-        let count = instance_ids.len();
-        if count == 0 {
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids();
+        if instance_ids.is_empty() {
             return None;
         }
 
         match self.router_mode {
-            RouterMode::RoundRobin => {
-                // Just peek at the current counter value without incrementing
-                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(instance_ids[counter % count])
-            }
-            RouterMode::Random => {
-                // For random, peeking implies a fresh random selection since it's stateless.
-                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
-                let counter = rand::rng().random::<u64>() as usize;
-                Some(instance_ids[counter % count])
-            }
-            RouterMode::LeastLoaded => self.occupancy_state.as_deref()?.peek_min(&instance_ids),
-            RouterMode::PowerOfTwoChoices => Some(p2c_select_from(
-                self.occupancy_state.as_deref()?,
-                &instance_ids,
-            )),
+            RouterMode::RoundRobin | RouterMode::Random => self
+                .picker
+                .as_deref()?
+                .peek(
+                    CandidateView::Workers(instance_ids),
+                    RouteContext::default(),
+                    |_| 0,
+                )
+                .map(|decision| decision.target.worker_id),
+            RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => self
+                .occupancy_state
+                .as_deref()?
+                .peek(
+                    self.picker.as_deref()?,
+                    CandidateView::Workers(instance_ids),
+                    RouteContext::default(),
+                )
+                .map(|decision| decision.target.worker_id),
             RouterMode::DeviceAwareWeighted => {
                 let state = self.occupancy_state.as_deref()?;
                 let device_type_map: HashMap<u64, Option<DeviceType>> = self
@@ -1227,13 +1252,31 @@ where
                     .and_then(|value| value.parse::<usize>().ok())
                     .filter(|value| *value >= 1)
                     .unwrap_or(8);
-                let candidates = device_aware_candidate_group(
-                    state,
-                    &instance_ids,
-                    &device_type_map,
-                    cuda_to_cpu_ratio,
-                );
-                state.peek_min(&candidates)
+                let candidates = instance_ids
+                    .iter()
+                    .map(|worker_id| RouteCandidate {
+                        target: RouteTarget::worker(*worker_id),
+                        device: if matches!(
+                            device_type_map.get(worker_id),
+                            Some(Some(DeviceType::Cpu))
+                        ) {
+                            RouteDevice::Cpu
+                        } else {
+                            RouteDevice::Accelerator
+                        },
+                        cache_hits: 0,
+                    })
+                    .collect::<Vec<_>>();
+                state
+                    .peek(
+                        self.picker.as_deref()?,
+                        CandidateView::DeviceAware(&candidates),
+                        RouteContext {
+                            required_cache_hits: 0,
+                            non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                        },
+                    )
+                    .map(|decision| decision.target.worker_id)
             }
             RouterMode::Direct => None,
             RouterMode::KV => {
@@ -1243,6 +1286,68 @@ where
                 )
             }
         }
+    }
+
+    /// Peek a request-aware target without mutating picker or admission state.
+    pub fn peek_target(&self, request: &T) -> anyhow::Result<RouteTarget> {
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids();
+        if instance_ids.is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+
+        let decision = match self.router_mode {
+            RouterMode::RoundRobin | RouterMode::Random => self.picker()?.peek(
+                CandidateView::Workers(instance_ids),
+                RouteContext::default(),
+                |_| 0,
+            ),
+            RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => {
+                self.occupancy_state()?.peek(
+                    self.picker()?,
+                    CandidateView::Workers(instance_ids),
+                    RouteContext::default(),
+                )
+            }
+            RouterMode::DeviceAwareWeighted => {
+                let state = self.occupancy_state()?;
+                let selection = self.device_aware_candidates(request, instance_ids);
+                state.peek(
+                    self.picker()?,
+                    CandidateView::DeviceAware(&selection.candidates),
+                    selection.context,
+                )
+            }
+            RouterMode::Direct => {
+                anyhow::bail!("Direct routing requires an explicit worker target")
+            }
+            RouterMode::KV => anyhow::bail!("KV routing selects through the KV scheduler"),
+        }
+        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        Ok(decision.target)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn occupancy_for_test(&self, worker_id: u64) -> u64 {
+        self.occupancy_state
+            .as_deref()
+            .map(|state| state.load(worker_id))
+            .unwrap_or(0)
+    }
+
+    /// Commit a request-aware target and retain any occupancy lease until the
+    /// returned reservation is dropped.
+    pub async fn reserve_target(
+        &self,
+        request: &T,
+        pinned_worker: Option<u64>,
+    ) -> anyhow::Result<RoutingReservation> {
+        let (instance_id, permit) = self.select_exact_target(request, pinned_worker).await?;
+        Ok(RoutingReservation {
+            target: RouteTarget::worker(instance_id),
+            _permit: permit,
+        })
     }
 
     async fn select_exact_target(
@@ -1263,8 +1368,7 @@ where
                 | RouterMode::PowerOfTwoChoices
                 | RouterMode::DeviceAwareWeighted => {
                     let state = self.occupancy_state()?;
-                    state.increment(instance_id);
-                    Some(OccupancyPermit::new(state, instance_id))
+                    Some(OccupancyPermit::acquire(state, instance_id))
                 }
                 RouterMode::RoundRobin
                 | RouterMode::Random
@@ -1280,47 +1384,42 @@ where
             | RouterMode::DeviceAwareWeighted => {
                 let state = self.occupancy_state()?;
                 let routing_instances = self.client.routing_instances();
-                let instance_ids = routing_instances.free_ids().to_vec();
+                let instance_ids = routing_instances.free_ids();
                 if instance_ids.is_empty() {
                     return Err(self.empty_free_pool_error(&routing_instances));
                 }
 
-                let instance_id = match self.router_mode {
-                    RouterMode::LeastLoaded => state
-                        .select_exact_min_and_increment(&instance_ids)
-                        .await
+                let (decision, counter) = match self.router_mode {
+                    RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => state
+                        .select_and_admit(
+                            self.picker()?,
+                            CandidateView::Workers(instance_ids),
+                            RouteContext::default(),
+                        )
                         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
-                    RouterMode::PowerOfTwoChoices => {
-                        let instance_id = p2c_select_from(state.as_ref(), &instance_ids);
-                        state.increment(instance_id);
-                        instance_id
-                    }
                     RouterMode::DeviceAwareWeighted => {
-                        let selection =
-                            self.device_aware_candidates(request, state.as_ref(), &instance_ids);
-                        let instance_id = if selection.full_embedding_cache_hit {
-                            state.select_exact_min(&selection.candidates).await
-                        } else {
-                            state
-                                .select_exact_min_and_increment(&selection.candidates)
-                                .await
-                        }
-                        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-                        let permit = (!selection.full_embedding_cache_hit)
-                            .then(|| OccupancyPermit::new(state, instance_id));
-                        return Ok((instance_id, permit));
+                        let selection = self.device_aware_candidates(request, instance_ids);
+                        state
+                            .select_and_admit(
+                                self.picker()?,
+                                CandidateView::DeviceAware(&selection.candidates),
+                                selection.context,
+                            )
+                            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?
                     }
                     _ => unreachable!(),
                 };
-                Ok((instance_id, Some(OccupancyPermit::new(state, instance_id))))
+                let instance_id = decision.target.worker_id;
+                let permit = counter
+                    .map(|counter| OccupancyPermit::from_counter(state, instance_id, counter));
+                Ok((instance_id, permit))
             }
-            RouterMode::RoundRobin | RouterMode::Random => self
-                .select_next_worker()
-                .map(|instance_id| (instance_id, None))
-                .ok_or_else(|| {
-                    let routing_instances = self.client.routing_instances();
-                    self.empty_free_pool_error(&routing_instances)
-                }),
+            RouterMode::RoundRobin => self
+                .select_untracked_worker(self.round_robin_picker.as_ref())
+                .map(|(instance_id, _)| (instance_id, None)),
+            RouterMode::Random => self
+                .select_untracked_worker(self.random_picker.as_ref())
+                .map(|(instance_id, _)| (instance_id, None)),
             RouterMode::Direct => Err(anyhow::anyhow!(
                 "Worker ID required for exact dispatch in Direct routing mode"
             )),
@@ -1736,22 +1835,30 @@ where
     }
 }
 
-struct OccupancyTrackedStream<U: Data> {
+struct OccupancyTrackedStream<U: Data + MaybeError> {
     inner: ManyOut<U>,
-    state: Arc<RoutingOccupancyState>,
     instance_id: u64,
+    counter: Arc<AtomicU64>,
     released: bool,
 }
 
-impl<U: Data> Drop for OccupancyTrackedStream<U> {
-    fn drop(&mut self) {
-        if !self.released {
-            self.state.decrement(self.instance_id);
+impl<U: Data + MaybeError> OccupancyTrackedStream<U> {
+    fn release(&mut self) {
+        if self.released {
+            return;
         }
+        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
+        self.released = true;
     }
 }
 
-impl<U: Data> std::fmt::Debug for OccupancyTrackedStream<U> {
+impl<U: Data + MaybeError> Drop for OccupancyTrackedStream<U> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl<U: Data + MaybeError> std::fmt::Debug for OccupancyTrackedStream<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OccupancyTrackedStream")
             .field("instance_id", &self.instance_id)
@@ -1759,7 +1866,7 @@ impl<U: Data> std::fmt::Debug for OccupancyTrackedStream<U> {
     }
 }
 
-impl<U: Data> Stream for OccupancyTrackedStream<U> {
+impl<U: Data + MaybeError> Stream for OccupancyTrackedStream<U> {
     type Item = U;
 
     fn poll_next(
@@ -1767,21 +1874,22 @@ impl<U: Data> Stream for OccupancyTrackedStream<U> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let poll = self.inner.as_mut().poll_next(cx);
-        if matches!(poll, Poll::Ready(None)) && !self.released {
-            self.state.decrement(self.instance_id);
-            self.released = true;
+        if matches!(&poll, Poll::Ready(None))
+            || matches!(&poll, Poll::Ready(Some(item)) if item.err().is_some())
+        {
+            self.release();
         }
         poll
     }
 }
 
-impl<U: Data> AsyncEngineContextProvider for OccupancyTrackedStream<U> {
+impl<U: Data + MaybeError> AsyncEngineContextProvider for OccupancyTrackedStream<U> {
     fn context(&self) -> Arc<dyn AsyncEngineContext> {
         self.inner.context()
     }
 }
 
-impl<U: Data> crate::engine::AsyncEngineStream<U> for OccupancyTrackedStream<U> {}
+impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrackedStream<U> {}
 
 #[cfg(test)]
 mod tests {
@@ -1860,6 +1968,28 @@ mod tests {
     }
 
     #[test]
+    fn explicit_static_pickers_keep_policy_specific_state() {
+        let (round_robin, random, configured) = route_pickers(RouterMode::KV);
+        assert!(configured.is_none());
+        assert_eq!(random.policy(), RoutePolicy::Random);
+
+        let candidates = CandidateView::Workers(&[10, 20, 30, 40]);
+        random
+            .select(candidates, RouteContext::default(), |_| 0)
+            .expect("random selection must have a candidate");
+        let selected = (0..2)
+            .map(|_| {
+                round_robin
+                    .select(candidates, RouteContext::default(), |_| 0)
+                    .expect("round-robin selection must have a candidate")
+                    .target
+                    .worker_id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected, [10, 20]);
+    }
+
+    #[test]
     fn p2c_selects_single_worker() {
         let state = RoutingOccupancyState::default();
         assert_eq!(p2c_select_from(&state, &[42]), 42);
@@ -1893,8 +2023,8 @@ mod tests {
     #[test]
     fn occupancy_permit_decrements_before_stream_creation() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(42);
-        let permit = OccupancyPermit::new(state.clone(), 42);
+        let counter = state.increment(42);
+        let permit = OccupancyPermit::from_counter(state.clone(), 42, counter);
         assert_eq!(state.load(42), 1);
         drop(permit);
         assert_eq!(state.load(42), 0);
@@ -1903,11 +2033,11 @@ mod tests {
     #[test]
     fn occupancy_tracked_stream_decrements_on_drop() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(7);
-        let permit = OccupancyPermit::new(state.clone(), 7);
+        let counter = state.increment(7);
+        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let stream = permit.into_tracked_stream(ResponseStream::new(
-            Box::pin(tokio_stream::iter(vec![1u64])),
+            Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
             ctx,
         ));
         assert_eq!(state.load(7), 1);
@@ -1918,20 +2048,66 @@ mod tests {
     #[tokio::test]
     async fn occupancy_tracked_stream_decrements_on_completion() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(7);
-        let permit = OccupancyPermit::new(state.clone(), 7);
+        let counter = state.increment(7);
+        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let mut stream = permit.into_tracked_stream(ResponseStream::new(
-            Box::pin(tokio_stream::iter(vec![1u64])),
+            Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
             ctx,
         ));
 
-        assert_eq!(stream.next().await, Some(1));
+        assert!(stream.next().await.unwrap().err().is_none());
         assert_eq!(state.load(7), 1);
-        assert_eq!(stream.next().await, None);
+        assert!(stream.next().await.is_none());
         assert_eq!(state.load(7), 0);
         drop(stream);
         assert_eq!(state.load(7), 0, "drop must not release twice after EOF");
+    }
+
+    #[tokio::test]
+    async fn occupancy_tracked_stream_releases_before_yielding_error() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        let counter = state.increment(7);
+        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let error = DynamoError::builder()
+            .error_type(ErrorType::WorkerOverloaded)
+            .message("worker queue full")
+            .build();
+        let mut stream = permit.into_tracked_stream(ResponseStream::new(
+            Box::pin(tokio_stream::iter(vec![TestResponse {
+                error: Some(error),
+            }])),
+            ctx,
+        ));
+
+        let response = stream.next().await.expect("error response");
+        assert!(response.err().is_some());
+        assert_eq!(
+            state.load(7),
+            0,
+            "occupancy must be released before retry observes the error"
+        );
+    }
+
+    #[test]
+    fn old_reservation_cannot_decrement_readded_worker_counter() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        let old_counter = state.increment(7);
+        let old_permit = OccupancyPermit::from_counter(state.clone(), 7, old_counter);
+
+        state.retain(&[]);
+        let new_counter = state.increment(7);
+        assert_eq!(state.load(7), 1);
+
+        drop(old_permit);
+        assert_eq!(
+            state.load(7),
+            1,
+            "dropping an old incarnation must not touch the replacement counter"
+        );
+        RoutingOccupancyState::decrement_counter(new_counter.as_ref());
+        assert_eq!(state.load(7), 0);
     }
 
     /// A mid-generation stream end means the worker dropped the request, so it
@@ -1969,8 +2145,7 @@ mod tests {
         let mut permits = Vec::new();
         for _ in 0..5 {
             let selected = p2c_select_from(&state, &[1, 2]);
-            state.increment(selected);
-            permits.push(OccupancyPermit::new(state.clone(), selected));
+            permits.push(OccupancyPermit::acquire(state.clone(), selected));
         }
 
         let total = state.load(1) + state.load(2);
@@ -2012,13 +2187,22 @@ mod tests {
         state.increment(1);
         state.increment(2);
 
-        let selected = state
-            .select_exact_min_and_increment(&[1, 2, 3])
-            .await
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        let (decision, counter) = state
+            .select_and_admit(
+                &picker,
+                CandidateView::Workers(&[1, 2, 3]),
+                RouteContext::default(),
+            )
             .unwrap();
+        let selected = decision.target.worker_id;
         assert_eq!(selected, 3);
 
-        let permit = OccupancyPermit::new(state.clone(), selected);
+        let permit = OccupancyPermit::from_counter(
+            state.clone(),
+            selected,
+            counter.expect("least-loaded selection must acquire a counter"),
+        );
         assert_eq!(state.load(selected), 1);
         drop(permit);
         assert_eq!(state.load(selected), 0);
@@ -2480,90 +2664,6 @@ mod tests {
         }
 
         rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn device_aware_cpu_only_selects_least_loaded_instance() {
-        let state = RoutingOccupancyState::default();
-        // All candidates are CPU. Make worker 2 the least-loaded one.
-        for _ in 0..3 {
-            state.increment(1);
-        }
-        state.increment(3);
-
-        let instance_ids = vec![1, 2, 3];
-        let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cpu)),
-            (2, Some(DeviceType::Cpu)),
-            (3, Some(DeviceType::Cpu)),
-        ]);
-
-        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
-        assert_eq!(candidates, vec![1, 2, 3]);
-
-        let selected = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .unwrap();
-        assert_eq!(selected, 2);
-    }
-
-    #[tokio::test]
-    async fn device_aware_non_cpu_only_selects_least_loaded_instance() {
-        let state = RoutingOccupancyState::default();
-        // All candidates are non-CPU. Make worker 2 the least-loaded one.
-        for _ in 0..3 {
-            state.increment(1);
-        }
-        state.increment(3);
-
-        let instance_ids = vec![1, 2, 3];
-        let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cuda)),
-            (2, Some(DeviceType::Cuda)),
-            (3, Some(DeviceType::Cuda)),
-        ]);
-
-        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
-        assert_eq!(candidates, vec![1, 2, 3]);
-
-        let selected = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .unwrap();
-        assert_eq!(selected, 2);
-    }
-
-    #[test]
-    fn device_aware_group_uses_ratio_budget() {
-        let state = RoutingOccupancyState::default();
-        // CPU ids: 1,2 ; non-CPU ids: 3,4
-        for _ in 0..4 {
-            state.increment(3);
-            state.increment(4);
-        }
-        // CPU inflight can differ across instances; budgeting uses total CPU inflight.
-        for _ in 0..3 {
-            state.increment(1);
-        }
-        // total_non_cpu_inflight=8, cpu_count=2, non_cpu_count=2, ratio=2
-        // allowed_cpu_inflight = 8*2/(2*2)=4
-        // total_cpu_inflight=3 < 4 => choose CPU group.
-        let instance_ids = vec![1, 2, 3, 4];
-        let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cpu)),
-            (2, Some(DeviceType::Cpu)),
-            (3, Some(DeviceType::Cuda)),
-            (4, Some(DeviceType::Cuda)),
-        ]);
-
-        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 2);
-        assert_eq!(candidates, vec![1, 2]);
-
-        // Within selected CPU group, final choice should be the least-loaded instance (id=2).
-        let selected =
-            futures::executor::block_on(state.select_exact_min_and_increment(&candidates)).unwrap();
-        assert_eq!(selected, 2);
     }
 
     #[tokio::test]
