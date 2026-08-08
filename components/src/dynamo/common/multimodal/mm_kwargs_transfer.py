@@ -276,6 +276,31 @@ class MmKwargsNixlSender(MmKwargsSender):
         )
         return {"mm_kwargs_nixl": metadata.model_dump()}
 
+    def _release_all(self, items: list[Any]) -> BaseException | None:
+        """Release every operation, returning the first failure (if any).
+
+        Broad ``except`` is deliberate here and is *not* re-raised inside the
+        loop: releasing is best-effort across all items, and aborting early
+        would leak exactly the buffers this method exists to free. The failure
+        is logged at warning level and returned so the caller can re-raise it
+        once every item has been attempted, per .ai/python-guidelines.md
+        ("always re-raise after logging").
+        """
+        first_error: BaseException | None = None
+        for op in items:
+            try:
+                # ReadableOperation.__exit__ -> _release() -> deregister.
+                # _release() skips descriptors that are already deregistered,
+                # so this stays safe alongside __del__.
+                op.__exit__(None, None, None)
+            except Exception as exc:
+                logger.warning(
+                    "[NIXL-Sender] failed to release transfer", exc_info=True
+                )
+                if first_error is None:
+                    first_error = exc
+        return first_error
+
     async def cleanup(self, items: list[Any]) -> None:
         """Await NIXL completion, then release the registered memory regions.
 
@@ -289,15 +314,28 @@ class MmKwargsNixlSender(MmKwargsSender):
 
         Releasing in ``finally`` is the part that actually fixes the leak: the
         timeout alone would stop the hang while still pinning the memory.
+
+        ``return_exceptions=True`` matters for correctness, not just tidiness:
+        without it ``gather`` propagates the first failure while its siblings
+        are still running, and the release below would then deregister buffers
+        whose reads are still in flight.
+
+        Trade-off worth stating: once the timeout elapses the buffer is
+        deregistered, so a backend that reads *later* will see a NIXL transfer
+        error rather than data. That is deliberate -- the alternative is
+        unbounded growth -- and is why the timeout is generous and tunable via
+        ``DYN_MM_NIXL_CLEANUP_TIMEOUT_S``.
         """
         if not items:
             return
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*(op.wait_for_completion() for op in items)),
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(op.wait_for_completion() for op in items),
+                    return_exceptions=True,
+                ),
                 timeout=MM_NIXL_CLEANUP_TIMEOUT_S,
             )
-            logger.debug("[NIXL-Sender] all transfers completed")
         except asyncio.TimeoutError:
             logger.warning(
                 "[NIXL-Sender] %d transfer(s) not read within %.1fs; "
@@ -305,19 +343,24 @@ class MmKwargsNixlSender(MmKwargsSender):
                 len(items),
                 MM_NIXL_CLEANUP_TIMEOUT_S,
             )
-        except Exception:
-            logger.warning("[NIXL-Sender] transfer completion failed", exc_info=True)
+        else:
+            failures = [r for r in results if isinstance(r, BaseException)]
+            if failures:
+                logger.warning(
+                    "[NIXL-Sender] %d of %d transfer(s) failed to complete; "
+                    "first error: %r",
+                    len(failures),
+                    len(items),
+                    failures[0],
+                )
+            else:
+                logger.debug("[NIXL-Sender] all transfers completed")
         finally:
-            for op in items:
-                try:
-                    # ReadableOperation.__exit__ -> _release() -> deregister.
-                    # _release() skips descriptors that are already
-                    # deregistered, so this stays safe alongside __del__.
-                    op.__exit__(None, None, None)
-                except Exception:
-                    logger.debug(
-                        "[NIXL-Sender] failed to release transfer", exc_info=True
-                    )
+            release_error = self._release_all(items)
+        # Raised outside the finally so it can never mask an exception that was
+        # already propagating (e.g. cancellation).
+        if release_error is not None:
+            raise release_error
 
 
 # ---------------------------------------------------------------------------
