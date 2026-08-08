@@ -1,0 +1,25 @@
+# Dynamo automated review — runs on every pull request.
+#
+# PROVIDED workflow: it runs the Dynamo review pipeline (static checks → rubric
+# review → duplicate check → validation → agent trials) and posts the results as
+# comments on your PR. The checks are maintained centrally by the Dynamo team, so
+# please don't edit this file — edits here won't change the checks.
+
+name: Dynamo Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: dynamo-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: handshake-project-dynamo/handshake-orchestration-tb2/.github/workflows/dynamo-review.yml@main
+    secrets: inherit

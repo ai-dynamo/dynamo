@@ -1,0 +1,187 @@
+# Diversity taxonomy — controlled vocabulary for task.toml [metadata] labels.
+# Source: TB_spec/TB_spec_diversity.md. Consumed by checks/check-diversity-labels.py.
+#
+# All labels are written in lowercase snake_case. Matching is case- and
+# separator-insensitive, so "software_engineering", "software engineering", and
+# "Software Engineering" all resolve to the same entry. [metadata].category must be
+# one of the [categories] keys; subcategory should be one of that category's listed
+# values (additional subcategories are allowed by the spec — an unlisted one is a
+# warning, not a failure). task_objective[] and artifact_type[] are CLOSED sets:
+# every value must appear below.
+#
+# NOTE: task_objective and artifact_type are declared BEFORE [categories] on purpose
+# — in TOML, keys after a table header belong to that table.
+
+# Closed set — every [metadata].task_objective value must be one of these.
+task_objective = [
+  "implement", "fix", "configure", "analyze", "transform", "validate",
+  "optimize", "migrate", "refactor", "test", "debug", "build_or_package",
+  "deploy_or_operate", "recover_or_repair_artifact", "generate",
+  "compare_or_select", "secure_or_harden", "automate_workflow",
+]
+
+# Closed set — every [metadata].artifact_type value must be one of these.
+artifact_type = [
+  "codebase", "single_script_or_program", "test_suite_or_benchmark",
+  "build_system_or_package_metadata", "configuration_file", "shell_environment",
+  "service_or_daemon", "container_or_virtual_environment",
+  "database_or_structured_store", "dataset_or_tabular_file", "text_or_log_file",
+  "document_or_report", "archive_or_compressed_artifact",
+  "binary_executable_or_library", "media_artifact", "model_or_checkpoint",
+  "hardware_or_firmware_artifact", "network_endpoint_or_protocol_artifact",
+  "repository_history_or_version_control_state", "security_artifact",
+  "mathematical_or_scientific_model", "generated_output_artifact",
+]
+
+[categories]
+"software_engineering" = [
+  "feature_implementation",
+  "refactoring_and_code_modernization",
+  "testing_and_quality_engineering",
+  "compilers_interpreters_and_programming_languages",
+  "porting_and_migration",
+  "scripting_and_automation",
+  "web_api_and_networking_software",
+  "version_control_and_repository_operations",
+]
+"debugging_and_repair" = [
+  "runtime_bug_repair",
+  "test_failure_repair",
+  "build_failure_repair",
+  "configuration_repair",
+  "performance_debugging",
+  "concurrency_and_synchronization_debugging",
+  "pipeline_and_orchestration_debugging",
+]
+"build_dependency_and_release_management" = [
+  "build_system_configuration",
+  "dependency_and_lockfile_resolution",
+  "ci_cd_pipelines",
+  "container_builds",
+  "cross_compilation_and_platform_targeting",
+  "package_publishing",
+  "release_artifacts",
+]
+"systems_infrastructure_and_operations" = [
+  "os_process_and_service_management",
+  "users_permissions_and_access_control",
+  "shell_and_environment_configuration",
+  "networking_configuration",
+  "containers_and_orchestration",
+  "storage_and_filesystem_administration",
+  "scheduling_and_automation_infrastructure",
+  "logging_monitoring_and_observability",
+  "virtualization_and_emulation",
+]
+"data_processing_and_etl" = [
+  "etl_pipelines",
+  "file_format_parsing_and_serialization",
+  "tabular_transformation",
+  "text_processing",
+  "data_validation",
+  "streaming_data_processing",
+  "geospatial_data_processing",
+  "media_data_processing",
+]
+"data_querying_and_databases" = [
+  "sql_querying",
+  "analytical_queries",
+  "query_optimization",
+  "database_administration",
+  "nosql_and_document_stores",
+  "graph_and_semantic_queries",
+]
+"data_science_and_reporting" = [
+  "exploratory_data_analysis",
+  "statistical_analysis_and_inference",
+  "time_series_analysis",
+  "experiment_and_metrics_analysis",
+  "data_visualization",
+  "notebook_and_report_generation",
+  "dataset_preparation_for_analysis",
+]
+"machine_learning_and_ai" = [
+  "model_inference_and_prediction",
+  "model_evaluation_and_benchmarking",
+  "feature_engineering",
+  "nlp_and_language_models",
+  "computer_vision",
+  "ml_serving_and_deployment",
+  "interpretability_and_model_inspection",
+  "unsupervised_and_representation_learning",
+]
+"model_training_and_ml_infrastructure" = [
+  "training_loops",
+  "fine_tuning",
+  "reinforcement_learning",
+  "hyperparameter_tuning",
+  "data_loading_and_training_pipelines",
+  "checkpointing_and_resumption",
+  "distributed_training",
+  "evaluation_infrastructure",
+]
+"security" = [
+  "cryptography",
+  "cryptanalysis",
+  "authentication_and_authorization",
+  "vulnerability_analysis",
+  "exploit_and_ctf_tasks",
+  "reverse_engineering",
+  "digital_forensics",
+  "network_forensics",
+  "security_hardening",
+]
+"scientific_computing_and_domain_science" = [
+  "numerical_methods",
+  "differential_equations_and_simulation",
+  "physics_and_mechanics",
+  "chemistry_and_materials_workflows",
+  "biology_and_bioinformatics",
+  "signal_processing",
+  "statistical_modeling",
+  "optimization_and_operations_research",
+]
+"mathematics_and_formal_reasoning" = [
+  "symbolic_computation",
+  "number_theory_and_exact_arithmetic",
+  "computational_linear_algebra",
+  "combinatorics_and_enumeration",
+  "computational_geometry",
+  "algorithms_and_optimization_theory",
+  "formal_verification",
+]
+"hardware_embedded_and_low_level_systems" = [
+  "gpu_kernels_and_accelerators",
+  "embedded_and_firmware",
+  "rtl_and_digital_design",
+  "dsp_and_signal_hardware",
+  "cad_and_mechanical_workflows",
+  "low_level_runtime_and_performance",
+]
+"file_and_media_operations" = [
+  "file_search_and_filtering",
+  "batch_rename_and_organization",
+  "archiving_and_compression",
+  "file_format_conversion",
+  "text_editing_and_manipulation",
+  "file_permissions_and_metadata",
+  "recovery_and_repair",
+  "video_processing",
+  "audio_and_music_processing",
+  "image_and_design_processing",
+]
+"games_puzzles_and_interactive_simulation" = [
+  "board_and_card_games",
+  "puzzle_solving",
+  "game_ai_and_strategy",
+  "world_simulation",
+  "interactive_text_games",
+  "rendering_and_graphics",
+]
+"regulated_knowledge_work_and_business_operations" = [
+  "finance_and_quantitative_workflows",
+  "business_operations",
+  "legal_and_compliance",
+  "medical_and_clinical_workflows",
+  "personal_assistant_productivity",
+]

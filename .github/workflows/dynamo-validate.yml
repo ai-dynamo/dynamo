@@ -1,0 +1,81 @@
+# Dynamo task validation (Docker build + oracle + nop).
+#
+# PROVIDED workflow. A maintainer triggers it with a `/validate` comment to build
+# your environment and run your reference solution + a no-op check. Maintained
+# centrally by the Dynamo team — please don't edit this file.
+
+name: Dynamo Validate
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to validate"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Preserve the inline workflow's behavior: a new `/validate` on a PR cancels the
+# previous in-progress one; non-/validate comments get a unique (never-colliding)
+# group so they don't block anything.
+concurrency:
+  group: >-
+    ${{ (github.event_name == 'issue_comment' && !contains(github.event.comment.body, '/validate'))
+        && format('validate-noop-{0}', github.run_id)
+        || format('validate-manual-{0}', github.event.issue.number || inputs.pr_number) }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+      head_sha: ${{ steps.check.outputs.head_sha }}
+    steps:
+      - name: Check trigger + maintainer access, pin head SHA
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_PR_URL: ${{ github.event.issue.pull_request.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          SHOULD=false; PRN=""
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            SHOULD=true; PRN="$INPUT_PR_NUMBER"
+          elif [ -n "$ISSUE_PR_URL" ] && [[ "$COMMENT_BODY" == *"/validate"* ]]; then
+            # /validate runs untrusted task code; require write access (maintainer).
+            PERMISSION=$(gh api "repos/${REPO}/collaborators/${COMMENT_USER}/permission" --jq '.permission' 2>/dev/null || echo "none")
+            if [[ "$PERMISSION" == "admin" || "$PERMISSION" == "write" ]]; then
+              SHOULD=true; PRN="$ISSUE_NUMBER"
+            else
+              echo "User ${COMMENT_USER} lacks write access"
+            fi
+          fi
+          echo "should_run=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PRN" >> "$GITHUB_OUTPUT"
+          if [ "$SHOULD" = "true" ]; then
+            # Resolve the PR head ONCE and pin it (immutable) for the run.
+            HEAD_SHA=$(gh pr view "$PRN" --repo "$REPO" --json headRefOid -q '.headRefOid')
+            echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "Pinned head SHA: $HEAD_SHA"
+          fi
+
+  validate:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true'
+    uses: handshake-project-dynamo/handshake-orchestration-tb2/.github/workflows/dynamo-validate.yml@main
+    with:
+      pr_number: ${{ needs.gate.outputs.pr_number }}
+      head_sha: ${{ needs.gate.outputs.head_sha }}
+    secrets: inherit
