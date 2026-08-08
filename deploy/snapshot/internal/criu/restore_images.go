@@ -10,22 +10,24 @@ import (
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	"github.com/checkpoint-restore/go-criu/v8/crit/images/fdinfo"
+	sk_unix "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-unix"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	filesImageFilename          = "files.img"
-	placeholderPIDNamespacePath = "/proc/self/ns/pid"
-	cudaSocketNameStart         = "\x00cuda-uvmfd-"
+	filesImageFilename            = "files.img"
+	placeholderMountNamespacePath = "/proc/self/ns/mnt"
+	cudaSocketNameStart           = "\x00cuda-uvmfd-"
+	// CRIU records an unconnected AF_UNIX socket with Linux's CLOSE state value.
+	linuxUnixSocketStateClose = 7
 )
 
 func prepareRestoreImageDir(checkpointPath string) (string, func(), error) {
-	// CRIU creates the restored child namespace too late to rewrite images, but restored
-	// CUDA endpoints do not rediscover this name. Only collision-free binding in the shared
-	// network namespace is required, and sibling placeholders have distinct PID namespaces.
+	// The placeholder mount namespace remains container-specific with shareProcessNamespace,
+	// so its inode uniquely scopes names that would collide in the shared network namespace.
 	var stat unix.Stat_t
-	if err := unix.Stat(placeholderPIDNamespacePath, &stat); err != nil {
-		return "", nil, fmt.Errorf("failed to stat placeholder PID namespace at %s: %w", placeholderPIDNamespacePath, err)
+	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
+		return "", nil, fmt.Errorf("failed to stat placeholder mount namespace at %s: %w", placeholderMountNamespacePath, err)
 	}
 	return prepareRestoreImageDirForSocketScope(checkpointPath, stat.Ino)
 }
@@ -55,6 +57,9 @@ func prepareRestoreImageDirForSocketScope(checkpointPath string, restoreSocketSc
 		}
 		if name, ok := rewriteCUDASocketName(fileEntry.Usk.Name, restoreSocketScope); ok {
 			fileEntry.Usk.Name = name
+			rewritten = true
+		}
+		if rewriteLinuxAutobindDatagramSocketName(fileEntry.Usk, restoreSocketScope) {
 			rewritten = true
 		}
 	}
@@ -129,6 +134,39 @@ func rewriteCUDASocketName(name []byte, restoreSocketScope uint64) ([]byte, bool
 	rewritten = append(rewritten, numericFields[separator:]...)
 	rewritten = append(rewritten, name[end:]...)
 	return rewritten, true
+}
+
+func rewriteLinuxAutobindDatagramSocketName(entry *sk_unix.UnixSkEntry, restoreSocketScope uint64) bool {
+	if entry == nil ||
+		entry.Type == nil ||
+		entry.State == nil ||
+		entry.Peer == nil ||
+		entry.Backlog == nil ||
+		entry.Uflags == nil ||
+		*entry.Type != uint32(unix.SOCK_DGRAM) ||
+		*entry.State != linuxUnixSocketStateClose ||
+		*entry.Peer != 0 ||
+		*entry.Backlog != 0 ||
+		*entry.Uflags != 0 ||
+		entry.FilePerms != nil ||
+		entry.NameDir != nil ||
+		(entry.Deleted != nil && *entry.Deleted) ||
+		len(entry.Name) != 6 ||
+		entry.Name[0] != 0 {
+		return false
+	}
+	for _, digit := range entry.Name[1:] {
+		if (digit < '0' || digit > '9') && (digit < 'a' || digit > 'f') {
+			return false
+		}
+	}
+
+	rewritten := make([]byte, 0, len(entry.Name)+1+20)
+	rewritten = append(rewritten, entry.Name...)
+	rewritten = append(rewritten, '-')
+	rewritten = strconv.AppendUint(rewritten, restoreSocketScope, 10)
+	entry.Name = rewritten
+	return true
 }
 
 func decimalDigits(value []byte) bool {

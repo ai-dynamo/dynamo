@@ -13,6 +13,7 @@ import (
 	"github.com/checkpoint-restore/go-criu/v8/crit/images/fown"
 	sk_opts "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-opts"
 	sk_unix "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-unix"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -62,6 +63,10 @@ func TestPrepareRestoreImageDir(t *testing.T) {
 		newUnixSocketEntry(1, []byte("\x00cuda-uvmfd-4026543509-1\x00"), 101, 202),
 		newUnixSocketEntry(2, []byte("\x00other-4026543509-1\x00"), 202, 101),
 		newUnixSocketEntry(3, []byte("/tmp/cuda-uvmfd-4026543509-3"), 303, 0),
+		newAutobindSocketEntry(4, []byte("\x000a1b2"), 404, uint32(unix.SOCK_DGRAM), linuxUnixSocketStateClose, 0),
+		newAutobindSocketEntry(5, []byte("\x00abcde"), 505, uint32(unix.SOCK_DGRAM), linuxUnixSocketStateClose, 0),
+		newAutobindSocketEntry(6, []byte("\x0012345"), 606, uint32(unix.SOCK_DGRAM), linuxUnixSocketStateClose, 404),
+		newAutobindSocketEntry(7, []byte("\x00f00ba"), 707, uint32(unix.SOCK_STREAM), linuxUnixSocketStateClose, 0),
 	}
 	originalEntries := make([]*fdinfo.FileEntry, len(entries))
 	for i, entry := range entries {
@@ -87,6 +92,8 @@ func TestPrepareRestoreImageDir(t *testing.T) {
 
 	privateEntries := readFilesImage(t, imageDir)
 	originalEntries[0].Usk.Name = []byte("\x00cuda-uvmfd-987654321-1\x00")
+	originalEntries[3].Usk.Name = []byte("\x000a1b2-987654321")
+	originalEntries[4].Usk.Name = []byte("\x00abcde-987654321")
 	for i, want := range originalEntries {
 		if !proto.Equal(privateEntries[i], want) {
 			t.Errorf("private entry %d changed outside the expected name rewrite:\n got: %v\nwant: %v", i, privateEntries[i], want)
@@ -194,6 +201,13 @@ func TestPrepareRestoreImageDirConcurrentSocketScopesAreIndependent(t *testing.T
 	if !bytes.Equal(gotCanonicalFilesImage, canonicalFilesImage) {
 		t.Fatal("canonical files.img was modified by concurrent restores")
 	}
+}
+
+func newAutobindSocketEntry(id uint32, name []byte, inode, socketType, state, peer uint32) *fdinfo.FileEntry {
+	entry := newUnixSocketEntry(id, name, inode, peer)
+	entry.Usk.Type = proto.Uint32(socketType)
+	entry.Usk.State = proto.Uint32(state)
+	return entry
 }
 
 func newUnixSocketEntry(id uint32, name []byte, inode, peer uint32) *fdinfo.FileEntry {
