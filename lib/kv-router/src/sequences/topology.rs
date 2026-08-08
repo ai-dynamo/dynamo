@@ -168,6 +168,10 @@ impl WorkerTable {
         self.slots.iter().map(|slot| slot.worker)
     }
 
+    pub(super) fn expiry_duration(&self) -> Option<Duration> {
+        self.expiry_duration
+    }
+
     pub(super) fn register_worker(
         &mut self,
         block_size: usize,

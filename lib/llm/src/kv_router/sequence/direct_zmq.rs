@@ -98,7 +98,7 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
     let handler_metrics = metrics.clone();
     let handler = move |envelope: dynamo_runtime::transports::event_plane::ValidatedEnvelope| {
         let codec = Codec::default();
-        let batch = codec
+        let mut batch = codec
             .decode_payload::<ActiveSequenceEventBatch>(&envelope.payload)
             .inspect_err(|_| {
                 handler_metrics.record_payload_decode_error();
@@ -110,6 +110,10 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
                 batch.events.len(),
                 MAX_REPLICA_BATCH_EVENTS
             );
+        }
+        let delivery_age = super::envelope_delivery_age(envelope.published_at);
+        for event in &mut batch.events {
+            event.delivery_age = delivery_age;
         }
         tracker.apply_replica_batch(batch.events);
         Ok(())
@@ -215,6 +219,7 @@ mod tests {
             },
             router_id: 99,
             lora_name: None,
+            delivery_age: Duration::ZERO,
         }
     }
 

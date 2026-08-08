@@ -569,6 +569,7 @@ mod tests {
                 data: ActiveSequenceEventData::Free,
                 router_id: 42,
                 lora_name: None,
+                delivery_age: std::time::Duration::ZERO,
             },
         }
     }

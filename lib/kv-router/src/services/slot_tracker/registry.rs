@@ -537,6 +537,7 @@ mod tests {
                 },
                 router_id,
                 lora_name: None,
+                delivery_age: std::time::Duration::ZERO,
             },
         }
     }
