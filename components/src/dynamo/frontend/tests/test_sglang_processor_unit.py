@@ -34,6 +34,7 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _flatten_message_content,
+    _filter_template_tools,
     _guided_tool_choice_requires_reasoning,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
@@ -654,6 +655,47 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
 # ---------------------------------------------------------------------------
 # convert_tools
 # ---------------------------------------------------------------------------
+
+
+class TestFilterTemplateTools:
+    """Tool dicts handed to the chat template carry only caller-supplied fields."""
+
+    TOOL = {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Look up the weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+
+    def _rendered(self, tool_choice="auto"):
+        request = {"tools": [self.TOOL], "tool_choice": tool_choice}
+        return _filter_template_tools(
+            request,
+            sglang_tools=convert_tools([self.TOOL]),
+            exclude_tools_when_tool_choice_none=True,
+        )
+
+    def test_drops_unset_internal_fields(self):
+        # defer_loading is SGLang bookkeeping the caller never sent. Templates
+        # that render declarations as compact JSON inline it as
+        # '"defer_loading":null' on every tool.
+        (rendered,) = self._rendered()
+        assert "defer_loading" not in rendered
+        assert rendered["type"] == "function"
+        assert rendered["function"]["name"] == "get_weather"
+        assert rendered["function"]["parameters"] == self.TOOL["function"]["parameters"]
+
+    def test_named_tool_choice_path_drops_them_too(self):
+        (rendered,) = self._rendered(
+            tool_choice={"type": "function", "function": {"name": "get_weather"}}
+        )
+        assert "defer_loading" not in rendered
 
 
 class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Function
