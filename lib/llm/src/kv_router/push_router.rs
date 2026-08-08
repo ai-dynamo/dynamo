@@ -1323,11 +1323,22 @@ mod tests {
             };
 
             if attempt == 1 {
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::WorkerOverloaded)
-                    .message("selected worker is overloaded")
-                    .build()
-                    .into());
+                let output = Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(
+                        DynamoError::builder()
+                            .error_type(ErrorType::WorkerOverloaded)
+                            .message("selected worker is overloaded")
+                            .build(),
+                    ),
+                };
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::once(async move { output })),
+                    context.context(),
+                ));
             }
 
             let output = Annotated::from_data(LLMEngineOutput {
@@ -1353,7 +1364,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn worker_overload_migration_reselects_another_kv_worker() {
+    async fn worker_overload_stream_migration_releases_and_reselects() {
         async fn shared_drt(runtime: Runtime, store_path: &std::path::Path) -> DistributedRuntime {
             DistributedRuntime::new(
                 runtime,
@@ -1448,7 +1459,8 @@ mod tests {
             PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch.clone())
                 .await
                 .unwrap();
-        let kv_router = Arc::new(KvPushRouter::new(push_router, Arc::new(chooser), None).unwrap());
+        let chooser = Arc::new(chooser);
+        let kv_router = Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap());
         let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             kv_router;
         let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
@@ -1472,11 +1484,14 @@ mod tests {
         assert!(registered_ids.contains(&retried_worker));
         assert!(attempts[0].1.is_empty());
         assert_eq!(attempts[1].1, vec![failed_worker]);
-        assert_eq!(
-            client.overloaded_instance_ids(),
-            Some(HashSet::from([failed_worker]))
+        let loads = chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().all(|load| load.active_requests == 0),
+            "all scheduler bookings must be released after migration: {loads:?}"
         );
-
         drop(attempts);
         runtime.shutdown();
     }

@@ -6,6 +6,7 @@ members = [
     "lib/llm",
     "lib/rl",
     "lib/runtime",
+    "lib/router-policy",
     "lib/tokens",
     "lib/truthy",
     "lib/data-gen",
@@ -48,6 +49,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.4.0" }
+dynamo-router-policy = { path = "lib/router-policy", version = "1.4.0" }
 dynamo-llm = { path = "lib/llm", version = "1.4.0" }
 dynamo-rl = { path = "lib/rl", version = "1.4.0" }
 dynamo-tokenizers = { version = "=1.8.0" }

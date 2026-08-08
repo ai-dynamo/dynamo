@@ -102,6 +102,11 @@ impl SessionAffinityPushRouter {
         self.inner.peek_next_worker()
     }
 
+    #[cfg(test)]
+    pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
+        self.inner.occupancy_for_test(worker_id)
+    }
+
     async fn acquire_routable(
         &self,
         session_id: &crate::protocols::common::extensions::SessionAffinityId,

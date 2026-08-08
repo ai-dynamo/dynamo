@@ -25,6 +25,7 @@ standalone-selection = ["standalone-indexer", "dep:once_cell"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
+dynamo-router-policy = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-truthy = { workspace = true }
