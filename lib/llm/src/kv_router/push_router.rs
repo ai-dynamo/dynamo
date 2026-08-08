@@ -1475,7 +1475,10 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert!(responses[0].error.is_none());
         assert_eq!(responses[0].data.as_ref().unwrap().token_ids, vec![2]);
-        let attempts = dispatch.attempts.lock().unwrap();
+        let attempts = {
+            let attempts = dispatch.attempts.lock().unwrap();
+            attempts.clone()
+        };
         assert_eq!(attempts.len(), 2);
         let failed_worker = attempts[0].0;
         let retried_worker = attempts[1].0;
@@ -1492,7 +1495,6 @@ mod tests {
             loads.iter().all(|load| load.active_requests == 0),
             "all scheduler bookings must be released after migration: {loads:?}"
         );
-        drop(attempts);
         runtime.shutdown();
     }
 }
