@@ -329,11 +329,15 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">
-  Object key prefix for the `s3` sink. When unset, records land at the bucket root. Keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`.
+  Object key prefix for the `s3` sink. When unset, the parent `DynamoGraphDeployment` qualified by its namespace (`DYN_PARENT_DGD_K8S_NAMESPACE/DYN_PARENT_DGD_K8S_NAME`, both injected by the operator) is used, so each deployment lands under its own prefix without configuration; DGD names are unique only within a namespace. Setting this variable overrides that default. With neither set, records land at the bucket root. Keys are `{prefix}/date=YYYY-MM-DD/hour=HH/{MMSS}-{seq}-{pod}-{run_id}.jsonl.gz`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES" type="integer" default="67108864">
   Batch roll threshold for the `s3` sink in uncompressed bytes. When the pending batch reaches this size it is gzipped and uploaded as one object.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_MAX_CONCURRENT_UPLOADS" type="integer" default="4">
+  Maximum concurrent `PutObject` calls for the `s3` sink. Finished batches upload on separate tasks so a slow `PutObject` cannot stall record ingestion; batches admitted beyond this limit wait in a bounded queue behind the in-flight uploads. Once both fill, further batches are dropped and counted.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS" type="integer" default="10000">
