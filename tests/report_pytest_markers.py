@@ -283,6 +283,9 @@ STUB_MODULES = [
     "aiconfigurator_core.sdk",
     "aiconfigurator_core.sdk.engine",
     "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.models",
+    "aiconfigurator_core.sdk.perf_database",
+    "aiconfigurator_core.sdk.utils",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -300,6 +303,9 @@ FORCE_STUB_MODULES = {
     "aiconfigurator.cli.main",
     "aiconfigurator_core.sdk.engine",
     "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.models",
+    "aiconfigurator_core.sdk.perf_database",
+    "aiconfigurator_core.sdk.utils",
 }
 
 # Project paths for local imports

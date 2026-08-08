@@ -4163,6 +4163,12 @@ mod offload {
         // request, schedules nothing.
         let mut collector = crate::replay::TraceCollector::default();
         let pass1 = core.execute_pass(&mut collector, 0.0);
+        let stall_deadline = core
+            .earliest_offload_deadline()
+            .expect("parked swap-in must expose a stall-advance deadline");
+        assert_eq!(pass1.token_completion_ms, 0.0);
+        assert_eq!(pass1.end_ms, stall_deadline);
+        assert!(pass1.end_ms > pass1.token_completion_ms);
         assert_eq!(
             core.requests_awaiting_swap_in.len(),
             1,

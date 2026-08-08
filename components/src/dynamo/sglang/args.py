@@ -86,9 +86,7 @@ def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
     return None
 
 
-def _forward_pass_metrics_source(
-    dynamo_config: DynamoConfig, *, fpm_trace_relay_supported: bool = True
-) -> Optional[str]:
+def _forward_pass_metrics_source(dynamo_config: DynamoConfig) -> Optional[str]:
     """Resolve the FPM opt-in source while preserving the legacy port switch."""
     if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
         return "DYN_FORWARDPASS_METRIC_PORT"
@@ -96,8 +94,6 @@ def _forward_pass_metrics_source(
         return None
 
     unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
-    if unsupported_role is None and not fpm_trace_relay_supported:
-        unsupported_role = "unified backend"
     if unsupported_role is None:
         return "--fpm-trace/DYN_FPM_TRACE"
 
@@ -307,17 +303,12 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
-async def parse_args(
-    args: list[str], *, fpm_trace_relay_supported: bool = True
-) -> Config:
+async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
-        fpm_trace_relay_supported: Whether this entry point constructs the
-            Dynamo relay required for trace-based FPM activation.
-
     Returns:
         Config object with server_args and dynamo_args.
 
@@ -518,10 +509,7 @@ async def parse_args(
     video_generation_worker = dynamo_config.video_generation_worker
 
     # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
-    fpm_source = _forward_pass_metrics_source(
-        dynamo_config,
-        fpm_trace_relay_supported=fpm_trace_relay_supported,
-    )
+    fpm_source = _forward_pass_metrics_source(dynamo_config)
     if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
         parsed_args.enable_forward_pass_metrics = True
         logging.info("Enabled forward_pass_metrics from %s", fpm_source)

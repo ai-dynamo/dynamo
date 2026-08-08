@@ -46,9 +46,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.core,
-    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
-    # runners with "Failed to infer device type" even for mock tests.
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # Building the vLLM argument parser resolves a device; on an accelerator-less
+    # host that raises unless a platform is pinned first.
+    pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
     pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -1204,6 +1205,66 @@ def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_
         assert getattr(sp.structured_outputs, field) == expected
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#"},
+        json.dumps({"$ref": "#"}),
+        {
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"},
+            },
+            "$ref": "#/$defs/A",
+        },
+    ],
+)
+def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
+    from dynamo.llm import HttpError
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"json": schema}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    with pytest.raises(HttpError) as error:
+        build_sampling_params(request, default_sampling_params={})
+
+    assert error.value.code == 400
+
+
+def test_build_sampling_params_accepts_productive_recursive_guided_json():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    schema = {
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/Node"},
+                    }
+                },
+            }
+        },
+        "$ref": "#/$defs/Node",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"json": schema}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    sampling_params = build_sampling_params(request, default_sampling_params={})
+
+    assert sampling_params.structured_outputs.json == schema
+
+
 def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     from dynamo.vllm.handlers import build_sampling_params
 
@@ -1441,15 +1502,13 @@ class TestForwardPassMetricsActivation:
         ]
 
     @pytest.mark.parametrize(
-        ("overrides", "role", "fpm_trace_relay_supported"),
+        ("overrides", "role"),
         [
-            ({}, "unified backend", False),
-            ({"embedding_worker": True}, "embedding", True),
-            ({"headless": True}, "headless", True),
+            ({"embedding_worker": True}, "embedding"),
+            ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},
                 "multimodal encode",
-                True,
             ),
         ],
     )
@@ -1459,18 +1518,13 @@ class TestForwardPassMetricsActivation:
         caplog,
         overrides,
         role,
-        fpm_trace_relay_supported,
     ):
         monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
         dynamo_cfg = _make_dynamo_config(fpm_trace=True, **overrides)
         engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
 
         with caplog.at_level(logging.WARNING, logger="dynamo.vllm.args"):
-            update_engine_config_with_dynamo(
-                dynamo_cfg,
-                engine_cfg,
-                fpm_trace_relay_supported=fpm_trace_relay_supported,
-            )
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert engine_cfg.scheduler_cls is None
         assert f"vLLM {role} workers do not create a Dynamo FPM relay" in caplog.text
@@ -1482,11 +1536,7 @@ class TestForwardPassMetricsActivation:
         dynamo_cfg = _make_dynamo_config(embedding_worker=True)
         engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
 
-        update_engine_config_with_dynamo(
-            dynamo_cfg,
-            engine_cfg,
-            fpm_trace_relay_supported=False,
-        )
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert (
             engine_cfg.scheduler_cls

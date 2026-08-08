@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
+use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -116,6 +117,77 @@ pub struct TraceLink {
     pub span_id: String,
 }
 
+/// Frontend-local state shared by every attempt from one migration manager.
+/// The selected router records a failed worker before the error is exposed;
+/// later attempts use the accumulated set as an attempt-local exclusion.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MigrationState {
+    inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
+}
+
+#[derive(Debug, Default)]
+struct MigrationStateInner {
+    excluded_worker_ids: Vec<WorkerId>,
+    last_error: Option<DynamoError>,
+}
+
+impl MigrationState {
+    pub(crate) fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
+        let mut inner = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.excluded_worker_ids.contains(&worker_id) {
+            inner.excluded_worker_ids.push(worker_id);
+        }
+        if error.is_some() {
+            inner.last_error = error;
+        }
+    }
+
+    pub(crate) fn excluded_worker_ids(&self) -> Vec<WorkerId> {
+        let Some(inner) = self.inner.get() else {
+            return Vec::new();
+        };
+        inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .excluded_worker_ids
+            .clone()
+    }
+
+    pub(crate) fn exhausted_error(&self) -> Option<DynamoError> {
+        let inner = self.inner.get()?;
+        let last_error = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_error
+            .clone()?;
+        let (error_type, message) = if match_error_chain(
+            &last_error,
+            &[ErrorType::WorkerOverloaded],
+            &[ErrorType::ResourceExhausted],
+        ) {
+            (
+                ErrorType::ResourceExhausted,
+                "all eligible workers rejected the request as overloaded",
+            )
+        } else {
+            (
+                ErrorType::Unavailable,
+                "no untried eligible worker remains after migration",
+            )
+        };
+        Some(
+            DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build(),
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
     /// Disaggregated execution parameters. Engine-owned; the framework
@@ -174,6 +246,12 @@ pub struct PreprocessedRequest {
     /// in-process canary path is allowed to omit it.
     #[serde(default)]
     pub model: String,
+
+    /// Attempt-local migration state. Frontend-only: it is neither serialized
+    /// to workers nor exposed as a caller-controlled routing hint.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) migration_state: Option<MigrationState>,
 
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,

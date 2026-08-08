@@ -64,6 +64,7 @@ from dynamo.common.rl import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
@@ -87,6 +88,7 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
+from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -717,8 +719,11 @@ def build_sampling_params(
             sampling_options.update(passthrough_sampling_options)
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
+        json_schema = guided_decoding.get("json")
+        if json_schema is not None:
+            reject_nonprogressing_guided_json_ref_cycles(json_schema)
         sampling_params.structured_outputs = StructuredOutputsParams(
-            json=guided_decoding.get("json"),
+            json=json_schema,
             regex=guided_decoding.get("regex"),
             choice=guided_decoding.get("choice"),
             grammar=guided_decoding.get("grammar"),
@@ -995,7 +1000,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     - `_lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
     These are required by `_resolve_lora_request()` and other LoRA methods.
-    See VllmWorkerHandler and OmniHandler for reference implementations.
+    The concrete decode, prefill, and Omni handlers provide examples.
     """
 
     _benchmark_results: Optional[dict] = None
@@ -1990,8 +1995,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         - `self._lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
         Subclasses that forget to define these will get AttributeError at runtime
-        when this method is called. See VllmWorkerHandler (llm_engine.py) and
-        OmniHandler (omni_handler.py) for implementation examples.
+        when this method is called. The concrete decode, prefill, and Omni handlers
+        provide examples.
         """
         return self._lora_state.resolve_request(
             model_name,
@@ -2048,7 +2053,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
         """Publish a loaded LoRA adapter to discovery.
 
-        Default implementation mirrors the legacy BaseWorkerHandler behavior.
+        Default implementation mirrors the BaseWorkerHandler behavior.
         """
         if self.generate_endpoint is None:
             logger.debug(
@@ -2067,6 +2072,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         runtime_config = ModelRuntimeConfig()
         runtime_config.context_length = self.model_max_len
+        publish_vllm_token_budget(runtime_config, self.model_max_len)
         runtime_config.kv_event_publishing_enabled = getattr(
             self.config, "use_kv_events", False
         )
@@ -2769,7 +2775,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        # Legacy vLLM handler always emits when vLLM returned a dict.
+        # Emit whenever vLLM returns a dictionary.
         return _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,
@@ -3362,14 +3368,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the per-request deferred guard so engine_client.abort() never fires in
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(

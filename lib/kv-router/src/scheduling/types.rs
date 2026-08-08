@@ -23,6 +23,34 @@ use crate::sequences::WorkerLoadProjection;
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
+/// Supplies the authoritative set of workers currently available for selection.
+///
+/// This is an inclusion set, unlike [`OverloadedWorkerProvider`]'s exclusion
+/// set. `None` means no hard-availability source is attached; `Some` is
+/// authoritative, so an empty set rejects every candidate.
+pub type WorkerAvailabilityProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerSelectionPolicyError {
+    #[error("worker selection policy failed: {0}")]
+    Failed(String),
+
+    #[error("scorer {scorer_index} produced a non-finite cost for candidate row {row}")]
+    NonFiniteCost { scorer_index: usize, row: usize },
+
+    #[error(
+        "picker returned candidate row {row}, but the candidate table contains {candidate_count} rows"
+    )]
+    InvalidPickerRow { row: usize, candidate_count: usize },
+}
+
+impl WorkerSelectionPolicyError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
     #[serde(default)]
@@ -58,6 +86,9 @@ pub enum KvSchedulerError {
 
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+
+    #[error(transparent)]
+    WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
 
 impl KvSchedulerError {

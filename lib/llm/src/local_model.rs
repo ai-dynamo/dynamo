@@ -471,11 +471,12 @@ pub async fn register_model_card(
     let model_suffix = derive_lora_suffix(lora_name);
 
     let discovery = endpoint.drt().discovery();
+    let wire_card = card.for_mdc_wire();
     let spec = DiscoverySpec::from_model_with_suffix(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),
         endpoint.name().to_string(),
-        card,
+        &wire_card,
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;

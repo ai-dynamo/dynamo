@@ -130,6 +130,8 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    #[serde(skip)]
+    metric_error_type: Option<ErrorType>,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -168,7 +170,11 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
-    classify_error_for_metrics(response.0, &response.1.message)
+    response
+        .1
+        .metric_error_type
+        .clone()
+        .unwrap_or_else(|| classify_error_for_metrics(response.0, &response.1.message))
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -220,6 +226,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -252,6 +259,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -269,6 +277,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -288,6 +297,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -311,6 +321,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -337,6 +348,7 @@ impl ErrorMessage {
                 error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -355,6 +367,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -369,6 +382,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -387,6 +401,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    metric_error_type: None,
                 }),
             );
         }
@@ -416,6 +431,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
                     details: None,
+                    metric_error_type: Some(ErrorType::Validation),
                 }),
             );
         }
@@ -458,6 +474,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    metric_error_type: None,
                 }),
             ),
             Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
@@ -474,6 +491,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            metric_error_type: None,
         }
     }
 }
@@ -497,6 +515,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
             .into_response()
@@ -1512,6 +1531,7 @@ fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -1934,6 +1954,7 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -1962,6 +1983,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -2233,6 +2255,7 @@ fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorRe
                 error_type: map_error_code_to_error_type(status_code),
                 code: status_code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         ),
     }
@@ -3876,6 +3899,7 @@ async fn images_edits(
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         ));
     }
@@ -4315,6 +4339,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -4678,6 +4703,19 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_max_output_tokens_reaches_chat_budget_field() {
+        let mut response_request = make_base_request();
+        response_request.inner.max_output_tokens = Some(256);
+
+        let unified_request: UnifiedRequest = response_request.try_into().unwrap();
+        let chat_request = unified_request.into_inner();
+        let stop_conditions = chat_request.extract_stop_conditions().unwrap();
+
+        assert_eq!(chat_request.inner.max_completion_tokens, Some(256));
+        assert_eq!(stop_conditions.max_tokens, Some(256));
+    }
+
+    #[test]
     fn test_openai_nvext_rejects_agent_context() {
         let err = serde_json::from_value::<NvExt>(serde_json::json!({
             "agent_context": {
@@ -4816,28 +4854,37 @@ mod tests {
     }
 
     #[test]
-    fn test_resource_exhausted_error_response_from_anyhow() {
+    fn overload_errors_preserve_the_http_529_contract() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
         use dynamo_runtime::pipeline::error::PipelineError;
 
-        let cause = PipelineError::ServiceOverloaded(
-            "All workers are busy, please retry later".to_string(),
-        );
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
-            .message("All workers are busy, please retry later")
-            .cause(cause)
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0.as_u16(), 529);
-        assert_eq!(response.1.code, 529);
-        assert_eq!(response.1.error_type, "Overloaded");
-        assert_eq!(response.1.message, "Service temporarily overloaded");
-        assert!(
-            !response.1.message.contains("All workers are busy"),
-            "client response must not include the underlying engine message"
-        );
+        for (error_type, message) in [
+            (
+                ErrorType::ResourceExhausted,
+                "All workers are busy, please retry later",
+            ),
+            (
+                ErrorType::WorkerOverloaded,
+                "Selected worker is overloaded, please retry later",
+            ),
+        ] {
+            let cause = PipelineError::ServiceOverloaded(message.to_string());
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .cause(cause)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0.as_u16(), 529);
+            assert_eq!(response.1.code, 529);
+            assert_eq!(response.1.error_type, "Overloaded");
+            assert_eq!(response.1.message, "Service temporarily overloaded");
+            assert!(
+                !response.1.message.contains(message),
+                "client response must not include the underlying engine message"
+            );
+        }
     }
 
     #[test]
