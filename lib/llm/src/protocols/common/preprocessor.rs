@@ -304,6 +304,7 @@ pub struct PreprocessedRequest {
 
     /// The computed checksum of the Model Deployment Card (MDC).
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mdc_sum: Option<String>,
 
     /// User requested annotations for the request
@@ -318,6 +319,7 @@ pub struct PreprocessedRequest {
 
     /// Router configuration overrides for this specific request
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config_override: Option<RouterConfigOverride>,
 
     /// Structured prefill result
@@ -513,10 +515,12 @@ pub struct PreprocessedEmbeddingRequest {
 
     /// The computed checksum of the Model Deployment Card (MDC)
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mdc_sum: Option<String>,
 
     /// User requested annotations for the request
     #[builder(default)]
+    #[serde(default)]
     pub annotations: Vec<String>,
 }
 
