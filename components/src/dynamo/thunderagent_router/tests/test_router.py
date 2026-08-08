@@ -131,6 +131,22 @@ async def test_assigned_worker_hint_reflects_sticky_assignment():
 
 
 @pytest.mark.asyncio
+async def test_stale_worker_assignment_moves_to_replacement():
+    router, capacity = make_router(capacity_workers={1: 1000})
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {2: 1000}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+    assert router._stat_worker_assignments == 2
+
+
+@pytest.mark.asyncio
 async def test_pause_acting_then_before_request_blocks_until_resume():
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=0.05,
