@@ -185,10 +185,7 @@ mod tests {
     #[test]
     fn http_like_errors_are_typed_at_the_python_boundary() {
         for (code, expected_type) in [
-            (
-                415,
-                ErrorType::Backend(BackendError::InvalidArgument),
-            ),
+            (415, ErrorType::Backend(BackendError::InvalidArgument)),
             (503, ErrorType::Backend(BackendError::Unknown)),
         ] {
             let error = build_http_like_error(code, "backend message".to_string());
