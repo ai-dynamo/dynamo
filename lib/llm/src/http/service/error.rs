@@ -317,12 +317,14 @@ impl ClassifiedHttpError {
                 diagnostic,
                 details: None,
             },
-            DynamoErrorType::ResourceExhausted => Self::classified(
-                HttpErrorKind::Overloaded,
-                overload_status_code(),
-                "Service temporarily overloaded",
-                diagnostic,
-            ),
+            DynamoErrorType::ResourceExhausted | DynamoErrorType::WorkerOverloaded => {
+                Self::classified(
+                    HttpErrorKind::Overloaded,
+                    overload_status_code(),
+                    "Service temporarily overloaded",
+                    diagnostic,
+                )
+            }
             DynamoErrorType::Unavailable => Self::classified(
                 HttpErrorKind::Unavailable,
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -436,6 +438,7 @@ fn select_dynamo_error_in_chain<'a>(
 ) -> Option<&'a DynamoError> {
     const OPERATIONAL: &[DynamoErrorType] = &[
         DynamoErrorType::ResourceExhausted,
+        DynamoErrorType::WorkerOverloaded,
         DynamoErrorType::Unavailable,
     ];
     const VALIDATION: &[DynamoErrorType] = &[
