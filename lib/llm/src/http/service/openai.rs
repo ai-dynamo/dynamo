@@ -3029,6 +3029,11 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
+    if let Err(err_response) = validate_response_chat_template_args(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
@@ -3340,6 +3345,27 @@ pub fn validate_response_unsupported_fields(
         ));
     }
     None
+}
+
+/// Applies the chat-template-argument guard to a Responses request.
+///
+/// `/v1/responses` converts to `NvCreateChatCompletionRequest` but never runs
+/// `ValidateRequest` on the result, so the guard that `NvCreateChatCompletionRequest::validate`
+/// applies to `chat_template_args` does not reach this path. Since the Responses request now
+/// carries and forwards that field, call the same check directly and return the same 400 the
+/// chat endpoint would, so an identical payload is rejected identically on both endpoints.
+pub fn validate_response_chat_template_args(
+    request: &NvCreateResponse,
+) -> Result<(), ErrorResponse> {
+    crate::protocols::openai::validate::validate_chat_template_args(
+        request.chat_template_args.as_ref(),
+    )
+    .map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
 }
 
 // todo - abstract this to the top level lib.rs to be reused
@@ -5077,6 +5103,36 @@ mod tests {
         );
 
         assert!(validate_response_unsupported_fields(&request).is_some());
+    }
+
+    #[test]
+    fn test_validate_response_chat_template_args_rejects_nested_chat_template() {
+        let mut request = make_base_request();
+        request.chat_template_args = Some(HashMap::from([(
+            "chat_template".to_string(),
+            serde_json::json!("{{ 'pwned' }}"),
+        )]));
+
+        let (status, Json(body)) = validate_response_chat_template_args(&request).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!(
+                "{VALIDATION_PREFIX}`chat_template` is not supported inside `chat_template_args`"
+            )
+        );
+    }
+
+    #[test]
+    fn test_validate_response_chat_template_args_accepts_ordinary_args() {
+        let mut request = make_base_request();
+        request.chat_template_args = Some(HashMap::from([(
+            "enable_thinking".to_string(),
+            serde_json::json!(true),
+        )]));
+
+        assert!(validate_response_chat_template_args(&request).is_ok());
+        assert!(validate_response_chat_template_args(&make_base_request()).is_ok());
     }
 
     #[test]
