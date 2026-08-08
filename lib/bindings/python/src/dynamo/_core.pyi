@@ -2814,24 +2814,31 @@ class KvDcRelay:
 
 class KvRouter:
     """
-    A KV-aware router that performs intelligent routing based on KV cache overlap.
+    A router supporting KV-aware and shared worker-picker routing modes.
     """
 
     def __init__(
         self,
         endpoint: Endpoint,
-        block_size: int,
-        kv_router_config: KvRouterConfig,
+        block_size: Optional[int] = None,
+        kv_router_config: Optional[KvRouterConfig] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        session_affinity_ttl_secs: Optional[int] = None,
+        *,
+        router_mode: RouterMode = RouterMode.KV,
+        enable_multimodal_cache_indexer: bool = False,
     ) -> None:
         """
         Create a new KvRouter instance.
 
         Args:
             endpoint: The endpoint to connect to for routing requests
-            block_size: The KV cache block size
-            kv_router_config: Configuration for the KV router
+            block_size: KV cache block size, required only for KV routing
+            kv_router_config: KV router configuration, required only for KV routing
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            session_affinity_ttl_secs: Optional session-affinity lifetime
+            router_mode: Routing mode; defaults to KV for compatibility
+            enable_multimodal_cache_indexer: Enable device-aware embedding-cache selection
         """
         ...
 
@@ -2853,7 +2860,7 @@ class KvRouter:
         response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
-        Generate text using the KV-aware router.
+        Generate text using the configured routing mode.
 
         Args:
             token_ids: Input token IDs
@@ -2923,7 +2930,9 @@ class KvRouter:
         strict_priority: int = 0,
         policy_class: Optional[str] = None,
         cache_namespace: Optional[str] = None,
-    ) -> Tuple[int, int, int]:
+        multi_modal_data: Optional[JsonLike] = None,
+        mm_routing_info: Optional[JsonLike] = None,
+    ) -> Tuple[int, Optional[int], int]:
         """
         Find the best matching worker for the given tokens.
 
@@ -2944,11 +2953,14 @@ class KvRouter:
             policy_class: Requested policy family, or an exact explicit class.
                           Missing, unknown, and ordinary physical-class names use the
                           configured default family before cache-bucket resolution.
+            multi_modal_data: Optional multimodal payload for device-aware cache selection.
+            mm_routing_info: Optional routing-only multimodal metadata.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
                 - worker_id: The ID of the best matching worker
-                - dp_rank: The data parallel rank of the selected worker
+                - dp_rank: The selected data-parallel rank in KV mode; None for
+                  worker-level shared picker modes
                 - overlap_blocks: The number of overlapping blocks found
         """
         ...
