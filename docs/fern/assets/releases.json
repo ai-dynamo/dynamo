@@ -1196,7 +1196,7 @@
       "group": "component",
       "name": "snapshot-agent",
       "description": "Fast GPU worker recovery via CRIU",
-      "meta": "AMD64/ARM64",
+      "meta": "AMD64",
       "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/snapshot-agent/tags",
       "badge": "Preview",
       "tags": [
