@@ -23,6 +23,14 @@ type CheckpointJobOptions struct {
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
 	WrapLaunchJob         bool
+	EnableCUDAVMM         bool
+}
+
+func wrapWithCUDAVMMLauncher(command []string, args []string) ([]string, []string) {
+	wrappedArgs := make([]string, 0, len(command)+len(args))
+	wrappedArgs = append(wrappedArgs, command...)
+	wrappedArgs = append(wrappedArgs, args...)
+	return []string{"dynamo-snapshot-cuda-vmm-launch"}, wrappedArgs
 }
 
 func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
@@ -87,10 +95,18 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		if len(targetContainer.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
+		if opts.EnableCUDAVMM {
+			targetContainer.Command, targetContainer.Args = wrapWithCUDAVMMLauncher(
+				targetContainer.Command,
+				targetContainer.Args,
+			)
+		}
 		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
 			targetContainer.Command,
 			targetContainer.Args,
 		)
+	} else if opts.EnableCUDAVMM {
+		return nil, fmt.Errorf("CUDA VMM interposition requires cuda-checkpoint --launch-job")
 	}
 
 	return &batchv1.Job{

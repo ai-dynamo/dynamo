@@ -131,12 +131,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+COPY cmd/cuda-vmm-interpose/interpose.c ./cmd/cuda-vmm-interpose/interpose.c
+COPY cmd/cuda-vmm-interpose/protocol.h ./cmd/cuda-vmm-interpose/protocol.h
+COPY cmd/cuda-vmm-interpose/launch.sh ./cmd/cuda-vmm-interpose/launch.sh
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
     -lcuda
+
+RUN gcc -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+    -Wno-deprecated-declarations \
+    -I/usr/local/cuda/include \
+    -o /libdynamo_snapshot_cuda_vmm.so \
+    ./cmd/cuda-vmm-interpose/interpose.c \
+    -Wl,-Bsymbolic-functions -ldl -pthread \
+    && ! readelf -d /libdynamo_snapshot_cuda_vmm.so \
+      | grep -Eq 'NEEDED.*(libcuda|libcudart)'
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -408,6 +420,15 @@ COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+
+# VMM interposition is scoped by the launcher; never add the DSO to
+# /etc/ld.so.preload.
+COPY --from=cuda-helper-builder /libdynamo_snapshot_cuda_vmm.so /usr/local/lib/dynamo/libdynamo_snapshot_cuda_vmm.so
+COPY --from=cuda-helper-builder /workspace/cmd/cuda-vmm-interpose/launch.sh /usr/local/bin/dynamo-snapshot-cuda-vmm-launch
+RUN chmod 0755 /usr/local/bin/dynamo-snapshot-cuda-vmm-launch \
+    && chmod 0644 /usr/local/lib/dynamo/libdynamo_snapshot_cuda_vmm.so \
+    && test -x /usr/local/bin/dynamo-snapshot-cuda-vmm-launch \
+    && test -r /usr/local/lib/dynamo/libdynamo_snapshot_cuda_vmm.so
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore

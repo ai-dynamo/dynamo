@@ -33,6 +33,9 @@ func TestManifestRoundTrip(t *testing.T) {
 		},
 	)
 	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	original.CUDA.VMMInterpose = true
+	original.CUDA.VMMGeneration = "00112233445566778899aabbccddeeff"
+	original.CUDA.VMMStateDigest = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
@@ -85,6 +88,67 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.CUDA.SourceGPUUUIDs) != 2 || loaded.CUDA.SourceGPUUUIDs[0] != "GPU-aaa" {
 		t.Errorf("CUDA.SourceGPUUUIDs = %v", loaded.CUDA.SourceGPUUUIDs)
+	}
+	if !loaded.CUDA.VMMInterpose ||
+		loaded.CUDA.VMMGeneration != original.CUDA.VMMGeneration ||
+		loaded.CUDA.VMMStateDigest != original.CUDA.VMMStateDigest {
+		t.Errorf(
+			"CUDA VMM metadata = %t/%q/%q",
+			loaded.CUDA.VMMInterpose,
+			loaded.CUDA.VMMGeneration,
+			loaded.CUDA.VMMStateDigest,
+		)
+	}
+}
+
+func TestManifestRejectsInconsistentVMMMetadata(t *testing.T) {
+	validGeneration := "00112233445566778899aabbccddeeff"
+	validDigest := "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	tests := []struct {
+		name string
+		cuda CUDAManifest
+	}{
+		{name: "disabled with generation", cuda: CUDAManifest{VMMGeneration: validGeneration}},
+		{name: "disabled with digest", cuda: CUDAManifest{VMMStateDigest: validDigest}},
+		{name: "enabled without PIDs", cuda: CUDAManifest{
+			VMMInterpose: true, VMMGeneration: validGeneration, VMMStateDigest: validDigest,
+		}},
+		{name: "enabled with invalid generation", cuda: CUDAManifest{
+			PIDs: []int{1}, VMMInterpose: true, VMMGeneration: "generation", VMMStateDigest: validDigest,
+		}},
+		{name: "enabled without digest", cuda: CUDAManifest{
+			PIDs: []int{1}, VMMInterpose: true, VMMGeneration: validGeneration,
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.cuda.validate(); err == nil {
+				t.Fatal("validation accepted inconsistent CUDA VMM metadata")
+			}
+		})
+	}
+}
+
+func TestManifestIORejectsInconsistentVMMMetadata(t *testing.T) {
+	manifest := &CheckpointManifest{CheckpointID: "checkpoint", CUDA: CUDAManifest{
+		VMMGeneration: "00112233445566778899aabbccddeeff",
+	}}
+	if err := WriteManifest(t.TempDir(), manifest); err == nil {
+		t.Fatal("WriteManifest accepted CUDA VMM metadata without opt-in")
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dir, manifestFilename),
+		[]byte(
+			"checkpointId: checkpoint\ncudaRestore:\n  vmmGeneration: invalid\n",
+		),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadManifest(dir); err == nil {
+		t.Fatal("ReadManifest accepted CUDA VMM metadata without opt-in")
 	}
 }
 
