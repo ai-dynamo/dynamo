@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub(crate) struct GroupKey {
@@ -83,15 +84,24 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
         spec: &GroupSpec,
         prepared: Self::Prepared,
         members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
     ) -> anyhow::Result<()>;
 
     fn add_group_member(&self, key: &GroupKey, member: &DesiredInstance) -> anyhow::Result<()>;
 
     fn remove_group_member(&self, key: &GroupKey, instance_key: &str) -> anyhow::Result<()>;
 
+    fn sync_group_adapters(
+        &self,
+        key: &GroupKey,
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()>;
+
     fn remove_group(&self, key: &GroupKey);
 
     fn discard_prepared(&self, prepared: Self::Prepared);
+
+    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
 
     fn project_lora(
         &self,
@@ -123,6 +133,7 @@ enum GroupStatus {
     Conflict,
     Blocked {
         fingerprint: String,
+        deadline: Instant,
     },
 }
 
@@ -175,12 +186,20 @@ struct BuildResult<P> {
     outcome: BuildOutcome<P>,
 }
 
+struct ReconciliationResult {
+    revision: u64,
+    instances: anyhow::Result<Vec<DiscoveryInstance>>,
+}
+
 pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     host: Arc<H>,
     desired: HashMap<String, DesiredInstance>,
     groups: HashMap<GroupKey, DesiredGroup>,
     endpoint_workers: HashMap<EndpointId, HashSet<u64>>,
+    revision: u64,
+    instance_revisions: HashMap<String, u64>,
     builds: JoinSet<BuildResult<H::Prepared>>,
+    reconciliations: JoinSet<ReconciliationResult>,
     active_builds: usize,
     max_concurrent_builds: usize,
 }
@@ -196,7 +215,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             desired: HashMap::new(),
             groups: HashMap::new(),
             endpoint_workers: HashMap::new(),
+            revision: 0,
+            instance_revisions: HashMap::new(),
             builds: JoinSet::new(),
+            reconciliations: JoinSet::new(),
             active_builds: 0,
             max_concurrent_builds: max_concurrent_builds.max(1),
         }
@@ -207,6 +229,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,
     ) {
+        let mut reconciliation_interval = tokio::time::interval_at(
+            Instant::now() + RECONCILIATION_INTERVAL,
+            RECONCILIATION_INTERVAL,
+        );
+        reconciliation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             self.start_queued_builds();
             let retry_deadline = self.next_retry_deadline();
@@ -232,6 +259,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         None => {}
                     }
                 }
+                _ = reconciliation_interval.tick(), if self.reconciliations.is_empty() => {
+                    self.start_reconciliation();
+                }
+                result = self.reconciliations.join_next(), if !self.reconciliations.is_empty() => {
+                    match result {
+                        Some(Ok(result)) => self.apply_reconciliation(result, &namespace_filter),
+                        Some(Err(error)) => tracing::error!(%error, "Model reconciliation task failed"),
+                        None => {}
+                    }
+                }
                 _ = wait_for_deadline(retry_deadline), if retry_deadline.is_some() => {
                     self.release_due_retries();
                 }
@@ -242,7 +279,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     }
 
     fn apply_event(&mut self, event: DiscoveryEvent, namespace_filter: &NamespaceFilter) {
-        let changed = match event {
+        match event {
             DiscoveryEvent::Added(instance) => {
                 match self.host.normalize(instance, namespace_filter) {
                     Ok(Some(instance)) => self.apply_added(instance),
@@ -264,10 +301,6 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 false
             }
         };
-
-        if changed {
-            self.requeue_blocked_groups();
-        }
     }
 
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
@@ -288,6 +321,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         let group_key = instance.group_key.clone();
         let endpoint_id = instance.endpoint_id.clone();
+        let instance_id = instance.mcid.instance_id;
+        let instance_key = instance.key.clone();
         let materializes_worker_set = instance.materializes_worker_set();
         if materializes_worker_set {
             self.groups
@@ -296,23 +331,37 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .insert(&instance);
         }
         self.desired.insert(instance.key.clone(), instance);
+        self.record_mutation(instance_key);
 
         if materializes_worker_set {
             self.reconcile_group(&group_key, true);
+        } else {
+            for key in self.materialization_groups_for(&endpoint_id, instance_id) {
+                self.reconcile_group(&key, true);
+            }
         }
         self.project_lora_for(HashSet::from([endpoint_id]));
         true
     }
 
     fn apply_removed(&mut self, instance_key: &str) -> bool {
-        let Some(instance) = self.desired.remove(instance_key) else {
+        let removed = self.desired.remove(instance_key);
+        self.record_mutation(instance_key.to_string());
+        let Some(instance) = removed else {
             return false;
         };
-        if instance.materializes_worker_set() {
-            if let Some(group) = self.groups.get_mut(&instance.group_key) {
-                group.remove(&instance);
-            }
-            self.reconcile_group(&instance.group_key, true);
+        let affected_groups = if instance.materializes_worker_set() {
+            vec![instance.group_key.clone()]
+        } else {
+            self.materialization_groups_for(&instance.endpoint_id, instance.mcid.instance_id)
+        };
+        if instance.materializes_worker_set()
+            && let Some(group) = self.groups.get_mut(&instance.group_key)
+        {
+            group.remove(&instance);
+        }
+        for key in affected_groups {
+            self.reconcile_group(&key, true);
         }
         self.project_lora_for(HashSet::from([instance.endpoint_id]));
         true
@@ -390,12 +439,26 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         sync_failed = true;
                     }
                 }
+                if !sync_failed {
+                    let adapters = self.adapters_for_members(&current_members);
+                    if let Err(error) = self.host.sync_group_adapters(key, &adapters) {
+                        tracing::warn!(
+                            group = %key.id(),
+                            error = format!("{error:#}"),
+                            "Failed to synchronize committed LoRA adapter surfaces"
+                        );
+                        sync_failed = true;
+                    }
+                }
                 if sync_failed {
                     group.admission_tx.send_replace(Vec::new());
                     self.host.remove_group(key);
                     group.generation = group.generation.wrapping_add(1);
-                    group.retry_attempt = 0;
-                    GroupStatus::Queued { fingerprint }
+                    group.retry_attempt = group.retry_attempt.saturating_add(1);
+                    GroupStatus::Blocked {
+                        fingerprint,
+                        deadline: Instant::now() + retry_delay(group.retry_attempt),
+                    }
                 } else {
                     GroupStatus::Ready {
                         fingerprint,
@@ -424,9 +487,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             },
             GroupStatus::Blocked {
                 fingerprint: blocked_fingerprint,
-            } if blocked_fingerprint == fingerprint && !desired_changed => {
-                GroupStatus::Blocked { fingerprint }
-            }
+                deadline,
+            } if blocked_fingerprint == fingerprint && !desired_changed => GroupStatus::Blocked {
+                fingerprint,
+                deadline,
+            },
             previous => {
                 cancel_build(&previous);
                 if matches!(previous, GroupStatus::Ready { .. }) {
@@ -449,12 +514,78 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .collect()
     }
 
+    fn adapters_for_members(&self, member_keys: &BTreeSet<String>) -> Vec<DesiredInstance> {
+        let physical_members = member_keys
+            .iter()
+            .filter_map(|key| self.desired.get(key))
+            .map(|member| (member.endpoint_id.clone(), member.mcid.instance_id))
+            .collect::<HashSet<_>>();
+        let mut adapters = self
+            .desired
+            .values()
+            .filter(|instance| {
+                !instance.materializes_worker_set()
+                    && physical_members
+                        .contains(&(instance.endpoint_id.clone(), instance.mcid.instance_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        adapters.sort_by(|left, right| left.key.cmp(&right.key));
+        adapters
+    }
+
+    fn materialization_groups_for(
+        &self,
+        endpoint_id: &EndpointId,
+        instance_id: u64,
+    ) -> Vec<GroupKey> {
+        self.desired
+            .values()
+            .filter(|instance| {
+                instance.materializes_worker_set()
+                    && &instance.endpoint_id == endpoint_id
+                    && instance.mcid.instance_id == instance_id
+            })
+            .map(|instance| instance.group_key.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn record_mutation(&mut self, instance_key: String) {
+        self.revision = self.revision.wrapping_add(1);
+        self.instance_revisions.insert(instance_key, self.revision);
+    }
+
     fn project_lora_for(&mut self, endpoint_ids: HashSet<EndpointId>) {
         for endpoint_id in endpoint_ids {
+            let committed_bases = self
+                .desired
+                .values()
+                .filter(|instance| {
+                    instance.materializes_worker_set()
+                        && instance.endpoint_id == endpoint_id
+                        && self.groups.get(&instance.group_key).is_some_and(|group| {
+                            matches!(
+                                &group.status,
+                                GroupStatus::Ready { committed_members, .. }
+                                    if committed_members.contains(&instance.key)
+                            )
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let committed_workers = committed_bases
+                .iter()
+                .map(|instance| instance.mcid.instance_id)
+                .collect::<HashSet<_>>();
             let desired = self
                 .desired
                 .values()
-                .filter(|instance| instance.endpoint_id == endpoint_id)
+                .filter(|instance| {
+                    instance.endpoint_id == endpoint_id
+                        && committed_workers.contains(&instance.mcid.instance_id)
+                })
                 .map(|instance| (instance.mcid.clone(), instance.card.clone()))
                 .collect::<Vec<_>>();
             let current_workers = desired
@@ -471,19 +602,6 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if !current_workers.is_empty() {
                 self.endpoint_workers.insert(endpoint_id, current_workers);
             }
-        }
-    }
-
-    fn requeue_blocked_groups(&mut self) {
-        for group in self.groups.values_mut() {
-            let GroupStatus::Blocked { fingerprint } = &group.status else {
-                continue;
-            };
-            group.generation = group.generation.wrapping_add(1);
-            group.retry_attempt = 0;
-            group.status = GroupStatus::Queued {
-                fingerprint: fingerprint.clone(),
-            };
         }
     }
 
@@ -598,8 +716,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     .cloned()
                     .unwrap_or_default();
                 let members = self.members(&member_keys);
+                let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
-                match self.host.commit_group(&result.spec, prepared, &members) {
+                match self
+                    .host
+                    .commit_group(&result.spec, prepared, &members, &adapters)
+                {
                     Ok(()) => {
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
@@ -614,8 +736,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             error = format!("{error:#}"),
                             "Model materialization is blocked at commit"
                         );
+                        group.retry_attempt = group.retry_attempt.saturating_add(1);
                         group.status = GroupStatus::Blocked {
                             fingerprint: result.spec.fingerprint,
+                            deadline: Instant::now() + retry_delay(group.retry_attempt),
                         };
                     }
                 }
@@ -641,14 +765,24 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 };
             }
         }
+        let affected_endpoints = group
+            .cohorts
+            .values()
+            .flatten()
+            .filter_map(|key| self.desired.get(key))
+            .map(|instance| instance.endpoint_id.clone())
+            .collect::<HashSet<_>>();
         self.groups.insert(result.spec.key, group);
+        self.project_lora_for(affected_endpoints);
     }
 
     fn next_retry_deadline(&self) -> Option<Instant> {
         self.groups
             .values()
             .filter_map(|group| match group.status {
-                GroupStatus::Retrying { deadline, .. } => Some(deadline),
+                GroupStatus::Retrying { deadline, .. } | GroupStatus::Blocked { deadline, .. } => {
+                    Some(deadline)
+                }
                 _ => None,
             })
             .min()
@@ -657,12 +791,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     fn release_due_retries(&mut self) {
         let now = Instant::now();
         for group in self.groups.values_mut() {
-            let GroupStatus::Retrying {
-                fingerprint,
-                deadline,
-            } = &group.status
-            else {
-                continue;
+            let (fingerprint, deadline) = match &group.status {
+                GroupStatus::Retrying {
+                    fingerprint,
+                    deadline,
+                }
+                | GroupStatus::Blocked {
+                    fingerprint,
+                    deadline,
+                } => (fingerprint, deadline),
+                _ => continue,
             };
             if *deadline <= now {
                 group.status = GroupStatus::Queued {
@@ -679,6 +817,80 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         }
         self.builds.abort_all();
         while self.builds.join_next().await.is_some() {}
+        self.reconciliations.abort_all();
+        while self.reconciliations.join_next().await.is_some() {}
+    }
+
+    fn start_reconciliation(&mut self) {
+        let host = self.host.clone();
+        let revision = self.revision;
+        self.reconciliations.spawn(async move {
+            ReconciliationResult {
+                revision,
+                instances: host.list_instances().await,
+            }
+        });
+    }
+
+    fn apply_reconciliation(
+        &mut self,
+        result: ReconciliationResult,
+        namespace_filter: &NamespaceFilter,
+    ) {
+        let instances = match result.instances {
+            Ok(instances) => instances,
+            Err(error) => {
+                tracing::warn!(error = format!("{error:#}"), "Model reconciliation failed");
+                return;
+            }
+        };
+        let mut observed = HashSet::new();
+        let mut normalized = Vec::new();
+        for instance in instances {
+            let DiscoveryInstanceId::Model(mcid) = instance.id() else {
+                continue;
+            };
+            let key = mcid.to_path();
+            observed.insert(key.clone());
+            if self
+                .instance_revisions
+                .get(&key)
+                .is_some_and(|revision| *revision > result.revision)
+            {
+                continue;
+            }
+            match self.host.normalize(instance, namespace_filter) {
+                Ok(Some(instance)) => normalized.push(instance),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    instance = key,
+                    error = format!("{error:#}"),
+                    "Rejected model from reconciliation snapshot"
+                ),
+            }
+        }
+
+        for instance in normalized {
+            self.apply_added(instance);
+        }
+        let removals = self
+            .desired
+            .keys()
+            .filter(|key| {
+                !observed.contains(*key)
+                    && self
+                        .instance_revisions
+                        .get(*key)
+                        .is_none_or(|revision| *revision <= result.revision)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in removals {
+            self.apply_removed(&key);
+        }
+        self.instance_revisions.retain(|key, revision| {
+            self.desired.contains_key(key) || observed.contains(key) || *revision > result.revision
+        });
     }
 }
 
@@ -731,9 +943,11 @@ mod tests {
     struct FakeHost {
         starts: AtomicUsize,
         failures: AtomicUsize,
+        commit_failures: AtomicUsize,
         start_tx: mpsc::UnboundedSender<GroupSpec>,
         release: Semaphore,
         committed: Mutex<HashMap<String, BTreeSet<String>>>,
+        adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
     }
@@ -745,9 +959,11 @@ mod tests {
                 Arc::new(Self {
                     starts: AtomicUsize::new(0),
                     failures: AtomicUsize::new(0),
+                    commit_failures: AtomicUsize::new(0),
                     start_tx,
                     release: Semaphore::new(0),
                     committed: Mutex::new(HashMap::new()),
+                    adapters: Mutex::new(HashMap::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
                 }),
@@ -763,6 +979,15 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
         }
+
+        fn adapters(&self, key: &GroupKey) -> BTreeSet<String> {
+            self.adapters
+                .lock()
+                .unwrap()
+                .get(&key.id())
+                .cloned()
+                .unwrap_or_default()
+        }
     }
 
     #[async_trait]
@@ -771,10 +996,43 @@ mod tests {
 
         fn normalize(
             &self,
-            _instance: DiscoveryInstance,
-            _namespace_filter: &NamespaceFilter,
+            instance: DiscoveryInstance,
+            namespace_filter: &NamespaceFilter,
         ) -> anyhow::Result<Option<DesiredInstance>> {
-            unreachable!("controller tests inject normalized desired instances")
+            let DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                card_json,
+                model_suffix,
+            } = instance
+            else {
+                return Ok(None);
+            };
+            if !namespace_filter.matches(&namespace) {
+                return Ok(None);
+            }
+            let card: ModelDeploymentCard = serde_json::from_value(card_json)?;
+            let mcid = ModelCardInstanceId {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint.clone(),
+                instance_id,
+                model_suffix,
+            };
+            Ok(Some(DesiredInstance {
+                key: mcid.to_path(),
+                mcid,
+                endpoint_id: EndpointId {
+                    namespace,
+                    component,
+                    name: endpoint,
+                },
+                group_key: group_key(),
+                card,
+                fingerprint: "spec".to_string(),
+            }))
         }
 
         async fn prepare(
@@ -803,11 +1061,25 @@ mod tests {
             spec: &GroupSpec,
             prepared: Self::Prepared,
             members: &[DesiredInstance],
+            adapters: &[DesiredInstance],
         ) -> anyhow::Result<()> {
             let Prepared(_build) = prepared;
+            if self
+                .commit_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                anyhow::bail!("injected commit conflict");
+            }
             self.committed.lock().unwrap().insert(
                 spec.key.id(),
                 members.iter().map(|member| member.key.clone()).collect(),
+            );
+            self.adapters.lock().unwrap().insert(
+                spec.key.id(),
+                adapters.iter().map(|adapter| adapter.key.clone()).collect(),
             );
             Ok(())
         }
@@ -832,14 +1104,31 @@ mod tests {
             Ok(())
         }
 
+        fn sync_group_adapters(
+            &self,
+            key: &GroupKey,
+            adapters: &[DesiredInstance],
+        ) -> anyhow::Result<()> {
+            self.adapters.lock().unwrap().insert(
+                key.id(),
+                adapters.iter().map(|adapter| adapter.key.clone()).collect(),
+            );
+            Ok(())
+        }
+
         fn remove_group(&self, key: &GroupKey) {
             self.committed.lock().unwrap().remove(&key.id());
+            self.adapters.lock().unwrap().remove(&key.id());
             self.removed_groups.fetch_add(1, Ordering::SeqCst);
         }
 
         fn discard_prepared(&self, prepared: Self::Prepared) {
             let Prepared(_build) = prepared;
             self.discarded.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+            Ok(Vec::new())
         }
 
         fn project_lora(
@@ -877,6 +1166,17 @@ mod tests {
             card: ModelDeploymentCard::with_name_only("model"),
             group_key: group_key(),
             fingerprint: fingerprint.to_string(),
+        }
+    }
+
+    fn discovery_instance(instance: &DesiredInstance) -> DiscoveryInstance {
+        DiscoveryInstance::Model {
+            namespace: instance.mcid.namespace.clone(),
+            component: instance.mcid.component.clone(),
+            endpoint: instance.mcid.endpoint.clone(),
+            instance_id: instance.mcid.instance_id,
+            card_json: serde_json::to_value(&instance.card).unwrap(),
+            model_suffix: instance.mcid.model_suffix.clone(),
         }
     }
 
@@ -1023,9 +1323,22 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([base.key.clone()])
         );
+        assert_eq!(
+            host.adapters(&group_key()),
+            BTreeSet::from([adapter.key.clone()])
+        );
+        controller.apply_removed(&adapter.key);
+        assert!(host.adapters(&group_key()).is_empty());
+        controller.apply_added(adapter.clone());
+        assert_eq!(
+            host.adapters(&group_key()),
+            BTreeSet::from([adapter.key.clone()])
+        );
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
 
         controller.apply_removed(&base.key);
         assert!(host.members(&group_key()).is_empty());
+        assert!(host.adapters(&group_key()).is_empty());
         assert!(controller.desired.contains_key(&adapter.key));
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
     }
@@ -1082,6 +1395,68 @@ mod tests {
         host.release.add_permits(1);
         finish_build(&mut controller).await;
         assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_group_retries_on_its_deadline_not_unrelated_churn() {
+        let (host, mut starts) = FakeHost::new();
+        host.commit_failures.store(1, Ordering::SeqCst);
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let desired = instance(1, "spec");
+        controller.apply_added(desired.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        let mut unrelated_adapter = instance(99, "spec");
+        unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
+        unrelated_adapter.key = unrelated_adapter.mcid.to_path();
+        controller.apply_added(unrelated_adapter);
+        controller.start_queued_builds();
+        assert!(starts.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        controller.release_due_retries();
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_repairs_missed_state_without_undoing_newer_events() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+        let second = instance(2, "spec");
+
+        controller.apply_added(first.clone());
+        let snapshot_revision = controller.revision;
+        controller.apply_removed(&first.key);
+        controller.apply_added(second.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: snapshot_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+
+        assert!(!controller.desired.contains_key(&first.key));
+        assert!(controller.desired.contains_key(&second.key));
+
+        let repair_revision = controller.revision;
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: repair_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.contains_key(&first.key));
+        assert!(!controller.desired.contains_key(&second.key));
     }
 
     #[test]

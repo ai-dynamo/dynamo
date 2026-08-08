@@ -135,9 +135,9 @@ pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
 
 #[derive(Default)]
 struct CommittedCatalog {
-    models: HashMap<String, Arc<Model>>,
-    cards: HashMap<String, ModelDeploymentCard>,
-    aliases: HashMap<String, String>,
+    models: Arc<HashMap<String, Arc<Model>>>,
+    cards: Arc<HashMap<String, Arc<ModelDeploymentCard>>>,
+    aliases: Arc<HashMap<String, String>>,
 }
 
 struct CommittedDiscoveryGroup {
@@ -146,6 +146,8 @@ struct CommittedDiscoveryGroup {
     worker_set_key: String,
     aliases: Vec<String>,
     cards: HashMap<String, ModelDeploymentCard>,
+    adapters: HashMap<String, ModelDeploymentCard>,
+    representative: ModelDeploymentCard,
 }
 
 pub(crate) struct RemovedDiscoveryGroup {
@@ -169,7 +171,7 @@ pub struct ModelManager {
     catalog: ArcSwap<CommittedCatalog>,
 
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
-    cards: DashMap<String, ModelDeploymentCard>,
+    cards: DashMap<String, Arc<ModelDeploymentCard>>,
 
     /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
     discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
@@ -257,9 +259,45 @@ impl ModelManager {
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         self.catalog.store(Arc::new(CommittedCatalog {
-            models,
-            cards,
-            aliases,
+            models: Arc::new(models),
+            cards: Arc::new(cards),
+            aliases: Arc::new(aliases),
+        }));
+    }
+
+    fn publish_cards_locked(&self) {
+        let current = self.catalog.load_full();
+        let cards = self
+            .cards
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        self.catalog.store(Arc::new(CommittedCatalog {
+            models: current.models.clone(),
+            cards: Arc::new(cards),
+            aliases: current.aliases.clone(),
+        }));
+    }
+
+    fn publish_models_and_cards_locked(&self, changed_models: &HashSet<String>) {
+        let current = self.catalog.load_full();
+        let mut models = (*current.models).clone();
+        for name in changed_models {
+            if let Some(model) = self.models.get(name) {
+                models.insert(name.clone(), Arc::new(model.snapshot()));
+            } else {
+                models.remove(name);
+            }
+        }
+        let cards = self
+            .cards
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        self.catalog.store(Arc::new(CommittedCatalog {
+            models: Arc::new(models),
+            cards: Arc::new(cards),
+            aliases: current.aliases.clone(),
         }));
     }
 
@@ -275,6 +313,12 @@ impl ModelManager {
 
     /// Get an existing Model, if it exists.
     pub fn get_model(&self, model_name: &str) -> Option<Arc<Model>> {
+        self.models
+            .get(model_name)
+            .map(|entry| entry.value().clone())
+    }
+
+    pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.catalog.load().models.get(model_name).cloned()
     }
 
@@ -496,6 +540,7 @@ impl ModelManager {
         worker_set_key: &str,
         worker_set: WorkerSet,
         members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
         before_publish: F,
     ) -> anyhow::Result<()>
     where
@@ -513,6 +558,7 @@ impl ModelManager {
             .cloned()
             .collect::<Vec<_>>();
         let namespace = worker_set.namespace().to_string();
+        let representative = representative.clone();
 
         let _reservation = self.reservation_lock.lock();
         anyhow::ensure!(
@@ -525,6 +571,13 @@ impl ModelManager {
                 owner.value()
             );
         }
+        anyhow::ensure!(
+            !self.discovery_groups.iter().any(|entry| entry
+                .adapters
+                .values()
+                .any(|adapter| adapter.name() == primary)),
+            "model name {primary:?} is reserved by a LoRA adapter"
+        );
 
         for alias in &aliases {
             if let Some(owner) = self.alias_to_primary.get(alias)
@@ -545,6 +598,7 @@ impl ModelManager {
                 "alias {alias:?} collides with a registered primary model"
             );
         }
+        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
 
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
@@ -554,10 +608,18 @@ impl ModelManager {
             self.get_or_create_model(alias)
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
         }
+        for (_, adapter) in &adapters {
+            self.get_or_create_model(adapter.name())
+                .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        }
 
         let cards = members.into_iter().collect::<HashMap<_, _>>();
         for (key, card) in &cards {
-            self.cards.insert(key.clone(), card.clone());
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+        let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
+        for (key, card) in &adapters {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
         }
         self.discovery_groups.insert(
             group_id.to_string(),
@@ -567,11 +629,45 @@ impl ModelManager {
                 worker_set_key: worker_set_key.to_string(),
                 aliases,
                 cards,
+                adapters,
+                representative,
             },
         );
         before_publish();
         self.reconcile_prefill_router_topology(&primary, &namespace);
         self.publish_catalog_locked();
+        Ok(())
+    }
+
+    fn validate_adapter_claims<'a>(
+        &self,
+        primary: &str,
+        adapters: impl Iterator<Item = &'a ModelDeploymentCard>,
+    ) -> anyhow::Result<()> {
+        for adapter in adapters {
+            let name = adapter.name();
+            anyhow::ensure!(
+                name != primary,
+                "LoRA adapter name {name:?} collides with its base model"
+            );
+            anyhow::ensure!(
+                !self.alias_to_primary.contains_key(name),
+                "LoRA adapter name {name:?} collides with a registered alias"
+            );
+            let owned_by_same_base = self.discovery_groups.iter().any(|entry| {
+                entry.primary == primary
+                    && entry
+                        .adapters
+                        .values()
+                        .any(|existing| existing.name() == name)
+            });
+            let collides_with_primary =
+                self.models.get(name).is_some_and(|model| !model.is_empty()) && !owned_by_same_base;
+            anyhow::ensure!(
+                !collides_with_primary,
+                "LoRA adapter name {name:?} collides with a registered model"
+            );
+        }
         Ok(())
     }
 
@@ -587,9 +683,9 @@ impl ModelManager {
             .get_mut(group_id)
             .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
         group.cards.insert(key.clone(), card.clone());
-        self.cards.insert(key, card);
+        self.cards.insert(key, Arc::new(card));
         drop(group);
-        self.publish_catalog_locked();
+        self.publish_cards_locked();
         Ok(())
     }
 
@@ -603,8 +699,88 @@ impl ModelManager {
         let removed = group.cards.remove(key)?;
         self.cards.remove(key);
         drop(group);
-        self.publish_catalog_locked();
+        self.publish_cards_locked();
         Some(removed)
+    }
+
+    pub(crate) fn sync_discovery_group_adapters(
+        &self,
+        group_id: &str,
+        desired: Vec<(String, ModelDeploymentCard)>,
+    ) -> anyhow::Result<()> {
+        let _reservation = self.reservation_lock.lock();
+        let group = self
+            .discovery_groups
+            .get(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        let primary = group.primary.clone();
+        let worker_set_key = group.worker_set_key.clone();
+        drop(group);
+
+        self.validate_adapter_claims(&primary, desired.iter().map(|(_, card)| card))?;
+        let worker_set = self
+            .models
+            .get(&primary)
+            .and_then(|model| model.get_worker_set(&worker_set_key))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "committed discovery group {group_id:?} lost WorkerSet {worker_set_key:?}"
+                )
+            })?;
+        let desired = desired.into_iter().collect::<HashMap<_, _>>();
+        let desired_names = desired
+            .values()
+            .map(|card| card.name().to_string())
+            .collect::<HashSet<_>>();
+        let mut group = self
+            .discovery_groups
+            .get_mut(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        let removed_names = group
+            .adapters
+            .iter()
+            .filter(|(key, _)| !desired.contains_key(*key))
+            .map(|(_, card)| card.name().to_string())
+            .collect::<HashSet<_>>();
+        for key in group
+            .adapters
+            .keys()
+            .filter(|key| !desired.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            group.adapters.remove(&key);
+            self.cards.remove(&key);
+        }
+        for (key, card) in desired {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+            group.adapters.insert(key, card);
+        }
+        drop(group);
+
+        for name in &desired_names {
+            self.get_or_create_model(name)
+                .add_worker_set(worker_set_key.clone(), worker_set.clone());
+        }
+        for name in removed_names.difference(&desired_names) {
+            if let Some(model) = self.models.get(name) {
+                model.remove_worker_set(&worker_set_key);
+            }
+            self.remove_model_if_empty(name);
+        }
+        let changed_models = desired_names
+            .union(&removed_names)
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.publish_models_and_cards_locked(&changed_models);
+        Ok(())
+    }
+
+    pub(crate) fn discovery_group_adapter_cards(&self, group_id: &str) -> Vec<ModelDeploymentCard> {
+        self.discovery_groups
+            .get(group_id)
+            .map(|group| group.adapters.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub(crate) fn remove_discovery_group<F>(
@@ -617,10 +793,13 @@ impl ModelManager {
     {
         let _reservation = self.reservation_lock.lock();
         let (_, group) = self.discovery_groups.remove(group_id)?;
-        let representative = group.cards.values().next()?.clone();
+        let representative = group.representative.clone();
         let topology_namespace = group.namespace.clone();
 
         for key in group.cards.keys() {
+            self.cards.remove(key);
+        }
+        for key in group.adapters.keys() {
             self.cards.remove(key);
         }
         if let Some(model) = self.models.get(&group.primary) {
@@ -637,7 +816,17 @@ impl ModelManager {
                     .remove_if(alias, |_, owner| owner == &group.primary);
             }
         }
-        let cards = group.cards.into_values().collect();
+        for adapter in group.adapters.values() {
+            if let Some(model) = self.models.get(adapter.name()) {
+                model.remove_worker_set(&group.worker_set_key);
+            }
+            self.remove_model_if_empty(adapter.name());
+        }
+        let cards = group
+            .cards
+            .into_values()
+            .chain(group.adapters.into_values())
+            .collect();
         let removed = RemovedDiscoveryGroup {
             namespace: group.namespace,
             representative,
@@ -652,7 +841,12 @@ impl ModelManager {
     // -- Model cards --
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.catalog.load().cards.values().cloned().collect()
+        self.catalog
+            .load()
+            .cards
+            .values()
+            .map(|card| (**card).clone())
+            .collect()
     }
 
     /// Return owned keys for cards in the published catalog.
@@ -664,19 +858,23 @@ impl ModelManager {
     /// lifecycle methods above and never publishes a card independently.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
         let _reservation = self.reservation_lock.lock();
-        self.cards.insert(key.to_string(), card);
+        self.cards.insert(key.to_string(), Arc::new(card));
         self.publish_catalog_locked();
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.catalog.load().cards.get(key).cloned()
+        self.catalog
+            .load()
+            .cards
+            .get(key)
+            .map(|card| (**card).clone())
     }
 
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
         let _reservation = self.reservation_lock.lock();
-        let removed = self.cards.remove(key).map(|(_, value)| value);
+        let removed = self.cards.remove(key).map(|(_, value)| (*value).clone());
         if removed.is_some() {
             self.publish_catalog_locked();
         }
@@ -3088,6 +3286,18 @@ mod tests {
         assert!(Arc::ptr_eq(&m1, &m2));
     }
 
+    #[test]
+    fn public_get_model_retains_live_mutation_semantics() {
+        let manager = ModelManager::new();
+        manager.add_worker_set("llama", "first", make_worker_set("first", "same"));
+        let model = manager.get_model("llama").unwrap();
+
+        manager.add_worker_set("llama", "second", make_worker_set("second", "same"));
+
+        assert!(model.has_worker_set("second"));
+        assert!(Arc::ptr_eq(&model, &manager.get_model("llama").unwrap()));
+    }
+
     // -- Model listing and filtering tests --
 
     #[test]
@@ -3255,6 +3465,7 @@ mod tests {
                 "candidate-workers",
                 blocked_worker_set,
                 vec![("instance-1".to_string(), blocked_card)],
+                Vec::new(),
                 || {},
             )
             .unwrap_err();
@@ -3276,6 +3487,7 @@ mod tests {
                 "committed-workers",
                 worker_set,
                 vec![("instance-2".to_string(), card)],
+                Vec::new(),
                 || {},
             )
             .unwrap();
@@ -3292,6 +3504,46 @@ mod tests {
         assert!(manager.get_model("committed").is_none());
         assert!(manager.get_model("alias").is_none());
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
+    }
+
+    #[test]
+    fn discovery_group_projects_adapter_cards_onto_the_base_worker_set() {
+        let manager = ModelManager::new();
+        let base = ModelDeploymentCard::with_name_only("base");
+        let mut adapter = ModelDeploymentCard::with_name_only("adapter");
+        adapter.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            base.mdcsum().to_string(),
+            base.clone(),
+        );
+
+        manager
+            .commit_discovery_group(
+                "adapter-group",
+                "base-workers",
+                worker_set,
+                vec![("base-instance".to_string(), base)],
+                vec![("adapter-instance".to_string(), adapter)],
+                || {},
+            )
+            .unwrap();
+
+        assert_eq!(manager.get_model_cards().len(), 2);
+        assert!(
+            manager
+                .get_committed_model("adapter")
+                .is_some_and(|model| model.has_worker_set("base-workers"))
+        );
+
+        manager
+            .remove_discovery_group("adapter-group", |_| {})
+            .unwrap();
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_committed_model("adapter").is_none());
     }
 
     // -- Prefill router rendezvous tests --

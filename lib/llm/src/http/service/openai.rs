@@ -3382,7 +3382,7 @@ pub(crate) fn check_model_serving_ready(
     state: &Arc<service_v2::State>,
     model_name: &str,
 ) -> Result<(), ErrorResponse> {
-    let Some(model) = state.manager().get_model(model_name) else {
+    let Some(model) = state.manager().get_committed_model(model_name) else {
         // Unknown model — let the per-endpoint engine accessor produce the
         // canonical 404. The readiness gate has nothing to say.
         return Ok(());
@@ -3685,7 +3685,7 @@ async fn get_model_openai(
     // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
     // still wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
-    if state.manager().get_model(model_id).is_some() {
+    if state.manager().get_committed_model(model_id).is_some() {
         return get_model_retrieve(&state, model_id);
     }
 
@@ -3694,7 +3694,7 @@ async fn get_model_openai(
     // the whole point of this endpoint is to diagnose models that are
     // registered but not yet ready, so it must find them too.
     if let Some(base) = model_id.strip_suffix("/ready")
-        && state.manager().get_model(base).is_some()
+        && state.manager().get_committed_model(base).is_some()
     {
         return get_model_readiness(&state, base);
     }
@@ -3753,7 +3753,7 @@ fn get_model_readiness(
 ) -> Result<Response, ErrorResponse> {
     let model = state
         .manager()
-        .get_model(model_id)
+        .get_committed_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
     Ok(Json(model.namespace_readiness()).into_response())
 }

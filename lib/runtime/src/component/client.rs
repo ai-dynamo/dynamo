@@ -639,11 +639,12 @@ impl Client {
         );
         let initial_ids = initial.iter().map(Instance::id).collect::<Vec<_>>();
         let (instance_tx, instance_rx) = tokio::sync::watch::channel(initial);
+        let updater_cancel = cancel_token.clone();
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => break,
+                    _ = updater_cancel.cancelled() => break,
                     _ = instance_tx.closed() => break,
                     result = endpoint_instances.changed() => {
                         if result.is_err() {
@@ -661,7 +662,8 @@ impl Client {
                     endpoint_instances.borrow_and_update().as_slice(),
                     admitted_ids.borrow_and_update().as_slice(),
                 );
-                if *instance_tx.borrow() != next && instance_tx.send(next).is_err() {
+                let changed = *instance_tx.borrow() != next;
+                if changed && instance_tx.send(next).is_err() {
                     break;
                 }
             }
@@ -674,7 +676,7 @@ impl Client {
             routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval: self.reconcile_interval,
         };
-        client.monitor_instance_source();
+        client.monitor_instance_source_with_cancellation(cancel_token);
         client
     }
 
@@ -793,8 +795,15 @@ impl Client {
     /// `instance_source`. This ensures instances removed via `report_instance_down`
     /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
-        let reconcile_interval = self.reconcile_interval;
         let cancel_token = self.endpoint.drt().primary_token();
+        self.monitor_instance_source_with_cancellation(cancel_token);
+    }
+
+    fn monitor_instance_source_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        let reconcile_interval = self.reconcile_interval;
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {

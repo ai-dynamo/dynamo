@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::{
     DistributedRuntime,
     component::Endpoint,
-    discovery::{DiscoveryInstance, DiscoveryStream, ModelCardInstanceId},
+    discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
@@ -734,9 +734,6 @@ where
             });
 
             let encoder_chooser = if needs_preprocessed_routing {
-                if supports_encoder_result_handoff(card) {
-                    self.manager.enable_encoder_routing(&model_name, &namespace);
-                }
                 lease.remove_encoder_waiter = true;
                 self.manager
                     .register_encoder_router(&model_name, &namespace)
@@ -1138,7 +1135,19 @@ where
         spec: &GroupSpec,
         mut prepared: Self::Prepared,
         members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
+        let adapter_was_available = adapters
+            .iter()
+            .map(|adapter| {
+                (
+                    adapter.card.name().to_string(),
+                    self.manager
+                        .get_committed_model(adapter.card.name())
+                        .is_some(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let worker_set = prepared
             .worker_set
             .take()
@@ -1158,6 +1167,10 @@ where
             &spec.key.worker_set_key,
             worker_set,
             committed_members,
+            adapters
+                .iter()
+                .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
+                .collect(),
             || {
                 let namespace = &spec.representative.mcid.namespace;
                 match &prepared.activation {
@@ -1194,6 +1207,17 @@ where
         )?;
         prepared.lease.disarm();
         self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        let mut adapter_names = HashSet::new();
+        for adapter in adapters {
+            if adapter_names.insert(adapter.card.name().to_string())
+                && !adapter_was_available
+                    .get(adapter.card.name())
+                    .copied()
+                    .unwrap_or(false)
+            {
+                self.emit_update(ModelUpdate::Added(adapter.card.clone()));
+            }
+        }
         if prepared.card.model_type.supports_chat() {
             self.notify_on_model.notify_waiters();
         }
@@ -1220,6 +1244,56 @@ where
                     key.id()
                 )
             })?;
+        Ok(())
+    }
+
+    fn sync_group_adapters(
+        &self,
+        key: &GroupKey,
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        let group_id = key.id();
+        let previous = self
+            .manager
+            .discovery_group_adapter_cards(&group_id)
+            .into_iter()
+            .map(|card| (card.name().to_string(), card))
+            .collect::<HashMap<_, _>>();
+        let desired = adapters
+            .iter()
+            .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))
+            .collect::<HashMap<_, _>>();
+        let was_available = previous
+            .keys()
+            .chain(desired.keys())
+            .map(|name| {
+                (
+                    name.clone(),
+                    self.manager.get_committed_model(name).is_some(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        self.manager.sync_discovery_group_adapters(
+            &group_id,
+            adapters
+                .iter()
+                .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
+                .collect(),
+        )?;
+        for (name, card) in &desired {
+            if !was_available.get(name).copied().unwrap_or(false)
+                && self.manager.get_committed_model(name).is_some()
+            {
+                self.emit_update(ModelUpdate::Added(card.clone()));
+            }
+        }
+        for (name, card) in previous {
+            if was_available.get(&name).copied().unwrap_or(false)
+                && self.manager.get_committed_model(&name).is_none()
+            {
+                self.emit_update(ModelUpdate::Removed(card));
+            }
+        }
         Ok(())
     }
 
@@ -1255,6 +1329,18 @@ where
             return;
         };
         let removed_members = removed.cards.len();
+        let mut removed_adapter_names = HashSet::new();
+        for removed_card in &removed.cards {
+            if removed_card.lora.is_some()
+                && removed_adapter_names.insert(removed_card.name().to_string())
+                && self
+                    .manager
+                    .get_committed_model(removed_card.name())
+                    .is_none()
+            {
+                self.emit_update(ModelUpdate::Removed(removed_card.clone()));
+            }
+        }
         let card = removed.representative;
         for removed_card in removed_model_cards(&self.manager, &card) {
             self.emit_update(ModelUpdate::Removed(removed_card));
@@ -1269,6 +1355,10 @@ where
 
     fn discard_prepared(&self, prepared: Self::Prepared) {
         drop(prepared);
+    }
+
+    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        self.drt.discovery().list(DiscoveryQuery::AllModels).await
     }
 
     fn project_lora(
@@ -1329,13 +1419,42 @@ fn materialization_fingerprint(
     card: &ModelDeploymentCard,
     default_router_config: &RouterConfig,
 ) -> anyhow::Result<String> {
-    let mut normalized = card.clone();
-    normalized.worker_type = Some(effective_worker_type(card.worker_type, card.model_type));
-    if normalized.router_config.is_none() {
-        normalized.router_config = Some(default_router_config.clone());
-    }
-    let bytes = serde_json::to_vec(&normalized)?;
+    let effective_router = card.router_config.as_ref().unwrap_or(default_router_config);
+    let mut value = serde_json::to_value(card)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("model card must serialize as an object"))?;
+    object.insert(
+        "worker_type".to_string(),
+        serde_json::to_value(effective_worker_type(card.worker_type, card.model_type))?,
+    );
+    object.remove("router_config");
+    let normalized: ModelDeploymentCard = serde_json::from_value(value)?;
+
+    let mut bytes = normalized.mdcsum().as_bytes().to_vec();
+    let mut router_value = serde_json::to_value(effective_router)?;
+    canonicalize_json(&mut router_value);
+    bytes.extend(serde_json::to_vec(&router_value)?);
     Ok(blake3::hash(&bytes).to_string())
+}
+
+fn canonicalize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            for (key, mut value) in entries {
+                canonicalize_json(&mut value);
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                canonicalize_json(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Seed the LoRA state tracker from a worker's MDC.
@@ -1474,7 +1593,9 @@ mod tests {
             .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
             .await
             .unwrap();
-        watcher.commit_group(&spec, prepared, &[desired]).unwrap();
+        watcher
+            .commit_group(&spec, prepared, &[desired], &[])
+            .unwrap();
 
         let model = manager.get_model("mixed-text-model").unwrap();
         assert!(model.has_chat_engine());
@@ -1790,9 +1911,28 @@ mod tests {
         );
 
         current.runtime_config.max_gpu_lora_count = Some(4);
+        current.runtime_config.kv_event_publishing_enabled = Some(true);
+        current.runtime_config.data_parallel_start_rank = 4;
+        assert_eq!(
+            materialization_fingerprint(&legacy, &RouterConfig::default()).unwrap(),
+            materialization_fingerprint(&current, &RouterConfig::default()).unwrap()
+        );
+
+        current.aliases.push("new-serving-name".to_string());
         assert_ne!(
             materialization_fingerprint(&legacy, &RouterConfig::default()).unwrap(),
             materialization_fingerprint(&current, &RouterConfig::default()).unwrap()
+        );
+
+        let mut legacy_wire = serde_json::to_value(&legacy).unwrap();
+        legacy_wire["context_length"] = serde_json::json!(8_192);
+        let legacy_wire: ModelDeploymentCard = serde_json::from_value(legacy_wire).unwrap();
+        let mut current_wire = legacy.clone();
+        current_wire.worker_type = Some(WorkerType::Prefill);
+        current_wire.runtime_config.context_length = Some(8_192);
+        assert_eq!(
+            materialization_fingerprint(&legacy_wire, &RouterConfig::default()).unwrap(),
+            materialization_fingerprint(&current_wire, &RouterConfig::default()).unwrap()
         );
     }
 
