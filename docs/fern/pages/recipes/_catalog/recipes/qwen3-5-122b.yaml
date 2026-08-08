@@ -7,10 +7,33 @@ page: pages/recipes/model-recipes/qwen3-5-122b.mdx
 provider: alibaba
 model:
   name: Qwen3.5-122B-A10B
-  hf_id: Qwen/Qwen3.5-122B-A10B-FP8
-  precision: FP8 + FP8 KV
+  hf_id: nvidia/Qwen3.5-122B-A10B-NVFP4 (B200) / Qwen/Qwen3.5-122B-A10B-FP8 (H200)
+  precision: NVFP4 + FP8 KV (B200) / FP8 + FP8 KV (H200)
 status: validated
 targets:
+- id: agg-b200-agentic
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp1
+  - fp8-kv-cache
+  - kv-aware-routing
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 50
+  deploy:
+    asset: recipes/qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3.5-122b/nvfp4/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1173.2 output tok/s/GPU, 52.4 user tok/s P50, TTFT P50 246 ms at concurrency 50 over 2 TP1 replicas (3,541-request agentic trace)
 - id: agg-h200-agentic
   recommended: true
   hardware:
@@ -35,6 +58,31 @@ targets:
   expected_performance:
     available: true
     summary: 720.3 output tok/s/GPU, 52.9 user tok/s P50, TTFT P50 313 ms at concurrency 64 over 2 TP2 replicas (3,541-request agentic trace)
+- id: disagg-b200-agentic
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 3
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p2d
+  - tp1-per-role
+  - fp8-kv-cache
+  - kv-aware-routing
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 60
+  deploy:
+    asset: recipes/qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3.5-122b/nvfp4/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 916.6 output tok/s/GPU, 51.4 user tok/s P50, TTFT P50 1353 ms at concurrency 60 (3,541-request agentic trace)
 - id: disagg-h200-agentic
   recommended: false
   hardware:
@@ -63,9 +111,10 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- NVFP4 B200 profiles for this model are tracked separately and are not yet on main; add them
-  as targets here once they land
-- disaggregated is retained but is no longer the recommended H200 path; aggregated TP2 is
-  2.8x better per GPU at the same operating point
-- disaggregated carries --no-async-scheduling on vLLM < 0.26.0, costing ~7% throughput
-- no perf.yaml in this recipe; the benchmark is driven from perf/README.md
+- aggregated is the recommended path on both SKUs; disaggregated is retained for deployments
+  that scale prefill and decode independently
+- H200 disaggregated carries --no-async-scheduling on vLLM < 0.26.0, costing ~7% throughput
+- no perf.yaml in the FP8/H200 variant; its benchmark is driven from perf/README.md
+- TP2 sharding is an H200 FP8 win only. On B200 NVFP4 it loses in both topologies, and on
+  H200 disaggregated it reaches 294.8 tok/s/GPU but regresses IFEval 84.66 to 80.22, so
+  only the H200 aggregated profile ships sharded
