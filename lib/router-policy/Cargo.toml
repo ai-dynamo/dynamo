@@ -12,4 +12,4 @@ repository.workspace = true
 description = "Dependency-neutral worker routing policies for Dynamo"
 
 [dependencies]
-rand = { workspace = true }
+fastrand = "2"

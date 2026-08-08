@@ -1929,7 +1929,7 @@ dependencies = [
 name = "dynamo-router-policy"
 version = "1.4.0"
 dependencies = [
- "rand 0.9.4",
+ "fastrand",
 ]
 
 [[package]]

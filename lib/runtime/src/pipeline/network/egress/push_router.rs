@@ -186,6 +186,11 @@ where
     /// Shared, scheduler-independent policy state. KV and Direct have no picker.
     picker: Option<Arc<RoutePicker>>,
 
+    /// Policy-specific state for callers that explicitly request static routing,
+    /// independently of the router's configured generate mode.
+    round_robin_picker: Arc<RoutePicker>,
+    random_picker: Arc<RoutePicker>,
+
     /// The final hop: after selecting an instance, `PushRouter` hands it to this
     /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
     /// A trait object so an alternate transport can swap it out.
@@ -264,6 +269,19 @@ impl RouterMode {
             Self::KV | Self::Direct => None,
         }
     }
+}
+
+fn route_pickers(
+    router_mode: RouterMode,
+) -> (Arc<RoutePicker>, Arc<RoutePicker>, Option<Arc<RoutePicker>>) {
+    let round_robin = Arc::new(RoutePicker::new(RoutePolicy::RoundRobin));
+    let random = Arc::new(RoutePicker::new(RoutePolicy::Random));
+    let configured = match router_mode {
+        RouterMode::RoundRobin => Some(round_robin.clone()),
+        RouterMode::Random => Some(random.clone()),
+        mode => mode.route_policy().map(RoutePicker::new).map(Arc::new),
+    };
+    (round_robin, random, configured)
 }
 
 /// Pick the instance with lower in-flight count from two random candidates.
@@ -533,15 +551,15 @@ where
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
+        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         Ok(PushRouter {
             client,
             addressed,
             router_mode,
-            picker: router_mode
-                .route_policy()
-                .map(RoutePicker::new)
-                .map(Arc::new),
+            picker,
+            round_robin_picker,
+            random_picker,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -607,15 +625,15 @@ where
                 client.endpoint.drt().primary_token(),
             );
         }
+        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         let router = PushRouter {
             client,
             addressed,
             router_mode,
-            picker: router_mode
-                .route_policy()
-                .map(RoutePicker::new)
-                .map(Arc::new),
+            picker,
+            round_robin_picker,
+            random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -655,15 +673,15 @@ where
             dispatch.clone(),
             client.endpoint.drt().primary_token(),
         );
+        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         Ok(PushRouter {
             client,
             addressed: dispatch,
             router_mode,
-            picker: router_mode
-                .route_policy()
-                .map(RoutePicker::new)
-                .map(Arc::new),
+            picker,
+            round_robin_picker,
+            random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -706,11 +724,10 @@ where
         })
     }
 
-    fn select_untracked_worker(&self) -> anyhow::Result<(u64, usize)> {
+    fn select_untracked_worker(&self, picker: &RoutePicker) -> anyhow::Result<(u64, usize)> {
         let routing_instances = self.client.routing_instances();
         let candidates = routing_instances.free_ids();
-        let decision = self
-            .picker()?
+        let decision = picker
             .select(
                 CandidateView::Workers(candidates),
                 RouteContext::default(),
@@ -735,7 +752,8 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let (instance_id, candidate_count) = self.select_untracked_worker()?;
+        let (instance_id, candidate_count) =
+            self.select_untracked_worker(self.round_robin_picker.as_ref())?;
         tracing::info!(
             router_mode = "round-robin",
             worker_id = instance_id,
@@ -762,7 +780,8 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let (instance_id, candidate_count) = self.select_untracked_worker()?;
+        let (instance_id, candidate_count) =
+            self.select_untracked_worker(self.random_picker.as_ref())?;
         tracing::info!(
             router_mode = "random",
             worker_id = instance_id,
@@ -1394,8 +1413,11 @@ where
                     .map(|counter| OccupancyPermit::from_counter(state, instance_id, counter));
                 Ok((instance_id, permit))
             }
-            RouterMode::RoundRobin | RouterMode::Random => self
-                .select_untracked_worker()
+            RouterMode::RoundRobin => self
+                .select_untracked_worker(self.round_robin_picker.as_ref())
+                .map(|(instance_id, _)| (instance_id, None)),
+            RouterMode::Random => self
+                .select_untracked_worker(self.random_picker.as_ref())
                 .map(|(instance_id, _)| (instance_id, None)),
             RouterMode::Direct => Err(anyhow::anyhow!(
                 "Worker ID required for exact dispatch in Direct routing mode"
@@ -1942,6 +1964,28 @@ mod tests {
         // With only two workers, p2c_select_from must pick both and choose id=2 (lower load).
         let result = p2c_select_from(&state, &[1, 2]);
         assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn explicit_static_pickers_keep_policy_specific_state() {
+        let (round_robin, random, configured) = route_pickers(RouterMode::KV);
+        assert!(configured.is_none());
+        assert_eq!(random.policy(), RoutePolicy::Random);
+
+        let candidates = CandidateView::Workers(&[10, 20, 30, 40]);
+        random
+            .select(candidates, RouteContext::default(), |_| 0)
+            .expect("random selection must have a candidate");
+        let selected = (0..2)
+            .map(|_| {
+                round_robin
+                    .select(candidates, RouteContext::default(), |_| 0)
+                    .expect("round-robin selection must have a candidate")
+                    .target
+                    .worker_id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected, [10, 20]);
     }
 
     #[test]

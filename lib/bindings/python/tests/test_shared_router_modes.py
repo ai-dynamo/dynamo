@@ -148,9 +148,13 @@ async def test_kv_router_generate_supports_every_mode(router_endpoint, mode):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
-async def test_non_kv_reservations_are_atomic_and_reusable(router_endpoint):
+@pytest.mark.parametrize(
+    "mode",
+    [RouterMode.RoundRobin, RouterMode.Random, RouterMode.LeastLoaded],
+)
+async def test_non_kv_reservation_ids_are_atomic_and_reusable(router_endpoint, mode):
     endpoint, worker_id = router_endpoint
-    router = KvRouter(endpoint, router_mode=RouterMode.LeastLoaded)
+    router = KvRouter(endpoint, router_mode=mode)
 
     outcomes = await asyncio.gather(
         router.best_worker([1, 2, 3], request_id="reservation"),

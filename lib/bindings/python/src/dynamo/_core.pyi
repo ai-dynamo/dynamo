@@ -2962,6 +2962,23 @@ class KvRouter:
                 - dp_rank: The selected data-parallel rank in KV mode; None for
                   worker-level shared picker modes
                 - overlap_blocks: The number of overlapping blocks found
+
+        Mode behavior:
+            KV mode preserves KV-overlap selection and accepts the KV-specific
+            override, indexer, LoRA, constraint, priority, policy-class, and
+            cache-namespace arguments. Shared worker-picker modes reject those
+            arguments. Direct mode raises because it cannot choose a worker
+            without an explicit target.
+
+            Without request_id, selection is advisory. With request_id, RR and
+            random commit a selection and retain a duplicate-ID marker, while
+            P2C, least-loaded, and device-aware also retain an occupancy lease.
+            Call free(request_id) to release retained shared-mode state.
+
+        Raises:
+            ValueError: If Direct mode is used, if KV-only arguments are supplied
+                        outside KV mode, or if shared multimodal arguments are
+                        supplied in KV mode.
         """
         ...
 
@@ -2993,6 +3010,9 @@ class KvRouter:
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
             If you need aggregated loads per worker_id, sum the values manually.
+
+        Raises:
+            ValueError: If the router is not in KV routing mode.
         """
         ...
 
@@ -3021,6 +3041,9 @@ class KvRouter:
             A dictionary containing block_size, num_blocks, shared_cache, and
             workers. Each worker row is keyed by worker_id and dp_rank and
             reports device, host-pinned, disk, and shared-cache overlap blocks.
+
+        Raises:
+            ValueError: If the router is not in KV routing mode.
         """
         ...
 
@@ -3030,6 +3053,9 @@ class KvRouter:
 
         Returns:
             A JSON string containing all indexer events
+
+        Raises:
+            ValueError: If the router is not in KV routing mode.
         """
         ...
 
@@ -3039,6 +3065,7 @@ class KvRouter:
 
         This signals that the request has finished its prefill phase and is now
         in the decode phase. Used to update router state for accurate load tracking.
+        In shared worker-picker modes this method is a no-op.
 
         Args:
             request_id: The ID of the request that completed prefill
@@ -3056,6 +3083,11 @@ class KvRouter:
 
         This should be called when a request completes to update the router's
         tracking of active blocks and ensure accurate load balancing.
+
+        In KV mode this releases chooser lifecycle state. In shared worker-picker
+        modes it releases the duplicate-ID marker and any occupancy lease retained
+        by best_worker(request_id=...). The operation is idempotent; shared-mode
+        state remains retained until it is called.
 
         Args:
             request_id: The ID of the request to free

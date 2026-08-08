@@ -94,7 +94,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use dynamo_runtime::{
@@ -274,8 +277,21 @@ mod tests {
             .client()
             .await
             .unwrap();
-        let instances = client.wait_for_instances().await.unwrap();
-        assert_eq!(instances.len(), 4);
+        let instances = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut source = client.instance_source.as_ref().clone();
+            loop {
+                let instances = source.borrow_and_update().clone();
+                if instances.len() == 4 {
+                    return instances;
+                }
+                source
+                    .changed()
+                    .await
+                    .expect("discovery source must remain open");
+            }
+        })
+        .await
+        .expect("all four workers must be discovered");
         let mut workers = instances.iter().map(Instance::id).collect::<Vec<_>>();
         workers.sort_unstable();
         let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)

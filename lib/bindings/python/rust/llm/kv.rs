@@ -1727,12 +1727,14 @@ pub(crate) struct KvRouter {
 
 enum RouterInner {
     Kv(Arc<RsKvPushRouter>),
-    Shared {
-        engine: Arc<llm_rs::session_affinity::SessionAffinityPushRouter>,
-        router: RsSharedPushRouter,
-        mode: rs::pipeline::RouterMode,
-        reservations: Arc<DashMap<String, Option<RoutingReservation>>>,
-    },
+    Shared(Arc<SharedRouterInner>),
+}
+
+struct SharedRouterInner {
+    engine: Arc<llm_rs::session_affinity::SessionAffinityPushRouter>,
+    router: RsSharedPushRouter,
+    mode: rs::pipeline::RouterMode,
+    reservations: Arc<DashMap<String, Option<RoutingReservation>>>,
 }
 
 /// Attach worker_id info from the tracker to `routing_data` so it survives the
@@ -1766,34 +1768,22 @@ impl KvRouter {
     fn engine(&self) -> RsRouterEngine {
         match &self.inner {
             RouterInner::Kv(router) => router.clone(),
-            RouterInner::Shared { engine, .. } => engine.clone(),
+            RouterInner::Shared(inner) => inner.engine.clone(),
         }
     }
 
     fn kv_router(&self, operation: &str) -> PyResult<Arc<RsKvPushRouter>> {
         match &self.inner {
             RouterInner::Kv(router) => Ok(router.clone()),
-            RouterInner::Shared { .. } => Err(PyValueError::new_err(format!(
+            RouterInner::Shared(_) => Err(PyValueError::new_err(format!(
                 "{operation} is only available in KV routing mode"
             ))),
         }
     }
 
-    fn shared_router(
-        &self,
-        operation: &str,
-    ) -> PyResult<(
-        RsSharedPushRouter,
-        rs::pipeline::RouterMode,
-        Arc<DashMap<String, Option<RoutingReservation>>>,
-    )> {
+    fn shared_router(&self, operation: &str) -> PyResult<&SharedRouterInner> {
         match &self.inner {
-            RouterInner::Shared {
-                router,
-                mode,
-                reservations,
-                ..
-            } => Ok((router.clone(), *mode, reservations.clone())),
+            RouterInner::Shared(inner) => Ok(inner.as_ref()),
             RouterInner::Kv(_) => Err(PyValueError::new_err(format!(
                 "{operation} uses the KV scheduler in KV routing mode"
             ))),
@@ -2047,12 +2037,12 @@ impl KvRouter {
             .map_err(to_pyerr)?;
 
             Ok(Self {
-                inner: RouterInner::Shared {
+                inner: RouterInner::Shared(Arc::new(SharedRouterInner {
                     engine: Arc::new(engine),
                     router,
                     mode: rs_router_mode,
                     reservations: Arc::new(DashMap::new()),
-                },
+                })),
             })
         })
     }
@@ -2350,12 +2340,14 @@ impl KvRouter {
             .mm_routing_info(mm_routing_info)
             .build()
             .map_err(to_pyerr)?;
-        let (router, mode, reservations) = self.shared_router("best_worker")?;
-        if mode == rs::pipeline::RouterMode::Direct {
+        let shared = self.shared_router("best_worker")?;
+        if shared.mode == rs::pipeline::RouterMode::Direct {
             return Err(PyValueError::new_err(
                 "Direct best_worker requires an explicit worker target and cannot select one advisory",
             ));
         }
+        let router = shared.router.clone();
+        let reservations = shared.reservations.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let Some(request_id) = request_id else {
@@ -2382,11 +2374,6 @@ impl KvRouter {
                 }
             };
             let target = reservation.target();
-            if !reservation.has_occupancy() {
-                reservations.remove(&request_id);
-                return Ok((target.worker_id, target.dp_rank, 0usize));
-            }
-
             let Some(mut slot) = reservations.get_mut(&request_id) else {
                 return Err(PyValueError::new_err(format!(
                     "routing reservation {request_id:?} was released before selection completed"
@@ -2415,7 +2402,7 @@ impl KvRouter {
                     Ok(())
                 })
             }
-            RouterInner::Shared { .. } => {
+            RouterInner::Shared(_) => {
                 pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
             }
         }
@@ -2431,8 +2418,8 @@ impl KvRouter {
                     Ok(())
                 })
             }
-            RouterInner::Shared { reservations, .. } => {
-                let reservations = reservations.clone();
+            RouterInner::Shared(inner) => {
+                let reservations = inner.reservations.clone();
                 pyo3_async_runtimes::tokio::future_into_py(py, async move {
                     reservations.remove(&request_id);
                     Ok(())
