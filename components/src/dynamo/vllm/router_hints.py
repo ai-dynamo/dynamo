@@ -6,9 +6,10 @@ from __future__ import annotations
 import ipaddress
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from vllm.engine.arg_utils import AsyncEngineArgs
+if TYPE_CHECKING:
+    from vllm.engine.arg_utils import AsyncEngineArgs
 
 from dynamo.common.constants import (
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
@@ -72,9 +73,12 @@ def _router_hint_source_control_endpoint(
     tier: Mapping[str, Any], port_offset: int = 0
 ) -> str | None:
     """Build one advertisable source-control endpoint for a tier and DP offset."""
+    configured_port = tier.get("control_port")
+    if not isinstance(configured_port, (int, str)):
+        return None
     try:
-        control_port = int(tier.get("control_port")) + port_offset
-    except (TypeError, ValueError):
+        control_port = int(configured_port) + port_offset
+    except ValueError:
         return None
     if not 0 < control_port <= 65535:
         return None
