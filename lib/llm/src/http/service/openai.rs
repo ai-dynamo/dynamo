@@ -7325,6 +7325,7 @@ mod tests {
             content: Some(vec![ChatCompletionTokenLogprob {
                 token: "h".to_string(),
                 logprob: -0.5,
+                token_id: None,
                 bytes: Some(vec![104]),
                 top_logprobs: vec![],
             }]),

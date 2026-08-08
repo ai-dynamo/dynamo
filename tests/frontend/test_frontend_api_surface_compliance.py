@@ -5,18 +5,20 @@
 
 Subject under test is Dynamo's HTTP surface (`/v1/responses` and
 `/v1/messages` wire shapes, tool-call routing through both); sglang is
-just the backend vehicle for producing real traffic. Runs three suites
+just the backend vehicle for producing real traffic. Runs six checks
 sequentially against one server:
 
 1. Upstream OpenResponses compliance-test.ts harness (bun/TypeScript
    validator against zod schemas generated from the OpenAPI spec).
 2. `codex exec` smoke — forces the shell tool-call path through
    `/v1/responses`.
-3. `claude -p` smoke — forces the Bash tool-call path through
+3. `codex exec` subagent smoke — requires a real Codex child request through
+   `/v1/responses`.
+4. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
-4. `opencode run --command ...` smoke — forces an OpenCode subtask request
+5. `opencode run --command ...` smoke — forces an OpenCode subtask request
    through `/v1/chat/completions`.
-5. Optional `claude -p` subagent smoke — collects CI signal for Claude Code
+6. Optional `claude -p` subagent smoke — collects CI signal for Claude Code
    child-agent headers without gating the suite while invocation is calibrated.
 
 All external tooling (bun, node, the OpenResponses suite, and the coding-agent
@@ -46,9 +48,11 @@ import requests
 from filelock import FileLock
 
 from tests.frontend.agent_smoke_inputs import (
+    CODEX_LIST_DIRECTORY_PROMPT,
     LIST_DIRECTORY_PROMPT,
     claude_subagent_definition,
     claude_subagent_prompt,
+    codex_subagent_prompt,
     write_codex_config,
     write_opencode_config,
 )
@@ -461,11 +465,11 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + claude exec (up to 180s) + optional claude
-# subagent probe (up to 45s) + opencode run (up to 180s) + inter-suite
-# health checks + teardown. 975s leaves headroom for CI variance without
-# masking real hangs.
-@pytest.mark.timeout(975)
+# codex exec (up to 180s) + Codex child process (up to 180s) + claude exec
+# (up to 180s) + optional claude subagent probe (up to 45s) + opencode run
+# (up to 180s) + inter-suite health checks + teardown. 1095s leaves headroom
+# for CI variance without masking real hangs.
+@pytest.mark.timeout(1095)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
 @pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
@@ -574,6 +578,17 @@ def test_frontend_api_surface_compliance(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
         _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
+        _wait_for_frontend_healthy(frontend_port)
+        codex_subagent_trace_start = _request_trace_record_count(request_trace_path)
+        write_codex_config(codex_home, frontend_port, enable_multi_agent=True)
+        _run_codex_subagent_smoke(
+            _codex_cli,
+            _node_bin,
+            codex_home,
+            agent_cwd,
+            request_trace_path,
+            codex_subagent_trace_start,
+        )
         _wait_for_frontend_healthy(frontend_port)
         claude_trace_start = _request_trace_record_count(request_trace_path)
         _run_claude_exec_smoke(
@@ -721,7 +736,10 @@ def _read_request_trace_records_since(path: Path, start_index: int) -> list[dict
 
 
 def _assert_agent_context_in_trace(
-    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
+    trace_path: Path,
+    source_label: str,
+    start_index: int,
+    timeout_s: float = 30.0,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
@@ -892,7 +910,7 @@ def _run_codex_exec_smoke(
         "-c",
         "model_provider=local",
         "exec",
-        LIST_DIRECTORY_PROMPT,
+        CODEX_LIST_DIRECTORY_PROMPT,
         "--dangerously-bypass-approvals-and-sandbox",
     ]
     result = subprocess.run(
@@ -928,6 +946,56 @@ def _run_codex_exec_smoke(
             f"contain {marker_filename!r} (implies the shell tool was invoked "
             f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
         )
+
+
+def _run_codex_subagent_smoke(
+    codex_cli: Path,
+    node_bin: Path,
+    codex_home: Path,
+    cwd: Path,
+    request_trace_path: Path,
+    trace_start_index: int,
+) -> None:
+    """Require Codex to invoke a child agent through the Responses API."""
+    logger.info("Running Codex subagent smoke test against CODEX_HOME=%s", codex_home)
+    extra_env = {
+        "CODEX_HOME": str(codex_home),
+        "HOME": str(codex_home),
+        "LOCAL_API_KEY": "sk-none",
+    }
+    cmd = [
+        str(codex_cli),
+        "-m",
+        COMPLIANCE_MODEL,
+        "-c",
+        "model_provider=local",
+        "exec",
+        codex_subagent_prompt(),
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+    result = subprocess.run(
+        cmd,
+        env=_agent_subprocess_env(extra_env, path_prepend=[node_bin]),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    _attach_subprocess_log(
+        name="codex_subagent_smoke.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"codex subagent smoke failed (exit={result.returncode}).\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        )
+    _assert_agent_parent_context_in_trace(
+        request_trace_path, "codex subagent", trace_start_index
+    )
 
 
 def _run_claude_exec_smoke(
