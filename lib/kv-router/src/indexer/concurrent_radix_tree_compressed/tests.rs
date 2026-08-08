@@ -4,9 +4,10 @@
 use super::*;
 use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
 use crate::test_utils::{
-    assert_score, flush_and_settle, make_clear_event_with_dp_rank, make_remove_event_with_parent,
-    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent, remove_event,
-    snapshot_events, snapshot_tree,
+    assert_score, descendant_invalidation_regression_events, flush_and_settle,
+    make_clear_event_with_dp_rank, make_remove_event_with_parent, make_store_event,
+    make_store_event_with_dp_rank, make_store_event_with_parent, remove_event, snapshot_events,
+    snapshot_tree,
 };
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -975,6 +976,21 @@ mod remove_tests {
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 4);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
+    }
+
+    #[test]
+    fn out_of_order_duplicate_parent_removal_preserves_other_worker_descendants() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        let (stores, removal) = descendant_invalidation_regression_events();
+        for event in stores {
+            apply_direct(&index, &mut lookup, event);
+        }
+        apply_direct(&index, &mut lookup, removal);
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5], worker(0), 1);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5], worker(1), 5);
+        assert_eq!(worker_lookup_len(&lookup, worker(1)), Some(5));
     }
 }
 
