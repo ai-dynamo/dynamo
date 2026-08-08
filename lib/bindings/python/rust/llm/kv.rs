@@ -1734,7 +1734,153 @@ struct SharedRouterInner {
     engine: Arc<llm_rs::session_affinity::SessionAffinityPushRouter>,
     router: RsSharedPushRouter,
     mode: rs::pipeline::RouterMode,
-    reservations: Arc<DashMap<String, Option<RoutingReservation>>>,
+    reservations: Arc<DashMap<String, SharedReservationSlot>>,
+}
+
+enum SharedReservationSlot {
+    Pending { marker: Arc<()> },
+    Active { _reservation: RoutingReservation },
+}
+
+struct PendingReservationGuard {
+    reservations: Arc<DashMap<String, SharedReservationSlot>>,
+    request_id: String,
+    marker: Arc<()>,
+    armed: bool,
+}
+
+impl PendingReservationGuard {
+    fn insert(
+        reservations: Arc<DashMap<String, SharedReservationSlot>>,
+        request_id: String,
+    ) -> PyResult<Self> {
+        let marker = Arc::new(());
+        match reservations.entry(request_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(SharedReservationSlot::Pending {
+                    marker: marker.clone(),
+                });
+            }
+            Entry::Occupied(_) => {
+                return Err(PyValueError::new_err(format!(
+                    "request_id {request_id:?} already has an active routing reservation"
+                )));
+            }
+        }
+
+        Ok(Self {
+            reservations,
+            request_id,
+            marker,
+            armed: true,
+        })
+    }
+
+    fn commit(mut self, reservation: RoutingReservation) -> PyResult<rs::pipeline::RouteTarget> {
+        let target = reservation.target();
+        let Some(mut slot) = self.reservations.get_mut(&self.request_id) else {
+            return Err(PyValueError::new_err(format!(
+                "routing reservation {:?} was released before selection completed",
+                self.request_id
+            )));
+        };
+        let owns_slot = matches!(
+            slot.value(),
+            SharedReservationSlot::Pending { marker } if Arc::ptr_eq(marker, &self.marker)
+        );
+        if !owns_slot {
+            return Err(PyValueError::new_err(format!(
+                "routing reservation {:?} was replaced before selection completed",
+                self.request_id
+            )));
+        }
+
+        *slot = SharedReservationSlot::Active {
+            _reservation: reservation,
+        };
+        self.armed = false;
+        Ok(target)
+    }
+}
+
+impl Drop for PendingReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        let Entry::Occupied(entry) = self.reservations.entry(self.request_id.clone()) else {
+            return;
+        };
+        let owns_slot = matches!(
+            entry.get(),
+            SharedReservationSlot::Pending { marker } if Arc::ptr_eq(marker, &self.marker)
+        );
+        if owns_slot {
+            entry.remove();
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_reservation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_releases_pending_request_id_for_reuse() {
+        let reservations = Arc::new(DashMap::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        {
+            let pending_reservations = reservations.clone();
+            let pending = async move {
+                let _guard = PendingReservationGuard::insert(
+                    pending_reservations,
+                    "cancelled-request".to_string(),
+                )
+                .unwrap();
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            };
+            tokio::pin!(pending);
+            tokio::select! {
+                _ = &mut pending => panic!("pending reservation unexpectedly completed"),
+                started = started_rx => started.unwrap(),
+            }
+            assert!(reservations.contains_key("cancelled-request"));
+        }
+
+        assert!(!reservations.contains_key("cancelled-request"));
+        let reused =
+            PendingReservationGuard::insert(reservations.clone(), "cancelled-request".to_string())
+                .unwrap();
+        drop(reused);
+        assert!(!reservations.contains_key("cancelled-request"));
+    }
+
+    #[test]
+    fn stale_guard_does_not_remove_reused_request_id() {
+        let reservations = Arc::new(DashMap::new());
+        let stale =
+            PendingReservationGuard::insert(reservations.clone(), "reused-request".to_string())
+                .unwrap();
+        reservations.remove("reused-request");
+        let replacement =
+            PendingReservationGuard::insert(reservations.clone(), "reused-request".to_string())
+                .unwrap();
+
+        drop(stale);
+        let slot = reservations.get("reused-request").unwrap();
+        assert!(matches!(
+            slot.value(),
+            SharedReservationSlot::Pending { marker }
+                if Arc::ptr_eq(marker, &replacement.marker)
+        ));
+        drop(slot);
+
+        drop(replacement);
+        assert!(!reservations.contains_key("reused-request"));
+    }
 }
 
 /// Attach worker_id info from the tracker to `routing_data` so it survives the
@@ -2355,32 +2501,12 @@ impl KvRouter {
                 return Ok((target.worker_id, target.dp_rank, 0usize));
             };
 
-            match reservations.entry(request_id.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(None);
-                }
-                Entry::Occupied(_) => {
-                    return Err(PyValueError::new_err(format!(
-                        "request_id {request_id:?} already has an active routing reservation"
-                    )));
-                }
-            }
-
-            let reservation = match router.reserve_target(&request, None).await {
-                Ok(reservation) => reservation,
-                Err(error) => {
-                    reservations.remove(&request_id);
-                    return Err(to_pyerr(error));
-                }
-            };
-            let target = reservation.target();
-            let Some(mut slot) = reservations.get_mut(&request_id) else {
-                return Err(PyValueError::new_err(format!(
-                    "routing reservation {request_id:?} was released before selection completed"
-                )));
-            };
-            *slot = Some(reservation);
-            drop(slot);
+            let pending = PendingReservationGuard::insert(reservations, request_id)?;
+            let reservation = router
+                .reserve_target(&request, None)
+                .await
+                .map_err(to_pyerr)?;
+            let target = pending.commit(reservation)?;
             Ok((target.worker_id, target.dp_rank, 0usize))
         })
     }
