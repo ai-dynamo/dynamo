@@ -303,6 +303,7 @@ impl PendingRequest {
             session_id: self.session_id.clone(),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
