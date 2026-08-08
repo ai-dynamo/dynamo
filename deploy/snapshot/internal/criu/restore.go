@@ -38,14 +38,20 @@ func ExecuteRestore(
 	// and unlock. That keeps the window where the restored process runs with CUDA
 	// still locked as short as possible. cleanup is called on the error paths below.
 	var openFiles, inheritedFiles []*os.File
+	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
+	}
 	cleanup := func() {
 		closeFiles(inheritedFiles)
 		closeFiles(openFiles)
+		removeImageDir()
 	}
 
 	// Open image dir FD
-	imageDir, imageDirFD, err := openPathForCRIU(checkpointPath)
+	imageDir, imageDirFD, err := openPathForCRIU(imageDirPath)
 	if err != nil {
+		cleanup()
 		return 0, nil, fmt.Errorf("failed to open image directory: %w", err)
 	}
 	openFiles = append(openFiles, imageDir)
@@ -87,7 +93,7 @@ func ExecuteRestore(
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
-		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
+		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
 		cleanup()
 		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
 	}
