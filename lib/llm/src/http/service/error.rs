@@ -15,12 +15,6 @@ use crate::types::Annotated;
 pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";
 
 #[derive(serde::Deserialize)]
-struct BackendHttpPayload {
-    code: u16,
-    message: String,
-}
-
-#[derive(serde::Deserialize)]
 struct LegacyBackendHttpPayload {
     code: Option<u16>,
     message: Option<String>,
@@ -56,9 +50,7 @@ pub struct HttpError {
     pub message: String,
 }
 
-/// Compatibility model used by endpoint handlers that have not yet migrated
-/// to the shared classifier. The next PR in the stack removes this once every
-/// HTTP surface uses the shared classifier.
+/// Sanitized HTTP error categories used by endpoint handlers.
 #[derive(Debug, Clone, Copy)]
 pub enum SanitizedError {
     Cancelled,
@@ -91,28 +83,6 @@ impl SanitizedError {
         }
     }
 
-    pub fn anthropic_type(self) -> &'static str {
-        match self {
-            Self::Cancelled => "request_cancelled",
-            Self::Overloaded | Self::Unavailable => "overloaded_error",
-            Self::PreserveServerError(status) if matches!(status.as_u16(), 503 | 529) => {
-                "overloaded_error"
-            }
-            Self::Internal | Self::PreserveServerError(_) => "api_error",
-        }
-    }
-
-    pub fn openai_type_slug(self) -> &'static str {
-        match self {
-            Self::Cancelled => "request_cancelled",
-            Self::Overloaded | Self::Unavailable => "service_unavailable",
-            Self::PreserveServerError(status) if matches!(status.as_u16(), 503 | 529) => {
-                "service_unavailable"
-            }
-            Self::Internal | Self::PreserveServerError(_) => "internal_server_error",
-        }
-    }
-
     pub fn log_as_error(self) -> bool {
         !matches!(self, Self::Cancelled)
     }
@@ -130,9 +100,9 @@ impl std::fmt::Display for SanitizedError {
 }
 
 /// Protocol-neutral error categories used for metrics and protocol rendering.
-#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HttpProblemKind {
+pub(crate) enum HttpErrorKind {
     Validation,
     Authentication,
     Permission,
@@ -151,9 +121,9 @@ pub(crate) enum HttpProblemKind {
 /// diagnostic. Protocol modules only translate this model into their wire
 /// envelope; they do not re-classify errors.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
-pub(crate) struct HttpProblem {
-    kind: HttpProblemKind,
+#[allow(dead_code)]
+pub(crate) struct ClassifiedHttpError {
+    kind: HttpErrorKind,
     status: StatusCode,
     message: String,
     diagnostic: String,
@@ -162,7 +132,7 @@ pub(crate) struct HttpProblem {
 
 /// Construct a typed invalid-argument error for validation performed at an
 /// HTTP protocol adapter boundary.
-#[allow(dead_code)] // Used by the protocol-validation PR later in this stack.
+#[allow(dead_code)]
 pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
         .error_type(DynamoErrorType::InvalidArgument)
@@ -176,8 +146,8 @@ enum ValidationScope {
     Outermost,
 }
 
-#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
-impl HttpProblem {
+#[allow(dead_code)]
+impl ClassifiedHttpError {
     /// Classify an arbitrary error through the same logical nested-error flow
     /// used by `from_annotated`; generic callers retain chain-wide validation
     /// lookup because untyped context wrappers may surround the typed failure.
@@ -200,7 +170,7 @@ impl HttpProblem {
                 error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             {
                 return Self {
-                    kind: HttpProblemKind::Overloaded,
+                    kind: HttpErrorKind::Overloaded,
                     status: overload_status_code(),
                     message: rejection.to_string(),
                     diagnostic,
@@ -249,36 +219,28 @@ impl HttpProblem {
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or_else(|| "unspecified error".to_string());
 
-            // Compatibility with v1.3 workers during v1.4 rolling upgrades.
-            // TODO(v1.5): Remove when v1.3 leaves the N-1 compatibility window.
-            if let Some(problem) = Self::from_legacy_http_json(diagnostic.clone()) {
-                return Some(problem);
+            if let Some(classified) = Self::from_legacy_http_json(diagnostic.clone()) {
+                return Some(classified);
             }
 
             return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
         }
 
-        // Compatibility with v1.3 workers during v1.4 rolling upgrades: older
-        // streams may carry HTTP errors in data or an untagged JSON comment.
-        // TODO(v1.5): Remove when v1.3 leaves the N-1 compatibility window.
         if let Some(data) = event.data.as_ref()
             && let Ok(diagnostic) = serde_json::to_string(data)
-            && let Some(problem) = Self::from_legacy_http_json(diagnostic)
+            && let Some(classified) = Self::from_legacy_http_json(diagnostic)
         {
-            return Some(problem);
+            return Some(classified);
         }
 
         if let Some(comments) = event.comment.as_ref()
             && !comments.is_empty()
         {
             let diagnostic = comments.join(", ");
-            if let Some(problem) = Self::from_legacy_http_json(diagnostic.clone()) {
-                return Some(problem);
+            if let Some(classified) = Self::from_legacy_http_json(diagnostic.clone()) {
+                return Some(classified);
             }
 
-            // Legacy backends also used a comment-only, otherwise empty
-            // annotation as an error marker. Preserve that signal, but never
-            // expose an unstructured comment as a client-safe message.
             if event.data.is_none() && event.event.is_none() {
                 return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
             }
@@ -307,7 +269,7 @@ impl HttpProblem {
         let diagnostic = diagnostic.into();
         match status {
             status if status.as_u16() == 499 => Self::classified(
-                HttpProblemKind::Cancelled,
+                HttpErrorKind::Cancelled,
                 status,
                 "Request cancelled",
                 diagnostic,
@@ -331,7 +293,7 @@ impl HttpProblem {
 
     pub(crate) fn internal(message: impl Into<String>, diagnostic: impl Into<String>) -> Self {
         Self {
-            kind: HttpProblemKind::Internal,
+            kind: HttpErrorKind::Internal,
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
             diagnostic: diagnostic.into(),
@@ -340,34 +302,37 @@ impl HttpProblem {
     }
 
     fn from_dynamo_error(error: &DynamoError, internal_message: &str, diagnostic: String) -> Self {
-        if let Some((status, message)) = backend_http_payload(error) {
+        if let Some((status, message)) = backend_http_metadata(error) {
             return Self::from_backend_status(status, message, diagnostic);
+        }
+        if error.http_error().is_some() {
+            return Self::internal(internal_message, diagnostic);
         }
 
         match error.error_type() {
             DynamoErrorType::InvalidArgument
             | DynamoErrorType::Backend(BackendError::InvalidArgument) => Self {
-                kind: HttpProblemKind::Validation,
+                kind: HttpErrorKind::Validation,
                 status: StatusCode::BAD_REQUEST,
                 message: error.message().to_string(),
                 diagnostic,
                 details: None,
             },
             DynamoErrorType::ResourceExhausted => Self::classified(
-                HttpProblemKind::Overloaded,
+                HttpErrorKind::Overloaded,
                 overload_status_code(),
                 "Service temporarily overloaded",
                 diagnostic,
             ),
             DynamoErrorType::Unavailable => Self::classified(
-                HttpProblemKind::Unavailable,
+                HttpErrorKind::Unavailable,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Service temporarily unavailable",
                 diagnostic,
             ),
             DynamoErrorType::Cancelled | DynamoErrorType::Backend(BackendError::Cancelled) => {
                 Self::classified(
-                    HttpProblemKind::Cancelled,
+                    HttpErrorKind::Cancelled,
                     StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
                     "Request cancelled",
                     diagnostic,
@@ -383,7 +348,7 @@ impl HttpProblem {
         };
         if status.as_u16() == 499 {
             Self::classified(
-                HttpProblemKind::Cancelled,
+                HttpErrorKind::Cancelled,
                 status,
                 "Request cancelled",
                 diagnostic,
@@ -402,7 +367,7 @@ impl HttpProblem {
     }
 
     fn classified(
-        kind: HttpProblemKind,
+        kind: HttpErrorKind,
         status: StatusCode,
         message: impl Into<String>,
         diagnostic: String,
@@ -416,7 +381,7 @@ impl HttpProblem {
         }
     }
 
-    pub(crate) fn kind(&self) -> HttpProblemKind {
+    pub(crate) fn kind(&self) -> HttpErrorKind {
         self.kind
     }
 
@@ -445,11 +410,17 @@ impl HttpProblem {
     }
 }
 
-/// Decode the deliberate Python-boundary `{code, message}` compatibility
-/// envelope without treating arbitrary typed error messages as HTTP policy.
-fn backend_http_payload(error: &DynamoError) -> Option<(StatusCode, String)> {
-    let payload = serde_json::from_str::<BackendHttpPayload>(error.message()).ok()?;
-    let status = StatusCode::from_u16(payload.code).ok()?;
+fn backend_http_metadata(error: &DynamoError) -> Option<(StatusCode, String)> {
+    let http_error = error.http_error()?;
+    validate_backend_http_metadata(error, http_error.code(), http_error.message())
+}
+
+fn validate_backend_http_metadata(
+    error: &DynamoError,
+    code: u16,
+    message: &str,
+) -> Option<(StatusCode, String)> {
+    let status = StatusCode::from_u16(code).ok()?;
 
     match error.error_type() {
         DynamoErrorType::Backend(BackendError::InvalidArgument) if status.is_client_error() => {}
@@ -457,129 +428,108 @@ fn backend_http_payload(error: &DynamoError) -> Option<(StatusCode, String)> {
         _ => return None,
     }
 
-    Some((status, payload.message))
+    Some((status, message.to_string()))
 }
 
 fn select_dynamo_error_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
     validation_scope: ValidationScope,
 ) -> Option<&'a DynamoError> {
-    // Preserve operational signals through wrappers before considering the
-    // validation scope selected by the calling boundary.
-    for error_type in [
+    const OPERATIONAL: &[DynamoErrorType] = &[
         DynamoErrorType::ResourceExhausted,
         DynamoErrorType::Unavailable,
-    ] {
-        if let Some(error) = find_dynamo_error_in_chain(err, error_type) {
-            return Some(error);
-        }
-    }
-
-    match validation_scope {
-        ValidationScope::Chain => {
-            for error_type in [
-                DynamoErrorType::InvalidArgument,
-                DynamoErrorType::Backend(BackendError::InvalidArgument),
-            ] {
-                if let Some(error) = find_dynamo_error_in_chain(err, error_type) {
-                    return Some(error);
-                }
-            }
-        }
-        ValidationScope::Outermost => {
-            if let Some(error) = find_outermost_dynamo_error_in_chain(err)
-                && matches!(
-                    error.error_type(),
-                    DynamoErrorType::InvalidArgument
-                        | DynamoErrorType::Backend(BackendError::InvalidArgument)
-                )
-            {
-                return Some(error);
-            }
-        }
-    }
-
-    for error_type in [
+    ];
+    const VALIDATION: &[DynamoErrorType] = &[
+        DynamoErrorType::InvalidArgument,
+        DynamoErrorType::Backend(BackendError::InvalidArgument),
+    ];
+    const CANCELLATION: &[DynamoErrorType] = &[
         DynamoErrorType::Cancelled,
         DynamoErrorType::Backend(BackendError::Cancelled),
-    ] {
-        if let Some(error) = find_dynamo_error_in_chain(err, error_type) {
-            return Some(error);
-        }
-    }
+    ];
 
-    None
+    // Preserve operational signals through wrappers before considering the
+    // validation scope selected by the calling boundary.
+    find_dynamo_error_in_chain(err, OPERATIONAL)
+        .or_else(|| match validation_scope {
+            ValidationScope::Chain => find_dynamo_error_in_chain(err, VALIDATION),
+            ValidationScope::Outermost => find_dynamo_error_in_chain(err, &[])
+                .filter(|error| VALIDATION.contains(&error.error_type())),
+        })
+        .or_else(|| find_dynamo_error_in_chain(err, CANCELLATION))
 }
 
-fn find_outermost_dynamo_error_in_chain<'a>(
-    err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a DynamoError> {
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
-            return Some(dynamo_error);
-        }
-        current = error.source();
-    }
-    None
-}
-
+/// Search error types in preference order. An empty slice returns the
+/// outermost `DynamoError` in the chain.
 fn find_dynamo_error_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
-    error_type: DynamoErrorType,
+    error_types: &[DynamoErrorType],
 ) -> Option<&'a DynamoError> {
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>()
-            && dynamo_error.error_type() == error_type
-        {
-            return Some(dynamo_error);
+    if error_types.is_empty() {
+        let mut current = Some(err);
+        while let Some(error) = current {
+            if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
+                return Some(dynamo_error);
+            }
+            current = error.source();
         }
-        current = error.source();
+        return None;
+    }
+
+    for error_type in error_types {
+        let mut current = Some(err);
+        while let Some(error) = current {
+            if let Some(dynamo_error) = error.downcast_ref::<DynamoError>()
+                && dynamo_error.error_type() == *error_type
+            {
+                return Some(dynamo_error);
+            }
+            current = error.source();
+        }
     }
     None
 }
 
-#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
-fn metric_type_for_kind(kind: HttpProblemKind) -> MetricErrorType {
+#[allow(dead_code)]
+fn metric_type_for_kind(kind: HttpErrorKind) -> MetricErrorType {
     match kind {
-        HttpProblemKind::Validation
-        | HttpProblemKind::Authentication
-        | HttpProblemKind::Permission => MetricErrorType::Validation,
-        HttpProblemKind::NotFound => MetricErrorType::NotFound,
-        HttpProblemKind::RateLimit | HttpProblemKind::Overloaded => MetricErrorType::Overload,
-        HttpProblemKind::Unavailable => MetricErrorType::Unavailable,
-        HttpProblemKind::Cancelled => MetricErrorType::Cancelled,
-        HttpProblemKind::NotImplemented => MetricErrorType::NotImplemented,
-        HttpProblemKind::Internal => MetricErrorType::Internal,
+        HttpErrorKind::Validation | HttpErrorKind::Authentication | HttpErrorKind::Permission => {
+            MetricErrorType::Validation
+        }
+        HttpErrorKind::NotFound => MetricErrorType::NotFound,
+        HttpErrorKind::RateLimit | HttpErrorKind::Overloaded => MetricErrorType::Overload,
+        HttpErrorKind::Unavailable => MetricErrorType::Unavailable,
+        HttpErrorKind::Cancelled => MetricErrorType::Cancelled,
+        HttpErrorKind::NotImplemented => MetricErrorType::NotImplemented,
+        HttpErrorKind::Internal => MetricErrorType::Internal,
     }
 }
 
-impl std::fmt::Display for HttpProblem {
+impl std::fmt::Display for ClassifiedHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for HttpProblem {}
+impl std::error::Error for ClassifiedHttpError {}
 
-#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
-fn kind_for_status(status: StatusCode) -> HttpProblemKind {
+#[allow(dead_code)]
+fn kind_for_status(status: StatusCode) -> HttpErrorKind {
     match status {
-        StatusCode::UNAUTHORIZED => HttpProblemKind::Authentication,
-        StatusCode::FORBIDDEN => HttpProblemKind::Permission,
-        StatusCode::NOT_FOUND => HttpProblemKind::NotFound,
-        StatusCode::TOO_MANY_REQUESTS => HttpProblemKind::RateLimit,
-        StatusCode::NOT_IMPLEMENTED => HttpProblemKind::NotImplemented,
-        StatusCode::SERVICE_UNAVAILABLE => HttpProblemKind::Unavailable,
-        status if status.as_u16() == 499 => HttpProblemKind::Cancelled,
-        status if status.as_u16() == 529 => HttpProblemKind::Overloaded,
-        status if status.is_client_error() => HttpProblemKind::Validation,
-        _ => HttpProblemKind::Internal,
+        StatusCode::UNAUTHORIZED => HttpErrorKind::Authentication,
+        StatusCode::FORBIDDEN => HttpErrorKind::Permission,
+        StatusCode::NOT_FOUND => HttpErrorKind::NotFound,
+        StatusCode::TOO_MANY_REQUESTS => HttpErrorKind::RateLimit,
+        StatusCode::NOT_IMPLEMENTED => HttpErrorKind::NotImplemented,
+        StatusCode::SERVICE_UNAVAILABLE => HttpErrorKind::Unavailable,
+        status if status.as_u16() == 499 => HttpErrorKind::Cancelled,
+        status if status.as_u16() == 529 => HttpErrorKind::Overloaded,
+        status if status.is_client_error() => HttpErrorKind::Validation,
+        _ => HttpErrorKind::Internal,
     }
 }
 
-#[allow(dead_code)] // Used by the endpoint-integration PR later in this stack.
+#[allow(dead_code)]
 fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut parts = Vec::new();
     let mut current = Some(err);
@@ -609,21 +559,21 @@ mod tests {
                 .error_type(error_type)
                 .message("temperature must be between 0 and 2")
                 .build();
-            let problem = HttpProblem::from_error(&error, "request failed");
-            assert_eq!(problem.kind(), HttpProblemKind::Validation);
-            assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(problem.message(), "temperature must be between 0 and 2");
+            let classified = ClassifiedHttpError::from_error(&error, "request failed");
+            assert_eq!(classified.kind(), HttpErrorKind::Validation);
+            assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(classified.message(), "temperature must be between 0 and 2");
         }
 
         let error = DynamoError::builder()
             .error_type(DynamoErrorType::Backend(BackendError::Unknown))
             .message("panic at /srv/worker.py:42")
             .build();
-        let problem = HttpProblem::from_error(&error, "request failed");
-        assert_eq!(problem.kind(), HttpProblemKind::Internal);
-        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(problem.message(), "request failed");
-        assert!(!problem.message().contains("/srv/worker.py"));
+        let classified = ClassifiedHttpError::from_error(&error, "request failed");
+        assert_eq!(classified.kind(), HttpErrorKind::Internal);
+        assert_eq!(classified.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(classified.message(), "request failed");
+        assert!(!classified.message().contains("/srv/worker.py"));
     }
 
     #[test]
@@ -659,22 +609,22 @@ mod tests {
         for (error_type, expected_kind, expected_status) in [
             (
                 DynamoErrorType::ResourceExhausted,
-                HttpProblemKind::Overloaded,
+                HttpErrorKind::Overloaded,
                 overload_status_code(),
             ),
             (
                 DynamoErrorType::Unavailable,
-                HttpProblemKind::Unavailable,
+                HttpErrorKind::Unavailable,
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (
                 DynamoErrorType::Cancelled,
-                HttpProblemKind::Cancelled,
+                HttpErrorKind::Cancelled,
                 StatusCode::from_u16(499).unwrap(),
             ),
             (
                 DynamoErrorType::Backend(BackendError::Cancelled),
-                HttpProblemKind::Cancelled,
+                HttpErrorKind::Cancelled,
                 StatusCode::from_u16(499).unwrap(),
             ),
         ] {
@@ -689,14 +639,33 @@ mod tests {
                 )
                 .build();
 
-            let problem = HttpProblem::from_error(&error, "request failed");
-            assert_eq!(problem.kind(), expected_kind);
-            assert_eq!(problem.status(), expected_status);
+            let classified = ClassifiedHttpError::from_error(&error, "request failed");
+            assert_eq!(classified.kind(), expected_kind);
+            assert_eq!(classified.status(), expected_status);
 
-            let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(error)).unwrap();
-            assert_eq!(problem.kind(), expected_kind);
-            assert_eq!(problem.status(), expected_status);
+            let classified =
+                ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(error)).unwrap();
+            assert_eq!(classified.kind(), expected_kind);
+            assert_eq!(classified.status(), expected_status);
         }
+    }
+
+    #[test]
+    fn nested_operational_errors_use_type_precedence() {
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::Unavailable)
+            .message("outer unavailable")
+            .cause(
+                DynamoError::builder()
+                    .error_type(DynamoErrorType::ResourceExhausted)
+                    .message("nested overload")
+                    .build(),
+            )
+            .build();
+
+        let classified = ClassifiedHttpError::from_error(&error, "request failed");
+        assert_eq!(classified.kind(), HttpErrorKind::Overloaded);
+        assert_eq!(classified.status(), overload_status_code());
     }
 
     #[test]
@@ -718,16 +687,17 @@ mod tests {
                     .build()
             };
 
-            let problem = HttpProblem::from_error(&wrapped_invalid(), "request failed");
-            assert_eq!(problem.kind(), HttpProblemKind::Validation);
-            assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(problem.message(), "nested invalid argument");
+            let classified = ClassifiedHttpError::from_error(&wrapped_invalid(), "request failed");
+            assert_eq!(classified.kind(), HttpErrorKind::Validation);
+            assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(classified.message(), "nested invalid argument");
 
-            let problem =
-                HttpProblem::from_annotated(&Annotated::<()>::from_err(wrapped_invalid())).unwrap();
-            assert_eq!(problem.kind(), HttpProblemKind::Internal);
-            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+            let classified =
+                ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(wrapped_invalid()))
+                    .unwrap();
+            assert_eq!(classified.kind(), HttpErrorKind::Internal);
+            assert_eq!(classified.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(classified.message(), INTERNAL_ERROR_MESSAGE);
         }
     }
 
@@ -766,22 +736,22 @@ mod tests {
         ];
 
         for (shape, event, expected_status, expected_message) in cases {
-            let problem = HttpProblem::from_annotated(&event)
+            let classified = ClassifiedHttpError::from_annotated(&event)
                 .unwrap_or_else(|| panic!("{shape} must remain an error"));
-            assert_eq!(problem.status(), expected_status, "{shape}");
-            assert_eq!(problem.message(), expected_message, "{shape}");
+            assert_eq!(classified.status(), expected_status, "{shape}");
+            assert_eq!(classified.message(), expected_message, "{shape}");
         }
 
         let normal = Annotated::from_data(serde_json::json!({
             "code": 200,
             "message": "normal response",
         }));
-        assert!(HttpProblem::from_annotated(&normal).is_none());
+        assert!(ClassifiedHttpError::from_annotated(&normal).is_none());
     }
 
     #[test]
     fn local_statuses_distinguish_overload_from_unavailable() {
-        let overloaded = HttpProblem::from_dynamo_error(
+        let overloaded = ClassifiedHttpError::from_dynamo_error(
             &DynamoError::builder()
                 .error_type(DynamoErrorType::ResourceExhausted)
                 .message("busy")
@@ -790,8 +760,8 @@ mod tests {
             "busy".to_string(),
         );
         assert_eq!(overloaded.status(), overload_status_code());
-        assert_eq!(overloaded.kind(), HttpProblemKind::Overloaded);
-        let unavailable = HttpProblem::from_dynamo_error(
+        assert_eq!(overloaded.kind(), HttpErrorKind::Overloaded);
+        let unavailable = ClassifiedHttpError::from_dynamo_error(
             &DynamoError::builder()
                 .error_type(DynamoErrorType::Unavailable)
                 .message("down")
@@ -800,17 +770,20 @@ mod tests {
             "down".to_string(),
         );
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(unavailable.kind(), HttpProblemKind::Unavailable);
+        assert_eq!(unavailable.kind(), HttpErrorKind::Unavailable);
     }
 
     #[test]
     fn backend_statuses_forward_client_messages_and_sanitize_everything_else() {
-        let client =
-            HttpProblem::from_backend_status(StatusCode::BAD_REQUEST, "bad prompt", "bad prompt");
+        let client = ClassifiedHttpError::from_backend_status(
+            StatusCode::BAD_REQUEST,
+            "bad prompt",
+            "bad prompt",
+        );
         assert_eq!(client.status(), StatusCode::BAD_REQUEST);
         assert_eq!(client.message(), "bad prompt");
 
-        let server = HttpProblem::from_backend_status(
+        let server = ClassifiedHttpError::from_backend_status(
             StatusCode::SERVICE_UNAVAILABLE,
             "worker host leaked",
             "worker host leaked",
@@ -818,7 +791,7 @@ mod tests {
         assert_eq!(server.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(server.message(), INTERNAL_ERROR_MESSAGE);
 
-        let invalid_status = HttpProblem::from_backend_status(
+        let invalid_status = ClassifiedHttpError::from_backend_status(
             StatusCode::from_u16(399).unwrap(),
             "not an error",
             "not an error",
@@ -828,24 +801,39 @@ mod tests {
     }
 
     #[test]
-    fn typed_backend_http_payload_preserves_status_policy() {
+    fn typed_backend_http_metadata_preserves_status_policy() {
         let invalid = DynamoError::builder()
             .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
-            .message(r#"{"code":415,"message":"unsupported media type"}"#)
+            .message("backend diagnostic")
+            .http_error(415, "unsupported media type")
             .build();
-        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(invalid)).unwrap();
-        assert_eq!(problem.kind(), HttpProblemKind::Validation);
-        assert_eq!(problem.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert_eq!(problem.message(), "unsupported media type");
+        let classified =
+            ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(invalid)).unwrap();
+        assert_eq!(classified.kind(), HttpErrorKind::Validation);
+        assert_eq!(classified.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(classified.message(), "unsupported media type");
 
         let unavailable = DynamoError::builder()
             .error_type(DynamoErrorType::Backend(BackendError::Unknown))
-            .message(r#"{"code":503,"message":"worker host leaked"}"#)
+            .message("backend diagnostic")
+            .http_error(503, "worker host leaked")
             .build();
-        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(unavailable)).unwrap();
-        assert_eq!(problem.kind(), HttpProblemKind::Unavailable);
-        assert_eq!(problem.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+        let classified =
+            ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(unavailable)).unwrap();
+        assert_eq!(classified.kind(), HttpErrorKind::Unavailable);
+        assert_eq!(classified.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(classified.message(), INTERNAL_ERROR_MESSAGE);
+
+        let inconsistent = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
+            .message("secret diagnostic")
+            .http_error(503, "secret public message")
+            .build();
+        let classified =
+            ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(inconsistent)).unwrap();
+        assert_eq!(classified.kind(), HttpErrorKind::Internal);
+        assert_eq!(classified.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(classified.message(), INTERNAL_ERROR_MESSAGE);
     }
 
     #[test]
@@ -854,46 +842,23 @@ mod tests {
             .error_type(DynamoErrorType::InvalidArgument)
             .message(r#"{"code":500,"message":"wrong"}"#)
             .build();
-        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(invalid)).unwrap();
-        assert_eq!(problem.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(problem.message(), r#"{"code":500,"message":"wrong"}"#);
+        let classified =
+            ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(invalid)).unwrap();
+        assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(classified.message(), r#"{"code":500,"message":"wrong"}"#);
 
         let unknown = DynamoError::builder()
             .error_type(DynamoErrorType::Backend(BackendError::Unknown))
             .message(r#"{"code":400,"message":"secret /srv/worker"}"#)
             .build();
-        let problem = HttpProblem::from_annotated(&Annotated::<()>::from_err(unknown)).unwrap();
-        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+        let classified =
+            ClassifiedHttpError::from_annotated(&Annotated::<()>::from_err(unknown)).unwrap();
+        assert_eq!(classified.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(classified.message(), INTERNAL_ERROR_MESSAGE);
     }
 
     #[test]
-    fn legacy_server_statuses_keep_protocol_error_types() {
-        for (status, anthropic_type, openai_type) in [
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                "service_unavailable",
-            ),
-            (
-                StatusCode::from_u16(529).unwrap(),
-                "overloaded_error",
-                "service_unavailable",
-            ),
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "api_error",
-                "internal_server_error",
-            ),
-        ] {
-            let error = SanitizedError::PreserveServerError(status);
-            assert_eq!(error.anthropic_type(), anthropic_type);
-            assert_eq!(error.openai_type_slug(), openai_type);
-        }
-    }
-
-    #[test]
-    fn legacy_backend_status_classification_remains_compatible() {
+    fn backend_statuses_are_classified() {
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::from_u16(499).unwrap()),
             Some(SanitizedError::Cancelled)
