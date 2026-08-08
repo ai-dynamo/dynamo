@@ -5384,29 +5384,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_for_backend_error_with_error_event() {
+    async fn test_check_for_backend_error_with_legacy_http_json_is_sanitized() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
-        // Create an error event
+        let legacy_payload = r#"{"message":"bad prompt","code":400}"#;
         let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: None,
             id: None,
             event: Some("error".to_string()),
-            comment: Some(vec!["Backend service unavailable".to_string()]),
+            comment: Some(vec![legacy_payload.to_string()]),
             error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
         let result = check_for_backend_error(test_stream, None).await;
 
-        // Should return an error
         assert!(result.is_err());
         if let Err(problem) = result {
             assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            // Backend-supplied 5xx text must not be forwarded to the client.
             assert_eq!(problem.message(), "Internal server error");
-            assert!(!problem.message().contains("Backend service unavailable"));
+            assert!(!problem.message().contains("bad prompt"));
         }
     }
 
@@ -5480,125 +5478,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_for_backend_error_with_json_error_and_code() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use futures::stream;
-
-        // Create an error event with JSON payload containing error code in comment
-        let error_json =
-            r#"{"message":"prompt > max_seq_len","type":"Internal Server Error","code":500}"#;
-        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: Some(vec![error_json.to_string()]),
-            error: None,
-        };
-
-        let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
-
-        // Should return an error with correct status code extracted from JSON
-        assert!(result.is_err());
-        if let Err(problem) = result {
-            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            // 500 backend JSON messages are sanitized to a static client
-            // message; the raw payload is only logged server-side.
-            assert_eq!(problem.message(), "Internal server error");
-            assert!(!problem.message().contains("prompt > max_seq_len"));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_check_for_backend_error_with_non_client_error_code() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use futures::stream;
-
-        // A backend asserting a non-4xx code (here 399) must not be able to
-        // smuggle a sensitive message through with a non-error status:
-        // anything outside the 4xx range is sanitized to 500.
-        let error_json =
-            r#"{"message":"panic at /srv/model.py:42","type":"Backend Error","code":399}"#;
-        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: Some(vec![error_json.to_string()]),
-            error: None,
-        };
-
-        let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
-
-        assert!(result.is_err());
-        if let Err(problem) = result {
-            assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(problem.message(), "Internal server error");
-            assert!(!problem.message().contains("/srv/model.py"));
-            assert!(!problem.message().contains("panic"));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_check_for_backend_error_with_503_preserves_status() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use futures::stream;
-
-        // Backend 5xx status codes must round-trip so clients can distinguish
-        // retryable overload (503) from generic 500; only the body is sanitized.
-        let error_json = r#"{"message":"engine pool exhausted at /srv/engine.py:88","code":503}"#;
-        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: Some(vec![error_json.to_string()]),
-            error: None,
-        };
-
-        let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
-
-        assert!(result.is_err());
-        if let Err(problem) = result {
-            assert_eq!(problem.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(problem.message(), "Internal server error");
-            assert!(!problem.message().contains("engine pool"));
-            assert!(!problem.message().contains("/srv/engine.py"));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_check_for_backend_error_with_499_sanitizes_cancellation() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use futures::stream;
-
-        // 499 falls inside is_client_error(); ensure cancellation text from
-        // the backend (e.g. context IDs) cannot reach the client.
-        let error_json =
-            r#"{"message":"Context id abc-123 cancelled at /srv/queue.py:42","code":499}"#;
-        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: Some(vec![error_json.to_string()]),
-            error: None,
-        };
-
-        let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
-
-        assert!(result.is_err());
-        if let Err(problem) = result {
-            assert_eq!(problem.status().as_u16(), 499);
-            assert_eq!(problem.message(), "Request cancelled");
-            assert!(!problem.message().contains("abc-123"));
-            assert!(!problem.message().contains("/srv/queue.py"));
-        }
-    }
-
-    #[tokio::test]
     async fn test_check_for_backend_error_skips_leading_annotation_frames() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use futures::stream;
 
         // Streams prepend a request_id annotation before forwarding engine
@@ -5614,10 +5496,13 @@ mod tests {
             data: None,
             id: None,
             event: Some("error".to_string()),
-            comment: Some(vec![
-                r#"{"message":"bad input from client","code":400}"#.to_string(),
-            ]),
-            error: None,
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("bad input from client")
+                    .build(),
+            ),
         };
 
         let test_stream = stream::iter(vec![annotation, error_event]);

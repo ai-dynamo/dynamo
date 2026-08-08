@@ -14,12 +14,6 @@ use crate::types::Annotated;
 
 pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";
 
-#[derive(serde::Deserialize)]
-struct LegacyBackendHttpPayload {
-    code: Option<u16>,
-    message: Option<String>,
-}
-
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
     let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
     value
@@ -149,7 +143,8 @@ impl ClassifiedHttpError {
     /// Classify a backend stream event through the same logical nested-error
     /// flow as `from_error`; the event's outer typed validation is authoritative,
     /// while nested operational failures retain their retry/cancellation meaning.
-    /// Ordinary data is never interpreted as an error.
+    /// Ordinary data and tagged annotation metadata are never interpreted as
+    /// errors.
     pub(crate) fn from_annotated<T>(event: &Annotated<T>) -> Option<Self> {
         if event.is_error() {
             if let Some(error) = event.error.as_ref() {
@@ -167,38 +162,19 @@ impl ClassifiedHttpError {
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or_else(|| "unspecified error".to_string());
 
-            if let Some(classified) = Self::from_legacy_http_json(diagnostic.clone()) {
-                return Some(classified);
-            }
-
             return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
         }
 
-        if let Some(comments) = event.comment.as_ref()
+        if event.data.is_none()
+            && event.event.is_none()
+            && let Some(comments) = event.comment.as_ref()
             && !comments.is_empty()
         {
             let diagnostic = comments.join(", ");
-            if let Some(classified) = Self::from_legacy_http_json(diagnostic.clone()) {
-                return Some(classified);
-            }
-
-            if event.data.is_none() && event.event.is_none() {
-                return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
-            }
+            return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
         }
 
         None
-    }
-
-    fn from_legacy_http_json(diagnostic: String) -> Option<Self> {
-        let payload = serde_json::from_str::<LegacyBackendHttpPayload>(&diagnostic).ok()?;
-        let code = payload.code?;
-        if code < 400 {
-            return None;
-        }
-        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let message = payload.message.unwrap_or_else(|| diagnostic.clone());
-        Some(Self::from_backend_status(status, message, diagnostic))
     }
 
     pub(crate) fn from_backend_status(
@@ -643,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_untagged_comment_errors_remain_supported() {
+    fn http_json_in_annotation_metadata_is_not_classified_as_an_error() {
         let event = Annotated::<()> {
             data: None,
             id: None,
@@ -654,10 +630,7 @@ mod tests {
             error: None,
         };
 
-        let classified = ClassifiedHttpError::from_annotated(&event)
-            .expect("untagged comment must remain an error");
-        assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(classified.message(), "bad prompt");
+        assert!(ClassifiedHttpError::from_annotated(&event).is_none());
     }
 
     #[test]
