@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(dead_code)]
+
 //! A deterministic chat-completions engine for HTTP protocol integration tests.
 
 use std::collections::VecDeque;
