@@ -9,7 +9,7 @@ OmniHandler holds an instance as ``self.audio`` (composition).
 
 import base64
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from transformers import AutoTokenizer
 from vllm_omni.inputs.data import OmniTextPrompt
@@ -31,6 +31,28 @@ logger = logging.getLogger(__name__)
 # (MiMo-Audio, Qwen3-Omni, Stable Audio, etc.) use a plain text prompt.
 # Mirrors vLLM-Omni's _TTS_MODEL_STAGES in serving_speech.py.
 _TTS_MODEL_STAGES: set = {"qwen3_tts"}
+
+# Audex (nvidia/Nemotron-Labs-Audex-2B) needs its own prompt format: the
+# thinker consumes a literal ChatML prompt whose assistant turn is primed with
+# ``<think></think><speechgen_start>`` (TTS) or ``<audiogen_start>`` (TTA).
+# A plain text prompt makes the thinker emit a text/thinking continuation with
+# zero ``<speechcodec_N>`` tokens, so stage 0 ships an empty codec payload and
+# the request fails with "Audex thinker produced no codec tokens".
+# Mirrors vLLM-Omni's _AUDEX_*_MODEL_STAGES in serving_speech.py.
+_AUDEX_TTS_MODEL_STAGES: set = {"audex_thinker", "audex_omni"}
+_AUDEX_TTA_MODEL_STAGES: set = {"audex_tta_thinker"}
+# The audio-capable ``audex_omni`` thinker is only speech-capable when
+# deployed WITH the speech decoder; the thinker-only deployment is text-final.
+_AUDEX_CODE2WAV_STAGE = "audex_code2wav"
+
+# Classifier-free guidance bounds, mirroring the vLLM-Omni Audex adapters.
+# TTS guidance is optional (unguided is the official baseline); TTA guidance is
+# effectively mandatory for quality, hence the 3.0 default.
+_AUDEX_CFG_SCALE_MIN = 1.0
+_AUDEX_CFG_SCALE_MAX = 10.0
+_AUDEX_TTA_DEFAULT_CFG_SCALE = 3.0
+# Official TTA generation cap (decode truncates at 500 frames).
+_AUDEX_TTA_CODEC_CAP = 4000
 
 # Fallback language set used when model config is unavailable.
 _TTS_LANGUAGES_FALLBACK = {
@@ -63,6 +85,9 @@ class AudioGenerationHandler:
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._tts_tokenizer: Any = None
+        # Audex lazily-loaded, process-wide caches (see _get_audex_tokenizer).
+        self._audex_tokenizer: Any = None
+        self._audex_tta_rvq: Optional[Dict[str, Any]] = None
 
         # Cache TTS capabilities from model config at init.
         self._tts_supported_speakers: set = self._load_supported_speakers()
@@ -120,22 +145,22 @@ class AudioGenerationHandler:
 
     # -- TTS model detection --------------------------------------------------
 
-    def _is_tts_model(self) -> bool:
-        """Check if the loaded model is a Qwen3-TTS-style model.
+    def _engine_model_stages(self) -> set:
+        """Collect every ``model_stage`` name the engine exposes.
 
-        Searches for a TTS model_stage in the engine's stage list,
-        stage configs, or model config. Supports multiple vLLM-Omni versions.
+        Reads the engine's stage list and stage configs, tolerating the several
+        shapes vLLM-Omni versions use (objects or dicts, ``engine_args`` nested
+        or flat).
         """
-        # Try stage_list
+        stages: set = set()
+
         stage_list = getattr(self.engine_client, "stage_list", None)
         if stage_list:
             for stage in stage_list:
                 ms = getattr(stage, "model_stage", None)
-                logger.debug("_is_tts_model: stage=%s model_stage=%s", stage, ms)
-                if ms in _TTS_MODEL_STAGES:
-                    return True
+                if ms:
+                    stages.add(ms)
 
-        # Try stage_configs
         stage_configs = getattr(self.engine_client, "stage_configs", None)
         if stage_configs:
             for cfg in stage_configs:
@@ -149,9 +174,37 @@ class AudioGenerationHandler:
                     if isinstance(engine_args, dict)
                     else getattr(engine_args, "model_stage", None)
                 )
-                logger.debug("_is_tts_model: stage_config model_stage=%s", ms)
-                if ms in _TTS_MODEL_STAGES:
-                    return True
+                if ms:
+                    stages.add(ms)
+
+        logger.debug("engine model stages: %s", sorted(stages))
+        return stages
+
+    def _audex_model_type(self) -> str | None:
+        """Return ``"audex"``/``"audex_tta"`` for an Audex deployment, else None.
+
+        Mirrors vLLM-Omni's ``_detect_tts_model_type`` for the Audex stages:
+        ``audex_omni`` only serves speech when the code2wav decoder is also
+        deployed (the thinker-only pipeline is text-final).
+        """
+        stages = self._engine_model_stages()
+        if stages & _AUDEX_TTA_MODEL_STAGES:
+            return "audex_tta"
+        for stage in stages & _AUDEX_TTS_MODEL_STAGES:
+            if stage == "audex_omni" and _AUDEX_CODE2WAV_STAGE not in stages:
+                continue
+            return "audex"
+        return None
+
+    def _is_tts_model(self) -> bool:
+        """Check if the loaded model is a Qwen3-TTS-style model.
+
+        Searches for a TTS model_stage in the engine's stage list,
+        stage configs, or model config. Supports multiple vLLM-Omni versions.
+        """
+        stages = self._engine_model_stages()
+        if stages & _TTS_MODEL_STAGES:
+            return True
 
         # Try model_config.hf_config.model_type (universal fallback)
         try:
@@ -163,29 +216,38 @@ class AudioGenerationHandler:
             logger.debug("_is_tts_model: hf_config fallback failed: %s", e)
 
         logger.warning(
-            "_is_tts_model: could not detect TTS model. "
-            "stage_list=%s, stage_configs=%s",
-            stage_list is not None,
-            stage_configs is not None,
+            "_is_tts_model: could not detect TTS model. engine model stages=%s",
+            sorted(stages),
         )
         return False
 
     # -- Audio engine input construction --------------------------------------
 
-    async def build_engine_inputs(self, req: NvCreateAudioSpeechRequest):
+    async def build_engine_inputs(
+        self, req: NvCreateAudioSpeechRequest, request_id: str | None = None
+    ):
         """Build engine inputs for an audio/TTS request.
 
-        Two code paths (matching vLLM-Omni serving_speech.py):
+        Three code paths (matching vLLM-Omni serving_speech.py):
 
         * **TTS path** (Qwen3-TTS): ``prompt_token_ids`` +
           ``additional_information``.
+        * **Audex path**: literal ChatML prompt priming codec generation,
+          plus the CFG / RVQ-phase contracts on stage-0 sampling params.
         * **Generic audio path** (MiMo-Audio, etc.): plain text prompt.
+
+        ``request_id`` is the final Dynamo request id; Audex uses it as the CFG
+        pair id that binds a guided request to its unconditional companion.
         """
         # Import here to avoid circular dependency
         from dynamo.vllm.omni.omni_handler import EngineInputs
 
         if not req.input or not req.input.strip():
             raise ValueError("Input text cannot be empty")
+
+        audex_model_type = self._audex_model_type()
+        if audex_model_type is not None:
+            return self._engine_inputs_audex(req, audex_model_type, request_id)
 
         if self._is_tts_model():
             return await self._engine_inputs_tts(req)
@@ -201,6 +263,234 @@ class AudioGenerationHandler:
             output_format=req.response_format,
             speed=req.speed or 1.0,
         )
+
+    # -- Audex-specific helpers -----------------------------------------------
+
+    @staticmethod
+    def _audex_prompt_builders(model_type: str) -> tuple:
+        """Return the (conditional, null) ChatML prompt builders for a task.
+
+        TTS and TTA prime different codec spaces, so each has its own pair of
+        model-owned builders. Imported lazily: vllm_omni only ships them in
+        Audex-capable builds.
+        """
+        from vllm_omni.model_executor.models.audex import prompt
+
+        if model_type == "audex_tta":
+            return prompt.build_tta_cond_prompt, prompt.build_tta_null_prompt
+        return prompt.build_cond_prompt, prompt.build_null_prompt
+
+    def _engine_inputs_audex(
+        self,
+        req: NvCreateAudioSpeechRequest,
+        model_type: str,
+        request_id: str | None,
+    ):
+        """Build engine inputs for Audex TTS/TTA.
+
+        The thinker only emits ``<speechcodec_N>``/``<audiocodec_N>`` tokens
+        when its assistant turn is primed by the exact ChatML prompt the
+        checkpoint was trained on, so the prompt is built with vLLM-Omni's
+        model-owned builders rather than passed through as plain text.
+        """
+        from dynamo.vllm.omni.omni_handler import EngineInputs
+
+        self._validate_audex_request(req, model_type)
+
+        build_cond, _ = self._audex_prompt_builders(model_type)
+        cond_prompt = build_cond(req.input)
+
+        sampling_params_list = self._audex_sampling_params_list(
+            req, model_type, cond_prompt, request_id
+        )
+
+        logger.info(
+            "Audex %s request: input='%s...', request_id=%s",
+            model_type,
+            req.input[:50],
+            request_id,
+        )
+        return EngineInputs(
+            prompt=OmniTextPrompt(prompt=cond_prompt),
+            sampling_params_list=sampling_params_list,
+            request_type=RequestType.AUDIO_GENERATION,
+            response_format=req.data_source,
+            output_format=req.response_format,
+            speed=req.speed or 1.0,
+        )
+
+    def _validate_audex_request(
+        self, req: NvCreateAudioSpeechRequest, model_type: str
+    ) -> None:
+        """Reject unsupported Audex parameters (mirrors the vLLM-Omni adapters).
+
+        Audex has a single built-in voice and no voice cloning, so a caller
+        asking for a named voice or reference audio must get an explicit error
+        instead of silently synthesized different-sounding audio.
+        """
+        voice = (req.voice or "").strip().lower()
+        if voice not in ("", "default"):
+            if model_type == "audex_tta":
+                raise ValueError(
+                    f"Audex TTA generates general audio and has no voices; "
+                    f"got voice={req.voice!r}. Omit 'voice' or pass 'default'."
+                )
+            raise ValueError(
+                f"Audex has a single built-in voice and no voice cloning; "
+                f"got voice={req.voice!r}. Omit 'voice' or pass 'default'."
+            )
+        if req.ref_audio is not None or req.ref_text is not None:
+            raise ValueError(
+                "Audex does not support reference audio (no voice cloning)."
+            )
+
+        cfg_scale = req.cfg_scale
+        if cfg_scale is not None and not (
+            _AUDEX_CFG_SCALE_MIN <= cfg_scale <= _AUDEX_CFG_SCALE_MAX
+        ):
+            raise ValueError(
+                f"cfg_scale must be within "
+                f"[{_AUDEX_CFG_SCALE_MIN}, {_AUDEX_CFG_SCALE_MAX}]; got {cfg_scale}. "
+                f"1.0 disables guidance."
+            )
+
+        self._validate_max_new_tokens(req)
+
+    def _audex_sampling_params_list(
+        self,
+        req: NvCreateAudioSpeechRequest,
+        model_type: str,
+        cond_prompt: str,
+        request_id: str | None,
+    ) -> list | None:
+        """Clone the engine's stage defaults and attach the Audex contracts.
+
+        The engine's ``default_sampling_params_list`` entries are SHARED across
+        requests, so per-request CFG pair state is written onto deep copies —
+        mutating the shared defaults would leak one request's pair id into the
+        next. Returns ``None`` when there is nothing to override, which leaves
+        the engine on its own defaults.
+        """
+        import copy
+
+        defaults = list(
+            getattr(self.engine_client, "default_sampling_params_list", None) or []
+        )
+        if not defaults:
+            logger.warning(
+                "Audex: engine exposed no default_sampling_params_list; "
+                "per-request CFG/RVQ overrides are unavailable"
+            )
+            return None
+
+        params_list = copy.deepcopy(defaults)
+        stage0 = params_list[0]
+
+        if req.max_new_tokens is not None:
+            stage0.max_tokens = req.max_new_tokens
+
+        extra_args = getattr(stage0, "extra_args", None)
+        if extra_args is None:
+            extra_args = {}
+            stage0.extra_args = extra_args
+
+        cfg_scale = req.cfg_scale
+        if model_type == "audex_tta":
+            # The RVQ phase contract gates which codec ids are sampleable per
+            # position; without it the stream is phase-invalid and decode is
+            # rejected. TTA guidance defaults on (official setting 3.0).
+            extra_args["tta_rvq"] = self._audex_tta_rvq_contract()
+            if cfg_scale is None:
+                cfg_scale = _AUDEX_TTA_DEFAULT_CFG_SCALE
+
+        if cfg_scale is None or cfg_scale <= 1.0:
+            extra_args.pop("cfg_scale", None)
+            return params_list
+
+        if request_id is None:
+            # The pair id must be unique per request; without it the guided and
+            # unconditional sequences cannot be matched, so fall back to
+            # unguided decoding rather than corrupting a concurrent pair.
+            logger.warning(
+                "Audex: no request id available; ignoring cfg_scale=%s "
+                "and decoding unguided",
+                cfg_scale,
+            )
+            extra_args.pop("cfg_scale", None)
+            return params_list
+
+        _, build_null = self._audex_prompt_builders(model_type)
+        null_prompt = build_null(cond_prompt, self._get_audex_tokenizer(model_type))
+        if model_type != "audex_tta":
+            # Guidance sharpens the distribution, so the unguided default
+            # temperature adds excess sampling noise (vLLM-Omni measures a CER
+            # win for 0.05 over 0.1 at cfg 1.5).
+            stage0.temperature = 0.05
+
+        extra_args.update(
+            {
+                "cfg_scale": cfg_scale,
+                "cfg_role": "cond",
+                "cfg_pair_id": request_id,
+                "cfg_null_prompt": null_prompt,
+            }
+        )
+        return params_list
+
+    def _audex_tta_rvq_contract(self) -> Dict[str, Any]:
+        """Build (once per process) the TTA RVQ phase-mask contract."""
+        if self._audex_tta_rvq is None:
+            from vllm_omni.model_executor.models.audex.tta import (
+                build_tta_phase_token_ids,
+            )
+
+            tokenizer = self._get_audex_tokenizer("audex_tta")
+            phase_token_ids, start_tid, end_tid = build_tta_phase_token_ids(tokenizer)
+            self._audex_tta_rvq = {
+                "phase_token_ids": phase_token_ids,
+                "start_tid": start_tid,
+                "end_tid": end_tid,
+                "codec_cap": _AUDEX_TTA_CODEC_CAP,
+                # The TTA prompt already ends with <audiogen_start>.
+                "start_in_prompt": True,
+            }
+        return self._audex_tta_rvq
+
+    def _get_audex_tokenizer(self, model_type: str):
+        """Load (once per process) the Audex thinker tokenizer.
+
+        Mirrors vLLM-Omni's ``_get_audex_tokenizer``: the checkpoint is a repo
+        of per-stage subfolders, and the stage's model_config may already point
+        at the resolved subfolder (joining again would yield a missing path that
+        transformers then mistakes for a repo id).
+        """
+        if self._audex_tokenizer is None:
+            import os
+
+            from vllm_omni.model_executor.models.audex.checkpoint import (
+                ensure_audex_snapshot,
+            )
+
+            # The snapshot profile decides which subset is fetched: "tts" also
+            # pulls the speech decoder, so it is not interchangeable with "tta".
+            if "audex_omni" in self._engine_model_stages():
+                profile, folder = "full", "checkpoint_folder_full"
+            else:
+                profile = "tta" if model_type == "audex_tta" else "tts"
+                folder = "checkpoint_folder_audiogen"
+
+            model_path = os.path.normpath(self.engine_client.model_config.model)
+            if os.path.basename(model_path).startswith("checkpoint_folder"):
+                root = os.path.dirname(model_path)
+            else:
+                root = ensure_audex_snapshot(model_path, profile=profile)
+            # The checkpoint ships custom code; without trust_remote_code
+            # transformers prompts on stdin, which would hang the worker.
+            self._audex_tokenizer = AutoTokenizer.from_pretrained(
+                os.path.join(root, folder),
+                trust_remote_code=self.config.engine_args.trust_remote_code,
+            )
+        return self._audex_tokenizer
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
@@ -309,17 +599,20 @@ class AudioGenerationHandler:
                 f"(max {self.config.tts_max_instructions_length} characters)"
             )
 
-        if req.max_new_tokens is not None:
-            if req.max_new_tokens < self.config.tts_max_new_tokens_min:
-                raise ValueError(
-                    f"max_new_tokens must be at least "
-                    f"{self.config.tts_max_new_tokens_min}"
-                )
-            if req.max_new_tokens > self.config.tts_max_new_tokens_max:
-                raise ValueError(
-                    f"max_new_tokens cannot exceed "
-                    f"{self.config.tts_max_new_tokens_max}"
-                )
+        self._validate_max_new_tokens(req)
+
+    def _validate_max_new_tokens(self, req: NvCreateAudioSpeechRequest) -> None:
+        """Bound the caller's generation length (shared by the TTS/Audex paths)."""
+        if req.max_new_tokens is None:
+            return
+        if req.max_new_tokens < self.config.tts_max_new_tokens_min:
+            raise ValueError(
+                f"max_new_tokens must be at least {self.config.tts_max_new_tokens_min}"
+            )
+        if req.max_new_tokens > self.config.tts_max_new_tokens_max:
+            raise ValueError(
+                f"max_new_tokens cannot exceed {self.config.tts_max_new_tokens_max}"
+            )
 
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
         """Download or decode reference audio for voice cloning (Base task)."""

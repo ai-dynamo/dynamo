@@ -67,6 +67,12 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_new_tokens: Option<i32>,
 
+    /// Classifier-free guidance scale (Audex). Unset or 1.0 decodes unguided;
+    /// higher values follow the prompt more closely. Without this field serde
+    /// drops the client's cfg_scale and guidance is silently never applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cfg_scale: Option<f64>,
+
     /// Optional user identifier
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -233,11 +239,32 @@ mod tests {
             ref_audio: None,
             ref_text: None,
             max_new_tokens: None,
+            cfg_scale: None,
             user: None,
             nvext: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("data_source"));
+    }
+
+    #[test]
+    fn audio_request_cfg_scale_reaches_the_worker() {
+        // Unknown fields are dropped silently, so a missing cfg_scale field
+        // would disable guidance without any error surfacing to the client.
+        let json = r#"{"input":"hi","cfg_scale":1.5}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.cfg_scale, Some(1.5));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"cfg_scale\":1.5"));
+    }
+
+    #[test]
+    fn audio_request_cfg_scale_omitted_when_absent() {
+        let json = r#"{"input":"hi"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.cfg_scale, None);
+        assert!(!serde_json::to_string(&req).unwrap().contains("cfg_scale"));
     }
 
     // --- AudioData ---
