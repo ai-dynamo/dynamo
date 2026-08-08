@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -31,7 +32,6 @@ func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
-
 		if err := os.WriteFile(filepath.Join(path, "environ"), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -46,6 +46,419 @@ func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
 	enabled, err := DetectVMMInterpose(procRoot, []int{10, 11})
 	if err != nil || !enabled {
 		t.Fatalf("uniform launcher scope = %t, %v", enabled, err)
+	}
+}
+
+func TestValidateVMMResponseShapeRejectsTypedPayloadBeforeAllocation(t *testing.T) {
+	tests := []struct {
+		name        string
+		expectation vmmResponseExpectation
+		handleType  uint32
+		payloadSize uint64
+		fdCount     int
+	}{
+		{
+			name:        "oversized fabric payload",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandleFabric,
+			payloadSize: vmmFabricHandleSize + 1,
+		},
+		{
+			name:        "POSIX payload",
+			expectation: vmmResponsePOSIXBroker,
+			handleType:  vmmHandlePOSIX,
+			payloadSize: 1,
+			fdCount:     1,
+		},
+		{
+			name:        "wrong handle type",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandlePOSIX,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := validateVMMResponseShape(
+				vmmRestoreOwner,
+				vmmHeader{
+					HandleType:  test.handleType,
+					PayloadSize: test.payloadSize,
+				},
+				test.expectation,
+				test.fdCount,
+			)
+			if err == nil {
+				t.Fatal("invalid typed response declaration was accepted")
+			}
+		})
+	}
+}
+
+func TestRestoreVMMFabricTransport(t *testing.T) {
+	const (
+		generation   = "00112233445566778899aabbccddeeff"
+		sourceUUID   = "00112233-4455-6677-8899-aabbccddeeff"
+		participantA = "11111111111111111111111111111111"
+		participantB = "22222222222222222222222222222222"
+	)
+	contents := []byte{1, 2, 3, 4}
+	raw := bytes.Repeat([]byte{0xa5}, vmmFabricHandleSize)
+	mapping := func(participant string, address uint64) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             address,
+			Size:                uint64(len(contents)),
+			GPUUUID:             sourceUUID,
+			RequestedHandleType: vmmHandleFabric,
+			Access:              []byte{1, 2, 3, 4},
+			AccessCount:         1,
+			AccessSize:          4,
+		}
+	}
+	ledger := vmmLedger{
+		Version:    vmmLedgerVersion,
+		Generation: generation,
+		Participants: []vmmParticipant{
+			{
+				ID: participantA,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{sourceUUID},
+				},
+			},
+			{
+				ID: participantB,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{sourceUUID},
+				},
+			},
+		},
+		Resources: []vmmResource{{
+			ID:        1,
+			Kind:      "allocation",
+			Owner:     mapping(participantA, 0x1000),
+			Importers: []vmmMapping{mapping(participantB, 0x2000)},
+		}},
+	}
+	encoded, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(base64.StdEncoding.EncodeToString(raw))) {
+		t.Fatal("FABRIC raw broker bytes appeared in durable ledger JSON")
+	}
+	digest := sha256.New()
+	writeVMMDigestPart(digest, encoded)
+	writeVMMDigestObject(digest, 1, contents)
+	expectedDigest := hex.EncodeToString(digest.Sum(nil))
+	events := make(chan string, 8)
+	placementResponse := func(operation uint16) vmmResponse {
+		payload := make([]byte, vmmPlacementSize)
+		copy(payload[8:24], parseGPUUUID(sourceUUID))
+		copy(payload[24:40], parseGPUUUID(sourceUUID))
+		return vmmResponse{
+			header:  vmmHeader{Operation: operation, Count: 1},
+			payload: payload,
+			fd:      -1,
+		}
+	}
+	owner := serveVMMProcess(
+		t, "", participantA,
+		func(request vmmResponse) (vmmResponse, error) {
+			switch request.header.Operation {
+			case vmmQueryPlacement:
+				return placementResponse(vmmQueryPlacement), nil
+			case vmmRestoreOwner:
+				if request.header.HandleType != vmmHandleFabric ||
+					request.fd >= 0 {
+					return vmmResponse{}, errors.New("invalid FABRIC owner request shape")
+				}
+				if err := validateVMMRestoreRequest(
+					request, 1, vmmOwner, contents,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				events <- "owner"
+				return vmmResponse{
+					header: vmmHeader{
+						Operation:  vmmRestoreOwner,
+						HandleType: vmmHandleFabric,
+					},
+					payload: append([]byte(nil), raw...),
+					fd:      -1,
+				}, nil
+			case vmmIdentify:
+				return vmmResponse{
+					header: vmmHeader{
+						Operation:   vmmIdentify,
+						Participant: participantA,
+					},
+					fd: -1,
+				}, nil
+			default:
+				return vmmResponse{}, fmt.Errorf(
+					"unexpected owner operation %d", request.header.Operation,
+				)
+			}
+		},
+	)
+	importer := serveVMMProcess(
+		t, "", participantB,
+		func(request vmmResponse) (vmmResponse, error) {
+			switch request.header.Operation {
+			case vmmQueryPlacement:
+				return placementResponse(vmmQueryPlacement), nil
+			case vmmRestoreImporter:
+				if request.header.HandleType != vmmHandleFabric ||
+					request.fd >= 0 ||
+					len(request.payload) < vmmRecordSize+vmmFabricHandleSize ||
+					!bytes.Equal(
+						request.payload[len(request.payload)-vmmFabricHandleSize:],
+						raw,
+					) {
+					return vmmResponse{}, errors.New(
+						"invalid FABRIC importer request shape",
+					)
+				}
+				metadata := request.payload[:len(request.payload)-vmmFabricHandleSize]
+				request.payload = metadata
+				if err := validateVMMRestoreRequest(
+					request, 1, vmmImporter, nil,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				events <- "importer"
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmRestoreImporter},
+					fd:     -1,
+				}, nil
+			case vmmIdentify:
+				return vmmResponse{
+					header: vmmHeader{
+						Operation:   vmmIdentify,
+						Participant: participantB,
+					},
+					fd: -1,
+				}, nil
+			default:
+				return vmmResponse{}, fmt.Errorf(
+					"unexpected importer operation %d",
+					request.header.Operation,
+				)
+			}
+		},
+	)
+	loaded := map[string][]byte{
+		vmmRedisKey(generation, "state"):      []byte("detached"),
+		vmmRedisKey(generation, "ledger"):     encoded,
+		vmmRedisKey(generation, "digest"):     []byte(expectedDigest),
+		vmmRedisKey(generation, "resource:1"): contents,
+	}
+	t.Setenv(VMMRedisAddressEnv, serveVMMRestoreRedis(t, loaded, nil))
+	t.Setenv(VMMRedisRDBPathEnv, "")
+	t.Setenv(VMMRedisRestoreCmdEnv, "/bin/true")
+	t.Setenv("NODE_NAME", "node-a")
+	if err := RestoreVMM(
+		context.Background(),
+		[]VMMProcess{owner, importer},
+		generation,
+		expectedDigest,
+		t.TempDir(),
+		func() error {
+			events <- "unlock"
+			return nil
+		},
+		logr.Discard(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{<-events, <-events, <-events}
+	want := []string{"unlock", "owner", "importer"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("FABRIC restore events = %v, want %v", got, want)
+	}
+}
+
+func TestVMMProtocolV3HandleTypeLayout(t *testing.T) {
+	encoded := encodeVMMHeader(vmmHeader{
+		Operation:  vmmRestoreOwner,
+		HandleType: vmmHandleFabric,
+	})
+	if got := binary.LittleEndian.Uint16(encoded[4:6]); got != 3 {
+		t.Fatalf("protocol version = %d, want 3", got)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[16:20]); got != vmmHandleFabric {
+		t.Fatalf("header handle type = %d, want %d", got, vmmHandleFabric)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[20:24]); got != 0 {
+		t.Fatalf("header reserved word = %d, want 0", got)
+	}
+	if len(encoded) != vmmHeaderSize {
+		t.Fatalf("header size = %d, want %d", len(encoded), vmmHeaderSize)
+	}
+	decoded, err := decodeVMMHeader(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.HandleType != vmmHandleFabric {
+		t.Fatalf(
+			"decoded handle type = %d, want %d",
+			decoded.HandleType, vmmHandleFabric,
+		)
+	}
+	encoded[255] = 1
+	if _, err := decodeVMMHeader(encoded); err == nil {
+		t.Fatal("nonzero final reserved header byte was accepted")
+	}
+}
+
+func TestValidateVMMLedgerExactHandleTypes(t *testing.T) {
+	const (
+		owner        = "11111111111111111111111111111111"
+		importer     = "22222222222222222222222222222222"
+		sourceUUID   = "00112233-4455-6677-8899-aabbccddeeff"
+		resourceID   = uint64(1)
+		resourceSize = uint64(4096)
+	)
+	mapping := func(participant string, handleType uint32) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             0x1000,
+			Size:                resourceSize,
+			GPUUUID:             sourceUUID,
+			RequestedHandleType: handleType,
+			Access:              []byte{1},
+			AccessCount:         1,
+			AccessSize:          1,
+		}
+	}
+	ledger := func(ownerType, importerType uint32) vmmLedger {
+		return vmmLedger{
+			Version: vmmLedgerVersion,
+			Participants: []vmmParticipant{
+				{
+					ID: owner,
+					Placement: vmmPlacement{
+						Node: "node-a", GPUUUIDs: []string{sourceUUID},
+					},
+				},
+				{
+					ID: importer,
+					Placement: vmmPlacement{
+						Node: "node-a", GPUUUIDs: []string{sourceUUID},
+					},
+				},
+			},
+			Resources: []vmmResource{{
+				ID:        resourceID,
+				Kind:      "allocation",
+				Owner:     mapping(owner, ownerType),
+				Importers: []vmmMapping{mapping(importer, importerType)},
+			}},
+		}
+	}
+	for _, handleType := range []uint32{vmmHandlePOSIX, vmmHandleFabric} {
+		if err := validateVMMLedger(ledger(handleType, handleType)); err != nil {
+			t.Fatalf("exact handle type %d rejected: %v", handleType, err)
+		}
+	}
+	if err := validateVMMLedger(ledger(9, 9)); err == nil {
+		t.Fatal("combined POSIX|FABRIC handle type was accepted")
+	}
+	if err := validateVMMLedger(
+		ledger(vmmHandlePOSIX, vmmHandleFabric),
+	); err == nil {
+		t.Fatal("mixed owner/importer handle types were accepted")
+	}
+	atLimit := ledger(vmmHandlePOSIX, vmmHandlePOSIX)
+	atLimit.Resources[0].Owner.Size = vmmMaximumRedisBulk
+	atLimit.Resources[0].Importers[0].Size = vmmMaximumRedisBulk
+	if err := validateVMMLedger(atLimit); err != nil {
+		t.Fatalf("allocation at the Redis bulk limit was rejected: %v", err)
+	}
+	for _, role := range []string{"owner", "importer"} {
+		t.Run(role+" above allocation limit", func(t *testing.T) {
+			aboveLimit := ledger(vmmHandlePOSIX, vmmHandlePOSIX)
+			if role == "owner" {
+				aboveLimit.Resources[0].Owner.Size =
+					vmmMaximumRedisBulk + 1
+			} else {
+				aboveLimit.Resources[0].Importers[0].Size =
+					vmmMaximumRedisBulk + 1
+			}
+			if err := validateVMMLedger(aboveLimit); err == nil {
+				t.Fatal("mapping above the Redis bulk limit was accepted")
+			}
+		})
+	}
+}
+
+func TestVMMBrokerResultShapesAndCleanup(t *testing.T) {
+	t.Run("fabric", func(t *testing.T) {
+		raw := bytes.Repeat([]byte{0xa5}, vmmFabricHandleSize)
+		response := vmmResponse{
+			header:  vmmHeader{HandleType: vmmHandleFabric},
+			payload: raw,
+			fd:      -1,
+		}
+		result, err := takeVMMBrokerResult(&response, vmmHandleFabric)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.fd >= 0 || len(result.bytes) != vmmFabricHandleSize {
+			t.Fatalf("FABRIC broker result = %#v", result)
+		}
+		if err := closeVMMBrokerResult(&result); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(raw, make([]byte, vmmFabricHandleSize)) {
+			t.Fatal("FABRIC broker cleanup did not wipe raw bytes")
+		}
+	})
+	t.Run("posix rejects payload and closes fd", func(t *testing.T) {
+		fd, err := unix.MemfdCreate("vmm-broker-shape", unix.MFD_CLOEXEC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte{1}
+		response := vmmResponse{
+			header:  vmmHeader{HandleType: vmmHandlePOSIX},
+			payload: payload,
+			fd:      fd,
+		}
+		if _, err := takeVMMBrokerResult(
+			&response, vmmHandlePOSIX,
+		); err == nil {
+			t.Fatal("POSIX broker response with payload was accepted")
+		}
+		if payload[0] != 0 || response.fd != -1 {
+			t.Fatal("invalid POSIX broker result was not cleaned")
+		}
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			t.Fatal("invalid POSIX broker FD remained open")
+		}
+	})
+}
+
+func TestVMMFabricImporterTransportIsTransient(t *testing.T) {
+	metadata := []byte{1, 2, 3}
+	raw := bytes.Repeat([]byte{0x7b}, vmmFabricHandleSize)
+	payload, fd, err := vmmImporterTransport(metadata, vmmBrokerResult{
+		handleType: vmmHandleFabric,
+		fd:         -1,
+		bytes:      raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fd >= 0 || len(payload) != len(metadata)+vmmFabricHandleSize ||
+		!bytes.Equal(payload[:len(metadata)], metadata) ||
+		!bytes.Equal(payload[len(metadata):], raw) {
+		t.Fatalf("FABRIC importer transport has invalid shape: fd=%d len=%d", fd, len(payload))
+	}
+	payload[0] = 0xff
+	payload[len(metadata)] = 0
+	if metadata[0] != 1 || raw[0] != 0x7b {
+		t.Fatal("FABRIC importer transport aliases durable metadata or broker bytes")
 	}
 }
 
@@ -85,6 +498,27 @@ func TestRestoreVMMProcessesUsesNamespacePIDSocket(t *testing.T) {
 	}
 	if process.Participant != participant {
 		t.Fatalf("participant = %q, want %q", process.Participant, participant)
+	}
+}
+
+func TestIdentifyVMMProcessRequiresLowercaseHexParticipant(t *testing.T) {
+	tests := []string{
+		"",
+		"1111111111111111111111111111111",
+		"111111111111111111111111111111111",
+		"1111111111111111111111111111111A",
+		"1111111111111111111111111111111g",
+	}
+	for _, participant := range tests {
+		t.Run(fmt.Sprintf("%q", participant), func(t *testing.T) {
+			endpoint := serveVMMProcess(t, "", participant, nil)
+			_, err := identifyVMMProcess(VMMProcess{
+				SocketPath: endpoint.SocketPath,
+			})
+			if err == nil {
+				t.Fatalf("identify participant %q was accepted", participant)
+			}
+		})
 	}
 }
 
@@ -235,7 +669,7 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 		}
 	}
 	ledger := vmmLedger{
-		Version:    1,
+		Version:    vmmLedgerVersion,
 		Generation: generation,
 		Participants: []vmmParticipant{
 			{ID: participantA, Placement: vmmPlacement{Node: "node-a", GPUUUIDs: []string{sourceUUID}}},
@@ -412,6 +846,89 @@ func TestInspectVMMRejectsUnsupportedGraph(t *testing.T) {
 	}
 }
 
+func TestPrepareVMMRejectsOversizedAllocationBeforeOwnerRead(t *testing.T) {
+	const (
+		owner      = "11111111111111111111111111111111"
+		importer   = "22222222222222222222222222222222"
+		sourceUUID = "00112233-4455-6677-8899-aabbccddeeff"
+	)
+	allocationUUID := [16]byte{1}
+	operations := make(chan uint16, 3)
+	process := func(participant string, record vmmCaptureRecord) VMMProcess {
+		return serveVMMProcess(
+			t, "", participant,
+			func(request vmmResponse) (vmmResponse, error) {
+				operations <- request.header.Operation
+				if request.header.Operation != vmmInspect {
+					return vmmResponse{}, fmt.Errorf(
+						"unexpected VMM operation %d",
+						request.header.Operation,
+					)
+				}
+				payload := encodeVMMRecordsForTest(
+					[]vmmCaptureRecord{record},
+				)
+				return vmmResponse{
+					header: vmmHeader{
+						Operation: vmmInspect,
+						Count:     1,
+					},
+					payload: payload,
+					fd:      -1,
+				}, nil
+			},
+		)
+	}
+	mapping := func(role uint32, address uint64) vmmCaptureRecord {
+		record := vmmCaptureRecord{
+			allocationUUID: allocationUUID,
+			address:        address,
+			size:           vmmMaximumRedisBulk + 1,
+			role:           role,
+			gpuUUID:        sourceUUID,
+			access:         []byte{1},
+			accessCount:    1,
+			accessSize:     1,
+		}
+		if role == vmmOwner {
+			record.properties = []byte{1}
+		}
+		return record
+	}
+	t.Setenv(VMMRedisAddressEnv, "127.0.0.1:1")
+	t.Setenv(VMMRedisRDBPathEnv, filepath.Join(t.TempDir(), "dump.rdb"))
+	t.Setenv("NODE_NAME", "node-a")
+	_, err := PrepareVMM(
+		context.Background(),
+		[]VMMProcess{
+			process(owner, mapping(vmmOwner, 0x1000)),
+			process(importer, mapping(vmmImporter, 0x2000)),
+		},
+		"generation",
+		t.TempDir(),
+		logr.Discard(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "allocation limit") {
+		t.Fatalf("oversized checkpoint error = %v, want allocation limit", err)
+	}
+	for index := 0; index < 2; index++ {
+		if operation := <-operations; operation != vmmInspect {
+			t.Fatalf(
+				"checkpoint operation %d = %d, want INSPECT",
+				index, operation,
+			)
+		}
+	}
+	select {
+	case operation := <-operations:
+		t.Fatalf(
+			"oversized checkpoint reached operation %d after inspection",
+			operation,
+		)
+	default:
+	}
+}
+
 func TestDecodeVMMRecordsRejectsZeroAllocationUUID(t *testing.T) {
 	payload := encodeVMMRecordsForTest([]vmmCaptureRecord{{
 		address:     0x1000,
@@ -430,7 +947,7 @@ func TestDecodeVMMRecordsRejectsZeroAllocationUUID(t *testing.T) {
 func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 	const ownerID = "11111111111111111111111111111111"
 	const importerID = "22222222222222222222222222222222"
-	owner := serveVMMInspect(t, []vmmCaptureRecord{{
+	owner := serveVMMInspectAs(t, ownerID, []vmmCaptureRecord{{
 		allocationUUID: [16]byte{9, 8},
 		address:        0x2000,
 		size:           4096,
@@ -440,8 +957,7 @@ func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 		accessCount:    1,
 		accessSize:     2,
 	}})
-	owner.Participant = ownerID
-	importer := serveVMMInspect(t, []vmmCaptureRecord{{
+	importer := serveVMMInspectAs(t, importerID, []vmmCaptureRecord{{
 		allocationUUID: [16]byte{9, 8},
 		address:        0x4000,
 		size:           4096,
@@ -450,8 +966,6 @@ func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 		accessCount:    1,
 		accessSize:     2,
 	}})
-	importer.Participant = importerID
-
 	ledger, err := inspectVMM(
 		context.Background(),
 		[]VMMProcess{importer, owner},
@@ -537,11 +1051,11 @@ func TestInspectVMMGraphEncodingIsIndependentOfDiscoveryOrder(t *testing.T) {
 		}
 		var processes []VMMProcess
 		for _, specification := range specifications {
-			process := serveVMMInspect(
+			process := serveVMMInspectAs(
 				t,
+				specification.participant,
 				[]vmmCaptureRecord{specification.record},
 			)
-			process.Participant = specification.participant
 			processes = append(processes, process)
 		}
 		if reverse {
@@ -593,9 +1107,7 @@ func TestInspectVMMKeepsIndependentOwnerUUIDsSeparate(t *testing.T) {
 		return record
 	}
 	process := func(participant string, record vmmCaptureRecord) VMMProcess {
-		result := serveVMMInspect(t, []vmmCaptureRecord{record})
-		result.Participant = participant
-		return result
+		return serveVMMInspectAs(t, participant, []vmmCaptureRecord{record})
 	}
 	uuidA := [16]byte{1}
 	uuidB := [16]byte{2}
@@ -961,13 +1473,155 @@ func TestExchangeVMMPreservesPayloadCoalescedWithHeader(t *testing.T) {
 		vmmHeader{Operation: vmmIdentify},
 		nil,
 		-1,
-		vmmResponseFDNone,
+		vmmResponseUntyped,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(response.payload, want) {
 		t.Fatalf("payload = %q, want %q", response.payload, want)
+	}
+}
+
+func TestExchangeVMMBindsEstablishedParticipant(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
+	process := serveVMMProcess(
+		t,
+		"",
+		participant,
+		func(request vmmResponse) (vmmResponse, error) {
+			if request.header.Participant != participant {
+				return vmmResponse{}, fmt.Errorf(
+					"request participant = %q, want %q",
+					request.header.Participant,
+					participant,
+				)
+			}
+			return vmmResponse{
+				header: vmmHeader{Operation: request.header.Operation},
+				fd:     -1,
+			}, nil
+		},
+	)
+	if _, err := exchangeVMM(
+		context.Background(),
+		process,
+		vmmHeader{Operation: vmmInspect},
+		nil,
+		-1,
+		vmmResponseUntyped,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExchangeVMMRejectsWrongResponseParticipant(t *testing.T) {
+	const (
+		participant = "11111111111111111111111111111111"
+		wrong       = "22222222222222222222222222222222"
+	)
+	process := serveVMMProcess(
+		t,
+		"",
+		participant,
+		func(request vmmResponse) (vmmResponse, error) {
+			return vmmResponse{
+				header: vmmHeader{
+					Operation:   request.header.Operation,
+					Participant: wrong,
+				},
+				fd: -1,
+			}, nil
+		},
+	)
+	if _, err := exchangeVMM(
+		context.Background(),
+		process,
+		vmmHeader{Operation: vmmInspect},
+		nil,
+		-1,
+		vmmResponseUntyped,
+	); err == nil || !strings.Contains(err.Error(), "response participant") {
+		t.Fatalf("wrong response participant error = %v", err)
+	}
+}
+
+func TestExchangeVMMRejectsTypedBrokerShapeBeforeReadingPayload(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
+	tests := []struct {
+		name        string
+		expectation vmmResponseExpectation
+		handleType  uint32
+		payloadSize uint64
+	}{
+		{
+			name:        "oversized fabric declaration",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandleFabric,
+			payloadSize: vmmFabricHandleSize + 1,
+		},
+		{
+			name:        "short fabric declaration",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandleFabric,
+			payloadSize: vmmFabricHandleSize - 1,
+		},
+		{
+			name:        "POSIX declaration with payload",
+			expectation: vmmResponsePOSIXBroker,
+			handleType:  vmmHandlePOSIX,
+			payloadSize: 1,
+		},
+		{
+			name:        "wrong typed handle",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandlePOSIX,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "vmm.sock")
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				connection, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer connection.Close()
+				request := make([]byte, vmmHeaderSize)
+				if _, err := io.ReadFull(connection, request); err != nil {
+					return
+				}
+				_ = writeVMMBytes(connection, encodeVMMHeader(vmmHeader{
+					Operation:   vmmRestoreOwner,
+					HandleType:  test.handleType,
+					PayloadSize: test.payloadSize,
+					Participant: participant,
+				}))
+			}()
+
+			_, err = exchangeVMM(
+				context.Background(),
+				VMMProcess{
+					SocketPath:  path,
+					Participant: participant,
+				},
+				vmmHeader{Operation: vmmRestoreOwner},
+				nil,
+				-1,
+				test.expectation,
+			)
+			<-done
+			if err == nil {
+				t.Fatal("invalid typed broker response was accepted")
+			}
+		})
 	}
 }
 
@@ -1029,7 +1683,7 @@ func testExchangeVMMClosesReceivedFD(t *testing.T, response []byte) {
 		vmmHeader{Operation: vmmIdentify},
 		nil,
 		-1,
-		vmmResponseFDNone,
+		vmmResponseUntyped,
 	)
 	<-done
 	if err == nil {
@@ -1041,6 +1695,7 @@ func testExchangeVMMClosesReceivedFD(t *testing.T, response []byte) {
 }
 
 func TestExchangeVMMRejectsMissingRequiredFD(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
 	path := filepath.Join(t.TempDir(), "vmm.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
@@ -1058,17 +1713,19 @@ func TestExchangeVMMRejectsMissingRequiredFD(t *testing.T) {
 			return
 		}
 		_ = writeVMMBytes(connection, encodeVMMHeader(vmmHeader{
-			Operation: vmmRestoreOwner,
+			Operation:   vmmRestoreOwner,
+			HandleType:  vmmHandlePOSIX,
+			Participant: participant,
 		}))
 	}()
 
 	if _, err := exchangeVMM(
 		context.Background(),
-		VMMProcess{SocketPath: path},
+		VMMProcess{SocketPath: path, Participant: participant},
 		vmmHeader{Operation: vmmRestoreOwner},
 		nil,
 		-1,
-		vmmResponseFDRequired,
+		vmmResponsePOSIXBroker,
 	); err == nil {
 		t.Fatal("missing required response FD was accepted")
 	}
@@ -1168,10 +1825,23 @@ func serveVMMInspect(
 	records []vmmCaptureRecord,
 ) VMMProcess {
 	t.Helper()
+	return serveVMMInspectAs(
+		t,
+		"11111111111111111111111111111111",
+		records,
+	)
+}
+
+func serveVMMInspectAs(
+	t *testing.T,
+	participant string,
+	records []vmmCaptureRecord,
+) VMMProcess {
+	t.Helper()
 	return serveVMMProcess(
 		t,
 		"",
-		"11111111111111111111111111111111",
+		participant,
 		func(request vmmResponse) (vmmResponse, error) {
 			if request.header.Operation != vmmInspect {
 				return vmmResponse{}, fmt.Errorf(
@@ -1375,6 +2045,7 @@ func serveVMMRestoreProcess(
 				return response, nil
 			}
 			var err error
+			response.header.HandleType = request.header.HandleType
 			response.fd, err = unix.MemfdCreate("vmm-restore-owner", unix.MFD_CLOEXEC)
 			return response, err
 		case vmmRestoreImporter:
@@ -1416,7 +2087,9 @@ func validateVMMRestoreRequest(
 		!bytes.Equal(request.payload[metadataSize:], wantContents) {
 		return fmt.Errorf("invalid resource %d replay contents", resourceID)
 	}
-	if (request.fd >= 0) != (wantRole == vmmImporter) {
+	wantFD := wantRole == vmmImporter &&
+		request.header.HandleType == vmmHandlePOSIX
+	if (request.fd >= 0) != wantFD {
 		return fmt.Errorf("invalid resource %d replay FD", resourceID)
 	}
 	return nil
@@ -1446,14 +2119,28 @@ func serveVMMProcess(
 			}
 			request, err := readVMMTestRequest(connection)
 			if err == nil {
+				if request.header.Participant != "" &&
+					request.header.Participant != participant {
+					err = fmt.Errorf(
+						"request participant %q does not match endpoint %q",
+						request.header.Participant,
+						participant,
+					)
+				} else if request.header.Operation != vmmIdentify &&
+					request.header.Participant == "" {
+					err = errors.New("established request omitted participant")
+				}
 				response := vmmResponse{
 					header: vmmHeader{Operation: vmmIdentify, Participant: participant},
 					fd:     -1,
 				}
-				if handler != nil {
+				if err == nil && handler != nil {
 					response, err = handler(request)
 				}
 				if err == nil {
+					if response.header.Participant == "" {
+						response.header.Participant = participant
+					}
 					err = writeVMMTestResponse(connection, response)
 				}
 				err = errors.Join(err, closeVMMFD(&response.fd))

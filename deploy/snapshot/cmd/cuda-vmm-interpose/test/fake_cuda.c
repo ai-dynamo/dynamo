@@ -44,6 +44,8 @@ static int last_exported_fd = -1;
 static int last_internal_export_alias = -1;
 static int internal_export_aliases[32];
 static int last_imported_fd = -1;
+static unsigned char last_imported_fabric[CU_IPC_HANDLE_SIZE];
+static CUmemAllocationHandleType last_imported_type;
 static int colliding_export_source = -1;
 static CUdeviceptr map_addresses[16];
 static CUdeviceptr access_addresses[16];
@@ -126,6 +128,12 @@ int
 fake_cuda_last_imported_fd(void)
 {
   return last_imported_fd;
+}
+
+unsigned char
+fake_cuda_last_imported_fabric_byte(unsigned int index)
+{
+  return index < sizeof(last_imported_fabric) ? last_imported_fabric[index] : 0;
 }
 
 CUdeviceptr
@@ -361,10 +369,18 @@ cuMemExportToShareableHandle(
     CUmemAllocationHandleType type, unsigned long long flags)
 {
   int fd;
+  size_t index;
 
   (void)flags;
-  if (!real_handle(handle) ||
-      type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+  if (!real_handle(handle))
+    return CUDA_ERROR_INVALID_HANDLE;
+  if (type == CU_MEM_HANDLE_TYPE_FABRIC) {
+    for (index = 0; index < CU_IPC_HANDLE_SIZE; index++)
+      ((unsigned char*)shareable)[index] = (unsigned char)(0xa0U + index);
+    export_count++;
+    return CUDA_SUCCESS;
+  }
+  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
     return CUDA_ERROR_INVALID_HANDLE;
   if (getenv("FAKE_CUDA_COLLIDE_EXPORT_IDENTITY") != NULL) {
     if (colliding_export_source < 0)
@@ -396,10 +412,14 @@ cuMemImportFromShareableHandle(
   struct stat status;
   int fd = (int)(uintptr_t)os_handle;
 
-  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ||
-      fstat(fd, &status) != 0)
+  if (type == CU_MEM_HANDLE_TYPE_FABRIC) {
+    memcpy(last_imported_fabric, os_handle, sizeof(last_imported_fabric));
+  } else if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR || fstat(fd, &status) != 0) {
     return CUDA_ERROR_INVALID_HANDLE;
-  last_imported_fd = fd;
+  } else {
+    last_imported_fd = fd;
+  }
+  last_imported_type = type;
   import_count++;
   active_handle_count++;
   *output = next_handle++;
@@ -416,8 +436,7 @@ cuMemGetAllocationPropertiesFromHandle(
   properties->type = CU_MEM_ALLOCATION_TYPE_PINNED;
   properties->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   properties->location.id = 0;
-  properties->requestedHandleTypes =
-      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  properties->requestedHandleTypes = last_imported_type;
   return CUDA_SUCCESS;
 }
 

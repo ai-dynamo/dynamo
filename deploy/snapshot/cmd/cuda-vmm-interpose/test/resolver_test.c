@@ -251,7 +251,7 @@ test_logical_handles(void)
 }
 
 static void
-test_unshared_create_passthrough(void)
+test_unshared_create_rejected(void)
 {
   CUmemAllocationProp properties;
   CUmemGenericAllocationHandle handle = 0;
@@ -260,16 +260,44 @@ test_unshared_create_passthrough(void)
   properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
   properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   require(
-      cuMemCreate(&handle, 4096, &properties, 0) == CUDA_SUCCESS &&
-          ((uint64_t)handle & UINT64_C(0xffff000000000000)) !=
-              UINT64_C(0xd94d000000000000) &&
-          cuMemMap(0x8000, 4096, 0, handle, 0) == CUDA_SUCCESS &&
-          cuMemSetAccess(0x8000, 4096, NULL, 0) == CUDA_SUCCESS &&
-          cuMemRelease(handle) == CUDA_SUCCESS,
-      "unshared real allocation did not pass through");
+      cuMemCreate(&handle, 4096, &properties, 0) != CUDA_SUCCESS && handle == 0 && fake_cuda_create_count() == 0,
+      "unshared allocation type was not rejected");
+  properties.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR | CU_MEM_HANDLE_TYPE_FABRIC;
   require(
-      fake_cuda_logical_forward_count() == 0,
-      "unshared create passthrough forwarded a logical token");
+      cuMemCreate(&handle, 4096, &properties, 0) != CUDA_SUCCESS && handle == 0 && fake_cuda_create_count() == 0,
+      "combined POSIX|FABRIC allocation type was not rejected");
+  require(fake_cuda_logical_forward_count() == 0, "unshared create rejection forwarded a logical token");
+}
+
+static void
+identify_participant(
+    const struct sockaddr_un* address,
+    char participant[DYN_VMM_PARTICIPANT_ID_SIZE])
+{
+  struct dyn_vmm_header request = {
+      .magic = DYN_VMM_MAGIC,
+      .version = DYN_VMM_VERSION,
+      .operation = DYN_VMM_IDENTIFY,
+  };
+  struct dyn_vmm_header response;
+  int client = socket(AF_UNIX, SOCK_STREAM, 0);
+
+  require(
+      client >= 0 &&
+          connect(
+              client, (const struct sockaddr*)address,
+              sizeof(*address)) == 0 &&
+          write(client, &request, sizeof(request)) ==
+              (ssize_t)sizeof(request) &&
+          read(client, &response, sizeof(response)) ==
+              (ssize_t)sizeof(response) &&
+          response.status == 0 &&
+          strlen(response.participant_id) == 32,
+      "VMM identify exchange failed");
+  close(client);
+  memcpy(
+      participant, response.participant_id,
+      DYN_VMM_PARTICIPANT_ID_SIZE);
 }
 
 static void
@@ -290,6 +318,7 @@ test_admission_succeeds_without_managed_resources(void)
           address.sun_path, sizeof(address.sun_path), "%s/%s%d.sock", control,
           DYN_VMM_SOCKET_PREFIX, getpid()) < (int)sizeof(address.sun_path),
       "socket path is too long");
+  identify_participant(&address, request.participant_id);
   client = socket(AF_UNIX, SOCK_STREAM, 0);
   require(
       client >= 0 &&
@@ -299,8 +328,7 @@ test_admission_succeeds_without_managed_resources(void)
       "VMM no-resource control exchange failed");
   close(client);
   require(
-      response.status == 0 && response.count == 0,
-      "unshared allocation poisoned VMM checkpoint admission");
+      response.status == 0 && response.count == 0, "rejected unshared allocation poisoned VMM checkpoint admission");
 }
 
 static void
@@ -318,15 +346,16 @@ test_retained_handle_admission(void)
   int client;
 
   require(
-      cuMemRetainAllocationHandle(&handle, (void*)(uintptr_t)0x1000) ==
-              CUDA_SUCCESS &&
-          handle == 0x5678,
-      "real cuMemRetainAllocationHandle result was not forwarded");
-  require(
       snprintf(
           address.sun_path, sizeof(address.sun_path), "%s/%s%d.sock", control,
           DYN_VMM_SOCKET_PREFIX, getpid()) < (int)sizeof(address.sun_path),
       "socket path is too long");
+  identify_participant(&address, request.participant_id);
+  require(
+      cuMemRetainAllocationHandle(&handle, (void*)(uintptr_t)0x1000) ==
+              CUDA_SUCCESS &&
+          handle == 0x5678,
+      "real cuMemRetainAllocationHandle result was not forwarded");
   client = socket(AF_UNIX, SOCK_STREAM, 0);
   require(
       client >= 0 &&
@@ -345,7 +374,7 @@ int
 main(int argc, char** argv)
 {
   if (argc == 2 && strcmp(argv[1], "unshared") == 0) {
-    test_unshared_create_passthrough();
+    test_unshared_create_rejected();
     test_admission_succeeds_without_managed_resources();
     return 0;
   }

@@ -42,6 +42,9 @@
 #define LOGICAL_HANDLE_TAG_MASK UINT64_C(0xffff000000000000)
 #define LOGICAL_HANDLE_VALUE_MASK UINT64_C(0x0000ffffffffffff)
 
+_Static_assert(CU_IPC_HANDLE_SIZE == DYN_VMM_FABRIC_HANDLE_SIZE, "CUDA IPC handle ABI changed");
+_Static_assert(sizeof(CUmemFabricHandle) == DYN_VMM_FABRIC_HANDLE_SIZE, "CUDA FABRIC handle ABI changed");
+
 CUresult CUDAAPI cuGetProcAddress(const char*, void**, int, cuuint64_t);
 CUresult CUDAAPI cuGetProcAddress_v2(
     const char*, void**, int, cuuint64_t, CUdriverProcAddressQueryResult*);
@@ -95,9 +98,11 @@ struct access_update {
   CUmemAccessDesc* access;
 };
 
-struct passthrough_handle {
-  CUmemGenericAllocationHandle handle;
-  struct passthrough_handle* next;
+struct broker_result {
+  CUmemAllocationHandleType handle_type;
+  int fd;
+  uint8_t bytes[DYN_VMM_FABRIC_HANDLE_SIZE];
+  size_t bytes_size;
 };
 
 typedef CUresult(CUDAAPI* create_fn)(
@@ -117,7 +122,6 @@ typedef CUresult(CUDAAPI* properties_fn)(
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct allocation* allocations;
-static struct passthrough_handle* passthrough_handles;
 static bool enabled;
 static bool cuda_seen;
 static bool forked_after_cuda;
@@ -138,6 +142,7 @@ static _Atomic(uintptr_t) explicit_cu_get_proc_address_v2;
 static int write_all(int, const void*, size_t);
 static int pread_all(int, void*, size_t);
 static int send_header(int, const struct dyn_vmm_header*, int);
+static int close_owned_fd(int*, const char*);
 static void set_error(struct dyn_vmm_header*, const char*);
 static bool all_zero(const void*, size_t);
 
@@ -261,31 +266,6 @@ dlsym(void* handle, const char* name)
 }
 
 static bool
-is_passthrough_handle(CUmemGenericAllocationHandle handle)
-{
-  struct passthrough_handle* current;
-
-  for (current = passthrough_handles; current != NULL; current = current->next) {
-    if (current->handle == handle)
-      return true;
-  }
-  return false;
-}
-
-static int
-record_passthrough_handle(CUmemGenericAllocationHandle handle)
-{
-  struct passthrough_handle* current = malloc(sizeof(*current));
-
-  if (current == NULL)
-    return -1;
-  current->handle = handle;
-  current->next = passthrough_handles;
-  passthrough_handles = current;
-  return 0;
-}
-
-static bool
 valid_participant_id(const char value[DYN_VMM_PARTICIPANT_ID_SIZE])
 {
   size_t index;
@@ -295,6 +275,51 @@ valid_participant_id(const char value[DYN_VMM_PARTICIPANT_ID_SIZE])
       return false;
   }
   return value[DYN_VMM_PARTICIPANT_ID_SIZE - 1] == '\0';
+}
+
+static bool
+valid_fabric_participant_id(const char value[DYN_VMM_FABRIC_PARTICIPANT_ID_SIZE])
+{
+  size_t index;
+
+  for (index = 0; index < DYN_VMM_FABRIC_PARTICIPANT_ID_SIZE; index++) {
+    if (!((value[index] >= '0' && value[index] <= '9') || (value[index] >= 'a' && value[index] <= 'f')))
+      return false;
+  }
+  return true;
+}
+
+static bool
+supported_handle_type(CUmemAllocationHandleType type)
+{
+  return type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR || type == CU_MEM_HANDLE_TYPE_FABRIC;
+}
+
+static bool
+valid_broker_shape(CUmemAllocationHandleType type, int fd, uint64_t bytes_size)
+{
+  return (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR && fd >= 0 && bytes_size == 0) ||
+         (type == CU_MEM_HANDLE_TYPE_FABRIC && fd < 0 && bytes_size == DYN_VMM_FABRIC_HANDLE_SIZE);
+}
+
+static void
+initialize_broker_result(struct broker_result* result, CUmemAllocationHandleType type)
+{
+  memset(result, 0, sizeof(*result));
+  result->handle_type = type;
+  result->fd = -1;
+}
+
+static int
+clear_broker_result(struct broker_result* result, const char* close_error)
+{
+  int status = 0;
+
+  if (result->fd >= 0 && close_owned_fd(&result->fd, close_error) != 0)
+    status = -1;
+  explicit_bzero(result->bytes, sizeof(result->bytes));
+  result->bytes_size = 0;
+  return status;
 }
 
 static bool
@@ -439,6 +464,43 @@ read_capability(int fd, struct dyn_vmm_capability* capability)
   return 0;
 }
 
+static int
+create_fabric_token(const uint8_t uuid[DYN_VMM_ALLOCATION_UUID_SIZE], struct dyn_vmm_fabric_token* token)
+{
+  pid_t pid = getpid();
+
+  if (pid <= 0 || (uint64_t)pid > UINT32_MAX)
+    return -1;
+  memset(token, 0, sizeof(*token));
+  token->magic = DYN_VMM_FABRIC_TOKEN_MAGIC;
+  token->version = DYN_VMM_FABRIC_TOKEN_VERSION;
+  token->handle_type = CU_MEM_HANDLE_TYPE_FABRIC;
+  memcpy(token->allocation_uuid, uuid, sizeof(token->allocation_uuid));
+  memcpy(token->owner_participant_id, participant_id, sizeof(token->owner_participant_id));
+  token->owner_namespace_pid = (uint32_t)pid;
+  return 0;
+}
+
+static int
+read_fabric_token(
+    const void* encoded, struct dyn_vmm_fabric_token* token, char owner_participant[DYN_VMM_PARTICIPANT_ID_SIZE],
+    char owner_socket[sizeof(((struct sockaddr_un*)0)->sun_path)])
+{
+  if (encoded == NULL)
+    return -1;
+  memcpy(token, encoded, sizeof(*token));
+  if (token->magic != DYN_VMM_FABRIC_TOKEN_MAGIC || token->version != DYN_VMM_FABRIC_TOKEN_VERSION ||
+      token->handle_type != CU_MEM_HANDLE_TYPE_FABRIC ||
+      all_zero(token->allocation_uuid, sizeof(token->allocation_uuid)) ||
+      !valid_fabric_participant_id(token->owner_participant_id) || token->owner_namespace_pid == 0 ||
+      token->owner_namespace_pid > INT_MAX || token->reserved != 0 ||
+      format_socket_path(owner_socket, sizeof(((struct sockaddr_un*)0)->sun_path), token->owner_namespace_pid) != 0)
+    return -1;
+  memcpy(owner_participant, token->owner_participant_id, sizeof(token->owner_participant_id));
+  owner_participant[DYN_VMM_PARTICIPANT_ID_SIZE - 1] = '\0';
+  return 0;
+}
+
 #ifdef DYN_VMM_TESTING
 int
 dyn_vmm_test_capability_valid(int fd)
@@ -446,6 +508,22 @@ dyn_vmm_test_capability_valid(int fd)
   struct dyn_vmm_capability capability;
 
   return read_capability(fd, &capability) == 0;
+}
+
+int
+dyn_vmm_test_fabric_token_valid(const void* encoded)
+{
+  struct dyn_vmm_fabric_token token;
+  char owner_participant[DYN_VMM_PARTICIPANT_ID_SIZE];
+  char owner_socket[sizeof(((struct sockaddr_un*)0)->sun_path)];
+
+  return read_fabric_token(encoded, &token, owner_participant, owner_socket) == 0;
+}
+
+int
+dyn_vmm_test_broker_shape(CUmemAllocationHandleType type, int fd, uint64_t bytes_size)
+{
+  return valid_broker_shape(type, fd, bytes_size);
 }
 #endif
 
@@ -519,22 +597,6 @@ query_placement(int client, struct dyn_vmm_header* response)
   }
   free(placements);
   return 0;
-}
-
-static void
-remove_passthrough_handle(CUmemGenericAllocationHandle handle)
-{
-  struct passthrough_handle** cursor = &passthrough_handles;
-
-  while (*cursor != NULL) {
-    if ((*cursor)->handle == handle) {
-      struct passthrough_handle* removed = *cursor;
-      *cursor = removed->next;
-      free(removed);
-      return;
-    }
-    cursor = &(*cursor)->next;
-  }
 }
 
 static struct allocation*
@@ -980,41 +1042,59 @@ initialize_identity(void)
 }
 
 static CUresult
-export_raw_owner(struct allocation* allocation, int* output)
+export_raw_owner(struct allocation* allocation, struct broker_result* output)
 {
   export_fn export_handle = (export_fn)real_symbol("cuMemExportToShareableHandle");
   struct context_scope scope;
   CUresult result;
 
-  *output = -1;
+  initialize_broker_result(output, allocation == NULL ? CU_MEM_HANDLE_TYPE_NONE : allocation->requested_handle_type);
   if (allocation == NULL || allocation->role != DYN_VMM_OWNER || !allocation->exported ||
       all_zero(allocation->allocation_uuid, sizeof(allocation->allocation_uuid)) ||
       !allocation->application_handle_live || allocation->real_handle == 0 || allocation->detached ||
-      phase != DYN_VMM_ACTIVE || failed || forked_after_cuda || export_handle == NULL ||
-      enter_context(allocation->context, &scope) != 0)
+      !supported_handle_type(allocation->requested_handle_type) || phase != DYN_VMM_ACTIVE || failed ||
+      forked_after_cuda || export_handle == NULL || enter_context(allocation->context, &scope) != 0)
     return CUDA_ERROR_INVALID_HANDLE;
-  result = export_handle(output, allocation->real_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+  if (output->handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
+    result = export_handle(&output->fd, allocation->real_handle, output->handle_type, 0);
+  } else {
+    result = export_handle(output->bytes, allocation->real_handle, output->handle_type, 0);
+    if (result == CUDA_SUCCESS)
+      output->bytes_size = sizeof(output->bytes);
+  }
   if (leave_context(&scope) != 0) {
-    (void)close_owned_fd(output, "cannot close owner raw export after context failure");
+    (void)clear_broker_result(output, "cannot close owner raw export after context failure");
     fail("cannot restore context after owner raw export");
     return CUDA_ERROR_UNKNOWN;
   }
-  if (result == CUDA_SUCCESS && *output < 0)
+  if (result == CUDA_SUCCESS && !valid_broker_shape(output->handle_type, output->fd, output->bytes_size))
     return CUDA_ERROR_INVALID_VALUE;
   return result;
+}
+
+static int
+send_broker_result(int client, struct dyn_vmm_header* response, const struct broker_result* result)
+{
+  response->handle_type = (uint32_t)result->handle_type;
+  response->payload_size = result->bytes_size;
+  if (send_header(client, response, result->fd) != 0)
+    return -1;
+  return result->bytes_size == 0 || write_all(client, result->bytes, result->bytes_size) == 0 ? 0 : -1;
 }
 
 static int
 export_owner(int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response, int passed_fd)
 {
   struct allocation* allocation;
-  int exported_fd = -1;
+  struct broker_result exported;
   int result;
+
+  initialize_broker_result(&exported, (CUmemAllocationHandleType)request->handle_type);
 
   memcpy(response->allocation_uuid, request->allocation_uuid, sizeof(response->allocation_uuid));
   if (passed_fd >= 0 || request->payload_size != 0 || request->count != 0 || request->status != 0 ||
-      request->object_id != 0 || !all_zero(request->reserved, sizeof(request->reserved)) ||
-      !all_zero(request->message, sizeof(request->message)) ||
+      request->object_id != 0 || !supported_handle_type((CUmemAllocationHandleType)request->handle_type) ||
+      request->reserved != 0 || !all_zero(request->message, sizeof(request->message)) ||
       !all_zero(request->reserved_identity, sizeof(request->reserved_identity)) ||
       memcmp(request->participant_id, participant_id, sizeof(request->participant_id)) != 0 ||
       all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) || failed || forked_after_cuda ||
@@ -1025,19 +1105,23 @@ export_owner(int client, const struct dyn_vmm_header* request, struct dyn_vmm_he
   allocation = find_object(request->allocation_uuid, DYN_VMM_OWNER);
   if (allocation == NULL ||
       memcmp(allocation->allocation_uuid, request->allocation_uuid, sizeof(allocation->allocation_uuid)) != 0 ||
-      export_raw_owner(allocation, &exported_fd) != CUDA_SUCCESS) {
-    (void)close_owned_fd(&exported_fd, "cannot close failed owner raw export FD");
+      allocation->requested_handle_type != (CUmemAllocationHandleType)request->handle_type ||
+      export_raw_owner(allocation, &exported) != CUDA_SUCCESS) {
+    (void)clear_broker_result(&exported, "cannot close failed owner raw export FD");
     set_error(response, "owner allocation is unavailable for export");
     return send_header(client, response, -1);
   }
-  result = send_header(client, response, exported_fd);
-  if (close_owned_fd(&exported_fd, "cannot close owner raw export FD") != 0)
+  result = send_broker_result(client, response, &exported);
+  if (clear_broker_result(&exported, "cannot close owner raw export FD") != 0)
     phase = DYN_VMM_FAILED;
   return result;
 }
 
 static int
-request_owner_export(const struct dyn_vmm_capability* capability, int* exported_fd)
+request_owner_export(
+    const uint8_t allocation_uuid[DYN_VMM_ALLOCATION_UUID_SIZE],
+    const char owner_participant[DYN_VMM_PARTICIPANT_ID_SIZE], const char* owner_socket,
+    CUmemAllocationHandleType handle_type, struct broker_result* exported)
 {
   struct sockaddr_un address = {.sun_family = AF_UNIX};
   struct dyn_vmm_header request;
@@ -1045,34 +1129,41 @@ request_owner_export(const struct dyn_vmm_capability* capability, int* exported_
   int client = -1;
   int result = -1;
 
-  *exported_fd = -1;
+  initialize_broker_result(exported, handle_type);
   memset(&request, 0, sizeof(request));
   request.magic = DYN_VMM_MAGIC;
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_EXPORT_OWNER;
-  memcpy(request.allocation_uuid, capability->allocation_uuid, sizeof(request.allocation_uuid));
-  snprintf(request.participant_id, sizeof(request.participant_id), "%s", capability->owner_participant_id);
-  snprintf(address.sun_path, sizeof(address.sun_path), "%s", capability->owner_socket_path);
+  request.handle_type = (uint32_t)handle_type;
+  memcpy(request.allocation_uuid, allocation_uuid, sizeof(request.allocation_uuid));
+  snprintf(request.participant_id, sizeof(request.participant_id), "%s", owner_participant);
+  snprintf(address.sun_path, sizeof(address.sun_path), "%s", owner_socket);
   client = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (client < 0 || set_socket_timeouts(client) != 0 ||
       connect(client, (const struct sockaddr*)&address, sizeof(address)) != 0 ||
-      send_header(client, &request, -1) != 0 || receive_header(client, &response, exported_fd) != 0)
+      send_header(client, &request, -1) != 0 || receive_header(client, &response, &exported->fd) != 0)
     goto done;
   if (response.magic != DYN_VMM_MAGIC || response.version != DYN_VMM_VERSION ||
       response.operation != DYN_VMM_EXPORT_OWNER || response.status != 0 || response.count != 0 ||
-      response.object_id != 0 || response.payload_size != 0 ||
-      !all_zero(response.reserved, sizeof(response.reserved)) ||
+      response.object_id != 0 || response.handle_type != (uint32_t)handle_type || response.reserved != 0 ||
       !all_zero(response.message, sizeof(response.message)) ||
       !all_zero(response.reserved_identity, sizeof(response.reserved_identity)) ||
-      memcmp(response.allocation_uuid, capability->allocation_uuid, sizeof(response.allocation_uuid)) != 0 ||
+      memcmp(response.allocation_uuid, allocation_uuid, sizeof(response.allocation_uuid)) != 0 ||
       !valid_participant_id(response.participant_id) ||
-      memcmp(response.participant_id, capability->owner_participant_id, sizeof(response.participant_id)) != 0 ||
-      *exported_fd < 0)
+      memcmp(response.participant_id, owner_participant, sizeof(response.participant_id)) != 0 ||
+      !valid_broker_shape(handle_type, exported->fd, response.payload_size))
     goto done;
+  if (handle_type == CU_MEM_HANDLE_TYPE_FABRIC) {
+    if (read_all(client, exported->bytes, sizeof(exported->bytes)) != 0)
+      goto done;
+    exported->bytes_size = sizeof(exported->bytes);
+  }
   result = 0;
 done:
   if (client >= 0 && close(client) != 0)
     result = -1;
+  if (result != 0)
+    (void)clear_broker_result(exported, "cannot close invalid owner broker response FD");
   return result;
 }
 
@@ -1112,7 +1203,7 @@ validate_admission(struct dyn_vmm_header* response)
         allocation->access[0].flags != CU_MEM_ACCESS_FLAGS_PROT_READWRITE) {
       set_error(
           response,
-          "unsupported managed access: M1 requires one read/write DEVICE "
+          "unsupported managed access: requires one read/write DEVICE "
           "descriptor on the allocation GPU");
       return -1;
     }
@@ -1271,28 +1362,27 @@ static int
 decode_record(
     const struct dyn_vmm_header* request, const char* payload, struct dyn_vmm_record* record,
     const CUmemAllocationProp** properties, const CUmemAccessDesc** access,
-    const char** contents)
+    size_t* metadata_size)
 {
-  uint64_t metadata_size;
+  uint64_t decoded_size;
 
   if (request->payload_size < sizeof(*record))
     return -1;
   memcpy(record, payload, sizeof(*record));
   if (record->access_size != sizeof(**access))
     return -1;
-  metadata_size = sizeof(*record) + record->properties_size +
+  decoded_size = sizeof(*record) + record->properties_size +
       (uint64_t)record->access_count * record->access_size;
-  if (metadata_size > request->payload_size)
+  if (decoded_size > request->payload_size || decoded_size > SIZE_MAX)
     return -1;
   *properties = record->properties_size == 0
       ? NULL
       : (const CUmemAllocationProp*)(payload + sizeof(*record));
   *access = (const CUmemAccessDesc*)(
       payload + sizeof(*record) + record->properties_size);
-  *contents = payload + metadata_size;
+  *metadata_size = (size_t)decoded_size;
   if (record->object_kind != DYN_VMM_ALLOCATION ||
-      record->requested_handle_type !=
-          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ||
+      !supported_handle_type((CUmemAllocationHandleType)record->requested_handle_type) ||
       (record->flags & ~DYN_VMM_APPLICATION_HANDLE_LIVE) != 0)
     return -1;
   return 0;
@@ -1317,8 +1407,8 @@ test_failure(const char* stage)
 
 static int
 restore_owner(
-    int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response,
-    const char* payload)
+    int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response, const char* payload,
+    int passed_fd)
 {
   typedef CUresult(CUDAAPI * copy_type)(CUdeviceptr, const void*, size_t);
   copy_type copy = (copy_type)real_symbol("cuMemcpyHtoD_v2");
@@ -1332,6 +1422,7 @@ restore_owner(
   const CUmemAllocationProp* properties;
   const CUmemAccessDesc* access;
   const char* contents;
+  size_t metadata_size;
   struct allocation* allocation;
   struct context_scope scope;
   CUmemAccessDesc temporary_access;
@@ -1344,16 +1435,21 @@ restore_owner(
   bool handle_released = false;
   struct context_scope cleanup_scope;
   bool cleanup_context_entered = false;
-  int exported_fd = -1;
+  struct broker_result exported;
   const char* primary_error = "owner VMM restore failed; process must not resume";
 
-  if (decode_record(request, payload, &record, &properties, &access, &contents) != 0 ||
-      properties == NULL || record.properties_size != sizeof(*properties) ||
-      record.role != DYN_VMM_OWNER || record.offset != 0 ||
-      record.size != (uint64_t)(payload + request->payload_size - contents)) {
+  initialize_broker_result(&exported, (CUmemAllocationHandleType)request->handle_type);
+
+  if (passed_fd >= 0 || request->reserved != 0 ||
+      decode_record(request, payload, &record, &properties, &access, &metadata_size) != 0 || properties == NULL ||
+      record.properties_size != sizeof(*properties) || record.role != DYN_VMM_OWNER || record.offset != 0 ||
+      request->handle_type != record.requested_handle_type ||
+      properties->requestedHandleTypes != (CUmemAllocationHandleType)record.requested_handle_type ||
+      record.size != request->payload_size - metadata_size) {
     set_error(response, "invalid owner restore payload");
     return send_header(client, response, -1);
   }
+  contents = payload + metadata_size;
   allocation = find_logical_object(record.object_id, DYN_VMM_OWNER);
   if (allocation == NULL || !allocation->detached ||
       allocation->address != (CUdeviceptr)record.address ||
@@ -1412,10 +1508,15 @@ restore_owner(
           record.access_count) != CUDA_SUCCESS)
     goto failed;
   temporary_access_installed = false;
-  if (export_handle(
-          &exported_fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0) !=
-          CUDA_SUCCESS)
-    goto failed;
+  if (record.requested_handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
+    if (export_handle(&exported.fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0) != CUDA_SUCCESS ||
+        exported.fd < 0)
+      goto failed;
+  } else {
+    if (export_handle(exported.bytes, handle, CU_MEM_HANDLE_TYPE_FABRIC, 0) != CUDA_SUCCESS)
+      goto failed;
+    exported.bytes_size = sizeof(exported.bytes);
+  }
   if (test_failure("owner-export"))
     goto failed;
   if (allocation->application_handle_live) {
@@ -1431,9 +1532,9 @@ restore_owner(
   if (test_failure("owner-rebind") || leave_context(&scope) != 0)
     goto failed;
   context_entered = false;
-  if (send_header(client, response, exported_fd) != 0)
+  if (send_broker_result(client, response, &exported) != 0)
     goto failed;
-  if (close_owned_fd(&exported_fd, "cannot close owner restore export FD") != 0) {
+  if (clear_broker_result(&exported, "cannot close owner restore export FD") != 0) {
     phase = DYN_VMM_FAILED;
     return -1;
   }
@@ -1481,7 +1582,7 @@ failed:
     owns_handle = false;
     handle_released = true;
   }
-  if (close_owned_fd(&exported_fd, "owner restore cleanup could not close export FD") != 0)
+  if (clear_broker_result(&exported, "owner restore cleanup could not close export FD") != 0)
     phase = DYN_VMM_FAILED;
   if (context_entered && leave_context(&scope) != 0)
     fail_cleanup("owner restore cleanup could not restore prior CUDA context");
@@ -1494,7 +1595,7 @@ failed:
 static int
 restore_importer(
     int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response,
-    const char* payload, int* imported_fd)
+    char* payload, int* imported_fd)
 {
   import_fn import_handle = (import_fn)real_symbol("cuMemImportFromShareableHandle");
   map_fn map = (map_fn)real_symbol("cuMemMap");
@@ -1504,7 +1605,8 @@ restore_importer(
   struct dyn_vmm_record record;
   const CUmemAllocationProp* properties;
   const CUmemAccessDesc* access;
-  const char* contents;
+  char* contents;
+  size_t metadata_size;
   struct allocation* allocation;
   struct context_scope scope;
   CUmemGenericAllocationHandle handle = 0;
@@ -1515,21 +1617,29 @@ restore_importer(
   bool handle_released = false;
   struct context_scope cleanup_scope;
   bool cleanup_context_entered = false;
+  void* import_value;
+  size_t broker_size;
   const char* primary_error = "importer VMM restore failed; process must not resume";
 
-  if (decode_record(request, payload, &record, &properties, &access, &contents) != 0) {
+  if (request->reserved != 0 ||
+      decode_record(request, payload, &record, &properties, &access, &metadata_size) != 0) {
     set_error(response, "invalid importer restore payload");
     return send_header(client, response, -1);
   }
-  if (properties != NULL || contents != payload + request->payload_size ||
-      record.role != DYN_VMM_IMPORTER || record.offset != 0) {
+  contents = payload + metadata_size;
+  broker_size = (size_t)request->payload_size - metadata_size;
+  if (properties != NULL || record.role != DYN_VMM_IMPORTER || record.offset != 0 ||
+      request->handle_type != record.requested_handle_type ||
+      (record.requested_handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR &&
+       (broker_size != 0 || *imported_fd < 0)) ||
+      (record.requested_handle_type == CU_MEM_HANDLE_TYPE_FABRIC &&
+       (broker_size != DYN_VMM_FABRIC_HANDLE_SIZE || *imported_fd >= 0))) {
     set_error(response, "invalid importer restore metadata");
     return send_header(client, response, -1);
   }
-  if (*imported_fd < 0) {
-    set_error(response, "importer restore requires one broker FD");
-    return send_header(client, response, -1);
-  }
+  import_value = record.requested_handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+                     ? (void*)(uintptr_t)*imported_fd
+                     : contents;
   allocation = find_logical_object(record.object_id, DYN_VMM_IMPORTER);
   if (allocation == NULL || !allocation->detached ||
       allocation->address != (CUdeviceptr)record.address ||
@@ -1549,14 +1659,15 @@ restore_importer(
       enter_context(allocation->context, &scope) != 0)
     goto failed;
   context_entered = true;
-  if (import_handle(
-          &handle, (void*)(uintptr_t)*imported_fd,
-          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) != CUDA_SUCCESS)
+  if (import_handle(&handle, import_value, (CUmemAllocationHandleType)record.requested_handle_type) !=
+      CUDA_SUCCESS)
     goto failed;
   owns_handle = true;
-  if (close_owned_fd(
-          imported_fd, "importer restore could not close received broker FD") != 0)
+  if (record.requested_handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR &&
+      close_owned_fd(imported_fd, "importer restore could not close received broker FD") != 0)
     goto failed;
+  if (record.requested_handle_type == CU_MEM_HANDLE_TYPE_FABRIC)
+    explicit_bzero(contents, DYN_VMM_FABRIC_HANDLE_SIZE);
   if (test_failure("importer-import"))
     goto failed;
   if (map((CUdeviceptr)record.address, (size_t)record.size, 0, handle, 0) !=
@@ -1624,12 +1735,71 @@ failed:
   if (close_owned_fd(
           imported_fd, "importer restore cleanup could not close broker FD") != 0)
     phase = DYN_VMM_FAILED;
+  if (record.requested_handle_type == CU_MEM_HANDLE_TYPE_FABRIC)
+    explicit_bzero(contents, broker_size);
   if (context_entered && leave_context(&scope) != 0)
     fail_cleanup("importer restore cleanup could not restore prior CUDA context");
   if (cleanup_context_entered && leave_context(&cleanup_scope) != 0)
     fail_cleanup("importer restore cleanup could not restore prior CUDA context");
   set_error(response, primary_error);
   return send_header(client, response, -1);
+}
+
+static bool
+valid_request_shape(const struct dyn_vmm_header* request, int passed_fd)
+{
+  const uint64_t owner_metadata_size =
+      sizeof(struct dyn_vmm_record) + sizeof(CUmemAllocationProp) + sizeof(CUmemAccessDesc);
+  const uint64_t importer_metadata_size =
+      sizeof(struct dyn_vmm_record) + sizeof(CUmemAccessDesc);
+  bool bootstrap_identify =
+      request->operation == DYN_VMM_IDENTIFY &&
+      all_zero(request->participant_id, sizeof(request->participant_id));
+
+  if (request->magic != DYN_VMM_MAGIC || request->version != DYN_VMM_VERSION ||
+      request->status != 0 || request->count != 0 || request->reserved != 0 ||
+      !all_zero(request->message, sizeof(request->message)) ||
+      !all_zero(request->reserved_identity, sizeof(request->reserved_identity)) ||
+      (!bootstrap_identify &&
+       memcmp(request->participant_id, participant_id, sizeof(request->participant_id)) != 0))
+    return false;
+
+  switch (request->operation) {
+    case DYN_VMM_IDENTIFY:
+      return passed_fd < 0 && request->payload_size == 0 && request->handle_type == 0 &&
+          all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) && request->object_id == 0;
+    case DYN_VMM_INSPECT:
+    case DYN_VMM_QUERY_PLACEMENT:
+      return !bootstrap_identify && passed_fd < 0 && request->payload_size == 0 &&
+          request->handle_type == 0 && all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) &&
+          request->object_id == 0;
+    case DYN_VMM_READ_OWNER:
+    case DYN_VMM_DETACH_IMPORTS:
+    case DYN_VMM_DETACH_OWNERS:
+      return !bootstrap_identify && passed_fd < 0 && request->payload_size == 0 &&
+          request->handle_type == 0 && !all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) &&
+          request->object_id != 0;
+    case DYN_VMM_RESTORE_OWNER:
+      return !bootstrap_identify && passed_fd < 0 &&
+          supported_handle_type((CUmemAllocationHandleType)request->handle_type) &&
+          all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) && request->object_id != 0 &&
+          request->payload_size >= owner_metadata_size &&
+          request->payload_size <= owner_metadata_size + DYN_VMM_MAXIMUM_ALLOCATION_SIZE;
+    case DYN_VMM_RESTORE_IMPORT:
+      return !bootstrap_identify &&
+          ((request->handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR && passed_fd >= 0) ||
+           (request->handle_type == CU_MEM_HANDLE_TYPE_FABRIC && passed_fd < 0)) &&
+          all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) && request->object_id != 0 &&
+          request->payload_size ==
+              importer_metadata_size +
+                  (request->handle_type == CU_MEM_HANDLE_TYPE_FABRIC ? DYN_VMM_FABRIC_HANDLE_SIZE : 0);
+    case DYN_VMM_EXPORT_OWNER:
+      return !bootstrap_identify && passed_fd < 0 && request->payload_size == 0 &&
+          supported_handle_type((CUmemAllocationHandleType)request->handle_type) &&
+          !all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) && request->object_id == 0;
+    default:
+      return false;
+  }
 }
 
 static void
@@ -1649,13 +1819,8 @@ serve(int client)
   snprintf(
       response.participant_id, sizeof(response.participant_id), "%s",
       participant_id);
-  if (request.magic != DYN_VMM_MAGIC || request.version != DYN_VMM_VERSION) {
+  if (!valid_request_shape(&request, passed_fd)) {
     set_error(&response, "invalid VMM control protocol");
-    (void)send_header(client, &response, -1);
-    goto done;
-  }
-  if (request.payload_size > SIZE_MAX) {
-    set_error(&response, "VMM request payload is too large");
     (void)send_header(client, &response, -1);
     goto done;
   }
@@ -1679,7 +1844,7 @@ serve(int client)
       (void)detach(client, &request, &response, DYN_VMM_OWNER);
       break;
     case DYN_VMM_RESTORE_OWNER:
-      (void)restore_owner(client, &request, &response, payload);
+      (void)restore_owner(client, &request, &response, payload, passed_fd);
       break;
     case DYN_VMM_RESTORE_IMPORT:
       (void)restore_importer(client, &request, &response, payload, &passed_fd);
@@ -1708,6 +1873,8 @@ done:
       phase = DYN_VMM_FAILED;
     pthread_mutex_unlock(&lock);
   }
+  if (payload != NULL)
+    explicit_bzero(payload, (size_t)request.payload_size);
   free(payload);
 }
 
@@ -1836,26 +2003,7 @@ cuMemCreate(
     return function != NULL
         ? function(output, size, properties, flags)
         : unavailable();
-  if (properties->requestedHandleTypes == CU_MEM_HANDLE_TYPE_NONE) {
-    pthread_mutex_lock(&lock);
-    cuda_seen = true;
-    result = function != NULL
-        ? function(output, size, properties, flags)
-        : unavailable();
-    if (result == CUDA_SUCCESS &&
-        (is_logical_handle(*output) ||
-         record_passthrough_handle(*output) != 0)) {
-      release_fn release = (release_fn)real_symbol("cuMemRelease");
-      if (release != NULL)
-        (void)release(*output);
-      fail("cannot record unshared cuMemCreate handle");
-      result = CUDA_ERROR_OUT_OF_MEMORY;
-    }
-    pthread_mutex_unlock(&lock);
-    return result;
-  }
-  if (properties->requestedHandleTypes !=
-      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+  if (!supported_handle_type(properties->requestedHandleTypes))
     return unavailable();
   pthread_mutex_lock(&lock);
   cuda_seen = true;
@@ -1913,8 +2061,6 @@ cuMemRelease(CUmemGenericAllocationHandle handle)
   cuda_seen = true;
   if (!is_logical_handle(handle)) {
     result = function != NULL ? function(handle) : unavailable();
-    if (result == CUDA_SUCCESS)
-      remove_passthrough_handle(handle);
     pthread_mutex_unlock(&lock);
     return result;
   }
@@ -1952,8 +2098,7 @@ cuMemMap(
   pthread_mutex_lock(&lock);
   cuda_seen = true;
   if (!is_logical_handle(handle)) {
-    if (!is_passthrough_handle(handle))
-      fail("cuMemMap used an untracked real generic handle");
+    fail("cuMemMap used an untracked real generic handle");
     result = function != NULL
         ? function(address, size, offset, handle, flags)
         : unavailable();
@@ -2116,6 +2261,8 @@ cuMemExportToShareableHandle(
 {
   export_fn function = (export_fn)real_symbol("cuMemExportToShareableHandle");
   struct allocation* allocation;
+  struct dyn_vmm_fabric_token fabric_token;
+  uint8_t raw_fabric[DYN_VMM_FABRIC_HANDLE_SIZE];
   uint8_t uuid[DYN_VMM_ALLOCATION_UUID_SIZE];
   int capability_fd = -1;
   int raw_fd = -1;
@@ -2123,8 +2270,9 @@ cuMemExportToShareableHandle(
 
   if (!enabled)
     return function != NULL ? function(shareable, handle, type, flags) : unavailable();
-  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR || shareable == NULL)
+  if (!supported_handle_type(type) || shareable == NULL)
     return unavailable();
+  memset(raw_fabric, 0, sizeof(raw_fabric));
   if (!is_logical_handle(handle)) {
     pthread_mutex_lock(&lock);
     cuda_seen = true;
@@ -2136,18 +2284,25 @@ cuMemExportToShareableHandle(
   cuda_seen = true;
   allocation = find_logical_handle(handle);
   if (allocation == NULL || !allocation->application_handle_live || allocation->real_handle == 0 ||
-      allocation->role != DYN_VMM_OWNER || failed || forked_after_cuda || phase != DYN_VMM_ACTIVE) {
+      allocation->role != DYN_VMM_OWNER || allocation->requested_handle_type != type || failed || forked_after_cuda ||
+      phase != DYN_VMM_ACTIVE) {
     result = unknown_logical_handle();
   } else {
-    result = function != NULL ? function(&raw_fd, allocation->real_handle, type, flags) : unavailable();
+    result = function != NULL
+                 ? function(
+                       type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ? (void*)&raw_fd : (void*)raw_fabric,
+                       allocation->real_handle, type, flags)
+                 : unavailable();
   }
   if (result == CUDA_SUCCESS) {
-    if (raw_fd < 0) {
+    if (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR && raw_fd < 0) {
       fail("real CUDA export returned an invalid POSIX FD");
       result = CUDA_ERROR_INVALID_VALUE;
     } else {
       memcpy(uuid, allocation->allocation_uuid, sizeof(uuid));
-      if ((!allocation->exported && random_uuid(uuid) != 0) || create_capability(uuid, &capability_fd) != 0) {
+      if ((!allocation->exported && random_uuid(uuid) != 0) ||
+          (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ? create_capability(uuid, &capability_fd)
+                                                            : create_fabric_token(uuid, &fabric_token)) != 0) {
         fail("cannot create CUDA VMM allocation capability");
         result = CUDA_ERROR_OUT_OF_MEMORY;
       }
@@ -2159,8 +2314,12 @@ cuMemExportToShareableHandle(
   }
   if (result == CUDA_SUCCESS) {
     memcpy(allocation->allocation_uuid, uuid, sizeof(allocation->allocation_uuid));
-    *(int*)shareable = capability_fd;
-    capability_fd = -1;
+    if (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
+      *(int*)shareable = capability_fd;
+      capability_fd = -1;
+    } else {
+      memcpy(shareable, &fabric_token, sizeof(fabric_token));
+    }
     allocation->exported = true;
   }
   if (capability_fd >= 0) {
@@ -2169,6 +2328,8 @@ cuMemExportToShareableHandle(
       phase = DYN_VMM_FAILED;
     }
   }
+  explicit_bzero(raw_fabric, sizeof(raw_fabric));
+  explicit_bzero(&fabric_token, sizeof(fabric_token));
   pthread_mutex_unlock(&lock);
   return result;
 }
@@ -2182,17 +2343,27 @@ cuMemImportFromShareableHandle(
   properties_fn get_properties = (properties_fn)real_symbol("cuMemGetAllocationPropertiesFromHandle");
   release_fn release = (release_fn)real_symbol("cuMemRelease");
   struct dyn_vmm_capability capability;
+  struct dyn_vmm_fabric_token fabric_token;
+  struct broker_result broker;
   struct allocation* allocation = NULL;
   struct allocation* owner;
   CUmemGenericAllocationHandle real_handle = 0;
-  int raw_fd = -1;
   int capability_fd = (int)(uintptr_t)os_handle;
+  uint8_t allocation_uuid[DYN_VMM_ALLOCATION_UUID_SIZE];
+  char owner_participant[DYN_VMM_PARTICIPANT_ID_SIZE];
+  char owner_socket[sizeof(((struct sockaddr_un*)0)->sun_path)];
   bool local_owner;
   CUresult result;
 
   if (!enabled)
     return function != NULL ? function(output, os_handle, type) : unavailable();
-  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR || output == NULL) {
+  initialize_broker_result(&broker, type);
+  memset(&fabric_token, 0, sizeof(fabric_token));
+  memset(&capability, 0, sizeof(capability));
+  memset(allocation_uuid, 0, sizeof(allocation_uuid));
+  memset(owner_participant, 0, sizeof(owner_participant));
+  memset(owner_socket, 0, sizeof(owner_socket));
+  if (!supported_handle_type(type) || output == NULL) {
     pthread_mutex_lock(&lock);
     cuda_seen = true;
     fail("shareable import requires a VMM capability");
@@ -2201,20 +2372,33 @@ cuMemImportFromShareableHandle(
   }
   pthread_mutex_lock(&lock);
   cuda_seen = true;
-  if (read_capability(capability_fd, &capability) != 0) {
+  if (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
+    if (read_capability(capability_fd, &capability) != 0) {
+      fail("shareable import requires a valid sealed VMM capability");
+      result = CUDA_ERROR_INVALID_VALUE;
+      goto done;
+    }
+    memcpy(allocation_uuid, capability.allocation_uuid, sizeof(allocation_uuid));
+    snprintf(owner_participant, sizeof(owner_participant), "%s", capability.owner_participant_id);
+    snprintf(owner_socket, sizeof(owner_socket), "%s", capability.owner_socket_path);
+  } else if (read_fabric_token(os_handle, &fabric_token, owner_participant, owner_socket) != 0) {
     fail("shareable import requires a valid sealed VMM capability");
     result = CUDA_ERROR_INVALID_VALUE;
     goto done;
+  } else {
+    memcpy(allocation_uuid, fabric_token.allocation_uuid, sizeof(allocation_uuid));
   }
   if (failed || forked_after_cuda || phase != DYN_VMM_ACTIVE) {
     result = CUDA_ERROR_INVALID_VALUE;
     goto done;
   }
-  local_owner = strcmp(capability.owner_socket_path, socket_path) == 0 &&
-                strcmp(capability.owner_participant_id, participant_id) == 0;
+  local_owner = strcmp(owner_socket, socket_path) == 0 && strcmp(owner_participant, participant_id) == 0;
   if (local_owner) {
-    owner = find_object(capability.allocation_uuid, DYN_VMM_OWNER);
-    result = export_raw_owner(owner, &raw_fd);
+    owner = find_object(allocation_uuid, DYN_VMM_OWNER);
+    if (owner == NULL || owner->requested_handle_type != type)
+      result = CUDA_ERROR_INVALID_HANDLE;
+    else
+      result = export_raw_owner(owner, &broker);
     if (result != CUDA_SUCCESS) {
       fail("local CUDA VMM capability owner is unavailable");
       result = CUDA_ERROR_INVALID_VALUE;
@@ -2222,7 +2406,9 @@ cuMemImportFromShareableHandle(
     }
   } else {
     pthread_mutex_unlock(&lock);
-    result = request_owner_export(&capability, &raw_fd) == 0 ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+    result = request_owner_export(allocation_uuid, owner_participant, owner_socket, type, &broker) == 0
+                 ? CUDA_SUCCESS
+                 : CUDA_ERROR_INVALID_VALUE;
     pthread_mutex_lock(&lock);
     if (result != CUDA_SUCCESS || failed || forked_after_cuda || phase != DYN_VMM_ACTIVE) {
       fail("remote CUDA VMM capability owner is unavailable");
@@ -2230,9 +2416,13 @@ cuMemImportFromShareableHandle(
       goto done;
     }
   }
-  result = function != NULL ? function(&real_handle, (void*)(uintptr_t)raw_fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+  result = function != NULL ? function(
+                                  &real_handle,
+                                  type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ? (void*)(uintptr_t)broker.fd
+                                                                                   : (void*)broker.bytes,
+                                  type)
                             : unavailable();
-  if (close_owned_fd(&raw_fd, "cannot close imported raw CUDA broker FD") != 0) {
+  if (clear_broker_result(&broker, "cannot close imported raw CUDA broker FD") != 0) {
     if (result == CUDA_SUCCESS && (release == NULL || release(real_handle) != CUDA_SUCCESS))
       fail_cleanup("cannot release failed imported CUDA handle");
     fail("cannot close imported raw CUDA broker FD");
@@ -2251,7 +2441,15 @@ cuMemImportFromShareableHandle(
       fail("cannot record VMM capability import");
       result = CUDA_ERROR_INVALID_VALUE;
     } else {
-      memcpy(allocation->allocation_uuid, capability.allocation_uuid, sizeof(allocation->allocation_uuid));
+      if (allocation->properties.requestedHandleTypes != type) {
+        if (release == NULL || release(real_handle) != CUDA_SUCCESS)
+          fail_cleanup("cannot release cross-type imported CUDA handle");
+        free(allocation);
+        fail("real CUDA import returned cross-type allocation properties");
+        result = CUDA_ERROR_INVALID_VALUE;
+        goto done;
+      }
+      memcpy(allocation->allocation_uuid, allocation_uuid, sizeof(allocation->allocation_uuid));
       allocation->exported = true;
       allocation->real_handle = real_handle;
       allocation->application_handle_live = true;
@@ -2266,10 +2464,11 @@ cuMemImportFromShareableHandle(
     fail("real CUDA capability import failed");
   }
 done:
-  if (raw_fd >= 0 && close_owned_fd(&raw_fd, "cannot close failed raw CUDA broker FD") != 0) {
+  if (clear_broker_result(&broker, "cannot close failed raw CUDA broker FD") != 0) {
     result = CUDA_ERROR_UNKNOWN;
     phase = DYN_VMM_FAILED;
   }
+  explicit_bzero(&fabric_token, sizeof(fabric_token));
   pthread_mutex_unlock(&lock);
   return result;
 }
@@ -2339,7 +2538,7 @@ cuMulticastBindMem(
   if (find_logical_handle(memory_handle) == NULL)
     result = unknown_logical_handle();
   else {
-    fail("M1 does not support multicast binding of managed allocations");
+    fail("multicast binding of managed allocations is unsupported");
     result = CUDA_ERROR_NOT_SUPPORTED;
   }
   pthread_mutex_unlock(&lock);
@@ -2370,7 +2569,7 @@ cuMulticastBindMem_v2(
   if (find_logical_handle(memory_handle) == NULL)
     result = unknown_logical_handle();
   else {
-    fail("M1 does not support multicast binding of managed allocations");
+    fail("multicast binding of managed allocations is unsupported");
     result = CUDA_ERROR_NOT_SUPPORTED;
   }
   pthread_mutex_unlock(&lock);

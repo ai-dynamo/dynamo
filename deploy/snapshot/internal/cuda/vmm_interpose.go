@@ -37,16 +37,18 @@ const (
 	vmmArtifactName     = "cuda-vmm.rdb"
 	vmmRestorePoison    = "dynamo:cuda-vmm:restore-poison"
 	vmmProtocolMagic    = 0x44564d4d
-	vmmProtocolVersion  = 2
+	vmmProtocolVersion  = 3
+	vmmLedgerVersion    = 2
 	vmmHeaderSize       = 256
 	vmmRecordSize       = 96
 	vmmPlacementSize    = 40
+	vmmFabricHandleSize = 64
 	vmmMessageSize      = 96
 	vmmParticipantSize  = 33
 	vmmGPUUUIDSize      = 16
 	vmmTimeout          = 30 * time.Second
-	vmmMaximumPayload   = 1 << 40
 	vmmMaximumRedisBulk = 512 << 20
+	vmmMaximumPayload   = vmmMaximumRedisBulk + 1<<20
 	vmmMaximumRESPLine  = 4 << 10
 	vmmMaximumRightsFDs = 253
 
@@ -65,6 +67,9 @@ const (
 	vmmAllocation = 1
 
 	vmmApplicationHandleLive = 1
+
+	vmmHandlePOSIX  = 1
+	vmmHandleFabric = 8
 )
 
 type VMMProcess struct {
@@ -72,6 +77,82 @@ type VMMProcess struct {
 	NamespacePID int
 	SocketPath   string
 	Participant  string
+}
+
+type vmmBrokerResult struct {
+	handleType uint32
+	fd         int
+	bytes      []byte
+}
+
+func supportedVMMHandleType(handleType uint32) bool {
+	return handleType == vmmHandlePOSIX || handleType == vmmHandleFabric
+}
+
+func takeVMMBrokerResult(
+	response *vmmResponse,
+	handleType uint32,
+) (vmmBrokerResult, error) {
+	result := vmmBrokerResult{handleType: handleType, fd: -1}
+	valid := response.header.HandleType == handleType
+	switch handleType {
+	case vmmHandlePOSIX:
+		valid = valid && response.fd >= 0 && len(response.payload) == 0
+	case vmmHandleFabric:
+		valid = valid && response.fd < 0 &&
+			len(response.payload) == vmmFabricHandleSize
+	default:
+		valid = false
+	}
+	if !valid {
+		clearVMMBytes(response.payload)
+		response.payload = nil
+		return result, errors.Join(
+			fmt.Errorf(
+				"invalid CUDA VMM broker response shape for handle type %d",
+				handleType,
+			),
+			closeVMMFD(&response.fd),
+		)
+	}
+	result.fd, response.fd = response.fd, -1
+	result.bytes, response.payload = response.payload, nil
+	return result, nil
+}
+
+func closeVMMBrokerResult(result *vmmBrokerResult) error {
+	clearVMMBytes(result.bytes)
+	result.bytes = nil
+	return closeVMMFD(&result.fd)
+}
+
+func vmmImporterTransport(
+	payload []byte,
+	broker vmmBrokerResult,
+) ([]byte, int, error) {
+	switch broker.handleType {
+	case vmmHandlePOSIX:
+		if broker.fd < 0 || len(broker.bytes) != 0 {
+			return nil, -1, errors.New("invalid POSIX CUDA VMM broker result")
+		}
+		return payload, broker.fd, nil
+	case vmmHandleFabric:
+		if broker.fd >= 0 || len(broker.bytes) != vmmFabricHandleSize {
+			return nil, -1, errors.New("invalid FABRIC CUDA VMM broker result")
+		}
+		return append(append([]byte(nil), payload...), broker.bytes...), -1, nil
+	default:
+		return nil, -1, fmt.Errorf(
+			"unsupported CUDA VMM broker handle type %d",
+			broker.handleType,
+		)
+	}
+}
+
+func clearVMMBytes(content []byte) {
+	for index := range content {
+		content[index] = 0
+	}
 }
 
 func verifyVMMHealth(ctx context.Context, processes []VMMProcess) error {
@@ -136,6 +217,7 @@ type vmmRestorePlan struct {
 	resourceIndex int
 	process       VMMProcess
 	payload       []byte
+	handleType    uint32
 }
 
 func ValidateVMMProcessSet(expected, current []int) error {
@@ -170,6 +252,7 @@ type vmmHeader struct {
 	Operation      uint16
 	Status         int32
 	Count          uint32
+	HandleType     uint32
 	AllocationUUID [16]byte
 	ObjectID       uint64
 	PayloadSize    uint64
@@ -364,16 +447,29 @@ func identifyVMMProcess(process VMMProcess) (VMMProcess, error) {
 		vmmHeader{Operation: vmmIdentify},
 		nil,
 		-1,
-		vmmResponseFDNone,
+		vmmResponseUntyped,
 	)
 	if err != nil {
 		return VMMProcess{}, err
 	}
-	if len(response.payload) != 0 || response.header.Participant == "" {
+	if len(response.payload) != 0 ||
+		!validVMMParticipant(response.header.Participant) {
 		return VMMProcess{}, errors.New("VMM identify returned incomplete logical identity")
 	}
 	process.Participant = response.header.Participant
 	return process, nil
+}
+
+func validVMMParticipant(participant string) bool {
+	if len(participant) != vmmParticipantSize-1 {
+		return false
+	}
+	for _, value := range participant {
+		if (value < '0' || value > '9') && (value < 'a' || value > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func requireVMMSocket(path string) error {
@@ -409,7 +505,7 @@ func ValidateVMMArtifact(checkpointDir string, enabled bool) error {
 	return nil
 }
 
-// PrepareVMM captures the complete POSIX-FD VMM ledger, detaches every managed
+// PrepareVMM captures the complete shared VMM ledger, detaches every managed
 // mapping, and exports the dedicated Redis RDB into the checkpoint artifact.
 func PrepareVMM(
 	ctx context.Context,
@@ -469,7 +565,7 @@ func PrepareVMM(
 			},
 			nil,
 			-1,
-			vmmResponseFDNone,
+			vmmResponseUntyped,
 		)
 		if err != nil {
 			return "", fmt.Errorf("capture CUDA VMM resource %d bytes: %w", resource.ID, err)
@@ -515,7 +611,7 @@ func PrepareVMM(
 			},
 			nil,
 			-1,
-			vmmResponseFDNone,
+			vmmResponseUntyped,
 		); err != nil {
 			return "", fmt.Errorf(
 				"detach CUDA VMM resource %d %s participant %s: %w",
@@ -536,7 +632,7 @@ func PrepareVMM(
 		return "", err
 	}
 	log.Info(
-		"Captured launcher-scoped CUDA POSIX-FD VMM state",
+		"Captured launcher-scoped CUDA VMM state",
 		"generation", generation,
 		"resources", len(ledger.Resources),
 	)
@@ -615,10 +711,10 @@ func RestoreVMM(
 	if err := json.Unmarshal(encoded, &ledger); err != nil {
 		return fmt.Errorf("decode CUDA VMM Redis ledger: %w", err)
 	}
-	if ledger.Version != 1 || ledger.Generation != generation {
+	if ledger.Version != vmmLedgerVersion || ledger.Generation != generation {
 		return fmt.Errorf(
-			"CUDA VMM Redis ledger is version/generation %d/%q, want 1/%q",
-			ledger.Version, ledger.Generation, generation,
+			"CUDA VMM Redis ledger is version/generation %d/%q, want %d/%q",
+			ledger.Version, ledger.Generation, vmmLedgerVersion, generation,
 		)
 	}
 	if err := validateVMMLedger(ledger); err != nil {
@@ -669,17 +765,17 @@ func RestoreVMM(
 			generation, actualDigest, expectedDigest,
 		)
 	}
-	brokerFDs := make([]int, len(ledger.Resources))
-	for index := range brokerFDs {
-		brokerFDs[index] = -1
+	brokers := make([]vmmBrokerResult, len(ledger.Resources))
+	for index := range brokers {
+		brokers[index].fd = -1
 	}
 	defer func() {
-		for index := range brokerFDs {
-			if err := closeVMMFD(&brokerFDs[index]); err != nil {
+		for index := range brokers {
+			if err := closeVMMBrokerResult(&brokers[index]); err != nil {
 				retErr = errors.Join(
 					retErr,
 					fmt.Errorf(
-						"close CUDA VMM resource %d broker FD: %w",
+						"close CUDA VMM resource %d broker result: %w",
 						ledger.Resources[index].ID,
 						err,
 					),
@@ -707,6 +803,7 @@ func RestoreVMM(
 			resourceIndex: index,
 			process:       owner,
 			payload:       payload,
+			handleType:    resource.Owner.RequestedHandleType,
 		})
 		for _, mapping := range resource.Importers {
 			importer, err := findVMMProcess(processes, mapping.Participant)
@@ -717,6 +814,7 @@ func RestoreVMM(
 				resourceID:    resource.ID,
 				resourceIndex: index,
 				process:       importer,
+				handleType:    mapping.RequestedHandleType,
 				payload: encodeVMMRestoreRecord(
 					resource.ID,
 					vmmImporter,
@@ -734,34 +832,65 @@ func RestoreVMM(
 		response, err := exchangeVMM(
 			ctx,
 			plan.process,
-			vmmHeader{Operation: vmmRestoreOwner, ObjectID: plan.resourceID},
+			vmmHeader{
+				Operation:  vmmRestoreOwner,
+				ObjectID:   plan.resourceID,
+				HandleType: plan.handleType,
+			},
 			plan.payload,
 			-1,
-			vmmResponseFDRequired,
+			vmmBrokerResponseExpectation(plan.handleType),
 		)
 		if err != nil {
 			return fmt.Errorf("restore CUDA VMM resource %d owner: %w", plan.resourceID, err)
 		}
-		brokerFDs[plan.resourceIndex] = response.fd
+		broker, err := takeVMMBrokerResult(&response, plan.handleType)
+		if err != nil {
+			return fmt.Errorf(
+				"restore CUDA VMM resource %d owner broker: %w",
+				plan.resourceID, err,
+			)
+		}
+		brokers[plan.resourceIndex] = broker
 	}
 	for _, plan := range importerPlans {
-		if _, err := exchangeVMM(
+		payload, fd, err := vmmImporterTransport(
+			plan.payload, brokers[plan.resourceIndex],
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"prepare CUDA VMM resource %d importer transport: %w",
+				plan.resourceID, err,
+			)
+		}
+		_, err = exchangeVMM(
 			ctx,
 			plan.process,
-			vmmHeader{Operation: vmmRestoreImporter, ObjectID: plan.resourceID},
-			plan.payload,
-			brokerFDs[plan.resourceIndex],
-			vmmResponseFDNone,
-		); err != nil {
+			vmmHeader{
+				Operation:  vmmRestoreImporter,
+				ObjectID:   plan.resourceID,
+				HandleType: plan.handleType,
+			},
+			payload,
+			fd,
+			vmmResponseUntyped,
+		)
+		if plan.handleType == vmmHandleFabric {
+			clearVMMBytes(payload)
+		}
+		if err != nil {
 			return fmt.Errorf(
 				"restore CUDA VMM resource %d importer participant %s: %w",
 				plan.resourceID, plan.process.Participant, err,
 			)
 		}
 	}
-	for index := range brokerFDs {
-		if err := closeVMMFD(&brokerFDs[index]); err != nil {
-			return fmt.Errorf("close CUDA VMM resource %d broker FD: %w", ledger.Resources[index].ID, err)
+	for index := range brokers {
+		if err := closeVMMBrokerResult(&brokers[index]); err != nil {
+			return fmt.Errorf(
+				"close CUDA VMM resource %d broker result: %w",
+				ledger.Resources[index].ID, err,
+			)
 		}
 	}
 	if err := verifyVMMHealth(ctx, processes); err != nil {
@@ -771,7 +900,7 @@ func RestoreVMM(
 		return err
 	}
 	log.Info(
-		"Restored launcher-scoped CUDA POSIX-FD VMM state",
+		"Restored launcher-scoped CUDA VMM state",
 		"generation", generation,
 		"resources", len(ledger.Resources),
 	)
@@ -810,6 +939,12 @@ func validateVMMLedger(ledger vmmLedger) error {
 			resource.Owner.Participant == "" || len(resource.Importers) == 0 {
 			return fmt.Errorf("ledger resource %d is incomplete or unsupported", resource.ID)
 		}
+		if !supportedVMMHandleType(resource.Owner.RequestedHandleType) {
+			return fmt.Errorf(
+				"ledger resource %d has unsupported owner handle type %d",
+				resource.ID, resource.Owner.RequestedHandleType,
+			)
+		}
 		mappings := append([]vmmMapping{resource.Owner}, resource.Importers...)
 		seen := make(map[string]struct{}, len(mappings))
 		for _, mapping := range mappings {
@@ -832,8 +967,16 @@ func validateVMMLedger(ledger vmmLedger) error {
 				)
 			}
 			seen[mapping.Participant] = struct{}{}
+			if mapping.Size > vmmMaximumRedisBulk {
+				return fmt.Errorf(
+					"ledger resource %d mapping for participant %q exceeds the %d-byte allocation limit",
+					resource.ID, mapping.Participant, vmmMaximumRedisBulk,
+				)
+			}
 			if mapping.Address == 0 || mapping.Size == 0 ||
-				mapping.GPUUUID == "" || mapping.RequestedHandleType != 1 ||
+				mapping.GPUUUID == "" ||
+				mapping.RequestedHandleType !=
+					resource.Owner.RequestedHandleType ||
 				mapping.AccessCount == 0 || mapping.AccessSize == 0 ||
 				len(mapping.Access) !=
 					int(mapping.AccessCount)*int(mapping.AccessSize) {
@@ -868,7 +1011,7 @@ func inspectVMM(
 			vmmHeader{Operation: vmmInspect},
 			nil,
 			-1,
-			vmmResponseFDNone,
+			vmmResponseUntyped,
 		)
 		if err != nil {
 			return vmmLedger{}, fmt.Errorf("inspect CUDA process %d VMM state: %w", process.ObservedPID, err)
@@ -913,7 +1056,7 @@ func inspectVMM(
 		participantNodes[process.Participant] = sourceNode
 	}
 	participants := make(map[string]vmmParticipant, len(captures))
-	ledger := vmmLedger{Version: 1, Generation: generation}
+	ledger := vmmLedger{Version: vmmLedgerVersion, Generation: generation}
 	for index, id := range ids {
 		resource := vmmResource{
 			ID:          uint64(index + 1),
@@ -925,6 +1068,12 @@ func inspectVMM(
 				return vmmLedger{}, fmt.Errorf(
 					"CUDA VMM capture has unsupported object kind %d",
 					capture.record.kind,
+				)
+			}
+			if !supportedVMMHandleType(capture.record.handleType) {
+				return vmmLedger{}, fmt.Errorf(
+					"CUDA VMM capture has unsupported handle type %d",
+					capture.record.handleType,
 				)
 			}
 			mapping := mappingFromCapture(capture.process.Participant, capture.record)
@@ -975,6 +1124,14 @@ func inspectVMM(
 					resource.ID, importer.Participant, importer.Size, resource.Owner.Size,
 				)
 			}
+			if importer.RequestedHandleType !=
+				resource.Owner.RequestedHandleType {
+				return vmmLedger{}, fmt.Errorf(
+					"CUDA VMM resource %d mixes owner handle type %d with importer type %d",
+					resource.ID, resource.Owner.RequestedHandleType,
+					importer.RequestedHandleType,
+				)
+			}
 			if _, duplicate := resourceParticipants[importer.Participant]; duplicate {
 				return vmmLedger{}, fmt.Errorf(
 					"CUDA VMM resource %d has multiple mappings in participant %s",
@@ -986,7 +1143,7 @@ func inspectVMM(
 		ledger.Resources = append(ledger.Resources, resource)
 	}
 	if len(ledger.Resources) == 0 {
-		return vmmLedger{}, errors.New("no CUDA POSIX-FD VMM sharing graph discovered")
+		return vmmLedger{}, errors.New("no CUDA VMM sharing graph discovered")
 	}
 	participantIDs := make([]string, 0, len(participants))
 	for id := range participants {
@@ -1101,7 +1258,7 @@ func validateRestoredVMMProcesses(
 			vmmHeader{Operation: vmmQueryPlacement},
 			nil,
 			-1,
-			vmmResponseFDNone,
+			vmmResponseUntyped,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -1316,12 +1473,67 @@ func parseGPUUUID(value string) []byte {
 	return decoded
 }
 
-type vmmResponseFDExpectation uint8
+type vmmResponseExpectation uint8
 
 const (
-	vmmResponseFDNone vmmResponseFDExpectation = iota
-	vmmResponseFDRequired
+	vmmResponseUntyped vmmResponseExpectation = iota
+	vmmResponsePOSIXBroker
+	vmmResponseFabricBroker
 )
+
+func vmmBrokerResponseExpectation(handleType uint32) vmmResponseExpectation {
+	switch handleType {
+	case vmmHandlePOSIX:
+		return vmmResponsePOSIXBroker
+	case vmmHandleFabric:
+		return vmmResponseFabricBroker
+	default:
+		return vmmResponseExpectation(255)
+	}
+}
+
+func validateVMMResponseShape(
+	operation uint16,
+	response vmmHeader,
+	expectation vmmResponseExpectation,
+	fdCount int,
+) (int, error) {
+	expectedHandleType := uint32(0)
+	expectedPayloadSize := uint64(0)
+	expectedFDs := 0
+	typedBroker := true
+	switch expectation {
+	case vmmResponseUntyped:
+		typedBroker = false
+	case vmmResponsePOSIXBroker:
+		expectedHandleType = vmmHandlePOSIX
+		expectedFDs = 1
+	case vmmResponseFabricBroker:
+		expectedHandleType = vmmHandleFabric
+		expectedPayloadSize = vmmFabricHandleSize
+	default:
+		return 0, fmt.Errorf("invalid VMM response expectation %d", expectation)
+	}
+	if response.HandleType != expectedHandleType {
+		return 0, fmt.Errorf(
+			"VMM operation %d returned handle type %d, want %d",
+			operation, response.HandleType, expectedHandleType,
+		)
+	}
+	if typedBroker && response.PayloadSize != expectedPayloadSize {
+		return 0, fmt.Errorf(
+			"VMM handle type %d response payload is %d bytes, want %d",
+			expectedHandleType, response.PayloadSize, expectedPayloadSize,
+		)
+	}
+	if fdCount != expectedFDs {
+		return 0, fmt.Errorf(
+			"VMM operation %d returned %d response FDs, want %d",
+			operation, fdCount, expectedFDs,
+		)
+	}
+	return expectedFDs, nil
+}
 
 type vmmResponse struct {
 	header  vmmHeader
@@ -1354,9 +1566,19 @@ func exchangeVMM(
 	request vmmHeader,
 	payload []byte,
 	passedFD int,
-	responseFD vmmResponseFDExpectation,
+	expectation vmmResponseExpectation,
 ) (result vmmResponse, retErr error) {
 	result.fd = -1
+	if process.Participant == "" {
+		if request.Operation != vmmIdentify {
+			return result, errors.New("VMM participant identity is required")
+		}
+	} else {
+		if !validVMMParticipant(process.Participant) {
+			return result, errors.New("invalid VMM participant identity")
+		}
+		request.Participant = process.Participant
+	}
 	dialer := net.Dialer{Timeout: vmmTimeout}
 	connection, err := dialer.DialContext(ctx, "unix", process.SocketPath)
 	if err != nil {
@@ -1393,6 +1615,7 @@ func exchangeVMM(
 	responseBuffer := make([]byte, vmmHeaderSize+64*1024)
 	ancillary = make([]byte, unix.CmsgSpace(4*vmmMaximumRightsFDs))
 	size, ancillarySize, flags, _, err := unixConnection.ReadMsgUnix(responseBuffer, ancillary)
+	defer clearVMMBytes(responseBuffer[:size])
 	if err != nil {
 		return result, err
 	}
@@ -1428,33 +1651,35 @@ func exchangeVMM(
 			response.Operation, request.Operation,
 		)
 	}
+	if process.Participant != "" &&
+		response.Participant != process.Participant {
+		return result, fmt.Errorf(
+			"VMM response participant %q does not match request participant %q",
+			response.Participant, process.Participant,
+		)
+	}
 	if response.Status != 0 {
 		return result, errors.New(response.Message)
 	}
-	switch responseFD {
-	case vmmResponseFDNone:
-		if len(receivedFDs) != 0 {
-			return result, fmt.Errorf(
-				"VMM operation %d returned %d forbidden response FDs",
-				request.Operation,
-				len(receivedFDs),
-			)
-		}
-	case vmmResponseFDRequired:
-		if len(receivedFDs) != 1 {
-			return result, fmt.Errorf(
-				"VMM operation %d returned %d response FDs, want exactly one",
-				request.Operation,
-				len(receivedFDs),
-			)
-		}
-	default:
-		return result, fmt.Errorf("invalid VMM response FD expectation %d", responseFD)
+	expectedFDs, err := validateVMMResponseShape(
+		request.Operation,
+		response,
+		expectation,
+		len(receivedFDs),
+	)
+	if err != nil {
+		return result, err
 	}
 	if response.PayloadSize > vmmMaximumPayload {
 		return result, fmt.Errorf("VMM response payload %d exceeds limit", response.PayloadSize)
 	}
 	responsePayload := make([]byte, int(response.PayloadSize))
+	payloadOwned := false
+	defer func() {
+		if !payloadOwned {
+			clearVMMBytes(responsePayload)
+		}
+	}()
 	payloadPrefix := responseBuffer[vmmHeaderSize:size]
 	if uint64(len(payloadPrefix)) > response.PayloadSize {
 		return result, errors.New("VMM response exceeds declared payload size")
@@ -1464,7 +1689,8 @@ func exchangeVMM(
 		return result, err
 	}
 	result.payload = responsePayload
-	if responseFD == vmmResponseFDRequired {
+	payloadOwned = true
+	if expectedFDs == 1 {
 		result.fd = receivedFDs[0]
 		receivedFDs[0] = -1
 	}
@@ -1519,6 +1745,7 @@ func encodeVMMHeader(header vmmHeader) []byte {
 	binary.LittleEndian.PutUint16(buffer[6:8], header.Operation)
 	binary.LittleEndian.PutUint32(buffer[8:12], uint32(header.Status))
 	binary.LittleEndian.PutUint32(buffer[12:16], header.Count)
+	binary.LittleEndian.PutUint32(buffer[16:20], header.HandleType)
 	copy(buffer[24:40], header.AllocationUUID[:])
 	binary.LittleEndian.PutUint64(buffer[40:48], header.ObjectID)
 	binary.LittleEndian.PutUint64(buffer[48:56], header.PayloadSize)
@@ -1530,13 +1757,16 @@ func encodeVMMHeader(header vmmHeader) []byte {
 func decodeVMMHeader(buffer []byte) (vmmHeader, error) {
 	if len(buffer) != vmmHeaderSize ||
 		binary.LittleEndian.Uint32(buffer[0:4]) != vmmProtocolMagic ||
-		binary.LittleEndian.Uint16(buffer[4:6]) != vmmProtocolVersion {
+		binary.LittleEndian.Uint16(buffer[4:6]) != vmmProtocolVersion ||
+		binary.LittleEndian.Uint32(buffer[20:24]) != 0 ||
+		!bytes.Equal(buffer[185:256], make([]byte, 71)) {
 		return vmmHeader{}, errors.New("invalid VMM response protocol")
 	}
 	header := vmmHeader{
 		Operation:   binary.LittleEndian.Uint16(buffer[6:8]),
 		Status:      int32(binary.LittleEndian.Uint32(buffer[8:12])),
 		Count:       binary.LittleEndian.Uint32(buffer[12:16]),
+		HandleType:  binary.LittleEndian.Uint32(buffer[16:20]),
 		ObjectID:    binary.LittleEndian.Uint64(buffer[40:48]),
 		PayloadSize: binary.LittleEndian.Uint64(buffer[48:56]),
 		Message:     strings.TrimRight(string(buffer[56:56+vmmMessageSize]), "\x00"),
