@@ -31,6 +31,10 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.multimodal,
     pytest.mark.gpu_0,
+    # These are sub-second unit tests. A generous cap so a hang here fails this
+    # test instead of stalling the whole session: an unstubbed network call once
+    # cost ~400s of teardown and took the CI container down with it.
+    pytest.mark.timeout(60),
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
     pytest.mark.skipif(Modality is None, reason="SGLang Modality is required"),
@@ -59,6 +63,21 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
         return url
 
     monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", _passthrough_url)
+
+    # No unit test may reach the network. Giving the handler a real url policy
+    # (below) removed the AttributeError that used to abort _maybe_nvdec_decoder
+    # before it fetched, so on an NVDEC-capable host these cache tests started
+    # issuing a real request for their example.com URL: ~400s of teardown while
+    # the event loop waited on the connection, which killed the CI job. The
+    # broad except in _maybe_nvdec_decoder turns this into the URL passthrough
+    # the cache tests already expected; tests that exercise fetching stub it
+    # with their own payload.
+    async def _no_network(*_args, **_kwargs):
+        raise AssertionError(
+            "unit tests must not fetch over the network; stub fetch_bytes"
+        )
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", _no_network)
 
     class _DummyEncoder:
         def __init__(self) -> None:
