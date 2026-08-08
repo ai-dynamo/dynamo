@@ -16,6 +16,7 @@ documentation** — shipped guidance lives under `docs/fern/pages/` and in
 | [ab-testing-request-distributions.md](ab-testing-request-distributions.md) | Standalone explainer for items 3 and 4 — why the repository cannot currently tell a small performance win from noise, worked through the embedding-cache benchmark, with a concrete fix for the part that is fixable now. Start here if those items read as abstract. |
 | [layered-benchmarking.md](layered-benchmarking.md) | Do we need e2e / subsystem / micro tiers, or is finely-instrumented e2e enough? The one thing e2e structurally cannot do, what the repo already has, and three verified findings — recipes capture no server-side data, the two frontend harnesses are alternatives rather than a stack, and where micro coverage stops. |
 | [benchmark-coverage-report.html](benchmark-coverage-report.html) | Rendered companion to the above: what exists at each tier, and an inference-path matrix scoring every stage per tier. **Hover or tab onto any cell** to see which harnesses cover it. Open in a browser. |
+| [micro-bench-audit.html](micro-bench-audit.html) | Each of the ten Rust benches audited against `benchmarking-procedure.md`, one tab per bench: is the load defined, is accuracy gated, is the target a curve, is "good" defined. Open in a browser. |
 | [overlap-review.md](overlap-review.md) | Whether the new front door duplicates the existing AIPerf benchmarking guide, and what to do about the two places it does. |
 
 Findings were verified against `origin/main` @ `c574e4d7c1a`. File and line references drift;

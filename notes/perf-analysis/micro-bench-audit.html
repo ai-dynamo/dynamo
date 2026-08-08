@@ -1,0 +1,280 @@
+<!doctype html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Micro benches vs. the benchmarking procedure</title>
+<style>
+  :root{
+    --surface:#fcfcfb; --plane:#f9f9f7;
+    --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,0.10);
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+    --goodT:#e4f6ef; --warningT:#fdf3dd; --criticalT:#fbeaea; --naT:#f2f1ee;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#1a1a19; --plane:#0d0d0d;
+      --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10);
+      --goodT:#123027; --warningT:#332813; --criticalT:#3a1c1c; --naT:#252523;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:40px 28px 72px;background:var(--plane);color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px;line-height:1.55}
+  main{max-width:1060px;margin:0 auto}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 6px}
+  .stamp{color:var(--muted);font-size:11.5px;margin:0 0 26px}
+  section{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:22px 24px;margin-bottom:20px}
+  h2{font-size:16px;margin:0 0 10px}
+  .lede{color:var(--ink2);margin:0 0 14px;max-width:78ch}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+    background:var(--naT);padding:1px 5px;border-radius:4px;color:var(--ink2)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--ink2);border-bottom:1px solid var(--axis);padding:7px 9px;font-size:11.5px;letter-spacing:.02em}
+  td{padding:7px 9px;border-bottom:1px solid var(--grid);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  /* tabs */
+  .tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:0;border-bottom:1px solid var(--axis);padding-bottom:0}
+  .tab{appearance:none;border:1px solid var(--ring);border-bottom:none;background:var(--naT);
+    color:var(--ink2);font:inherit;font-size:12px;font-weight:600;padding:7px 11px;
+    border-radius:7px 7px 0 0;cursor:pointer;display:flex;align-items:center;gap:6px;line-height:1.2}
+  .tab:hover{color:var(--ink)}
+  .tab[aria-selected="true"]{background:var(--surface);color:var(--ink);border-color:var(--axis);
+    position:relative;top:1px;box-shadow:0 -2px 0 0 var(--ink) inset}
+  .tab .dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px}
+  .d-good{background:var(--good)} .d-warning{background:var(--warning)} .d-critical{background:var(--critical)}
+  .panel{display:none;border:1px solid var(--axis);border-top:none;border-radius:0 0 9px 9px;padding:20px 22px}
+  .panel.on{display:block}
+  .ptitle{font-size:15px;font-weight:700;margin:0 0 2px}
+  .ppath{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--muted);margin:0 0 14px}
+  .verdict{border-radius:7px;padding:10px 13px;margin:0 0 16px;font-size:12.5px;line-height:1.5}
+  .v-good{background:var(--goodT);box-shadow:inset 0 0 0 1.5px var(--good)}
+  .v-warning{background:var(--warningT);box-shadow:inset 0 0 0 1.5px var(--warning)}
+  .v-critical{background:var(--criticalT);box-shadow:inset 0 0 0 1.5px var(--critical)}
+  .verdict b{display:block;margin-bottom:3px}
+  .rub{width:100%;font-size:12.5px}
+  .rub th{width:210px;font-weight:600;color:var(--ink);border-bottom:1px solid var(--grid);
+    padding:8px 10px 8px 0;text-align:left;font-size:12.5px;letter-spacing:0;vertical-align:top}
+  .rub td{padding:8px 0;border-bottom:1px solid var(--grid)}
+  .rub tr:last-child th,.rub tr:last-child td{border-bottom:none}
+  .m{font-weight:700;margin-right:5px}
+  .m-good{color:var(--good)} .m-warning{color:var(--warning)} .m-critical{color:var(--critical)}
+  .note{font-size:12px;color:var(--ink2);background:var(--naT);border-left:2px solid var(--axis);
+    padding:10px 13px;border-radius:0 6px 6px 0;margin:14px 0 0}
+  .note b{color:var(--ink)}
+  ul{margin:8px 0 0;padding-left:19px;color:var(--ink2)} li{margin:4px 0} li b{color:var(--ink)}
+</style>
+</head>
+<body>
+<main>
+
+  <h1>Micro benches vs. the benchmarking procedure</h1>
+  <p class="sub">Each bench audited against <code>benchmarking-procedure.md</code>. One tab per bench.</p>
+  <p class="stamp">Verified against origin/main @ cd6b63b0cc · working draft, not published guidance</p>
+
+  <section>
+    <h2>The rubric</h2>
+    <p class="lede">Six questions drawn from the procedure. A micro bench is not expected to answer all of them — §2's utilization loop and SLA constraints are e2e concepts — but the first four apply at any tier.</p>
+    <table>
+      <thead><tr><th style="width:24%">Question</th><th style="width:16%">Procedure</th><th>What a good answer looks like</th></tr></thead>
+      <tbody>
+        <tr><td><b>Load defined?</b></td><td>§1</td><td>Input shape stated and reproducible, not an unexplained constant</td></tr>
+        <tr><td><b>Accuracy gated?</b></td><td>§1.1</td><td>Output validated; a wrong-but-fast result fails rather than scores</td></tr>
+        <tr><td><b>Target a curve?</b></td><td>§2.1</td><td>Sweeps an axis, so the shape is visible — not one point</td></tr>
+        <tr><td><b>Definition of good?</b></td><td>§2.4</td><td>A threshold or baseline that makes a result pass or fail</td></tr>
+        <tr><td><b>Data collected?</b></td><td>§3</td><td>Emits more than a duration — throughput, or a named unit</td></tr>
+        <tr><td><b>Analysis systematized?</b></td><td>§5</td><td>Programmatic → procedural → agent-runnable</td></tr>
+      </tbody>
+    </table>
+    <div class="note"><b>Two corrections found while auditing.</b> <code>kv_router_bench.rs</code> is <b>not dead and not a micro bench</b> — it is a 1,749-line KV-router stress harness with its own CLI, gated behind <code>kv-router-stress</code>. An earlier note called it dead weight and proposed deleting it; that was wrong, and came from grepping for <code>bench_function</code> in a file that never used criterion. And <b>only 6 of 10 run in default CI</b> — four are feature-gated, so "all ten execute on every PR" was too broad.</div>
+  </section>
+
+  <section>
+    <h2>Summary</h2>
+    <table>
+      <thead><tr><th style="width:30%">Bench</th><th style="width:11%">In CI</th><th style="width:10%">Load</th><th style="width:11%">Accuracy</th><th style="width:10%">Curve</th><th style="width:13%">Def. of good</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td><code>policy_queue</code></td><td>yes</td><td>✔</td><td>✔</td><td>✔</td><td>✔ 3%</td><td><span class="m m-good">✔</span>Best-in-class</td></tr>
+        <tr><td><code>tokenizer_dataset</code></td><td>opt-in</td><td>✔ real data</td><td>✔ verified</td><td>✔</td><td>✕</td><td><span class="m m-good">✔</span>Strong on load + accuracy</td></tr>
+        <tr><td><code>tokenizer_simple</code></td><td>yes</td><td>▲</td><td>✔</td><td>✕</td><td>✕</td><td><span class="m m-warning">▲</span>Solid, no sweep</td></tr>
+        <tr><td><code>block_manager</code></td><td>gated</td><td>✔</td><td>✔</td><td>▲</td><td>✕</td><td><span class="m m-warning">▲</span>Documented, unthresholded</td></tr>
+        <tr><td><code>tcp_codec_perf</code></td><td>yes</td><td>✔</td><td>✕</td><td>✔</td><td>✕</td><td><span class="m m-warning">▲</span>Good shape, no gate</td></tr>
+        <tr><td><code>compute_pool_overhead</code></td><td>yes</td><td>✔</td><td>✕</td><td>✔</td><td>✕</td><td><span class="m m-warning">▲</span>Good shape, no gate</td></tr>
+        <tr><td><code>tracking_hash</code></td><td>yes</td><td>▲</td><td>✕</td><td>✔</td><td>✕</td><td><span class="m m-warning">▲</span>Undocumented</td></tr>
+        <tr><td><code>transfer_context_v2</code></td><td>gated</td><td>▲</td><td>✕</td><td>✔</td><td>✕</td><td><span class="m m-warning">▲</span>Tuned, unexplained</td></tr>
+        <tr><td><code>request_trace_finish_metadata</code></td><td>gated</td><td>▲</td><td>✕</td><td>▲</td><td>✕</td><td><span class="m m-warning">▲</span>Thin</td></tr>
+        <tr><td><code>kv_router_bench</code></td><td>gated</td><td>✔</td><td>—</td><td>—</td><td>✕</td><td><span class="m m-critical">✕</span>Misfiled — Tier 2</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Per bench</h2>
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div id="panels"></div>
+  </section>
+
+  <section>
+    <h2>What the audit says overall</h2>
+    <ul>
+      <li><b>One bench in ten defines "good."</b> Only <code>policy_queue.rs</code> sets a threshold (<code>noise_threshold(0.03)</code>). The other nine produce a number with nothing to compare it against, which is §2.4 unanswered across the tier.</li>
+      <li><b>Accuracy gating splits the field cleanly.</b> Four assert correctness; five do not; one is out of scope. Where it exists it is real — <code>tokenizer_dataset</code> counts mismatches and fails on any.</li>
+      <li><b>Sweeping is the norm, which is the procedure's strongest agreement.</b> Seven of nine criterion benches sweep an axis, so §2.1's "target is a curve" is satisfied by habit rather than by policy.</li>
+      <li><b>Documentation is the weakest common axis.</b> Five of ten have no module docs at all, so the load they assume is inferable only from code — the same "input distribution is never stated" problem found at Tier 2.</li>
+      <li><b>Nothing is systematized.</b> §5's ladder — programmatic, then procedural, then agent-runnable — has no rung built at this tier. Results live in whoever ran <code>cargo bench</code>'s terminal.</li>
+    </ul>
+  </section>
+
+</main>
+
+<script>
+const BENCHES = [
+ {id:"policy_queue", t:"policy_queue.rs", p:"lib/kv-router/benches/policy_queue.rs", s:"good", ci:"Runs in default CI",
+  v:["good","The reference implementation","The only bench that answers §2.4. Sweeps, asserts, documents itself, declares throughput, and sets an explicit noise threshold — every axis except a persisted baseline."],
+  r:[["Load defined?","good","6 groups sweeping request counts and lane configurations; <code>Throughput::</code> declared on 4, so results are per-item rather than per-batch."],
+     ["Accuracy gated?","good","4 assertions inside the benchmarked paths — a drained queue that returns the wrong count fails rather than scores."],
+     ["Target a curve?","good","12 sweep points across <code>bench_with_input</code> and explicit size lists. <code>pop_once_exact</code> and <code>drain_4096_exact</code> give both ends."],
+     ["Definition of good?","good","<code>.noise_threshold(0.03)</code> — the only stated pass/fail criterion in the tier. Also tunes <code>sample_size(20)</code>, <code>warm_up_time(1s)</code>, <code>measurement_time(3s)</code>."],
+     ["Data collected?","good","Throughput plus duration; criterion's change detection applies when a baseline exists."],
+     ["Analysis systematized?","critical","None. The 3% threshold is never evaluated because CI runs in test mode and no baseline is retained."]],
+  n:"Its threshold is the single most useful artifact at this tier — it is the one place someone wrote down what counts as a regression. It has never fired."},
+
+ {id:"tokenizer_dataset", t:"tokenizer_dataset.rs", p:"lib/llm/benches/tokenizer_dataset.rs", s:"good", ci:"Opt-in via RUN_BENCH=1",
+  v:["good","Best answer to §1 and §1.1 in the repository","Real downloaded data rather than synthetic input, correctness verified per sample, and a deliberate CI opt-out. Someone hit the procedure's problems and solved them."],
+  r:[["Load defined?","good","Downloads LongBench-v2 from HuggingFace. Overridable via <code>TOKENIZER_PATH</code>, <code>DATASET</code>, <code>MAX_SAMPLES</code> — the load is stated, reproducible, and real."],
+     ["Accuracy gated?","good","Counts mismatches across samples, reports the first three, and fails if any occur. This is §1.1 implemented literally."],
+     ["Target a curve?","good","Per-sample encode throughput across the dataset, so the distribution over real inputs is visible rather than one mean."],
+     ["Definition of good?","critical","No threshold. Correctness is gated; speed is only reported."],
+     ["Data collected?","good","Throughput per sample plus correctness counts."],
+     ["Analysis systematized?","critical","None — output is terminal text."]],
+  n:"Not a criterion bench: it has its own <code>fn main</code> and exits immediately unless <code>RUN_BENCH=1</code>, explicitly \"so that <code>cargo test --all-targets</code> in CI is not affected.\" That is the CI-interaction problem, anticipated and handled."},
+
+ {id:"tokenizer_simple", t:"tokenizer_simple.rs", p:"lib/llm/benches/tokenizer_simple.rs", s:"warning", ci:"Runs in default CI",
+  v:["warning","Broad and asserted, but flat","7 groups covering encode, decode, large decode, and tiktoken variants, with throughput declared throughout. No sweep and no module docs."],
+  r:[["Load defined?","warning","Inputs are in-file constants with no documentation of why those sizes. Reproducible, but the assumed distribution is unstated."],
+     ["Accuracy gated?","good","3 assertions — round-trip correctness is checked, not just timed."],
+     ["Target a curve?","critical","No sweep. 9 fixed benchmark functions, each one point. §2.1's curve is absent; you see levels, not shape."],
+     ["Definition of good?","critical","No threshold, no baseline."],
+     ["Data collected?","good","<code>Throughput::</code> on all 7 groups, so results are per-token rather than per-call."],
+     ["Analysis systematized?","critical","None."]],
+  n:"The tiktoken groups make this implicitly comparative — HF versus tiktoken is an A/B — but nothing records which should win or by how much."},
+
+ {id:"block_manager", t:"block_manager.rs", p:"lib/kvbm-logical/benches/block_manager.rs", s:"warning", ci:"Gated: testing",
+  v:["warning","Best-documented, still unthresholded","18 lines of module docs — the most in the tier — plus assertions in the benchmarked paths. Missing only a definition of good."],
+  r:[["Load defined?","good","Documented in the module header: block counts and match scenarios are explained, not just coded."],
+     ["Accuracy gated?","good","4 assertions including <code>assert_eq!(token_blocks.len(), n, \"expected {n} full blocks\")</code> — the setup is validated before timing."],
+     ["Target a curve?","warning","3 scenarios (active hit, inactive hit, bulk drop) rather than a swept axis. Comparative across cases, not continuous."],
+     ["Definition of good?","critical","No threshold."],
+     ["Data collected?","warning","Duration only — no <code>Throughput::</code>, so results are per-call and don't normalize by block count."],
+     ["Analysis systematized?","critical","None."]],
+  n:"Gated behind <code>testing</code>, so it does not run in the default pipeline — its compile health is not checked per-PR the way the ungated ones are."},
+
+ {id:"tcp_codec_perf", t:"tcp_codec_perf.rs", p:"lib/runtime/benches/tcp_codec_perf.rs", s:"warning", ci:"Runs in default CI",
+  v:["warning","Right shape, no verification and no gate","5 groups, 10 sweep points, throughput throughout — the cleanest curve in the tier. But nothing checks the codec round-trips correctly."],
+  r:[["Load defined?","good","Payload sizes swept explicitly; 3 lines of module docs state the intent."],
+     ["Accuracy gated?","critical","No assertions. A codec change that encodes faster and wrongly would score as an improvement."],
+     ["Target a curve?","good","10 sweep points across encode and decode for both requests and responses."],
+     ["Definition of good?","critical","No threshold."],
+     ["Data collected?","good","<code>Throughput::</code> on all 5 groups — bytes/sec, the correct unit here."],
+     ["Analysis systematized?","critical","None."]],
+  n:"The missing accuracy gate matters more here than elsewhere: serialization is exactly the kind of code where a correctness regression and a speed improvement can share a cause."},
+
+ {id:"compute_pool_overhead", t:"compute_pool_overhead.rs", p:"lib/runtime/benches/compute_pool_overhead.rs", s:"warning", ci:"Runs in default CI",
+  v:["warning","Most thorough sweep, no gate","10 benchmark functions across 11 sweep points and 3 groups, with criterion config tuned. Measures overhead, which is the right question for a pool."],
+  r:[["Load defined?","good","Sweeps task counts and parallelism explicitly across <code>compute_overhead</code>, <code>parallel_tasks</code>, and <code>block_in_place_overhead</code>."],
+     ["Accuracy gated?","critical","No assertions — tasks are timed, results not validated."],
+     ["Target a curve?","good","The most sweep points of any bench here."],
+     ["Definition of good?","critical","No threshold, though overhead is a metric where an absolute ceiling would be natural to state."],
+     ["Data collected?","warning","Duration only — no throughput unit, so numbers don't normalize across task counts."],
+     ["Analysis systematized?","critical","None."]],
+  n:"Config is tuned (3 settings) but no docs explain the chosen values, so it isn't clear whether they were measured or guessed."},
+
+ {id:"tracking_hash", t:"tracking_hash.rs", p:"lib/kv-router/benches/tracking_hash.rs", s:"warning", ci:"Runs in default CI",
+  v:["warning","Sweeps well, explains nothing","Zero module docs. The load is inferable only by reading the code, which is §1 unanswered in the weakest way."],
+  r:[["Load defined?","warning","5 sweep points exist, but with no documentation of what sizes they represent or why."],
+     ["Accuracy gated?","critical","No assertions — a hash change that broke correctness would still time cleanly."],
+     ["Target a curve?","good","Swept across input sizes with <code>Throughput::</code> declared."],
+     ["Definition of good?","critical","No threshold."],
+     ["Data collected?","good","Throughput declared."],
+     ["Analysis systematized?","critical","None."]],
+  n:"Hashing is on the routing hot path, and a correctness break here would silently corrupt cache matching. The absent accuracy gate is the notable omission."},
+
+ {id:"transfer_context_v2", t:"transfer_context_v2.rs", p:"lib/llm/benches/transfer_context_v2.rs", s:"warning", ci:"Gated: block-manager, testing-cuda",
+  v:["warning","Heavily tuned, entirely unexplained","9 criterion config settings — the most in the tier — and zero documentation of why any of them. Also no assertions and no throughput unit."],
+  r:[["Load defined?","warning","4 sweep points across blocking, single-async, and concurrent-async modes. No docs on what is being transferred or at what size."],
+     ["Accuracy gated?","critical","No assertions — transfers are timed, completion not verified."],
+     ["Target a curve?","good","Sweeps across concurrency modes."],
+     ["Definition of good?","critical","No threshold despite the heaviest tuning."],
+     ["Data collected?","warning","Duration only — for a transfer benchmark, bytes/sec would be the natural unit."],
+     ["Analysis systematized?","critical","None."]],
+  n:"9 config settings imply someone fought noise here. That knowledge is in the numbers but not in the file, so the next person cannot tell tuned from arbitrary."},
+
+ {id:"request_trace_finish_metadata", t:"request_trace_finish_metadata.rs", p:"lib/llm/benches/request_trace_finish_metadata.rs", s:"warning", ci:"Gated: request-trace-bench",
+  v:["warning","Narrow and undocumented","2 groups covering postprocessor finish metadata and tool calls. Throughput declared, but no docs, no assertions, no threshold."],
+  r:[["Load defined?","warning","2 sweep points. No module docs explaining the metadata shapes being measured."],
+     ["Accuracy gated?","critical","No assertions."],
+     ["Target a curve?","warning","Two points is comparative, not a curve."],
+     ["Definition of good?","critical","No threshold."],
+     ["Data collected?","good","<code>Throughput::</code> declared on both groups."],
+     ["Analysis systematized?","critical","None."]],
+  n:"This is the only bench touching postprocess, so the tier's coverage of that stage rests entirely on it — and it covers metadata only, not per-token decode in a streaming response."},
+
+ {id:"kv_router_bench", t:"kv_router_bench.rs", p:"lib/llm/benches/kv_router_bench.rs", s:"critical", ci:"Gated: kv-router-stress",
+  v:["critical","Misfiled — this is a Tier 2 harness","1,749 lines with its own <code>fn main</code> and clap CLI. Not a criterion bench and not a micro bench. It builds a radix tree by publishing KV events to NATS, then sends HTTP requests and measures routing-decision latency."],
+  r:[["Load defined?","good","Documented in the module header and configurable via CLI flags — tree size, request count, hash construction matching the frontend."],
+     ["Accuracy gated?","warning","Not applicable in the micro sense, but it does ensure published hashes match tokenized requests, so tree hits are real rather than accidental."],
+     ["Target a curve?","warning","Not applicable — it is a stress harness, not a swept micro measurement."],
+     ["Definition of good?","critical","No threshold."],
+     ["Data collected?","good","Routing decision latency under load, through the real HTTP path and NATS event plane."],
+     ["Analysis systematized?","critical","None."]],
+  n:"<b>Correction.</b> An earlier note called this dead weight and proposed deleting it, on the evidence that it contained no <code>bench_function</code> calls. That was the wrong instrument for a file that never used criterion. It belongs in the Tier 2 inventory alongside the replay and frontend harnesses, not in a <code>benches/</code> directory where a grep for criterion symbols reads its absence as decay."}
+];
+
+const tabs = document.getElementById('tabs'), panels = document.getElementById('panels');
+BENCHES.forEach(function(b, i){
+  const t = document.createElement('button');
+  t.className = 'tab'; t.role = 'tab'; t.id = 'tab-'+b.id;
+  t.setAttribute('aria-selected', i===0 ? 'true' : 'false');
+  t.setAttribute('aria-controls','panel-'+b.id);
+  t.innerHTML = '<span class="dot d-'+b.s+'"></span>'+b.t;
+  t.onclick = function(){ select(b.id); };
+  tabs.appendChild(t);
+
+  const p = document.createElement('div');
+  p.className = 'panel' + (i===0 ? ' on' : ''); p.id = 'panel-'+b.id; p.role='tabpanel';
+  p.innerHTML =
+    '<p class="ptitle">'+b.t+'</p><p class="ppath">'+b.p+' · '+b.ci+'</p>'+
+    '<div class="verdict v-'+b.v[0]+'"><b>'+b.v[1]+'</b>'+b.v[2]+'</div>'+
+    '<table class="rub"><tbody>'+
+      b.r.map(function(row){
+        const g = row[1]==='good' ? '✔' : row[1]==='warning' ? '▲' : '✕';
+        return '<tr><th>'+row[0]+'</th><td><span class="m m-'+row[1]+'">'+g+'</span>'+row[2]+'</td></tr>';
+      }).join('')+
+    '</tbody></table>'+
+    '<div class="note">'+b.n+'</div>';
+  panels.appendChild(p);
+});
+function select(id){
+  BENCHES.forEach(function(b){
+    document.getElementById('tab-'+b.id).setAttribute('aria-selected', b.id===id ? 'true':'false');
+    document.getElementById('panel-'+b.id).classList.toggle('on', b.id===id);
+  });
+}
+tabs.addEventListener('keydown', function(e){
+  const ids = BENCHES.map(function(b){return b.id;});
+  const cur = ids.findIndex(function(x){ return document.getElementById('tab-'+x).getAttribute('aria-selected')==='true'; });
+  let n = null;
+  if(e.key==='ArrowRight') n = (cur+1)%ids.length;
+  if(e.key==='ArrowLeft')  n = (cur-1+ids.length)%ids.length;
+  if(n!==null){ select(ids[n]); document.getElementById('tab-'+ids[n]).focus(); e.preventDefault(); }
+});
+</script>
+</body>
+</html>
