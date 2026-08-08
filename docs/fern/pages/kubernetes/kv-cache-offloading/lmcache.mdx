@@ -1,0 +1,191 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Deploy LMCache MP
+subtitle: Run aggregated vLLM serving with KV cache offloaded to a per-node LMCache MP DaemonSet over cross-Pod CUDA IPC.
+---
+
+This guide deploys Dynamo aggregated vLLM serving on Kubernetes with KV cache offloaded to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. It uses the [`v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/fc626a5f053cdc4112d752be47eb08a303623311/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml) manifest plus an `LMCacheEngine` CR managed by the LMCache operator.
+
+## Prerequisites
+
+- [cert-manager](https://cert-manager.io/docs/installation/) — the LMCache
+  operator's webhook certificates are issued through it:
+  ```bash
+  kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.21.1/cert-manager.yaml
+  ```
+
+<Steps toc={true}>
+<Step title="Install the Dynamo platform" id="install-the-dynamo-platform">
+
+```bash
+export RELEASE_VERSION=1.3.0
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$RELEASE_VERSION.tgz
+helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace dynamo-system --create-namespace \
+  --wait
+```
+
+Verify the install:
+```bash
+kubectl get crd | grep nvidia.com
+# expect (among others):
+#   dynamographdeployments.nvidia.com
+```
+
+</Step>
+<Step title="Install the LMCache operator" id="install-the-lmcache-operator">
+
+```bash
+kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-latest/install.yaml
+```
+
+<Note>
+Tested with the LMCache operator image `lmcache/lmcache-operator:v0.5.2`.
+</Note>
+
+Verify the install:
+```bash
+kubectl get crd | grep lmcache
+# expect (among others):
+#   lmcacheengines.lmcache.lmcache.ai
+```
+
+</Step>
+<Step title="Create the namespace" id="create-the-namespace">
+
+```bash
+kubectl create namespace dynamo-lmcache
+```
+
+</Step>
+<Step title="Create the HF token Secret" id="create-the-hf-token-secret">
+
+Both `Frontend` and `VllmDecodeWorker` reference `hf-token-secret` via a Secret ref.
+The Secret must exist or the pods fail to start with `secret "hf-token-secret" not found`.
+
+```bash
+# Replace the dummy token below with a real HF token.
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hf-token-secret
+  namespace: dynamo-lmcache
+type: Opaque
+stringData:
+  HF_TOKEN: "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+EOF
+```
+
+</Step>
+<Step title="Deploy the LMCacheEngine" id="deploy-the-lmcacheengine">
+
+Replace `my-tag` below with the `lmcache/vllm-openai` image tag you want to run.
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: lmcache-mp
+  namespace: dynamo-lmcache
+spec:
+  image:
+    repository: lmcache/vllm-openai
+    tag: my-tag
+    pullPolicy: IfNotPresent
+  # L1 (CPU RAM) cache size — bump for production workloads.
+  l1:
+    sizeGB: 16
+EOF
+```
+
+<Info>
+The server tag must match
+the LMCache version bundled inside the Dynamo worker image from the next step.
+Validated: server `v0.4.6` paired with
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` (bundles LMCache 0.4.6). Check it with:
+`docker run --rm --entrypoint python3 <worker-image> -c "import lmcache; print(lmcache.__version__)"`.
+Mismatched versions do not speak the same MP wire protocol.
+</Info>
+
+Verify with:
+```bash
+kubectl -n dynamo-lmcache get lmcacheengine lmcache-mp
+# expect: PHASE  Running
+```
+
+</Step>
+<Step title="Deploy the Dynamo worker" id="deploy-the-dynamo-worker">
+
+Edit [`examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/fc626a5f053cdc4112d752be47eb08a303623311/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml): replace
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` (on both `Frontend` and
+`VllmDecodeWorker`) with your Dynamo vllm-runtime image.
+
+```bash
+kubectl apply -n dynamo-lmcache -f examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml
+```
+
+Verify with:
+```bash
+kubectl -n dynamo-lmcache get pods -l nvidia.com/dynamo-component-type=worker
+# expect: READY 1/1, STATUS Running
+```
+
+</Step>
+<Step title="Verify" id="verify">
+
+Send the same long prompt twice:
+
+```bash
+kubectl -n dynamo-lmcache port-forward svc/vllm-agg-lmcache-frontend 8000:8000 >/dev/null &
+trap 'kill %1' EXIT
+sleep 4
+
+PROMPT=$(python3 -c "print('the quick brown fox jumps over the lazy dog '*60)")
+REQ="{\"model\":\"Qwen/Qwen3-0.6B\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":5}"
+
+for label in cold warm; do
+  echo "--- $label ---"
+  curl -s http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" -d "$REQ" \
+    | python3 -m json.tool | grep -E "prompt_tokens|cached_tokens"
+done
+```
+
+Then check LMCache server metrics:
+
+```bash
+# The DaemonSet pod on the worker's node serves the traffic; check them all.
+for LMC in $(kubectl -n dynamo-lmcache get pod -l app.kubernetes.io/instance=lmcache-mp -o name); do
+  kubectl -n dynamo-lmcache exec "$LMC" -- curl -s localhost:8080/metrics | grep '^lmcache_mp_lookup'
+done
+```
+
+Expected: warm response shows `cached_tokens > 0`, and
+`lmcache_mp_lookup_hit_tokens_total > 0`.
+
+<Note>
+The `lmcache_mp_` metrics are served on the control HTTP port `8080`
+(exposed by the `lmcache-mp` Service).
+</Note>
+
+</Step>
+</Steps>
+
+## Cleanup
+
+```bash
+kubectl delete -n dynamo-lmcache -f examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml
+kubectl -n dynamo-lmcache delete lmcacheengine lmcache-mp
+kubectl delete namespace dynamo-lmcache
+kubectl delete -f https://github.com/LMCache/LMCache/releases/download/operator-latest/install.yaml
+helm uninstall dynamo-platform -n dynamo-system
+kubectl delete namespace dynamo-system
+```
+
+## Related pages
+
+- [Set up KV Cache Offloading](./overview.mdx) — choose an offloading connector for a DGD worker.
+- [KV Cache Offloading for vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md) — engine internals and the local-CLI workflow.
