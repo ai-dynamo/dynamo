@@ -29,7 +29,7 @@ import pickle
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
-from typing import Any, Awaitable
+from typing import Any
 
 import torch
 from pydantic import BaseModel
@@ -233,8 +233,14 @@ class MmKwargsNixlSender(MmKwargsSender):
 
     async def _encode_item(
         self, idx: int, pickled: bytes
-    ) -> tuple[TensorTransferSpec, Awaitable[None]]:
-        """Register pickled bytes with NIXL and return the spec + completion."""
+    ) -> tuple[TensorTransferSpec, Any]:
+        """Register pickled bytes with NIXL and return the spec + operation.
+
+        The second element is the ``ReadableOperation`` itself, typed as ``Any``
+        to match the base hook's opaque ``cleanup_item`` contract and to avoid
+        depending on ``dynamo.nixl_connect``, which is imported lazily so the
+        module stays importable where NIXL is unavailable.
+        """
         with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
             pickled_tensor = torch.frombuffer(bytearray(pickled), dtype=torch.uint8)
             descriptor = self._nixl_connect.Descriptor(pickled_tensor)
