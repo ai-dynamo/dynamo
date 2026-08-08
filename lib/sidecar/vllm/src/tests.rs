@@ -218,7 +218,7 @@ impl pb::control_server::Control for FakeVllm {
             sources: (0..2)
                 .map(|rank| pb::KvEventSource {
                     transport: "zmq".to_string(),
-                    endpoint: format!("tcp://127.0.0.1:{}", 20081 + rank),
+                    endpoint: format!("tcp://*:{}", 20081 + rank),
                     topic: String::new(),
                     replay_endpoint: String::new(),
                     data_parallel_rank: Some(rank),
@@ -654,6 +654,16 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
         source,
         dynamo_backend_common::KvEventSource::Zmq { topic, .. } if topic.is_empty()
     )));
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| match source {
+                dynamo_backend_common::KvEventSource::Zmq { endpoint, .. } => endpoint.as_str(),
+                dynamo_backend_common::KvEventSource::Push { .. } => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        ["tcp://127.0.0.1:20081", "tcp://127.0.0.1:20082"]
+    );
 
     let mut routed_request = serde_json::to_value(request()).expect("serialize request");
     routed_request["routing"] = json!({"dp_rank": 1, "cache_salt": "cache-salt"});
