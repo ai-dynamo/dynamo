@@ -62,7 +62,7 @@ func prepareRestoreImageDirForSocketScope(checkpointPath string, restoreSocketSc
 		return checkpointPath, func() {}, nil
 	}
 
-	privateDir, err := os.MkdirTemp("", "dynamo-criu-restore-*")
+	privateDir, err := os.MkdirTemp(filepath.Dir(checkpointPath), ".dynamo-criu-restore-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create private CRIU image directory: %w", err)
 	}
@@ -83,9 +83,10 @@ func prepareRestoreImageDirForSocketScope(checkpointPath string, restoreSocketSc
 		if name == filesImageFilename || !strings.HasSuffix(name, ".img") {
 			continue
 		}
-		// Restore images are read-only; symlinks avoid copying page images.
-		if err := os.Symlink(filepath.Join(checkpointPath, name), filepath.Join(privateDir, name)); err != nil {
-			return fail(fmt.Errorf("failed to expose CRIU image %s: %w", name, err))
+		// CRIU does not modify restore images; hard links keep them visible after it
+		// enters the restored mount namespace without copying large page images.
+		if err := os.Link(filepath.Join(checkpointPath, name), filepath.Join(privateDir, name)); err != nil {
+			return fail(fmt.Errorf("failed to hard-link CRIU image %s: %w", name, err))
 		}
 	}
 

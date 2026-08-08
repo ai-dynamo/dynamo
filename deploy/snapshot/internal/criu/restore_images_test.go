@@ -81,6 +81,9 @@ func TestPrepareRestoreImageDir(t *testing.T) {
 	if imageDir == checkpointPath {
 		t.Fatal("matching CUDA socket should use a private image directory")
 	}
+	if got, want := filepath.Dir(imageDir), filepath.Dir(checkpointPath); got != want {
+		t.Fatalf("private image directory parent = %q, want %q", got, want)
+	}
 
 	privateEntries := readFilesImage(t, imageDir)
 	originalEntries[0].Usk.Name = []byte("\x00cuda-uvmfd-987654321-1\x00")
@@ -90,12 +93,19 @@ func TestPrepareRestoreImageDir(t *testing.T) {
 		}
 	}
 
+	canonicalPageInfo, err := os.Lstat(filepath.Join(checkpointPath, "pages-1.img"))
+	if err != nil {
+		t.Fatalf("lstat canonical pages image: %v", err)
+	}
 	linkInfo, err := os.Lstat(filepath.Join(imageDir, "pages-1.img"))
 	if err != nil {
 		t.Fatalf("lstat private pages image: %v", err)
 	}
-	if linkInfo.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("pages image was copied instead of exposed by symlink")
+	if linkInfo.Mode()&os.ModeSymlink != 0 || !linkInfo.Mode().IsRegular() {
+		t.Fatalf("private pages image mode = %v, want regular non-symlink", linkInfo.Mode())
+	}
+	if !os.SameFile(canonicalPageInfo, linkInfo) {
+		t.Fatal("private pages image is not a hard link to the canonical image")
 	}
 	gotPageImage, err := os.ReadFile(filepath.Join(imageDir, "pages-1.img"))
 	if err != nil {
