@@ -28,11 +28,14 @@ When `--no-router-kv-events` is used, the router does not consume worker KV even
 
 #### Prefix Cache Persistence and Recovery
 
-Prefix cache recovery matters because stale or missing prefix state directly affects cache-hit routing decisions. Dynamo recovers state from worker-local indexers:
+Prefix cache recovery matters because stale or missing prefix state affects cache-hit routing
+decisions. Dynamo uses worker-local indexers to recover worker-to-router event-plane gaps:
 
-- Prefix state persists on workers. Events are fire-and-forget, but workers retain their local indexer state.
+- Each worker applies accepted, normalized state updates to its worker-local indexer before
+  event-plane publication.
 - On startup, each router queries each worker's local indexer to rebuild prefix state.
 - Recovery depends on workers being available. If a worker is down, its blocks cannot be recovered until the worker returns.
+- Recovery does not cover a raw engine event that was lost before it reached the Dynamo worker.
 
 For more on gap detection and replay, see [KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md).
 
@@ -132,11 +135,11 @@ Request-plane transport is independent of KV event transport. The request plane 
 
 When `--router-kv-overlap-score-credit` is set to 0, no KV indexer is created and prefix matching is disabled. When `--no-router-kv-events` is set, a KV indexer is still created but no event subscriber is launched; the router predicts cache state from its own routing decisions with TTL-based expiration.
 
-Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag. The frontend flag controls whether the router consumes events; backend flags control whether workers publish them. If the router is not consuming events, workers that still publish will waste resources but cause no harm.
-
-- **vLLM**: Pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or `'{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'` to enable.
-- **SGLang**: Pass `--kv-events-config` with a JSON config to enable, or omit it to keep publishing disabled.
-- **TRT-LLM**: Pass `--publish-kv-events` to enable, or omit it to keep publishing disabled. The legacy `--publish-events-and-metrics` alias is accepted but deprecated.
+Backend KV event publication is independent of the frontend `--no-router-kv-events` flag. The
+frontend flag controls whether the router consumes events. Backend flags control whether workers
+publish events. If the router does not consume events, worker publication uses unnecessary
+resources. See the [Router Quick Start](overview.md#quick-start) for the vLLM and SGLang worker
+configurations. The backend reference guides explain worker roles.
 
 The CLI arg `--router-ttl-secs` controls local cache prediction lifetime when the router operates without receiving events from workers. When workers are configured to publish KV events, the router relies on worker-side eviction events and this parameter is ignored.
 

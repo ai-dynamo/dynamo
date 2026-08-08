@@ -9,28 +9,62 @@ The Dynamo KV Router intelligently routes requests by evaluating their computati
 
 ## Quick Start
 
-To launch the Dynamo frontend with the KV Router:
+Event-driven KV routing requires configuration at the frontend and each worker whose cache state
+the router tracks.
 
-```bash
-python -m dynamo.frontend --router-mode kv --http-port 8000
-```
+> [!IMPORTANT]
+> Event-driven KV routing requires both configurations below. `--router-mode kv` enables worker
+> selection on the frontend. It does not enable KV event publication in vLLM or SGLang. Without
+> `--kv-events-config` on event-producing workers, no engine events reach the worker-local indexer
+> or router.
+
+1. Start the frontend with the KV router enabled:
+
+   ```bash
+   python -m dynamo.frontend --router-mode kv --http-port 8000
+   ```
+
+2. Enable engine KV event publication on each aggregated worker.
+   For a standard disaggregated deployment, enable publication on each prefill worker.
+
+   For vLLM:
+
+   ```bash
+   python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+   ```
+
+   For SGLang:
+
+   ```bash
+   python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+   ```
+
+   For vLLM, the JSON must set `"enable_kv_cache_events":true`. If you omit the other fields,
+   vLLM uses its ZMQ publisher and default endpoint. For SGLang, the JSON must include
+   `"publisher":"zmq"` and `"endpoint"`. The `"topic"` field is optional. Do not use the
+   vLLM-only `{"enable_kv_cache_events":true}` form for SGLang.
+
+For workers that share a network namespace, use a unique event endpoint port. The
+`--kv-events-config` flag configures the first event hop from the engine to its Dynamo worker.
+The worker normalizes the events and applies them to its worker-local indexer. It publishes the
+normalized updates to the router over Dynamo's separate event plane. See
+[Router Design](router-design.md#event-flow-and-recovery) for the full data path and recovery
+boundary.
 
 The [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) is the
 canonical reference for embedded-router flags, environment variables, defaults, and
 boolean forms. See [Configuration and Tuning](configuration-and-tuning.md) for behavioral
 guidance.
 
-> [!IMPORTANT]
-> `--router-mode kv` (or `DYN_ROUTER_MODE=kv`) enables KV routing on the
-> frontend, but it does not enable KV event publishing on backend workers. With
-> the default `--router-kv-events` setting, missing publishers leave the router
-> in event-driven mode without real cache state; the router does not
-> automatically switch to approximate prediction. Configure the backend-specific
-> publishing flags in [Router Operations](router-operations.md#additional-notes).
-> If workers will not publish events, use `--no-router-kv-events` for approximate
-> cache prediction or `--load-aware` for load-only routing.
+Without the worker flag, the router does not automatically switch to approximate prediction.
+If workers will not publish events, use `--no-router-kv-events` for approximate cache prediction.
+For load-only routing, use `--load-aware`.
 
-For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service.
+For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Add the backend event flag to the
+workers described above. See [Using the Dynamo Frontend](../../../../kubernetes/kv-aware-routing/dynamo-frontend.md)
+for complete `DynamoGraphDeployment` snippets.
 
 ### Standalone Router
 
