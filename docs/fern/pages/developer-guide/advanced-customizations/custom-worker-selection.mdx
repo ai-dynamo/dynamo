@@ -219,7 +219,7 @@ python3 -m dynamo.frontend \
   --router-policy-config "$POLICY_DIR/worker-selection.yaml"
 ```
 
-The frontend loads `least-busy` at startup and uses its factory for KV-router partitions. Invalid configuration or duplicate registration stops startup.
+The frontend loads `least-busy` at startup and uses its factory for KV-router partitions. Invalid configuration or duplicate registration stops startup. Linked policies are supported by the frontend and custom EPP binaries, not `python3 -m dynamo.router`.
 
 ## Run With EPP
 
@@ -248,7 +248,7 @@ cargo run --release
 
 Follow the [standalone EPP on-ramp](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for worker discovery, KV events, tokenization, Kubernetes resources, and the remaining EPP environment. Use `acme-epp` in place of the stock EPP executable. It uses the same ports, environment, and startup behavior.
 
-Linked policies require `DYN_EPP_MODE=standalone`. In `dynamo` mode, EPP delegates selection to the Dynamo runtime. The stock `dynamo-ext-proc` binary uses Dynamo's default selector and rejects custom instances at startup.
+Linked policies require `DYN_EPP_MODE=standalone`. In `dynamo` mode, EPP delegates selection to the Dynamo runtime. The stock standalone `dynamo-ext-proc` binary uses Dynamo's default selector and rejects custom instances at startup.
 
 ## Policy Contract
 

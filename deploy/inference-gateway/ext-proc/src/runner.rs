@@ -130,9 +130,13 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 /// Run the stock EPP until it exits.
 pub async fn run() -> Result<()> {
     init_tracing();
-    let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-    reject_unlinked_worker_selection_policy(&kv_router_config)?;
-    run_inner(EppMode::from_env()?, StandaloneSelectionService::Default).await
+    let mode = EppMode::from_env()?;
+    if matches!(mode, EppMode::Standalone) {
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        reject_unlinked_worker_selection_policy(&kv_router_config)?;
+    }
+    run_inner(mode, StandaloneSelectionService::Default).await
 }
 
 fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
