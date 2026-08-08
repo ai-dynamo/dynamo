@@ -894,12 +894,23 @@ fn anthropic_sanitized_error_with_details(
         Json(AnthropicErrorResponse {
             object_type: "error".to_string(),
             error: AnthropicErrorBody {
-                error_type: err.anthropic_type().to_string(),
+                error_type: anthropic_sanitized_error_type(err).to_string(),
                 message: err.to_string(),
             },
         }),
     )
         .into_response()
+}
+
+fn anthropic_sanitized_error_type(error: SanitizedError) -> &'static str {
+    match error {
+        SanitizedError::Cancelled => "request_cancelled",
+        SanitizedError::Overloaded | SanitizedError::Unavailable => "overloaded_error",
+        SanitizedError::PreserveServerError(status) if matches!(status.as_u16(), 503 | 529) => {
+            "overloaded_error"
+        }
+        SanitizedError::Internal | SanitizedError::PreserveServerError(_) => "api_error",
+    }
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
@@ -1053,5 +1064,19 @@ mod tests {
             find_invalid_argument_in_chain(error.as_ref()).map(|error| error.message()),
             Some("invalid request")
         );
+    }
+
+    #[test]
+    fn sanitized_server_statuses_keep_anthropic_error_types() {
+        for (status, expected) in [
+            (StatusCode::SERVICE_UNAVAILABLE, "overloaded_error"),
+            (StatusCode::from_u16(529).unwrap(), "overloaded_error"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "api_error"),
+        ] {
+            assert_eq!(
+                anthropic_sanitized_error_type(SanitizedError::PreserveServerError(status)),
+                expected
+            );
+        }
     }
 }
