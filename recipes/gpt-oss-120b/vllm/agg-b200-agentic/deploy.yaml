@@ -67,6 +67,13 @@ spec:
                 - --max-num-batched-tokens=32768
                 - --enable-chunked-prefill
                 - --enable-prefix-caching
+                # Required for KV-aware routing: the Frontend above runs --router-kv-events, but
+                # dynamo.vllm only publishes vLLM KV-cache events when this flag is passed
+                # explicitly (see create_kv_events_config in components/src/dynamo/vllm/args.py).
+                # Without it the worker logs use_kv_events=False, the router scores
+                # overlap_blocks=0 on every request, and --router-mode kv silently degrades to
+                # pure load balancing.
+                - '--kv-events-config={"enable_kv_cache_events":true}'
                 - --async-scheduling
                 - --enable-flashinfer-autotune
                 - --compilation-config=$(COMPILATION_CONFIG)
