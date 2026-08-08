@@ -15,11 +15,6 @@ description = "Envoy ext_proc gRPC server for Dynamo inference routing"
 name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
-[features]
-# Links a policy catalog selected by the dependency alias below. Private images replace
-# that dependency with their catalog crate; the stock image does not enable this feature.
-custom-policy = ["dep:dynamo-worker-selection-policy-catalog"]
-
 [dependencies]
 dynamo-kv-router = { workspace = true, features = [
     "metrics",
@@ -27,7 +22,6 @@ dynamo-kv-router = { workspace = true, features = [
     "standalone-selection",
 ] }
 dynamo-runtime = { workspace = true }
-dynamo-worker-selection-policy-catalog = { path = "../../../lib/router-plugins/catalog", optional = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }

@@ -138,7 +138,7 @@ pub async fn run() -> Result<()> {
 fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
     if let Some(instance) = config.selected_worker_selection_policy_instance()? {
         anyhow::bail!(
-            "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
         );
     }
     Ok(())
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn stock_epp_rejects_linked_worker_selection_policy() {
+    fn stock_epp_rejects_custom_worker_selection_policy() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),

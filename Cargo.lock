@@ -2492,7 +2492,6 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
- "dynamo-worker-selection-policy-catalog",
  "futures",
  "hyper-util",
  "k8s-openapi",
@@ -3110,13 +3109,6 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
-]
-
-[[package]]
-name = "dynamo-worker-selection-policy-catalog"
-version = "1.4.0"
-dependencies = [
- "dynamo-kv-router",
 ]
 
 [[package]]

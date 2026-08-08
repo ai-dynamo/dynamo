@@ -247,10 +247,6 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo check --locked --features custom-policy,select-service
-    - name: Compile linked custom worker-selection policy catalog
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      run: cargo check --locked -p dynamo-ext-proc --features custom-policy
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -334,10 +330,6 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
-    - name: Lint linked custom worker-selection policy catalog
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      run: cargo clippy --locked --no-deps -p dynamo-ext-proc --features custom-policy --all-targets -- -D warnings
     - name: Run KVBM offload Mooncake trace clippy
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
