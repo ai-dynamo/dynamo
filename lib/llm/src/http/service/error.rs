@@ -149,7 +149,8 @@ impl ClassifiedHttpError {
     /// Classify a backend stream event through the same logical nested-error
     /// flow as `from_error`; the event's outer typed validation is authoritative,
     /// while nested operational failures retain their retry/cancellation meaning.
-    pub(crate) fn from_annotated<T: serde::Serialize>(event: &Annotated<T>) -> Option<Self> {
+    /// Ordinary data is never interpreted as an error.
+    pub(crate) fn from_annotated<T>(event: &Annotated<T>) -> Option<Self> {
         if event.is_error() {
             if let Some(error) = event.error.as_ref() {
                 return Some(Self::from_error_with_validation_scope(
@@ -171,13 +172,6 @@ impl ClassifiedHttpError {
             }
 
             return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
-        }
-
-        if let Some(data) = event.data.as_ref()
-            && let Ok(diagnostic) = serde_json::to_string(data)
-            && let Some(classified) = Self::from_legacy_http_json(diagnostic)
-        {
-            return Some(classified);
         }
 
         if let Some(comments) = event.comment.as_ref()
@@ -649,51 +643,30 @@ mod tests {
     }
 
     #[test]
-    fn legacy_data_and_untagged_comment_errors_remain_supported() {
-        let cases = [
-            (
-                "data payload",
-                Annotated {
-                    data: Some(serde_json::json!({
-                        "code": 415,
-                        "message": "unsupported media type",
-                    })),
-                    id: None,
-                    event: None,
-                    comment: None,
-                    error: None,
-                },
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "unsupported media type",
-            ),
-            (
-                "untagged comment",
-                Annotated {
-                    data: None,
-                    id: None,
-                    event: Some("legacy.backend.annotation".to_string()),
-                    comment: Some(vec![
-                        r#"{"code":400,"message":"bad prompt","type":"Bad Request"}"#.to_string(),
-                    ]),
-                    error: None,
-                },
-                StatusCode::BAD_REQUEST,
-                "bad prompt",
-            ),
-        ];
+    fn legacy_untagged_comment_errors_remain_supported() {
+        let event = Annotated::<()> {
+            data: None,
+            id: None,
+            event: Some("legacy.backend.annotation".to_string()),
+            comment: Some(vec![
+                r#"{"code":400,"message":"bad prompt","type":"Bad Request"}"#.to_string(),
+            ]),
+            error: None,
+        };
 
-        for (shape, event, expected_status, expected_message) in cases {
-            let classified = ClassifiedHttpError::from_annotated(&event)
-                .unwrap_or_else(|| panic!("{shape} must remain an error"));
-            assert_eq!(classified.status(), expected_status, "{shape}");
-            assert_eq!(classified.message(), expected_message, "{shape}");
-        }
+        let classified = ClassifiedHttpError::from_annotated(&event)
+            .expect("untagged comment must remain an error");
+        assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(classified.message(), "bad prompt");
+    }
 
-        let normal = Annotated::from_data(serde_json::json!({
-            "code": 200,
-            "message": "normal response",
+    #[test]
+    fn http_looking_data_is_not_classified_as_an_error() {
+        let data = Annotated::from_data(serde_json::json!({
+            "code": 415,
+            "message": "unsupported media type",
         }));
-        assert!(ClassifiedHttpError::from_annotated(&normal).is_none());
+        assert!(ClassifiedHttpError::from_annotated(&data).is_none());
     }
 
     #[test]

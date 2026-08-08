@@ -1898,7 +1898,7 @@ pub(super) async fn check_for_backend_error<T>(
     timeout: Option<std::time::Duration>,
 ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ClassifiedHttpError>
 where
-    T: serde::Serialize + Send + 'static,
+    T: Send + 'static,
 {
     use futures::stream::StreamExt;
 
