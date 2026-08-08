@@ -475,7 +475,7 @@ def _render_deepseek_v4_prompt_token_ids(
     try:
         from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
     except ImportError as exc:
-        raise ValueError(
+        raise ImportError(
             "DeepSeek-V4 preprocessing requires SGLang's "
             "sglang.srt.entrypoints.openai.encoding_dsv4 encoder. "
             "Install an SGLang build that includes the DeepSeek-V4 integration."
@@ -766,7 +766,7 @@ def preprocess_chat_request(
         chosen_name = tool_choice["function"]["name"]
         available_names = {t.function.name for t in (sglang_tools or [])}
         if chosen_name not in available_names:
-            raise ValueError(
+            raise PreprocessError(
                 f"tool_choice names function {chosen_name!r}, but it is not "
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )

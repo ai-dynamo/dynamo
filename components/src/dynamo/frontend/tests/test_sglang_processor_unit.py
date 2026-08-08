@@ -65,6 +65,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
+from dynamo.llm.exceptions import InvalidArgument
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -2097,7 +2098,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         ), "tool_choice=none with flag off should keep tools in template"
 
     def test_named_tool_choice_missing_function_raises(self, tokenizer):
-        """Named tool_choice referencing a function absent from tools raises ValueError."""
+        """A named tool_choice absent from tools is client validation."""
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hello"}],
@@ -2119,13 +2120,27 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 "function": {"name": "does_not_exist"},
             },
         }
-        with pytest.raises(ValueError, match="does_not_exist"):
+        with pytest.raises(PreprocessError, match="does_not_exist"):
             preprocess_chat_request(
                 request,
                 tokenizer=tokenizer,
                 tool_call_parser_name="hermes",
                 reasoning_parser_name=None,
             )
+
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=FakeRoutedEngine(items=[]),
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        with pytest.raises(InvalidArgument, match="does_not_exist"):
+            asyncio.run(collect())
 
     def test_chat_template_override_helpers(self, tmp_path):
         """Chat template overrides can be supplied as a Jinja file path."""
@@ -2307,6 +2322,31 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["role"] == "system"
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_v4_missing_sglang_encoder_is_import_error(self, monkeypatch):
+        """A missing server-side integration is not invalid client input."""
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            None,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+        with pytest.raises(
+            ImportError,
+            match="DeepSeek-V4 preprocessing requires SGLang's",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": "deepseek-ai/DeepSeek-V4-Pro",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+                tokenizer=NoTemplateTokenizer(),
+                tool_call_parser_name=None,
+                reasoning_parser_name="deepseek-v4",
+            )
 
     def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
         self, monkeypatch
