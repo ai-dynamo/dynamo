@@ -647,28 +647,27 @@ fn convert_input_items_to_messages(
 
 /// Convert Responses API tools to the flat Chat Completions representation.
 ///
-/// Bare function names are preserved for model compatibility. This is only
-/// reversible when every forwarded function name is unique across top-level
-/// and namespace tools, so reject collisions instead of guessing which
-/// namespace to restore on the response path.
+/// Bare function names are preserved for model compatibility. Reject collisions
+/// from different origins instead of guessing which namespace to restore on the
+/// response path.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
-    let mut origins = HashMap::<String, bool>::new();
+    let mut origins = HashMap::<String, Option<String>>::new();
     let mut push_function = |name: &str,
                              description: &Option<String>,
                              parameters: &Option<serde_json::Value>,
                              strict: Option<bool>,
-                             is_namespaced: bool|
+                             namespace: Option<&str>|
      -> anyhow::Result<()> {
-        if origins
-            .get(name)
-            .is_some_and(|previous_is_namespaced| *previous_is_namespaced || is_namespaced)
-        {
-            return Err(anyhow::anyhow!(
-                "Responses function tool name '{name}' is ambiguous after namespace flattening"
-            ));
+        if let Some(previous_namespace) = origins.get(name) {
+            if previous_namespace.as_deref() != namespace {
+                return Err(anyhow::anyhow!(
+                    "Responses function tool name '{name}' is ambiguous after namespace flattening"
+                ));
+            }
+        } else {
+            origins.insert(name.to_owned(), namespace.map(str::to_owned));
         }
-        origins.entry(name.to_owned()).or_insert(is_namespaced);
         converted.push(ChatCompletionTool {
             r#type: ChatCompletionToolType::Function,
             function: FunctionObject {
@@ -684,12 +683,18 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     for tool in tools {
         match tool {
             Tool::Function(f) => {
-                push_function(&f.name, &f.description, &f.parameters, f.strict, false)?
+                push_function(&f.name, &f.description, &f.parameters, f.strict, None)?
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
                     if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(&f.name, &f.description, &f.parameters, f.strict, true)?;
+                        push_function(
+                            &f.name,
+                            &f.description,
+                            &f.parameters,
+                            f.strict,
+                            Some(&namespace.name),
+                        )?;
                     }
                 }
             }
@@ -2602,6 +2607,28 @@ mod tests {
             serde_json::from_value(serde_json::json!([
                 {"type": "function", "name": "lookup"},
                 {"type": "function", "name": "lookup"}
+            ]))
+            .unwrap(),
+        );
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.tools.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_duplicate_namespace_function_tools_are_preserved() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {
+                    "type": "namespace",
+                    "name": "crm",
+                    "description": "CRM tools",
+                    "tools": [
+                        {"type": "function", "name": "lookup"},
+                        {"type": "function", "name": "lookup"}
+                    ]
+                }
             ]))
             .unwrap(),
         );
