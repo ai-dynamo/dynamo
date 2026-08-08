@@ -40,6 +40,18 @@ async fn assert_openai_400(response: reqwest::Response, message: &str) {
     );
 }
 
+async fn assert_openai_501(response: reqwest::Response, message: &str) {
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert!(
+        body["message"].as_str().is_some_and(|actual| actual
+            .to_ascii_lowercase()
+            .contains(&message.to_ascii_lowercase())),
+        "unexpected OpenAI error body: {body}"
+    );
+}
+
 async fn assert_anthropic_400(response: reqwest::Response, message: &str) {
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.unwrap();
@@ -64,6 +76,91 @@ async fn assert_anthropic_501(response: reqwest::Response, message: &str) {
             .is_some_and(|actual| actual.contains(message)),
         "unexpected Anthropic error body: {body}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_conversion_distinguishes_invalid_from_unsupported() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for stream in [false, true] {
+            for (content, message) in [
+                (
+                    json!({"type": "input_image", "file_id": "file_123"}),
+                    "image input by file_id",
+                ),
+                (
+                    json!({
+                        "type": "input_file",
+                        "file_url": "https://example.com/report.pdf"
+                    }),
+                    "file input content",
+                ),
+            ] {
+                let response = svc
+                    .client
+                    .post(format!("{}/v1/responses", svc.base_url))
+                    .json(&json!({
+                        "model": MODEL,
+                        "stream": stream,
+                        "input": [{"role": "user", "content": [content]}]
+                    }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_openai_501(response, message).await;
+            }
+
+            for (content, message) in [
+                (
+                    json!({"type": "input_image"}),
+                    "requires exactly one of file_id or image_url",
+                ),
+                (
+                    json!({"type": "input_file"}),
+                    "requires exactly one of file_data, file_id, or file_url",
+                ),
+            ] {
+                let response = svc
+                    .client
+                    .post(format!("{}/v1/responses", svc.base_url))
+                    .json(&json!({
+                        "model": MODEL,
+                        "stream": stream,
+                        "input": [{"role": "user", "content": [content]}]
+                    }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_openai_400(response, message).await;
+            }
+        }
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            for (error_type, expected) in [
+                (ErrorType::NotImplemented, 2),
+                (ErrorType::Validation, 2),
+                (ErrorType::Internal, 0),
+            ] {
+                assert_eq!(
+                    svc.metrics.get_request_counter(
+                        MODEL,
+                        &Endpoint::Responses,
+                        &request_type,
+                        &Status::Error,
+                        &error_type,
+                    ),
+                    expected,
+                    "unexpected {error_type:?} count for {request_type}"
+                );
+            }
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 #[tokio::test]

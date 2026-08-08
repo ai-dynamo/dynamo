@@ -67,7 +67,10 @@ use crate::protocols::openai::{
         NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
         PoolingEndianness, PoolingOutput,
     },
-    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    responses::{
+        NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
+        chat_completion_to_response,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -3068,11 +3071,18 @@ async fn responses(
             error = %e,
             "Failed to convert NvCreateResponse to UnifiedRequest",
         );
-        let err_response = ErrorMessage::from_anyhow(
-            invalid_argument(format!("Failed to convert responses request: {e}")).into(),
-            "Failed to convert responses request",
-        );
-        inflight_guard.mark_error(ErrorType::Validation);
+        let err_response = match e.downcast_ref::<ResponsesConversionError>() {
+            Some(ResponsesConversionError::NotImplemented(message)) => {
+                ErrorMessage::not_implemented_error(format!(
+                    "{VALIDATION_PREFIX}Failed to convert responses request: {message}"
+                ))
+            }
+            _ => ErrorMessage::from_anyhow(
+                invalid_argument(format!("Failed to convert responses request: {e}")).into(),
+                "Failed to convert responses request",
+            ),
+        };
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
     // Extract the API context before consuming the UnifiedRequest — this
