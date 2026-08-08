@@ -461,8 +461,10 @@ impl Model {
     /// and old aggregated workers are indistinguishable on the wire. Rather than
     /// hide the model, we fall back to legacy behavior and report ready as long
     /// as some worker is live. Strict worker-type readiness gating resumes automatically once
-    /// every worker in the namespace carries a `worker_type`. Remove this branch
-    /// when the compat shim is retired.
+    /// every worker in the namespace carries a `worker_type`.
+    ///
+    /// TODO(v1.5): Remove this branch with the legacy MDC topology shims after
+    /// the v1.2 compatibility window expires.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
         let wsets: Vec<Arc<WorkerSet>> = self
             .worker_sets

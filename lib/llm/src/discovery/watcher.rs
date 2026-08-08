@@ -165,6 +165,23 @@ fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
 // Generate's opaque request state is not yet verified for migration replay.
 const GENERATE_MIGRATION_LIMIT: u32 = 0;
 
+/// Project the topology implicit in a pre-`worker_type` prefill card into the
+/// explicit contract used by current workers.
+///
+/// TODO(v1.5): Remove this projection together with the missing-role fallback
+/// in `effective_worker_type` and the legacy readiness bypass after the v1.2
+/// MDC compatibility window expires.
+fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
+    if card.worker_type.is_some() || !card.model_type.supports_prefill() {
+        return;
+    }
+
+    card.worker_type = Some(WorkerType::Prefill);
+    if card.needs.is_empty() {
+        card.needs = vec![vec![WorkerType::Decode]];
+    }
+}
+
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -1102,6 +1119,7 @@ where
         }
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
+        normalize_legacy_prefill_topology(&mut card);
         self.apply_tokenizer_backend_override(&mut card);
         validate_card_shape(&card)?;
         let endpoint_id = model_card_endpoint_id(&mcid);
@@ -1899,11 +1917,16 @@ mod tests {
     }
 
     #[test]
-    fn materialization_fingerprint_normalizes_legacy_worker_role() {
+    fn materialization_fingerprint_normalizes_legacy_prefill_topology() {
         let mut legacy = ModelDeploymentCard::with_name_only("model");
         legacy.model_type = ModelType::Prefill;
         let mut current = legacy.clone();
         current.worker_type = Some(WorkerType::Prefill);
+        current.needs = vec![vec![WorkerType::Decode]];
+
+        normalize_legacy_prefill_topology(&mut legacy);
+        assert_eq!(legacy.worker_type, Some(WorkerType::Prefill));
+        assert_eq!(legacy.needs, vec![vec![WorkerType::Decode]]);
 
         assert_eq!(
             materialization_fingerprint(&legacy, &RouterConfig::default()).unwrap(),
@@ -1924,16 +1947,85 @@ mod tests {
             materialization_fingerprint(&current, &RouterConfig::default()).unwrap()
         );
 
-        let mut legacy_wire = serde_json::to_value(&legacy).unwrap();
+        let mut legacy_wire = ModelDeploymentCard::with_name_only("model");
+        legacy_wire.model_type = ModelType::Prefill;
+        let mut legacy_wire = serde_json::to_value(&legacy_wire).unwrap();
+        let object = legacy_wire.as_object_mut().unwrap();
+        object.remove("worker_type");
+        object.remove("needs");
         legacy_wire["context_length"] = serde_json::json!(8_192);
-        let legacy_wire: ModelDeploymentCard = serde_json::from_value(legacy_wire).unwrap();
-        let mut current_wire = legacy.clone();
+        let mut legacy_wire: ModelDeploymentCard = serde_json::from_value(legacy_wire).unwrap();
+        normalize_legacy_prefill_topology(&mut legacy_wire);
+        let mut current_wire = ModelDeploymentCard::with_name_only("model");
+        current_wire.model_type = ModelType::Prefill;
         current_wire.worker_type = Some(WorkerType::Prefill);
+        current_wire.needs = vec![vec![WorkerType::Decode]];
         current_wire.runtime_config.context_length = Some(8_192);
         assert_eq!(
             materialization_fingerprint(&legacy_wire, &RouterConfig::default()).unwrap(),
             materialization_fingerprint(&current_wire, &RouterConfig::default()).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn discovery_normalization_joins_v12_and_current_prefill() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_v12_prefill_compat_test".to_string(),
+            ))),
+        );
+
+        let mut legacy_card = ModelDeploymentCard::with_name_only("model");
+        legacy_card.model_type = ModelType::Prefill;
+        legacy_card.model_input = ModelInput::Tokens;
+        let mut legacy_json = serde_json::to_value(legacy_card).unwrap();
+        let legacy_object = legacy_json.as_object_mut().unwrap();
+        legacy_object.remove("worker_type");
+        legacy_object.remove("needs");
+
+        let mut current_card = ModelDeploymentCard::with_name_only("model");
+        current_card.model_type = ModelType::Prefill;
+        current_card.model_input = ModelInput::Tokens;
+        current_card.worker_type = Some(WorkerType::Prefill);
+        current_card.needs = vec![vec![WorkerType::Decode]];
+
+        let instance = |instance_id, card_json| DiscoveryInstance::Model {
+            namespace: "ns1".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id,
+            card_json,
+            model_suffix: None,
+        };
+        let legacy = watcher
+            .normalize(instance(1, legacy_json), &NamespaceFilter::Global)
+            .unwrap()
+            .unwrap();
+        let current = watcher
+            .normalize(
+                instance(2, serde_json::to_value(current_card).unwrap()),
+                &NamespaceFilter::Global,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(legacy.card.worker_type, Some(WorkerType::Prefill));
+        assert_eq!(legacy.card.needs, vec![vec![WorkerType::Decode]]);
+        assert_eq!(legacy.group_key, current.group_key);
+        assert_eq!(legacy.fingerprint, current.fingerprint);
     }
 
     #[test]
