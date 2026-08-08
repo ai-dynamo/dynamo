@@ -235,27 +235,25 @@ Aggregated leads on both SKUs at the same operating point — 1173.2 against 916
 
 ## Notes
 
-Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they diverge, prefix hashing does not line up and KV-aware routing silently degrades toward round-robin.
+- Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they diverge, prefix hashing does not line up and KV-aware routing silently degrades toward round-robin.
+- The H200 aggregated target runs `--kv-cache-dtype auto`; the disaggregated targets and both B200 targets use `fp8`. FP8 KV costs compute and only pays back when the cache is the binding constraint, which it is not at TP2.
 
 <div data-sku="h200" data-variant="agg">
 
-Benchmark with the shipped `speculative-config` ConfigMap key. MTP measures an acceptance length of about 3.2 on this trace, so the `speculative-config-synthetic` override is not needed.
-
-TP2 is an H200 FP8 result. FP8 weights leave roughly 20 GB per card for paged KV at TP1, which caps the running batch near 8 requests; sharding to TP2 removes that cap. B200 NVFP4 is never KV-starved, so it ships at TP1.
+- Benchmark with the shipped `speculative-config` ConfigMap key. MTP measures an acceptance length of about 3.2 on this trace, so the `speculative-config-synthetic` override is not needed.
 
 </div>
 
 ## Limitations
 
-Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
+- Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
+- MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
 
 <div data-sku="h200" data-variant="disagg">
 
-Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
+- Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
 
 </div>
-
-MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
 
 ## Source
 
