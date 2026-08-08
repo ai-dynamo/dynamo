@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 180 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">65 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
@@ -1750,6 +1750,11 @@ UID of the source pod, recorded so the node agent dumps that specific pod and no
 See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="containers" type="string array" required={true}>
+Containers narrows the capture to these containers of the source pod. The node agent reads this instead of the source pod's target-container annotation. v1alpha1 supports exactly one container; the cap is lifted when the runtime supports multi-container capture.
+**Validation:** MaxItems: 1  MinItems: 1  Required: \&#123;\&#125;  items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+</ParamField>
 </Accordion>
 
 <Accordion id="podsnapshot" title="PodSnapshot">
@@ -1904,7 +1909,7 @@ PodSnapshotSource identifies the workload captured by a PodSnapshot.
 **Appears in:** [PodSnapshotSpec](#podsnapshotspec)
 
 <ParamField path="podRef" type="PodReference" required={true}>
-PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, target-container annotation, checkpoint storage mount) before creating the PodSnapshot.
+PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, checkpoint storage mount) before creating the PodSnapshot. The capture target container is carried on PodRef.Containers, not a pod annotation.
 See [PodReference](#podreference).
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
@@ -2825,9 +2830,8 @@ extraParameters are additional parameters that affect the checkpoint hash. Depre
 <Accordion id="v1beta1-dynamocomponentdeployment" title="DynamoComponentDeployment">
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is a served version: the API server accepts reads and writes
-against it, and transparently converts to/from v1alpha1 (still the
-storage version until a later MR flips it). Conversion goes through the
+v1beta1 is the storage version. The API server transparently converts
+to and from the served v1alpha1 version through
 operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
@@ -2902,7 +2906,7 @@ replicas is the desired number of Pods for this component. When `scalingAdapter`
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-minAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3005,7 +3009,7 @@ replicas is the desired number of Pods for this component. When `scalingAdapter`
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-minAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3066,9 +3070,8 @@ See [ExperimentalSpec](#experimentalspec).
 <Accordion id="v1beta1-dynamographdeployment" title="DynamoGraphDeployment">
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is a served version: the API server accepts reads and writes
-against it, and transparently converts to/from v1alpha1 (still the
-storage version until a later MR flips it). Conversion goes through the
+v1beta1 is the storage version. The API server transparently converts
+to and from the served v1alpha1 version through
 operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
@@ -3316,8 +3319,8 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1alpha1 remains the storage version; conversion between served versions is
-handled by the operator's conversion webhook
+v1beta1 is the storage version; conversion to and from the served v1alpha1
+version is handled by the operator's conversion webhook
 (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
@@ -3547,6 +3550,12 @@ See [FailoverSpec](#v1beta1-failoverspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="grove" type="GroveSpec">
+grove groups Grove-specific rendering options.
+See [GroveSpec](#grovespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
 checkpoint configures container-image snapshotting and restore for this component. Set `checkpoint.enabled: true` to opt in. Without checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint CR and later restores pods in the same DGD generation from that checkpoint. With checkpointRef, the DGD restores from that existing checkpoint instead. The user-facing shape of this field is still settling, which is why it lives under `experimental` in v1beta1 instead of at the top level.
 See [ComponentCheckpointConfig](#componentcheckpointconfig).
@@ -3693,6 +3702,19 @@ GPUSKUType is the AIC hardware system identifier for a supported GPU.
 - <Badge intent="note" minimal>t4</Badge>
 - <Badge intent="note" minimal>mi200</Badge> --- AMD ---
 - <Badge intent="note" minimal>mi300</Badge>
+</Accordion>
+
+<Accordion id="grovespec" title="GroveSpec">
+GroveSpec groups experimental Grove-specific rendering options.
+
+
+**Kind:** `type`
+**Appears in:** [ExperimentalSpec](#experimentalspec)
+
+<ParamField path="forceScalingGroup" type="boolean">
+forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". Immutable after creation.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="hardwarespec" title="HardwareSpec">

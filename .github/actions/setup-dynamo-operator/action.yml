@@ -18,6 +18,10 @@ inputs:
     description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
     required: false
     default: ''
+  repository:
+    description: 'Container repository path. Required when registry is set.'
+    required: false
+    default: ''
   operator_tag:
     description: 'Operator image tag. Required when registry is set.'
     required: false
@@ -389,6 +393,7 @@ runs:
       shell: bash
       env:
         REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
         CHECKPOINT_STORAGE_PVC_NAME: ${{ inputs.checkpoint_storage_pvc_name }}
@@ -405,11 +410,11 @@ runs:
 
         IMAGE_ARGS=()
         if [ -n "${REGISTRY}" ]; then
-          if [ -z "${OPERATOR_TAG}" ]; then
-            echo "::error::operator_tag is required when registry is set"
+          if [ -z "${REPOSITORY}" ] || [ -z "${OPERATOR_TAG}" ]; then
+            echo "::error::repository and operator_tag are required when registry is set"
             exit 1
           fi
-          OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+          OPERATOR_REPO="${REGISTRY}/${REPOSITORY}"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
           # Automated CI passes a commit-scoped tag so the chart, CRDs,
           # and manager binary stay in sync. Manual workflows may still pass a

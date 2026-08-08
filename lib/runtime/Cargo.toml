@@ -18,6 +18,8 @@ ignored = ["mio"]
 default = []
 integration = []
 testing-etcd = [] # Tests that require an active ETCD server
+# White-box helpers for cross-crate lifecycle tests. Never enabled by a normal build.
+testing = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)

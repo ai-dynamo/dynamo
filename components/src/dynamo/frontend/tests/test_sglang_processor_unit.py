@@ -63,17 +63,26 @@ from dynamo.frontend.utils import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # Registers the tokenizer in the session predownload manifest (tests/conftest.py)
+    # so it stays fetchable after a worker's predownload test flips HF_HUB_OFFLINE.
+    pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
+BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
 @pytest.fixture(scope="module")
 def tokenizer():
     return get_tokenizer(MODEL)
+
+
+@pytest.fixture(scope="module")
+def byte_fallback_tokenizer():
+    return get_tokenizer(BYTE_FALLBACK_MODEL)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +233,133 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["sampling_options"]["guided_decoding"] == {
             "json": {"type": "object"}
         }
+
+    def test_agent_hints_are_projected_to_routing(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "agent_hints": {
+                        "priority": 10,
+                        "strict_priority": 3,
+                        "osl": 128,
+                    }
+                },
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {
+            "priority": 10,
+            "priority_jump": 10.0,
+            "strict_priority": 3,
+            "expected_output_tokens": 128,
+        }
+
+    def test_negative_priority_hint_preserves_backend_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": -5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": -5, "priority_jump": 0.0}
+
+    def test_existing_routing_overrides_agent_hint_projection(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "routing": {"priority_jump": 1.0, "strict_priority": 2},
+                "nvext": {
+                    "agent_hints": {
+                        "priority": 10,
+                        "strict_priority": 3,
+                        "osl": 128,
+                    }
+                },
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {
+            "priority": 10,
+            "priority_jump": 1.0,
+            "strict_priority": 2,
+            "expected_output_tokens": 128,
+        }
+
+    def test_latency_sensitivity_projects_to_priority_jump_without_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority_jump": 2.5}
+
+    @pytest.mark.parametrize(
+        "latency_sensitivity", [10**400, float("inf"), float("nan")]
+    )
+    def test_invalid_latency_sensitivity_hint_is_ignored(self, latency_sensitivity):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": latency_sensitivity}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize("priority", [2**40, 10**400])
+    def test_out_of_range_priority_hint_is_ignored(self, priority):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": priority}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("strict_priority", -1),
+            ("strict_priority", 2**32),
+            ("osl", -1),
+            ("osl", 2**32),
+        ],
+    )
+    def test_out_of_range_u32_agent_hints_are_ignored(self, field, value):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": 1, field: value}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": 1, "priority_jump": 1.0}
 
     @pytest.mark.parametrize("require_reasoning", [False, True])
     def test_require_reasoning_passthrough(self, require_reasoning):
@@ -2819,7 +2955,14 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
 
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
-    """Test the sliding-window incremental detokenizer."""
+    """Test safe-boundary incremental detokenization."""
+
+    class ByteTokenizer:
+        """Decode each token as one byte to exercise split UTF-8 sequences."""
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            del skip_special_tokens
+            return bytes(token_ids).decode("utf-8", errors="replace")
 
     def test_basic_decode(self, tokenizer):
         """Tokens decode to expected text."""
@@ -2851,6 +2994,71 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                 content += choice["delta"]["content"]
         assert text in content
 
+    def test_split_multibyte_character_is_not_replaced(self):
+        """A UTF-8 character split across chunks is emitted once completed."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        content = ""
+        encoded = "한".encode("utf-8")
+        for index, token_id in enumerate(encoded):
+            choice = post.process_output(
+                {
+                    "token_ids": [token_id],
+                    "finish_reason": "stop" if index == len(encoded) - 1 else None,
+                }
+            )
+            if choice and "content" in choice["delta"]:
+                content += choice["delta"]["content"]
+
+        assert content == "한"
+        assert "\ufffd" not in content
+
+    def test_byte_fallback_sequence_longer_than_six_tokens(
+        self, byte_fallback_tokenizer
+    ):
+        """A long byte-fallback sequence remains pending until it is complete."""
+        token_ids = byte_fallback_tokenizer.encode("🙂🙂", add_special_tokens=False)
+        assert len(token_ids) == 9
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=byte_fallback_tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        pending = post.process_output(
+            {"token_ids": token_ids[:8], "finish_reason": None}
+        )
+        finished = post.process_output(
+            {"token_ids": token_ids[8:], "finish_reason": "stop"}
+        )
+
+        assert pending is None
+        assert finished is not None
+        assert finished["delta"]["content"] == "🙂🙂"
+        assert "\ufffd" not in finished["delta"]["content"]
+
+    def test_trailing_replacement_character_is_flushed_on_finish(self):
+        """A legitimate trailing U+FFFD is delayed, not dropped."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        pending = post.process_output(
+            {"token_ids": list("\ufffd".encode("utf-8")), "finish_reason": None}
+        )
+        finished = post.process_output({"token_ids": [], "finish_reason": "stop"})
+
+        assert pending is None
+        assert finished is not None
+        assert finished["delta"]["content"] == "\ufffd"
+
     def test_empty_token_ids(self, tokenizer):
         """Empty token_ids with no finish_reason returns None."""
         post = SglangStreamingPostProcessor(
@@ -2871,6 +3079,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         choice = post.process_output({"token_ids": [], "finish_reason": "stop"})
         assert choice is not None
         assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {}
 
     def test_stop_reason_not_emitted_on_choice(self, tokenizer):
         """Backend stop_reason is not part of the OpenAI choice shape."""
@@ -2986,16 +3195,18 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert len(items) == 1
         assert "error" in items[0]
 
-    def test_lookback_trimming(self, tokenizer):
-        """Verify _all_token_ids doesn't grow unbounded."""
+    def test_completed_batches_replace_decode_context(self):
+        """Completed batches replace context instead of accumulating history."""
         post = SglangStreamingPostProcessor(
-            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
         )
-        # Send enough tokens to trigger trimming (LOOKBACK * 16 = 96)
         for _ in range(200):
-            post.process_output({"token_ids": [1], "finish_reason": None})
-        # Should be trimmed, not 200 tokens
-        assert len(post._all_token_ids) < 200
+            post.process_output({"token_ids": [ord("a")], "finish_reason": None})
+
+        assert post._decode_context_ids == [ord("a")]
+        assert post._pending_decode_ids == []
 
     def test_strips_all_configured_trailing_eos_token_ids(self, tokenizer):
         """Any configured EOS id is stripped from the final chunk before decode."""
@@ -3047,6 +3258,36 @@ class TestFastPlainTextPath:  # FRONTEND.6 — fast path that skips parser when 
         assert choice["index"] == 0
         assert choice["logprobs"] is None
 
+    def test_fast_path_emits_role_only_once(self, tokenizer):
+        """Only the first emitted content delta includes the assistant role."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+        token_ids = tokenizer.encode("Hello world again", add_special_tokens=False)
+        assert len(token_ids) >= 2
+
+        first = post.process_output({"token_ids": token_ids[:1], "finish_reason": None})
+        second = post.process_output(
+            {"token_ids": token_ids[1:], "finish_reason": None}
+        )
+
+        assert first is not None
+        assert first["delta"]["role"] == "assistant"
+        assert second is not None
+        assert "role" not in second["delta"]
+
+    def test_finish_only_output_emits_initial_role(self, tokenizer):
+        """An immediate finish still emits the stream's initial role."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        choice = post.process_output({"token_ids": [], "finish_reason": "stop"})
+
+        assert choice is not None
+        assert choice["delta"] == {"role": "assistant"}
+        assert choice["finish_reason"] == "stop"
+
 
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: reasoning parsing
@@ -3069,6 +3310,7 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
 
         reasoning = ""
         content = ""
+        roles = []
         for i in range(0, len(token_ids), 5):
             batch = token_ids[i : i + 5]
             is_last = i + 5 >= len(token_ids)
@@ -3077,11 +3319,14 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             )
             if choice:
                 delta = choice.get("delta", {})
+                if "role" in delta:
+                    roles.append(delta["role"])
                 reasoning += delta.get("reasoning_content", "")
                 content += delta.get("content", "")
 
         assert "think about this" in reasoning
         assert "42" in content
+        assert roles == ["assistant"]
 
     @pytest.mark.parametrize(
         ("parser_name", "reasoning_output", "expected_reasoning"),

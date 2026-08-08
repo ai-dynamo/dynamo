@@ -221,24 +221,39 @@ pub(crate) struct RoutingInstances {
     routable_ids: Vec<u64>,
     overloaded_ids: HashSet<u64>,
     free_ids: Vec<u64>,
+    routable_id_set: Arc<HashSet<u64>>,
+    /// True after this client has observed at least one discovered instance.
+    /// Once set, a later empty snapshot is authoritative rather than startup
+    /// absence of information.
+    availability_initialized: bool,
 }
 
 impl RoutingInstances {
     fn new(discovered_ids: Vec<u64>) -> Self {
-        Self::from_parts(discovered_ids.clone(), discovered_ids, HashSet::new())
+        let availability_initialized = !discovered_ids.is_empty();
+        Self::from_parts(
+            discovered_ids.clone(),
+            discovered_ids,
+            HashSet::new(),
+            availability_initialized,
+        )
     }
 
     fn from_parts(
         discovered_ids: Vec<u64>,
         routable_ids: Vec<u64>,
         overloaded_ids: HashSet<u64>,
+        availability_initialized: bool,
     ) -> Self {
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
+        let routable_id_set = Arc::new(routable_ids.iter().copied().collect());
         Self {
             discovered_ids,
             routable_ids,
             overloaded_ids,
             free_ids,
+            routable_id_set,
+            availability_initialized,
         }
     }
 
@@ -248,6 +263,11 @@ impl RoutingInstances {
 
     pub(crate) fn routable_ids(&self) -> &[u64] {
         &self.routable_ids
+    }
+
+    fn available_ids(&self) -> Option<Arc<HashSet<u64>>> {
+        self.availability_initialized
+            .then(|| Arc::clone(&self.routable_id_set))
     }
 
     pub(crate) fn free_ids(&self) -> &[u64] {
@@ -282,7 +302,13 @@ impl RoutingInstances {
         overloaded_ids
             .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
 
-        Self::from_parts(discovered_ids.clone(), discovered_ids, overloaded_ids)
+        let availability_initialized = self.availability_initialized || !discovered_ids.is_empty();
+        Self::from_parts(
+            discovered_ids.clone(),
+            discovered_ids,
+            overloaded_ids,
+            availability_initialized,
+        )
     }
 
     fn report_instance_down(&self, instance_id: u64) -> Self {
@@ -297,10 +323,11 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             routable_ids,
             self.overloaded_ids.clone(),
+            self.availability_initialized,
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     fn override_routable_ids(&self, routable_ids: Vec<u64>) -> Self {
         // Route through from_parts so `free_ids` is recomputed from the new
         // routable set instead of carrying the stale value forward.
@@ -308,6 +335,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             routable_ids,
             self.overloaded_ids.clone(),
+            self.availability_initialized,
         )
     }
 
@@ -316,6 +344,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            self.availability_initialized,
         )
     }
 
@@ -329,6 +358,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            self.availability_initialized,
         )
     }
 
@@ -339,6 +369,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            self.availability_initialized,
         )
     }
 
@@ -405,6 +436,10 @@ impl RoutingInstancesState {
 
     fn routable_ids(&self) -> Vec<u64> {
         self.snapshot().routable_ids().to_vec()
+    }
+
+    fn available_ids(&self) -> Option<Arc<HashSet<u64>>> {
+        self.snapshot().available_ids()
     }
 
     fn free_ids(&self) -> Vec<u64> {
@@ -477,7 +512,7 @@ impl RoutingInstancesState {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     fn override_routable_ids(&self, ids: Vec<u64>) {
         self.update(move |current| current.override_routable_ids(ids), true);
     }
@@ -634,10 +669,10 @@ impl Client {
         self.routing_instances.overload_reconciliation_needed()
     }
 
-    /// Mark an instance overloaded immediately. A worker returning
-    /// `ResourceExhausted` is busy ("queue full, retry later"), not faulted, so
-    /// this is the overload path, NOT `report_instance_down`. Short-lived: the
-    /// next `set_overloaded_instances` recompute overwrites the overloaded set.
+    /// Mark an instance overloaded immediately after a worker-scoped
+    /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
+    /// does not call `report_instance_down`. The next worker-monitor
+    /// reconciliation replaces this short-lived global routing hint.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
         self.routing_instances
             .mark_overloaded_immediate(instance_id);
@@ -654,6 +689,17 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// Workers currently eligible for selection: discovered and not locally
+    /// inhibited by [`Self::report_instance_down`].
+    ///
+    /// This hard-availability snapshot is separate from transient overload.
+    /// `None` means this client has not discovered an instance yet. After the
+    /// first discovery, `Some` is authoritative, including `Some(empty)` when
+    /// the last previously discovered worker is removed.
+    pub fn available_instance_ids(&self) -> Option<Arc<HashSet<u64>>> {
+        self.routing_instances.available_ids()
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -707,10 +753,15 @@ impl Client {
         });
     }
 
-    /// Override routable IDs for testing. This allows creating an inconsistency
-    /// between `instance_ids_avail()` and `instances()` to simulate downed workers.
-    #[cfg(test)]
-    pub(crate) fn override_instance_avail(&self, ids: Vec<u64>) {
+    /// Simulate a complete discovery snapshot for testing.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn override_discovered_instances(&self, ids: Vec<u64>) {
+        self.reconcile_discovered_instances(ids);
+    }
+
+    /// Override routable IDs for testing while preserving discovery membership.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn override_instance_avail(&self, ids: Vec<u64>) {
         self.routing_instances.override_routable_ids(ids);
     }
 
