@@ -21,7 +21,6 @@ use dynamo_llm::{
     },
     model_card::ModelDeploymentCard,
 };
-use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -1457,29 +1456,8 @@ async fn test_nvext_disabled_strips_request_and_response() {
 /// the peek-before-200 helper with chat_completions, so an `InvalidArgument`
 /// frame at t=0 must land as HTTP 400, not HTTP 200 + generic 500 SSE.
 ///
-/// The pre-commit peek is opt-in via `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`
-/// (default: unset → peek disabled). Enable it here so the assertion
-/// exercises the fix path. `#[serial]` prevents the env var from bleeding
-/// into other tests that may run in parallel.
 #[tokio::test]
-#[serial_test::serial]
 async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
-    // SAFETY: single-threaded via `#[serial]`; no other test reads or writes
-    // this env var concurrently.
-    unsafe {
-        std::env::set_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, "500");
-    }
-    // Guard to unset on any exit path from this test.
-    struct EnvGuard;
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS);
-            }
-        }
-    }
-    let _guard = EnvGuard;
-
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)

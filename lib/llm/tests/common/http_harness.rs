@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::codec::create_message_stream;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
@@ -19,7 +19,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::ports::bind_random_port;
-use super::scripted_chat_engine::{Script, ScriptGate, ScriptedChatEngine};
+use super::scripted_chat_engine::{
+    AnnotatedScript, CompletionScript, Script, ScriptGate, ScriptedChatEngine,
+    ScriptedCompletionEngine,
+};
 
 pub const MODEL: &str = "harness-model";
 
@@ -36,6 +39,9 @@ pub struct HarnessService {
     pub base_url: String,
     pub client: reqwest::Client,
     pub engine: Arc<ScriptedChatEngine>,
+    #[allow(dead_code)]
+    pub metrics: Arc<Metrics>,
+    pub completion_engine: Arc<ScriptedCompletionEngine>,
     cancel: CancellationToken,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
@@ -43,15 +49,50 @@ pub struct HarnessService {
 impl HarnessService {
     pub async fn start(scripts: impl IntoIterator<Item = Script>) -> Self {
         let engine = Arc::new(ScriptedChatEngine::new(scripts));
-        Self::start_with_engine(engine).await
+        let completion_engine = Arc::new(ScriptedCompletionEngine::new([]));
+        Self::start_with_engines(engine, completion_engine).await
+    }
+
+    pub async fn start_with_completion_scripts(
+        scripts: impl IntoIterator<Item = CompletionScript>,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new([]));
+        let completion_engine = Arc::new(ScriptedCompletionEngine::new(scripts));
+        Self::start_with_engines(engine, completion_engine).await
+    }
+
+    pub async fn start_with_scripts(
+        chat_scripts: impl IntoIterator<Item = AnnotatedScript>,
+        completion_scripts: impl IntoIterator<Item = CompletionScript>,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new_annotated(chat_scripts));
+        let completion_engine = Arc::new(ScriptedCompletionEngine::new(completion_scripts));
+        Self::start_with_engines(engine, completion_engine).await
+    }
+
+    pub async fn start_with_pending_annotated_scripts(
+        chat_scripts: impl IntoIterator<Item = AnnotatedScript>,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new_pending_after_annotated(
+            chat_scripts,
+        ));
+        let completion_engine = Arc::new(ScriptedCompletionEngine::new([]));
+        Self::start_with_engines(engine, completion_engine).await
     }
 
     pub async fn start_with_gated_tail(script: Script, split_at: usize) -> (Self, ScriptGate) {
         let (engine, gate) = ScriptedChatEngine::with_gated_tail(script, split_at);
-        (Self::start_with_engine(Arc::new(engine)).await, gate)
+        let completion_engine = Arc::new(ScriptedCompletionEngine::new([]));
+        (
+            Self::start_with_engines(Arc::new(engine), completion_engine).await,
+            gate,
+        )
     }
 
-    async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+    async fn start_with_engines(
+        engine: Arc<ScriptedChatEngine>,
+        completion_engine: Arc<ScriptedCompletionEngine>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -61,17 +102,22 @@ impl HarnessService {
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(false)
+            .enable_cmpl_endpoints(true)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()
             .expect("failed to build harness HTTP service");
 
         let card = ModelDeploymentCard::with_name_only(MODEL);
+        let metrics = service.state_clone().metrics_clone();
         service
             .model_manager()
             .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
             .expect("failed to register scripted harness model");
+        service
+            .model_manager()
+            .add_completions_model(MODEL, card.mdcsum(), completion_engine.clone())
+            .expect("failed to register scripted harness completion model");
 
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;
@@ -82,6 +128,8 @@ impl HarnessService {
             base_url,
             client,
             engine,
+            metrics,
+            completion_engine,
             cancel,
             join: Some(join),
         }
