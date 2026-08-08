@@ -82,6 +82,32 @@ jobs:
     - name: Validate Fern configuration
       working-directory: docs/fern
       run: fern check
+    - name: Parse custom MDX components
+      working-directory: docs/fern
+      # `fern check` validates configuration and navigation, never component
+      # syntax, so a component that does not compile merges green and only
+      # surfaces when Fern builds the site. #12330 shipped a LandingStyles.tsx
+      # whose CSS comment contained raw backticks that closed the enclosing
+      # template literal; it took #12402 to repair. esbuild transforms each
+      # file without bundling, which is exactly the syntax gate that was
+      # missing. Keep the version pinned so a bad esbuild release cannot
+      # redefine this gate.
+      run: |
+        set -euo pipefail
+        # Same four suffixes Fern's bundler scans, and the same set
+        # docs/fern/scripts/check_component_imports.py covers. Keep them aligned.
+        find_components() {
+          find components -type f \
+            \( -name '*.tsx' -o -name '*.ts' -o -name '*.jsx' -o -name '*.js' \) "$@"
+        }
+        COUNT=$(find_components | wc -l)
+        if [ "$COUNT" -eq 0 ]; then
+          echo "::error::No component sources found under docs/fern/components"
+          exit 1
+        fi
+        echo "Parsing $COUNT component sources"
+        find_components -print0 \
+          | xargs -0 npx --yes esbuild@0.24.0 --outdir="$(mktemp -d)"
 
   docs-website-composition:
     name: Docs Website Composition Check

@@ -17,12 +17,11 @@
  * constraint, CSS injected this exact way.
  *
  * Server component (no "use client"); registered via docs.yml
- * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
- * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
- * fern/ root and is rewritten to a relative path at publish time:
- *   import { ReferenceStyles } from "@/components/ReferenceStyles";
- * Then place <ReferenceStyles /> once, right after the frontmatter, on every
- * Reference page that uses these components.
+ * `experimental.mdx-components: ./components`. It must be imported — ambient
+ * use renders "Unsupported JSX tag" — then placed once, right after the
+ * frontmatter, on every Reference page that uses these components.
+ *
+ * The page-usage example lives in README.md, for the reason recorded there.
  */
 const REFERENCE_CSS = `
 /* Dark-mode variable re-bind.

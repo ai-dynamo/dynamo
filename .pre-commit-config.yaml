@@ -117,6 +117,18 @@ repos:
       language: system
       files: ^docs/fern/scripts/check_published_styles\.py$
       pass_filenames: false
+    - id: check-component-imports
+      name: Check Fern components trigger no rolldown bundling
+      entry: python3 docs/fern/scripts/check_component_imports.py
+      language: system
+      files: ^docs/fern/(components/.*\.(js|jsx|ts|tsx)|scripts/check_component_imports\.py|fern\.config\.json)$
+      pass_filenames: false
+    - id: check-component-imports-selftest
+      name: Self-test the Fern component import scanner
+      entry: python3 docs/fern/scripts/check_component_imports.py --test
+      language: system
+      files: ^docs/fern/scripts/check_component_imports\.py$
+      pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py
