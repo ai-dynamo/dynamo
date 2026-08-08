@@ -3,10 +3,9 @@
 
 """Unit tests for MM kwargs transfer (NIXL sender/receiver + SHM sender/receiver)."""
 
+import asyncio
 import pickle
 from unittest.mock import MagicMock
-
-import asyncio
 
 import pytest
 
