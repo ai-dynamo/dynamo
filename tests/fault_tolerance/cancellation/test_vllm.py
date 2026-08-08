@@ -38,7 +38,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
-CANCELLATION_MAX_TOKENS = 16384
+CANCELLATION_MAX_TOKENS = 2048
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
 
@@ -248,7 +248,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(
     660
 )  # worker startup can take up to 600s; allow headroom for test body
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
 def test_request_cancellation_vllm_aggregated(
@@ -344,6 +344,9 @@ def test_request_cancellation_vllm_aggregated(
                     pattern="Decode Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
                 )
 
                 # For streaming, read 5 responses before cancelling
