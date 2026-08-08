@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use super::{
     AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, LowerTierQueryOptions,
@@ -154,10 +154,12 @@ pub trait KvIndexerInterface {
     ///
     /// * `tokens_with_hashes` - Tokens with lazily computed hashes.
     /// * `worker` - The worker (with dp_rank) that was selected.
+    /// * `ttl_override` - Optional pruning TTL for this routing decision.
     async fn process_routing_decision_for_request(
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError>;
 
     /// Async task that returns when all pending events have been processed.
