@@ -32,8 +32,11 @@ testing-cuda = []
 # most FC↔LW transfers efficiently without permutation.
 permute_kernels = []
 
+# Enable KVTC (KV Token Compression) quantization kernels
+kvtc_kernels = []
+
 # Enable kvbench example (pulls in clap for CLI)
-kvbench = ["dep:clap"]
+kvbench = ["dep:clap", "kvtc_kernels"]
 
 [[example]]
 name = "kvbench"
