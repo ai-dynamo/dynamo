@@ -56,7 +56,7 @@ class FakeVMM(VMMDevice):
         os.close(write_fd)
         return read_fd
 
-    def import_shareable_handle_close_fd(self, fd):
+    def import_shareable_handle_close_fd(self, fd, import_size=0):
         os.close(fd)
         return next(self._handles)
 

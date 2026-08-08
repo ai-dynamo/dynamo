@@ -206,8 +206,11 @@ def patch_kv_cache_pool_scope() -> None:
     def patched_init_kv_cache(*args, **kwargs):
         # Installed only in shadow mode, so always scope to the pool. init_kv_cache
         # allocates on the worker's current device.
-        assert torch.cuda.is_available(), "GMS scratch KV requires CUDA"
-        device = torch.device("cuda", torch.cuda.current_device())
+        from gpu_memory_service.common.vmm import get_vmm_device_type
+        from gpu_memory_service.integrations.common.utils import torch_device
+
+        dev_mod = torch_device()
+        device = torch.device(get_vmm_device_type().value, dev_mod.current_device())
         with gms_use_mem_pool("kv_cache", device):
             return original_init_kv_cache(*args, **kwargs)
 
