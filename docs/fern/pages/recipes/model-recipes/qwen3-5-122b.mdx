@@ -188,9 +188,13 @@ See [nvfp4/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes
 
 <div data-sku="h200">
 
-See [fp8/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/perf/README.md) for the full workflow.
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/perf/perf.yaml -n ${NAMESPACE}
+```
 
-AIPerf builds its replay schedule from a `timestamp` field. The shipped trace rows have none, and without one AIPerf replays a small default instead of the whole file, so add one:
+Edit `ENDPOINT` and `CONCURRENCY` in the Job to select a target — aggregated at c64, disaggregated at c18. See [fp8/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/perf/README.md) for the full workflow.
+
+AIPerf builds its replay schedule from a `timestamp` field. The shipped trace rows have none, and without one AIPerf replays a small default instead of the whole file, so add one before staging the trace on the PVC:
 
 ```bash
 git lfs install
