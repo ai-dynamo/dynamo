@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
@@ -112,9 +113,17 @@ fn demand_driven_python_stream(
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
-        let next = Python::with_gil(|py| {
-            pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
-        });
+        // NVTX span for the per-response Python->Rust hand-off. Opened before
+        // `with_gil` so it also covers any time spent waiting to acquire the
+        // GIL (contention), then the `__anext__` call scheduled on the event
+        // loop. Scoped to end before the `.await` below so the thread-local
+        // NVTX push/pop stays balanced.
+        let next = {
+            let _nvtx = dynamo_nvtx_range!("egress.bridge.anext");
+            Python::with_gil(|py| {
+                pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
+            })
+        };
         let item = match next {
             Ok(next) => next.await,
             Err(error) => Err(error),
@@ -328,6 +337,10 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
+        // NVTX span for the per-response depythonize. Opened before `with_gil`
+        // so it also covers any time spent waiting to acquire the GIL, then the
+        // conversion of the yielded Python object into a Rust value.
+        let _nvtx = dynamo_nvtx_range!("egress.depythonize");
         Python::with_gil(|py| {
             let bound = item.into_bound(py);
             // Yields tagged with `_dynamo_annotated: True` are wire

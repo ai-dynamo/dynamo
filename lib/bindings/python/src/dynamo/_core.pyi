@@ -38,6 +38,18 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+def nvtx_enabled() -> bool:
+    """Whether NVTX annotations are active (feature built + DYN_ENABLE_RUST_NVTX)."""
+    ...
+
+def nvtx_range_start(name: str) -> int:
+    """Open a correlated NVTX range; returns an id (0 when NVTX is disabled)."""
+    ...
+
+def nvtx_range_end(id: int) -> None:
+    """Close a correlated NVTX range opened by nvtx_range_start. No-op for id 0."""
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...

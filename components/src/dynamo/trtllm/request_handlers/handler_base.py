@@ -32,6 +32,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
+from dynamo import nvtx
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.engine import is_generation_stage
@@ -960,10 +961,11 @@ class HandlerBase(BaseGenerativeHandler):
             }
             return
         try:
-            async for chunk in self._generate_locally_impl(
-                request, context, embeddings, ep_disaggregated_params
-            ):
-                yield chunk
+            with nvtx.range("worker.trtllm.generate"):
+                async for chunk in self._generate_locally_impl(
+                    request, context, embeddings, ep_disaggregated_params
+                ):
+                    yield chunk
         finally:
             await self._mark_request_finished()
 
@@ -1047,9 +1049,10 @@ class HandlerBase(BaseGenerativeHandler):
         ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
 
         # Prepare input for generation (handles multimodal/text flows)
-        processed_input = await self._prepare_input_for_generation(
-            request, embeddings, ep_disaggregated_params, epd_metadata
-        )
+        with nvtx.range("worker.trtllm.preprocess"):
+            processed_input = await self._prepare_input_for_generation(
+                request, embeddings, ep_disaggregated_params, epd_metadata
+            )
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -1227,17 +1230,18 @@ class HandlerBase(BaseGenerativeHandler):
             conv_kwargs = (
                 {"conversation_params": conversation_params} if conv_affinity else {}
             )
-            generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=streaming,
-                trace_headers=trace_headers,
-                scheduling_params=scheduling_params,
-                **conv_kwargs,
-                priority=priority,
-                cache_salt=cache_salt,
-            )
+            with nvtx.range("worker.trtllm.engine_submit"):
+                generation_result = self.engine.llm.generate_async(
+                    inputs=processed_input,  # Use the correctly extracted inputs
+                    sampling_params=sampling_params,
+                    disaggregated_params=disaggregated_params,
+                    streaming=streaming,
+                    trace_headers=trace_headers,
+                    scheduling_params=scheduling_params,
+                    **conv_kwargs,
+                    priority=priority,
+                    cache_salt=cache_salt,
+                )
 
             # In disagg decode mode with remote prefill, wrap abort() to defer
             # until the first token is received (KV transfer complete).

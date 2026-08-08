@@ -3,7 +3,10 @@
 
 //! NVTX timeline-annotation helpers for Nsight Systems profiling.
 //!
-//! Delegates to [`cudarc::nvtx`] for the actual NVTX calls
+//! Delegates to the [`nvtx`](https://docs.rs/nvtx) crate for the actual NVTX
+//! calls. That crate compiles the vendored, header-only **NVTX v3** headers
+//! (`nvtx3/nvToolsExt.h`), so there is no link against the legacy
+//! `libnvToolsExt.so` — which CUDA 12.9+ / CUDA 13 removed.
 //!
 //! # Gating (two-level)
 //!
@@ -11,7 +14,7 @@
 //! |----------------------|----------------------------|-------------------------------------------|
 //! | off (default)        | any                        | macros compile to nothing; zero overhead  |
 //! | on                   | unset                      | one `Relaxed` load per site (~1 ns)       |
-//! | on                   | `1` / `true` / `yes`       | cudarc NVTX calls (~50 ns/annotation)     |
+//! | on                   | `1` / `true` / `yes`       | NVTX v3 calls (~50 ns/annotation)         |
 //!
 //! # Usage
 //!
@@ -27,7 +30,8 @@
 //! ```bash
 //! cargo build --profile profiling --features nvtx
 //! ```
-//! Requires `libnvToolsExt.so` at runtime (CUDA Toolkit or NVHPC).
+//! NVTX v3 is header-only, so no shared library is required at runtime; the
+//! profiler (e.g. Nsight Systems) injects the implementation when it attaches.
 
 #[cfg(feature = "nvtx")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,7 +73,7 @@ pub fn push_impl(name: &str) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            cudarc::nvtx::result::range_push(name);
+            nvtx::range_push!("{name}");
         }
     }
     let _ = name;
@@ -82,9 +86,47 @@ pub fn pop_impl() {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            cudarc::nvtx::result::range_pop();
+            nvtx::range_pop!();
         }
     }
+}
+
+/// Open a **correlated** NVTX range and return an opaque id to pass to
+/// [`range_end_impl`].
+///
+/// Unlike [`push_impl`]/[`pop_impl`], a correlated range is *not* tied to the
+/// calling thread's push/pop stack, so it may be opened and closed across
+/// `await` points, on different threads, and while other ranges interleave —
+/// which is exactly what async callers (e.g. the Python workers, whose
+/// coroutines interleave on one event-loop thread) need. Prefer the RAII
+/// [`NvtxRangeGuard`] / push-pop pair for synchronous scopes.
+///
+/// Returns `0` when NVTX is disabled (feature off, or `DYN_ENABLE_RUST_NVTX`
+/// unset); [`range_end_impl`] treats `0` as "no range".
+#[inline(always)]
+pub fn range_start_impl(name: &str) -> i64 {
+    #[cfg(feature = "nvtx")]
+    {
+        if NVTX_ENABLED.load(Ordering::Relaxed) {
+            return i64::from(nvtx::range_start!("{name}"));
+        }
+    }
+    let _ = name;
+    0
+}
+
+/// Close a correlated NVTX range previously opened by [`range_start_impl`].
+/// No-op for id `0`.
+#[inline(always)]
+pub fn range_end_impl(id: i64) {
+    #[cfg(feature = "nvtx")]
+    {
+        if id != 0 {
+            let range_id = id as i32;
+            nvtx::range_end!(range_id);
+        }
+    }
+    let _ = id;
 }
 
 /// Name the current OS thread in the Nsight Systems timeline.
@@ -94,11 +136,8 @@ pub fn name_current_thread_impl(name: &str) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            #[cfg(target_os = "linux")]
-            let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
-            #[cfg(not(target_os = "linux"))]
-            let tid = 0u32;
-            cudarc::nvtx::result::name_os_thread(tid, name);
+            // The `nvtx` crate resolves the current OS thread id internally.
+            nvtx::name_thread!("{name}");
         }
     }
     let _ = name;
@@ -124,9 +163,9 @@ impl NvtxRangeGuard {
         {
             let active = NVTX_ENABLED.load(Ordering::Relaxed);
             if active {
-                cudarc::nvtx::result::range_push(name);
+                nvtx::range_push!("{name}");
             }
-            return NvtxRangeGuard { active };
+            NvtxRangeGuard { active }
         }
         #[cfg(not(feature = "nvtx"))]
         {
@@ -140,7 +179,7 @@ impl NvtxRangeGuard {
 impl Drop for NvtxRangeGuard {
     fn drop(&mut self) {
         if self.active {
-            cudarc::nvtx::result::range_pop();
+            nvtx::range_pop!();
         }
     }
 }
