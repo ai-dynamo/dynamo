@@ -128,6 +128,7 @@ impl DeltaGenerator {
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: token_str.clone(),
                         logprob: lp,
+                        token_id: None,
                         bytes: token_to_utf8_bytes(&token_str),
                         top_logprobs: converted,
                     }
