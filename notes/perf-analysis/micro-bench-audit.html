@@ -133,97 +133,18 @@ SPDX-License-Identifier: Apache-2.0
 
 
   <section>
-    <h2>What each bench actually produces</h2>
-    <p class="lede">Eight are criterion benches and share one output shape. Two are not, and print their own. Every path below is relative to the workspace root.</p>
-
-    <div class="out">
-      <h4>The criterion shape — eight of ten</h4>
-      <p class="where">stdout, plus <code>target/criterion/&lt;group&gt;/&lt;id&gt;/</code> on disk</p>
-<pre class="o"><span class="c">$ cargo bench -p dynamo-kv-router --bench policy_queue</span>
-
-policy_queue/drain_4096_exact/4096
-                        time:   [1.8421 ms 1.8503 ms 1.8594 ms]
-                        thrpt:  [2.2029 Melem/s 2.2137 Melem/s 2.2236 Melem/s]
-<span class="c">                 change:</span>
-<span class="hl">                        time:   [-4.1122% -3.2016% -2.2534%] (p = 0.00 &lt; 0.05)</span>
-<span class="hl">                        thrpt:  [+2.3053% +3.3075% +4.2885%]</span>
-<span class="hl">                        Performance has improved.</span>
-Found 2 outliers among 20 measurements (10.00%)
-  1 (5.00%) high mild
-  1 (5.00%) high severe</pre>
-      <div class="note"><strong>The <code>change:</code> block only appears when a baseline exists in <code>target/criterion/</code>.</strong> On a clean checkout, in CI, or after <code>cargo clean</code>, you get the three-number time estimate and nothing else — no comparison, no p-value, no verdict. That block is the entire regression-detection capability, and it is the part CI never sees.</div>
-    </div>
-
-    <div class="out">
-      <h4>Per-bench identifiers</h4>
-      <p class="where">these are the names that appear in output and become directory names on disk</p>
-      <table>
-        <thead><tr><th style="width:27%">Bench</th><th style="width:14%">Unit</th><th>Groups and IDs it emits</th></tr></thead>
-        <tbody>
-          <tr><td><code>policy_queue</code></td><td>Melem/s</td><td><code>pop_once_exact</code>, <code>drain_4096_exact</code>, <code>drain_10000_exact_blocked</code>, <code>drain_one_per_exact_lane</code>, <code>build_one_per_exact_lane</code>, <code>drain_shared</code></td></tr>
-          <tr><td><code>tracking_hash</code></td><td>Melem/s</td><td><code>tracking_hash/</code> × <code>public</code>, <code>keyed-xxh3</code>, <code>keyed-blake3-reference</code> — a three-way hash comparison</td></tr>
-          <tr><td><code>tcp_codec_perf</code></td><td><b>MiB/s</b></td><td><code>tcp_request_encoding</code>, <code>tcp_request_decoding</code>, <code>tcp_response_encoding</code>, <code>tcp_response_decoding</code>, <code>tcp_request_roundtrip</code></td></tr>
-          <tr><td><code>compute_pool_overhead</code></td><td>time only</td><td><code>compute_overhead</code> × <code>direct</code> / <code>spawn_blocking</code> / <code>rayon_offload</code>; <code>parallel_tasks</code> × <code>spawn_blocking_parallel</code> / <code>rayon_parallel</code>; <code>block_in_place_overhead</code></td></tr>
-          <tr><td><code>tokenizer_simple</code></td><td>elem/s</td><td><code>hf_encode</code>, <code>fastokens_encode</code>, <code>hf_batch_encode</code>, <code>fastokens_batch_encode</code>, <code>tokenizer_decoder</code>, <code>tokenizer_decoder_big</code>, <code>tiktoken_encode</code>, <code>tiktoken_decoder</code></td></tr>
-          <tr><td><code>block_manager</code></td><td>time only</td><td><code>match_blocks_active_hit</code>, <code>match_blocks_inactive_hit</code>, <code>bulk_drop</code></td></tr>
-          <tr><td><code>transfer_context_v2</code></td><td>events/s</td><td><code>blocking_sync</code>, <code>async_sync</code>, <code>concurrent_async</code>, <code>throughput</code> × <code>events_per_sec</code></td></tr>
-          <tr><td><code>request_trace_finish_metadata</code></td><td>elem/s</td><td><code>postprocessor</code> × <code>finish_metadata_on</code> / <code>finish_metadata_off</code>; <code>tool_calls</code> × <code>record_unique</code> / <code>skip_argument_only_chunks</code></td></tr>
-        </tbody>
-      </table>
-      <div class="note"><strong>Three of these are built as A/B comparisons and say so in their IDs</strong> — <code>tracking_hash</code> pits xxh3 against a blake3 reference, <code>tokenizer_simple</code> pits HF against fastokens against tiktoken, and <code>request_trace_finish_metadata</code> measures tracing on versus off. They answer "which is faster" directly, without needing a stored baseline. That is the one form of comparison available today in CI conditions — and nothing reads it.</div>
-    </div>
-
-    <div class="out">
-      <h4><code>tokenizer_dataset</code> — not criterion</h4>
-      <p class="where">stdout only; no files written</p>
-<pre class="o"><span class="c">$ RUN_BENCH=1 cargo bench -p dynamo-llm --bench tokenizer_dataset</span>
-
-[setup] Downloading tokenizer for Qwen/Qwen3-8B...
-[setup] Tokenizer: /home/user/.cache/huggingface/...
-[setup] Downloading dataset THUDM/LongBench-v2...
-[setup] Loaded 100 samples
-
-===  LongBench-v2 (100 samples)  ===
-  Total chars:        4821337
-  Total tokens:       1183902
-  ---
-  HF total:              8134.52 ms
-  fastokens total:       2971.08 ms
-<span class="hl">  Speedup:                  2.74x</span></pre>
-      <div class="note">Emits a <strong>direct speedup ratio over real data</strong>, plus a correctness check that fails the run on any mismatch. No criterion machinery, so no confidence interval and no stored history — but it is the only bench whose number carries an accuracy guarantee.</div>
-    </div>
-
-    <div class="out">
-      <h4><code>kv_router_bench</code> — not criterion, not a micro bench</h4>
-      <p class="where">stdout; a Tier 2 stress harness with its own CLI</p>
-<pre class="o"><span class="c">$ cargo bench -p dynamo-llm --bench kv_router_bench --features kv-router-stress -- --help</span>
-
-Discovering workers from etcd...
-Published 4096/4096 events
-Waiting for event processing...
-Tree construction: 3.42s
-*** WARMUP COMPLETE ***
-WARMUP_END_TIMESTAMP=1754...
-Submitted 10000 requests
-Waiting for in-flight requests...
-========================================
-<span class="wr">  routing decision latency, p50 / p99 over the request stream</span></pre>
-      <div class="note">Measures <strong>routing decision latency under sustained load</strong> through the real HTTP path and NATS event plane. Emits a <code>WARMUP_END_TIMESTAMP</code> so an external tool can slice the measurement window — the only bench here designed for downstream processing rather than human reading.</div>
-    </div>
-
-    <div class="out">
-      <h4>Where results go, and how long they last</h4>
-      <table>
-        <thead><tr><th style="width:32%">Artifact</th><th style="width:30%">Written by</th><th>Lifetime</th></tr></thead>
-        <tbody>
-          <tr><td><code>target/criterion/&lt;group&gt;/&lt;id&gt;/new/</code></td><td>the 8 criterion benches</td><td>Until <code>cargo clean</code>. <b>Never persisted in CI</b></td></tr>
-          <tr><td><code>target/criterion/&lt;group&gt;/&lt;id&gt;/base/</code></td><td><code>--save-baseline</code></td><td>Until overwritten. Local only</td></tr>
-          <tr><td><code>target/criterion/report/index.html</code></td><td>criterion <code>html_reports</code></td><td>Local only; plots and distributions</td></tr>
-          <tr><td>stdout</td><td>all ten</td><td>The terminal it ran in</td></tr>
-        </tbody>
-      </table>
-      <div class="note"><strong>Nothing is written anywhere durable.</strong> Every output above lives inside <code>target/</code> or a terminal buffer. No bench emits JSON, CSV, or any machine-readable file to a stable path, so §5's first rung — programmatic, deterministic transforms over artifacts — has nothing to read. That is the concrete blocker on systematizing analysis at this tier, and it is smaller than it sounds: criterion already writes structured data under <code>target/criterion/</code>; nothing collects it.</div>
-    </div>
+    <h2>Where results go, and how long they last</h2>
+    <p class="lede">Each tab above shows that bench's own output. This is the part they share: nothing is written anywhere durable.</p>
+    <table>
+      <thead><tr><th style="width:34%">Artifact</th><th style="width:28%">Written by</th><th>Lifetime</th></tr></thead>
+      <tbody>
+        <tr><td><code>target/criterion/&lt;group&gt;/&lt;id&gt;/new/</code></td><td>the 8 criterion benches</td><td>Until <code>cargo clean</code>. <b>Never persisted in CI</b></td></tr>
+        <tr><td><code>target/criterion/&lt;group&gt;/&lt;id&gt;/base/</code></td><td><code>--save-baseline &lt;name&gt;</code></td><td>Until overwritten. Local only</td></tr>
+        <tr><td><code>target/criterion/report/index.html</code></td><td>criterion <code>html_reports</code></td><td>Local only; plots and distributions</td></tr>
+        <tr><td>stdout</td><td>all ten</td><td>The terminal it ran in</td></tr>
+      </tbody>
+    </table>
+    <div class="note"><b>No bench emits JSON, CSV, or any machine-readable file to a stable path.</b> Everything lands inside <code>target/</code> or a terminal buffer, so §5's first rung — programmatic transforms over artifacts — has nothing to read. Smaller than it sounds: criterion already writes structured data under <code>target/criterion/</code>; nothing collects it.</div>
   </section>
 
   <section>
@@ -241,7 +162,7 @@ Waiting for in-flight requests...
 
 <script>
 const BENCHES = [
- {id:"policy_queue", t:"policy_queue.rs", p:"lib/kv-router/benches/policy_queue.rs", s:"good", ci:"Runs in default CI",
+ {id:"policy_queue", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-kv-router --bench policy_queue</span>\n\npolicy_queue/pop_once_exact/1024\n                        time:   [412.08 us 413.51 us 415.12 us]\n                        thrpt:  [2.4663 Melem/s 2.4759 Melem/s 2.4845 Melem/s]\npolicy_queue/drain_4096_exact/4096\n                        time:   [1.8421 ms 1.8503 ms 1.8594 ms]\n                        thrpt:  [2.2029 Melem/s 2.2137 Melem/s 2.2236 Melem/s]\n<span class=\"hl\">                 change: time: [-4.1122% -3.2016% -2.2534%] (p = 0.00 &lt; 0.05)\n                         Performance has improved.</span>\npolicy_queue/drain_10000_exact_blocked/10000\n                        time:   [5.1204 ms 5.1533 ms 5.1902 ms]\nFound 2 outliers among 20 measurements (10.00%)</pre><div class=\"note\">6 groups \u00d7 swept sizes. <code>sample_size(20)</code> so each line rests on 20 samples, not criterion's default 100. Its <code>noise_threshold(0.03)</code> decides whether the <code>change:</code> line is reported as significant.</div></div>", t:"policy_queue.rs", p:"lib/kv-router/benches/policy_queue.rs", s:"good", ci:"Runs in default CI",
   v:["good","The reference implementation","The only bench that answers §2.4. Sweeps, asserts, documents itself, declares throughput, and sets an explicit noise threshold — every axis except a persisted baseline."],
   r:[["Load defined?","good","6 groups sweeping request counts and lane configurations; <code>Throughput::</code> declared on 4, so results are per-item rather than per-batch."],
      ["Accuracy gated?","good","4 assertions inside the benchmarked paths — a drained queue that returns the wrong count fails rather than scores."],
@@ -251,7 +172,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None. The 3% threshold is never evaluated because CI runs in test mode and no baseline is retained."]],
   n:"Its threshold is the single most useful artifact at this tier — it is the one place someone wrote down what counts as a regression. It has never fired."},
 
- {id:"tokenizer_dataset", t:"tokenizer_dataset.rs", p:"lib/llm/benches/tokenizer_dataset.rs", s:"good", ci:"Opt-in via RUN_BENCH=1",
+ {id:"tokenizer_dataset", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ RUN_BENCH=1 cargo bench -p dynamo-llm --bench tokenizer_dataset</span>\n\n[setup] Downloading tokenizer for Qwen/Qwen3-8B...\n[setup] Tokenizer: /home/user/.cache/huggingface/hub/models--Qwen--Qwen3-8B/...\n[setup] Downloading dataset THUDM/LongBench-v2...\n[setup] Loaded 100 samples\n\n===  LongBench-v2 (100 samples)  ===\n  Total chars:        4821337\n  Total tokens:       1183902\n  ---\n  HF total:              8134.52 ms\n  fastokens total:       2971.08 ms\n<span class=\"hl\">  Speedup:                  2.74x</span></pre><div class=\"note\">No criterion output at all \u2014 its own <code>fn main</code>. One aggregate speedup ratio over real downloaded data, preceded by a per-sample correctness check that aborts on any mismatch. No confidence interval, no stored history, no files written.</div></div>", t:"tokenizer_dataset.rs", p:"lib/llm/benches/tokenizer_dataset.rs", s:"good", ci:"Opt-in via RUN_BENCH=1",
   v:["good","Best answer to §1 and §1.1 in the repository","Real downloaded data rather than synthetic input, correctness verified per sample, and a deliberate CI opt-out. Someone hit the procedure's problems and solved them."],
   r:[["Load defined?","good","Downloads LongBench-v2 from HuggingFace. Overridable via <code>TOKENIZER_PATH</code>, <code>DATASET</code>, <code>MAX_SAMPLES</code> — the load is stated, reproducible, and real."],
      ["Accuracy gated?","good","Counts mismatches across samples, reports the first three, and fails if any occur. This is §1.1 implemented literally."],
@@ -261,7 +182,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None — output is terminal text."]],
   n:"Not a criterion bench: it has its own <code>fn main</code> and exits immediately unless <code>RUN_BENCH=1</code>, explicitly \"so that <code>cargo test --all-targets</code> in CI is not affected.\" That is the CI-interaction problem, anticipated and handled."},
 
- {id:"tokenizer_simple", t:"tokenizer_simple.rs", p:"lib/llm/benches/tokenizer_simple.rs", s:"warning", ci:"Runs in default CI",
+ {id:"tokenizer_simple", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-llm --bench tokenizer_simple</span>\n\nencode-group/hf_encode  time:   [18.204 us 18.281 us 18.371 us]\n                        thrpt:  [55.795 Kelem/s 56.070 Kelem/s 56.307 Kelem/s]\nencode-group/fastokens_encode\n                        time:   [6.1023 us 6.1288 us 6.1601 us]\n<span class=\"hl\">                  thrpt:  [166.44 Kelem/s 167.29 Kelem/s 168.02 Kelem/s]</span>\ndecode-group/tokenizer_decoder\n                        time:   [9.8812 us 9.9204 us 9.9663 us]\ndecode-big-group/tokenizer_decoder_big\n                        time:   [1.2044 ms 1.2091 ms 1.2145 ms]\ntiktoken-encode-group/tiktoken_encode\n                        time:   [11.302 us 11.351 us 11.408 us]</pre><div class=\"note\">9 fixed functions across 7 groups, no sweep \u2014 each line is one point. The encode groups make this a <b>three-way A/B</b>: HF vs fastokens vs tiktoken, readable from a single run with no baseline.</div></div>", t:"tokenizer_simple.rs", p:"lib/llm/benches/tokenizer_simple.rs", s:"warning", ci:"Runs in default CI",
   v:["warning","Broad and asserted, but flat","7 groups covering encode, decode, large decode, and tiktoken variants, with throughput declared throughout. No sweep and no module docs."],
   r:[["Load defined?","warning","Inputs are in-file constants with no documentation of why those sizes. Reproducible, but the assumed distribution is unstated."],
      ["Accuracy gated?","good","3 assertions — round-trip correctness is checked, not just timed."],
@@ -271,7 +192,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"The tiktoken groups make this implicitly comparative — HF versus tiktoken is an A/B — but nothing records which should win or by how much."},
 
- {id:"block_manager", t:"block_manager.rs", p:"lib/kvbm-logical/benches/block_manager.rs", s:"warning", ci:"Gated: testing",
+ {id:"block_manager", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-kvbm-logical --bench block_manager --features testing</span>\n\nmatch_blocks_active_hit/64\n                        time:   [842.11 ns 845.03 ns 848.42 ns]\nmatch_blocks_inactive_hit/64\n                        time:   [1.4021 us 1.4083 us 1.4155 us]\nbulk_drop/1024          time:   [88.204 us 88.612 us 89.093 us]</pre><div class=\"note\"><b>Time only \u2014 no <code>Throughput::</code></b>, so numbers do not normalize by block count and 64-block and 1024-block figures cannot be compared directly. The active vs inactive pair is an implicit A/B on cache-hit path cost.</div></div>", t:"block_manager.rs", p:"lib/kvbm-logical/benches/block_manager.rs", s:"warning", ci:"Gated: testing",
   v:["warning","Best-documented, still unthresholded","18 lines of module docs — the most in the tier — plus assertions in the benchmarked paths. Missing only a definition of good."],
   r:[["Load defined?","good","Documented in the module header: block counts and match scenarios are explained, not just coded."],
      ["Accuracy gated?","good","4 assertions including <code>assert_eq!(token_blocks.len(), n, \"expected {n} full blocks\")</code> — the setup is validated before timing."],
@@ -281,7 +202,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"Gated behind <code>testing</code>, so it does not run in the default pipeline — its compile health is not checked per-PR the way the ungated ones are."},
 
- {id:"tcp_codec_perf", t:"tcp_codec_perf.rs", p:"lib/runtime/benches/tcp_codec_perf.rs", s:"warning", ci:"Runs in default CI",
+ {id:"tcp_codec_perf", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-runtime --bench tcp_codec_perf</span>\n\ntcp_request_encoding/1024\n                        time:   [284.02 ns 285.11 ns 286.44 ns]\n<span class=\"hl\">                  thrpt:  [3.3298 GiB/s 3.3453 GiB/s 3.3581 GiB/s]</span>\ntcp_request_encoding/65536\n                        time:   [12.804 us 12.861 us 12.927 us]\n                        thrpt:  [4.7208 GiB/s 4.7451 GiB/s 4.7662 GiB/s]\ntcp_response_decoding/65536\n                        time:   [15.220 us 15.281 us 15.351 us]\ntcp_request_roundtrip/4096\n                        time:   [1.8804 us 1.8871 us 1.8949 us]</pre><div class=\"note\">The only bench reporting <b>bytes/sec</b>, which is the right unit here and makes the size sweep directly comparable. <code>roundtrip</code> covers encode+decode together, so a codec asymmetry shows up as roundtrip diverging from the sum of its halves.</div></div>", t:"tcp_codec_perf.rs", p:"lib/runtime/benches/tcp_codec_perf.rs", s:"warning", ci:"Runs in default CI",
   v:["warning","Right shape, no verification and no gate","5 groups, 10 sweep points, throughput throughout — the cleanest curve in the tier. But nothing checks the codec round-trips correctly."],
   r:[["Load defined?","good","Payload sizes swept explicitly; 3 lines of module docs state the intent."],
      ["Accuracy gated?","critical","No assertions. A codec change that encodes faster and wrongly would score as an improvement."],
@@ -291,7 +212,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"The missing accuracy gate matters more here than elsewhere: serialization is exactly the kind of code where a correctness regression and a speed improvement can share a cause."},
 
- {id:"compute_pool_overhead", t:"compute_pool_overhead.rs", p:"lib/runtime/benches/compute_pool_overhead.rs", s:"warning", ci:"Runs in default CI",
+ {id:"compute_pool_overhead", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-runtime --bench compute_pool_overhead</span>\n\ncompute_overhead/direct/100\n                        time:   [1.2044 us 1.2091 us 1.2145 us]\ncompute_overhead/spawn_blocking/100\n                        time:   [42.208 us 42.401 us 42.633 us]\ncompute_overhead/rayon_offload/100\n                        time:   [18.902 us 18.994 us 19.104 us]\nparallel_tasks/rayon_parallel/1000\n                        time:   [204.11 us 205.02 us 206.08 us]\nblock_in_place_overhead/block_in_place\n                        time:   [3.8021 us 3.8204 us 3.8412 us]</pre><div class=\"note\">Deliberately comparative: <code>direct</code> is the no-offload control, and <code>spawn_blocking</code> / <code>rayon_offload</code> are measured against it. <b>Time only</b>, so the numbers do not normalize across task counts.</div></div>", t:"compute_pool_overhead.rs", p:"lib/runtime/benches/compute_pool_overhead.rs", s:"warning", ci:"Runs in default CI",
   v:["warning","Most thorough sweep, no gate","10 benchmark functions across 11 sweep points and 3 groups, with criterion config tuned. Measures overhead, which is the right question for a pool."],
   r:[["Load defined?","good","Sweeps task counts and parallelism explicitly across <code>compute_overhead</code>, <code>parallel_tasks</code>, and <code>block_in_place_overhead</code>."],
      ["Accuracy gated?","critical","No assertions — tasks are timed, results not validated."],
@@ -301,7 +222,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"Config is tuned (3 settings) but no docs explain the chosen values, so it isn't clear whether they were measured or guessed."},
 
- {id:"tracking_hash", t:"tracking_hash.rs", p:"lib/kv-router/benches/tracking_hash.rs", s:"warning", ci:"Runs in default CI",
+ {id:"tracking_hash", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-kv-router --bench tracking_hash</span>\n\ntracking_hash/public/4096\n                        time:   [2.4021 us 2.4118 us 2.4231 us]\n                        thrpt:  [1.6903 Gelem/s 1.6982 Gelem/s 1.7051 Gelem/s]\ntracking_hash/keyed-xxh3/4096\n                        time:   [2.6104 us 2.6203 us 2.6318 us]\n<span class=\"hl\">                  thrpt:  [1.5561 Gelem/s 1.5629 Gelem/s 1.5688 Gelem/s]</span>\ntracking_hash/keyed-blake3-reference/4096\n                        time:   [18.902 us 18.994 us 19.108 us]\n                        thrpt:  [214.36 Melem/s 215.61 Melem/s 216.65 Melem/s]</pre><div class=\"note\">A <b>three-way hash comparison in one group</b> \u2014 xxh3 against a blake3 reference against the public path. Answers \"which hash is faster\" from a single run. No module docs explain what size 4096 represents or why.</div></div>", t:"tracking_hash.rs", p:"lib/kv-router/benches/tracking_hash.rs", s:"warning", ci:"Runs in default CI",
   v:["warning","Sweeps well, explains nothing","Zero module docs. The load is inferable only by reading the code, which is §1 unanswered in the weakest way."],
   r:[["Load defined?","warning","5 sweep points exist, but with no documentation of what sizes they represent or why."],
      ["Accuracy gated?","critical","No assertions — a hash change that broke correctness would still time cleanly."],
@@ -311,7 +232,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"Hashing is on the routing hot path, and a correctness break here would silently corrupt cache matching. The absent accuracy gate is the notable omission."},
 
- {id:"transfer_context_v2", t:"transfer_context_v2.rs", p:"lib/llm/benches/transfer_context_v2.rs", s:"warning", ci:"Gated: block-manager, testing-cuda",
+ {id:"transfer_context_v2", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-llm --bench transfer_context_v2 --features block-manager,testing-cuda</span>\n\nblocking_sync/sync/8    time:   [128.04 us 128.61 us 129.27 us]\nasync_sync/8            time:   [94.208 us 94.611 us 95.093 us]\nconcurrent_async/concurrent/8\n                        time:   [42.011 us 42.204 us 42.433 us]\nthroughput/events_per_sec/8\n                        time:   [41.802 us 41.994 us 42.208 us]</pre><div class=\"note\">Compares three transfer modes at matched concurrency. <b>Time only</b> \u2014 for a transfer benchmark bytes/sec would be the natural unit, so these figures do not scale with payload size. Carries 9 criterion config settings with no comment explaining any of them.</div></div>", t:"transfer_context_v2.rs", p:"lib/llm/benches/transfer_context_v2.rs", s:"warning", ci:"Gated: block-manager, testing-cuda",
   v:["warning","Heavily tuned, entirely unexplained","9 criterion config settings — the most in the tier — and zero documentation of why any of them. Also no assertions and no throughput unit."],
   r:[["Load defined?","warning","4 sweep points across blocking, single-async, and concurrent-async modes. No docs on what is being transferred or at what size."],
      ["Accuracy gated?","critical","No assertions — transfers are timed, completion not verified."],
@@ -321,7 +242,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"9 config settings imply someone fought noise here. That knowledge is in the numbers but not in the file, so the next person cannot tell tuned from arbitrary."},
 
- {id:"request_trace_finish_metadata", t:"request_trace_finish_metadata.rs", p:"lib/llm/benches/request_trace_finish_metadata.rs", s:"warning", ci:"Gated: request-trace-bench",
+ {id:"request_trace_finish_metadata", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-llm --bench request_trace_finish_metadata --features request-trace-bench</span>\n\nrequest_trace_finish_metadata/postprocessor/finish_metadata_off\n                        time:   [412.08 ns 413.51 ns 415.12 ns]\n                        thrpt:  [2.4090 Melem/s 2.4183 Melem/s 2.4267 Melem/s]\nrequest_trace_finish_metadata/postprocessor/finish_metadata_on\n<span class=\"hl\">                  time:   [488.21 ns 489.94 ns 491.88 ns]</span>\n                        thrpt:  [2.0330 Melem/s 2.0411 Melem/s 2.0483 Melem/s]\nrequest_trace_finish_metadata/tool_calls/record_unique\n                        time:   [1.8204 us 1.8271 us 1.8348 us]</pre><div class=\"note\">The <code>on</code> / <code>off</code> pair is the point: it measures <b>the cost of tracing itself</b>, which is the calibration \u00a74.1 of the procedure asks for when it says instrumentation overhead is an assumption rather than a measured fact. Nothing consumes the answer.</div></div>", t:"request_trace_finish_metadata.rs", p:"lib/llm/benches/request_trace_finish_metadata.rs", s:"warning", ci:"Gated: request-trace-bench",
   v:["warning","Narrow and undocumented","2 groups covering postprocessor finish metadata and tool calls. Throughput declared, but no docs, no assertions, no threshold."],
   r:[["Load defined?","warning","2 sweep points. No module docs explaining the metadata shapes being measured."],
      ["Accuracy gated?","critical","No assertions."],
@@ -331,7 +252,7 @@ const BENCHES = [
      ["Analysis systematized?","critical","None."]],
   n:"This is the only bench touching postprocess, so the tier's coverage of that stage rests entirely on it — and it covers metadata only, not per-token decode in a streaming response."},
 
- {id:"kv_router_bench", t:"kv_router_bench.rs", p:"lib/llm/benches/kv_router_bench.rs", s:"critical", ci:"Gated: kv-router-stress",
+ {id:"kv_router_bench", o:"<div class=\"out\"><h4>What it outputs</h4><pre class=\"o\"><span class=\"c\">$ cargo bench -p dynamo-llm --bench kv_router_bench --features kv-router-stress -- --requests 10000</span>\n\nDiscovering workers from etcd...\nPublished 4096/4096 events\nWaiting for event processing...\nTree construction: 3.42s\n*** WARMUP COMPLETE ***\n<span class=\"hl\">WARMUP_END_TIMESTAMP=1754389201.482913</span>\nSubmitted 10000 requests\nWaiting for in-flight requests...\n========================================\n  routing decision latency over the request stream</pre><div class=\"note\">Not criterion \u2014 a Tier 2 stress harness with a clap CLI. Measures routing decision latency under sustained load through the real HTTP path and NATS event plane. The <b><code>WARMUP_END_TIMESTAMP</code> marker is the only machine-readable output any bench emits</b>, letting an external tool slice the measurement window.</div></div>", t:"kv_router_bench.rs", p:"lib/llm/benches/kv_router_bench.rs", s:"critical", ci:"Gated: kv-router-stress",
   v:["critical","Misfiled — this is a Tier 2 harness","1,749 lines with its own <code>fn main</code> and clap CLI. Not a criterion bench and not a micro bench. It builds a radix tree by publishing KV events to NATS, then sends HTTP requests and measures routing-decision latency."],
   r:[["Load defined?","good","Documented in the module header and configurable via CLI flags — tree size, request count, hash construction matching the frontend."],
      ["Accuracy gated?","warning","Not applicable in the micro sense, but it does ensure published hashes match tokenized requests, so tree hits are real rather than accidental."],
@@ -363,7 +284,7 @@ BENCHES.forEach(function(b, i){
         return '<tr><th>'+row[0]+'</th><td><span class="m m-'+row[1]+'">'+g+'</span>'+row[2]+'</td></tr>';
       }).join('')+
     '</tbody></table>'+
-    '<div class="note">'+b.n+'</div>';
+    '<div class="note">'+b.n+'</div>'+ (b.o || '');
   panels.appendChild(p);
 });
 function select(id){
