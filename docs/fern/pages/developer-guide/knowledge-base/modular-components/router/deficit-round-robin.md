@@ -188,7 +188,7 @@ for a complete profile.
 ## Prioritize Premium Requests with Policy Classes
 
 Policy classes help a shared deployment protect premium traffic during demand
-spikes. When the backend is saturated, the router gives premium requests a
+spikes. Under sustained prefill pressure, the router gives premium requests a
 larger share of queued service while regular requests continue receiving
 service. When premium demand subsides, regular traffic can use all available
 capacity.
@@ -232,10 +232,12 @@ python -m dynamo.frontend \
     --router-policy-config ./policy-classes.yaml
 ```
 
-In this four-wide workload, `prefill_busy_threshold: 1536` admits four
-512-token requests before later requests enter the policy queues. Once queued,
-the `512:128` quantum ratio gives premium four times the DRR credit. Tune the
-threshold to the request sizes and backend capacity of your deployment.
+In this one-output-token, four-wide workload,
+`prefill_busy_threshold: 1536` admits four 512-token requests before sustained
+prefill pressure causes later requests to enter the policy queues. While both
+queues remain backlogged, the `512:128` quantum ratio gives premium four times
+the DRR credit. Tune the threshold to the request sizes and prefill pressure at
+which queueing should begin in your deployment.
 
 ### Select a Class on Each Request
 
@@ -282,5 +284,5 @@ directly in request completions; with varied request sizes, `quantum` continues
 to control the share of uncached-token service.
 
 The CPU Mocker regression test at
-`tests/fault_tolerance/admission_control/policy_class/test_policy_class.py`
+`tests/router/test_policy_class.py`
 asserts both the larger premium share and continued regular progress.

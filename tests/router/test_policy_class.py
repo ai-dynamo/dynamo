@@ -27,7 +27,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.e2e,
-    pytest.mark.fault_tolerance,
+    pytest.mark.router,
     pytest.mark.model(ROUTER_MODEL_NAME),
     pytest.mark.timeout(140),  # 3x the observed 45.90s end-to-end runtime.
 ]
@@ -39,7 +39,7 @@ INPUT_TOKENS = 512
 COMPLETION_PREFIX = REQUESTS_PER_CLASS
 EARLY_PREMIUM_COMPLETIONS = REQUESTS_PER_CLASS // 4
 LATE_PREMIUM_COMPLETIONS = 3 * REQUESTS_PER_CLASS // 4
-CONFIG_DIR = Path(__file__).with_name("configs")
+CONFIG_DIR = Path(__file__).with_name("configs") / "policy_class"
 
 
 logger = logging.getLogger(__name__)
