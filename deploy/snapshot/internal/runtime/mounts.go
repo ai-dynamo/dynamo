@@ -113,16 +113,39 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 
 // RemountProcSys remounts /proc/sys read-write or read-only.
 func RemountProcSys(rw bool) error {
-	flags := uintptr(syscall.MS_BIND | syscall.MS_REMOUNT)
+	const target = "/proc/sys"
+	mounted, err := mountinfo.Mounted(target)
+	if err != nil {
+		return fmt.Errorf("failed to inspect %s mount: %w", target, err)
+	}
+	var statfs syscall.Statfs_t
+	if err := syscall.Statfs(target, &statfs); err != nil {
+		return fmt.Errorf("failed to statfs %s: %w", target, err)
+	}
+
+	return remountProcSys(rw, mounted, uintptr(statfs.Flags), syscall.Mount)
+}
+
+func remountProcSys(rw bool, mounted bool, currentFlags uintptr, mount func(string, string, string, uintptr, string) error) error {
+	const target = "/proc/sys"
+	// A bind remount requires a mount root, which privileged OCI containers
+	// do not create for readonlyPaths.
+	if rw && !mounted {
+		if err := mount(target, target, "", syscall.MS_BIND, ""); err != nil {
+			return fmt.Errorf("failed to bind mount %s for rw remount: %w", target, err)
+		}
+	}
+
+	// A bind remount replaces per-mount flags, so retain the security flags.
+	flags := currentFlags & (syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC)
+	flags |= syscall.MS_BIND | syscall.MS_REMOUNT
+	mode := "rw"
 	if !rw {
 		flags |= syscall.MS_RDONLY
+		mode = "ro"
 	}
-	if err := syscall.Mount("proc", "/proc/sys", "", flags, ""); err != nil {
-		mode := "rw"
-		if !rw {
-			mode = "ro"
-		}
-		return fmt.Errorf("failed to remount /proc/sys %s: %w", mode, err)
+	if err := mount("", target, "", flags, ""); err != nil {
+		return fmt.Errorf("failed to remount %s %s: %w", target, mode, err)
 	}
 	return nil
 }
