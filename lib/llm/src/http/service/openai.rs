@@ -37,7 +37,7 @@ use super::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
         monitor_for_disconnects_with_rendered_errors,
     },
-    error::{ClassifiedHttpError, HttpError, invalid_argument},
+    error::{ClassifiedHttpError, HttpError, HttpErrorKind, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -168,17 +168,24 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             CONTEXT,
         ),
         Some(ResponsesConversionError::NotImplemented(message)) => {
-            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+            ErrorMessage::not_implemented_error(format!("{CONTEXT}: {message}"))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
     }
 }
 
-fn responses_error_code(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
-        status if status.is_client_error() => "invalid_prompt",
-        _ => "server_error",
+fn responses_error_code(kind: HttpErrorKind) -> &'static str {
+    match kind {
+        HttpErrorKind::Validation => "invalid_prompt",
+        HttpErrorKind::Authentication => "authentication_error",
+        HttpErrorKind::Permission => "permission_error",
+        HttpErrorKind::NotFound => "not_found_error",
+        HttpErrorKind::RateLimit => "rate_limit_exceeded",
+        HttpErrorKind::Cancelled => "request_cancelled",
+        HttpErrorKind::Overloaded
+        | HttpErrorKind::Unavailable
+        | HttpErrorKind::NotImplemented
+        | HttpErrorKind::Internal => "server_error",
     }
 }
 
@@ -2874,7 +2881,7 @@ async fn responses(
                 if let Some(problem) = ClassifiedHttpError::from_annotated(&annotated_chunk) {
                     converter.append_error_events(
                         ErrorObject {
-                            code: responses_error_code(problem.status()).to_string(),
+                            code: responses_error_code(problem.kind()).to_string(),
                             message: problem.message().to_string(),
                         },
                         &mut events,

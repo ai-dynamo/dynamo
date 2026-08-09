@@ -391,24 +391,31 @@ async fn anthropic_overload_statuses_use_overloaded_error() {
 
 #[tokio::test]
 #[serial]
-async fn responses_overload_statuses_use_server_error_events() {
+async fn responses_operational_error_kinds_use_protocol_codes() {
     temp_env::async_with_vars(BASE_ENV, async {
         let cases = [
-            (ErrorType::Unavailable, "Service temporarily unavailable"),
+            (
+                ErrorType::Unavailable,
+                "server_error",
+                "Service temporarily unavailable",
+            ),
             (
                 ErrorType::ResourceExhausted,
+                "server_error",
                 "Service temporarily overloaded",
             ),
+            (
+                ErrorType::Cancelled,
+                "request_cancelled",
+                "Request cancelled",
+            ),
         ];
-        let scripts = cases.iter().map(|(error_type, _)| {
-            vec![backend_error(
-                *error_type,
-                "private backend overload detail",
-            )]
+        let scripts = cases.iter().map(|(error_type, _, _)| {
+            vec![backend_error(*error_type, "private backend error detail")]
         });
         let svc = HarnessService::start_with_scripts(scripts, []).await;
 
-        for (_, expected_message) in cases {
+        for (_, expected_code, expected_message) in cases {
             let response = svc
                 .client
                 .post(format!("{}/v1/responses", svc.base_url))
@@ -424,7 +431,7 @@ async fn responses_overload_statuses_use_server_error_events() {
                 .iter()
                 .find(|event| event.event == "response.failed")
                 .expect("missing response.failed event");
-            assert_eq!(failed.data["response"]["error"]["code"], "server_error");
+            assert_eq!(failed.data["response"]["error"]["code"], expected_code);
             assert_eq!(
                 failed.data["response"]["error"]["message"],
                 expected_message
@@ -433,7 +440,7 @@ async fn responses_overload_statuses_use_server_error_events() {
                 !failed
                     .data
                     .to_string()
-                    .contains("private backend overload detail")
+                    .contains("private backend error detail")
             );
         }
 
