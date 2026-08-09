@@ -92,7 +92,6 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
-const VALIDATION_PREFIX: &str = "Validation: ";
 const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str = "Batch file storage is not implemented yet.";
 const BATCH_JOB_STATE_NOT_IMPLEMENTED: &str =
     "Batch job lifecycle persistence is not implemented yet.";
@@ -1285,11 +1284,6 @@ async fn classify(
         &request_id,
     );
 
-    // Marked as `Validation` explicitly rather than through
-    // `extract_error_type_from_response`: that helper infers the type from the
-    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
-    // `Validation` (anything else falls back to `Internal`). These messages
-    // stay verbatim vLLM-compatible, so the prefix is not an option here.
     if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
         inflight.mark_error(ErrorType::Validation);
         return Err(err_response);
@@ -1558,11 +1552,6 @@ async fn pooling(
         &request_id,
     );
 
-    // Marked as `Validation` explicitly rather than through
-    // `extract_error_type_from_response`: that helper infers the type from the
-    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
-    // `Validation` (anything else falls back to `Internal`). These messages
-    // stay verbatim vLLM-compatible, so the prefix is not an option here.
     if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
         inflight.mark_error(ErrorType::Validation);
         return Err(err_response);
@@ -2458,15 +2447,13 @@ pub fn validate_chat_completion_unsupported_fields(
 
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
+            "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
         ));
     }
 
     if inner.functions.is_some() {
         return Err(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "`functions` is deprecated. Please migrate to use `tools` instead.",
+            "`functions` is deprecated. Please migrate to use `tools` instead.",
         ));
     }
 
@@ -2480,7 +2467,7 @@ fn normalize_chat_reasoning_template_args(
     request.normalize_reasoning_template_args().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+            message: e.to_string(),
         })
     })
 }
@@ -2494,8 +2481,8 @@ pub fn validate_chat_completion_required_fields(
     if inner.messages.is_empty() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: VALIDATION_PREFIX.to_string()
-                + "The 'messages' field cannot be empty. At least one message is required.",
+            message: "The 'messages' field cannot be empty. At least one message is required."
+                .to_string(),
         }));
     }
 
@@ -2511,8 +2498,8 @@ pub fn validate_chat_completion_stream_options(
     if !streaming && inner.stream_options.is_some() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: VALIDATION_PREFIX.to_string()
-                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
+            message: "The 'stream_options' field is only allowed when 'stream' is set to true."
+                .to_string(),
         }));
     }
     Ok(())
@@ -2528,7 +2515,7 @@ pub fn validate_chat_completion_fields_generic(
     request.validate().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+            message: e.to_string(),
         })
     })
 }
@@ -2542,8 +2529,8 @@ pub fn validate_completion_stream_options(
     if !streaming && inner.stream_options.is_some() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: VALIDATION_PREFIX.to_string()
-                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
+            message: "The 'stream_options' field is only allowed when 'stream' is set to true."
+                .to_string(),
         }));
     }
     Ok(())
@@ -2559,7 +2546,7 @@ pub fn validate_completion_fields_generic(
     request.validate().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+            message: e.to_string(),
         })
     })
 }
@@ -2970,23 +2957,23 @@ pub fn validate_response_unsupported_fields(
         })
     {
         return Some(ErrorMessage::not_implemented_error(format!(
-            "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+            "`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
         )));
     }
 
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
+            "`background: true` is not supported.",
         ));
     }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
+            "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
+            "`prompt` is not supported.",
         ));
     }
     // Reject directive fields that change semantics if silently dropped.
@@ -3004,7 +2991,7 @@ pub fn validate_response_unsupported_fields(
     // makes receipt observable without needing a real backend.
     if inner.max_tool_calls.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
+            "`max_tool_calls` is not supported.",
         ));
     }
     None
@@ -4745,7 +4732,7 @@ mod tests {
                 assert_eq!(
                     error.message,
                     format!(
-                        "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+                        "`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
                     )
                 );
             }
@@ -4870,9 +4857,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!(
-                    "{VALIDATION_PREFIX}The 'messages' field cannot be empty. At least one message is required."
-                )
+                "The 'messages' field cannot be empty. At least one message is required."
             );
         }
     }
@@ -4918,9 +4903,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!(
-                    "{VALIDATION_PREFIX}`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
-                )
+                "`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
             );
         }
     }
@@ -4966,7 +4949,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
+                "Frequency penalty must be between -2 and 2, got -3"
             );
         }
 
@@ -4990,7 +4973,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
+                "Presence penalty must be between -2 and 2, got -3"
             );
         }
 
@@ -5014,7 +4997,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
+                "Temperature must be between 0 and 2, got -3"
             );
         }
 
@@ -5038,7 +5021,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
+                "Top_p must be between 0 and 1, got -3"
             );
         }
 
@@ -5064,7 +5047,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
+                "Repetition penalty must be between 0 and 2, got -3"
             );
         }
 
@@ -5088,7 +5071,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
+                "Logprobs must be between 0 and 5, got 6"
             );
         }
     }
@@ -5153,7 +5136,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
+                "Frequency penalty must be between -2 and 2, got -3"
             );
         }
 
@@ -5184,7 +5167,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
+                "Presence penalty must be between -2 and 2, got -3"
             );
         }
 
@@ -5215,7 +5198,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
+                "Temperature must be between 0 and 2, got -3"
             );
         }
 
@@ -5246,7 +5229,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
+                "Top_p must be between 0 and 1, got -3"
             );
         }
 
@@ -5279,7 +5262,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
+                "Repetition penalty must be between 0 and 2, got -3"
             );
         }
 
@@ -5310,7 +5293,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Top_logprobs must be between 0 and 20, got 25")
+                "Top_logprobs must be between 0 and 20, got 25"
             );
         }
     }
@@ -5656,7 +5639,7 @@ mod tests {
     fn test_extract_error_type_from_response_validation() {
         let response = ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: "Validation: bad input".to_string(),
+            message: "bad input".to_string(),
         });
         assert_eq!(
             extract_error_type_from_response(&response),
