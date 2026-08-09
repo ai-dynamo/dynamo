@@ -148,6 +148,13 @@ class GMSSessionManager:
                     return None
             return GrantedLockType.RO
 
+        if mode == RequestedLockType.RW_PERSISTENT:
+            raise OperationNotAllowed(
+                "persistent allocation sessions are not implemented"
+            )
+        if mode != RequestedLockType.RW_OR_RO:
+            raise OperationNotAllowed(f"unsupported lock type: {mode}")
+
         async with self._condition:
             if self._can_grant_rw() and not self._locking.committed:
                 self._reserved_rw_session_id = session_id
