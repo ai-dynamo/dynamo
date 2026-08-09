@@ -305,6 +305,9 @@ fn monitor_for_disconnects_impl(
                                     )
                                 });
                             inflight_guard.mark_error(problem.metric_type());
+                            // A terminal stream error abandons the source stream, so explicitly
+                            // kill linked backend work instead of relying on ResponseStream::drop().
+                            context.kill();
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
@@ -474,7 +477,7 @@ mod tests {
     ) -> (
         Arc<Metrics>,
         InflightGuard,
-        Arc<dyn AsyncEngineContext>,
+        Arc<MockContext>,
         ConnectionHandle,
     ) {
         let metrics = Arc::new(Metrics::new());
@@ -482,7 +485,7 @@ mod tests {
             metrics
                 .clone()
                 .create_inflight_guard(model, Endpoint::ChatCompletions, true, req_id);
-        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
+        let context = Arc::new(MockContext::with_kill_tracking());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
@@ -814,9 +817,11 @@ mod tests {
         let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk");
         let backend_detail = "Disconnected: Stream ended before generation completed";
         let stream = simulate_mid_stream_error(3, backend_detail);
+        let backend_ctx = ctx.clone();
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("worker_kill", &body, backend_detail);
+        assert!(backend_ctx.is_killed());
     }
 
     /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with
