@@ -206,6 +206,96 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::HashMap, sync::Arc};
+
+    use dynamo_kv_router::{config::KvRouterConfig, selector::DefaultWorkerSelector};
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        pipeline::{PushRouter, RouterMode},
+        protocols::annotated::Annotated,
+    };
+    use tokio::sync::watch;
+
+    use crate::{
+        discovery::ModelManager,
+        kv_router::{KvPushRouter, KvRouter},
+        protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        worker_type::WorkerType,
+    };
+
+    async fn make_tracked_prefill_router() -> (Arc<PrefillRouter>, Arc<KvRouter>) {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let component = distributed
+            .namespace(format!("tracked-prefill-test-{}", uuid::Uuid::new_v4()))
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers_rx) =
+            watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let config = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            router_temperature: 0.0,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let chooser = Arc::new(
+            KvRouter::new_with_worker_role(
+                endpoint,
+                client.clone(),
+                workers_rx,
+                None,
+                16,
+                DefaultWorkerSelector::new(Some(config.clone()), "prefill"),
+                Some(config),
+                None,
+                Some(WorkerType::Prefill),
+                "prefill",
+                Some("tracked-prefill-test".to_string()),
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                client,
+                RouterMode::KV,
+            )
+            .await
+            .unwrap();
+        let router = PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None);
+        assert!(
+            router
+                .prefill_router
+                .set(InnerPrefillRouter::KvRouter(Arc::new(
+                    KvPushRouter::new_with_coordinator(push_router, chooser.clone(), None,),
+                )))
+                .is_ok()
+        );
+        router.mark_active_for_test();
+
+        (router, chooser)
+    }
+
+    async fn current_prefill_load(chooser: &KvRouter) -> (usize, usize) {
+        let loads = chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(loads.len(), 1);
+        (loads[0].potential_prefill_tokens, loads[0].active_requests)
+    }
 
     #[test]
     fn cleanup_treats_missing_request_as_success() {
@@ -224,5 +314,41 @@ mod tests {
             PrefillRequestMode::Tracked("reservation-1").scheduler_args(),
             (Some("reservation-1"), true)
         );
+    }
+
+    #[tokio::test]
+    async fn tracked_prefill_reservation_books_active_tokens() {
+        let (router, chooser) = make_tracked_prefill_router().await;
+        assert_eq!(current_prefill_load(&chooser).await, (0, 0));
+
+        let token_ids = vec![1; 64];
+        let outcome = router
+            .reserve_prefill_worker(
+                "tracked-prefill",
+                &token_ids,
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            PrefillQueryOutcome::Routed { worker_id: 7, .. }
+        ));
+        assert_eq!(current_prefill_load(&chooser).await, (64, 1));
+
+        router
+            .mark_prefill_completed("tracked-prefill")
+            .await
+            .unwrap();
+        assert_eq!(current_prefill_load(&chooser).await, (0, 1));
+
+        router.free("tracked-prefill").await.unwrap();
+        assert_eq!(current_prefill_load(&chooser).await, (0, 0));
     }
 }
