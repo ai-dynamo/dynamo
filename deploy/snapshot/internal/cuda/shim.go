@@ -13,17 +13,6 @@ import (
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
-// cudaCheckpointHelperBinary is the path to the cuda-checkpoint-helper binary.
-// Defaults to the agent-side installation; cmd/nsrestore calls SetHelperBinaryPath
-// to redirect it to the injected bundle before any CUDA restore operation.
-var cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
-
-// SetHelperBinaryPath overrides the cuda-checkpoint-helper binary path.
-// Must be called before any CUDA checkpoint or restore operation.
-func SetHelperBinaryPath(path string) {
-	cudaCheckpointHelperBinary = path
-}
-
 const (
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
@@ -32,23 +21,23 @@ const (
 )
 
 func lock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionLock, "", log)
+	return runAction(ctx, pid, actionLock, "", DefaultHelperBinaryPath, log)
 }
 
 func checkpoint(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionCheckpoint, "", log)
+	return runAction(ctx, pid, actionCheckpoint, "", DefaultHelperBinaryPath, log)
 }
 
-func restoreProcess(ctx context.Context, pid int, deviceMap string, log logr.Logger) error {
-	return runAction(ctx, pid, actionRestore, deviceMap, log)
+func restoreProcess(ctx context.Context, pid int, deviceMap, helperBinaryPath string, log logr.Logger) error {
+	return runAction(ctx, pid, actionRestore, deviceMap, helperBinaryPath, log)
 }
 
-func unlock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionUnlock, "", log)
+func unlock(ctx context.Context, pid int, helperBinaryPath string, log logr.Logger) error {
+	return runAction(ctx, pid, actionUnlock, "", helperBinaryPath, log)
 }
 
-func getState(ctx context.Context, pid int) (string, error) {
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-state", "--pid", strconv.Itoa(pid))
+func getState(ctx context.Context, pid int, helperBinaryPath string) (string, error) {
+	cmd := exec.CommandContext(ctx, helperBinaryPath, "--get-state", "--pid", strconv.Itoa(pid))
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
@@ -60,12 +49,12 @@ func getState(ctx context.Context, pid int) (string, error) {
 	return state, nil
 }
 
-func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.Logger) error {
+func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath string, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,

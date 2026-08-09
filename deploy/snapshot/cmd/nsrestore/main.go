@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
@@ -86,6 +85,5 @@ func useInjectedBundle(bundleDir, inheritedLDPath, inheritedPATH string) error {
 	if err := os.Setenv("PATH", newPATH); err != nil {
 		return err
 	}
-	cuda.SetHelperBinaryPath(filepath.Join(bundleDir, "cuda-checkpoint-helper"))
 	return nil
 }
