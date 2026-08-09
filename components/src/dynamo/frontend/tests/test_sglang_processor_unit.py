@@ -17,6 +17,13 @@ import types
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
+from _tool_guidance_parity import (
+    TOOL_GUIDANCE_PARITY_CASES,
+    assistant_response_format,
+    classify_guidance_source,
+    parity_tool,
+    tool_choice_value,
+)
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -233,6 +240,133 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["sampling_options"]["guided_decoding"] == {
             "json": {"type": "object"}
         }
+
+    def test_agent_hints_are_projected_to_routing(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "agent_hints": {
+                        "priority": 10,
+                        "strict_priority": 3,
+                        "osl": 128,
+                    }
+                },
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {
+            "priority": 10,
+            "priority_jump": 10.0,
+            "strict_priority": 3,
+            "expected_output_tokens": 128,
+        }
+
+    def test_negative_priority_hint_preserves_backend_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": -5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": -5, "priority_jump": 0.0}
+
+    def test_existing_routing_overrides_agent_hint_projection(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "routing": {"priority_jump": 1.0, "strict_priority": 2},
+                "nvext": {
+                    "agent_hints": {
+                        "priority": 10,
+                        "strict_priority": 3,
+                        "osl": 128,
+                    }
+                },
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {
+            "priority": 10,
+            "priority_jump": 1.0,
+            "strict_priority": 2,
+            "expected_output_tokens": 128,
+        }
+
+    def test_latency_sensitivity_projects_to_priority_jump_without_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority_jump": 2.5}
+
+    @pytest.mark.parametrize(
+        "latency_sensitivity", [10**400, float("inf"), float("nan")]
+    )
+    def test_invalid_latency_sensitivity_hint_is_ignored(self, latency_sensitivity):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": latency_sensitivity}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize("priority", [2**40, 10**400])
+    def test_out_of_range_priority_hint_is_ignored(self, priority):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": priority}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("strict_priority", -1),
+            ("strict_priority", 2**32),
+            ("osl", -1),
+            ("osl", 2**32),
+        ],
+    )
+    def test_out_of_range_u32_agent_hints_are_ignored(self, field, value):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": 1, field: value}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": 1, "priority_jump": 1.0}
 
     @pytest.mark.parametrize("require_reasoning", [False, True])
     def test_require_reasoning_passthrough(self, require_reasoning):
@@ -1121,6 +1255,43 @@ class TestBuildResponseFormatGuidedDecoding:
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
+    # Keep SGLang's guidance decisions aligned with the shared backend matrix.
+    @pytest.mark.parametrize(
+        "case",
+        TOOL_GUIDANCE_PARITY_CASES,
+        ids=lambda case: case.name,
+    )
+    def test_shared_tool_guidance_policy(self, tokenizer, case):
+        # A divergent case still runs the backend and asserts its RECORDED current
+        # answer, so an exception or any other behavior change fails here rather
+        # than being absorbed. Fixing SGLang makes this fail with "expected
+        # assistant, got tool", which is the signal to drop the entry.
+        expected = case.divergent_source("sglang") or case.expected
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if case.has_tools:
+            request["tools"] = [parity_tool()]
+            request["tool_choice"] = tool_choice_value(case.tool_choice)
+        if case.has_assistant_constraint:
+            request["response_format"] = assistant_response_format()
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name="kimi_k2",
+            reasoning_parser_name=None,
+        )
+
+        assert (
+            classify_guidance_source(
+                result.guided_decoding,
+                has_assistant_constraint=case.has_assistant_constraint,
+            )
+            == expected
+        )
+
     def test_none_when_no_tools(self):
         assert (
             build_tool_call_guided_decoding(

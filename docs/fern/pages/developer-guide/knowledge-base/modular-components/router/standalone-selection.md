@@ -367,7 +367,7 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   reservation form is local to the selector that served the `/select`. Use
   `/select_and_reserve` for atomic local booking.
 - Reservation IDs must be globally unique. Duplicate bookings for the same ID
-  conflict (`409`); no idempotency ledger is added. An explicit booking that
+  conflict (`409`), regardless of the target worker. An explicit booking that
   carries a `selection_id` also discards that cached selection.
 
 ## Inspection APIs

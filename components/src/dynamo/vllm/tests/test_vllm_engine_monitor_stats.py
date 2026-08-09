@@ -7,6 +7,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.vllm.engine_monitor import VllmEngineMonitor
@@ -193,3 +194,26 @@ async def test_run_health_check_times_out(mock_engine):
 
     with pytest.raises(asyncio.TimeoutError):
         await monitor._run_health_check()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("health_error", [EngineDeadError, asyncio.TimeoutError])
+async def test_health_failure_during_worker_shutdown_stops_monitor(
+    mock_engine, health_error
+):
+    shutdown_event = asyncio.Event()
+
+    async def fail_health_check_during_shutdown():
+        shutdown_event.set()
+        raise health_error()
+
+    mock_engine.check_health = fail_health_check_during_shutdown
+    monitor = _make_monitor(mock_engine, shutdown_event)
+    monitor._shutdown_engine = MagicMock()
+
+    with patch("dynamo.vllm.engine_monitor.os._exit") as exit_process:
+        await monitor._check_engine_health()
+
+    monitor._shutdown_engine.assert_not_called()
+    monitor.runtime.shutdown.assert_not_called()
+    exit_process.assert_not_called()

@@ -705,7 +705,10 @@ fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
-        ErrorType::ResourceExhausted
+        // This ACK came from the one worker addressed by this dispatch. It says
+        // nothing about capacity elsewhere in the eligible pool, so preserve
+        // worker scope for migration instead of reporting pool exhaustion.
+        ErrorType::WorkerOverloaded
     } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
         ErrorType::Unavailable
     } else {
@@ -726,10 +729,10 @@ mod rejection_detection_tests {
     use super::*;
 
     #[test]
-    fn overload_payload_maps_to_resource_exhausted() {
+    fn overload_payload_maps_to_worker_overloaded() {
         let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
-        assert_eq!(err.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
     }
 
     #[test]
@@ -740,14 +743,13 @@ mod rejection_detection_tests {
     }
 
     #[test]
-    fn detected_overload_satisfies_http_529_gate() {
-        // request_was_rejected (http/service/metrics.rs) → 529 keys on ResourceExhausted.
+    fn detected_overload_preserves_worker_scope() {
         let err =
             detect_worker_rejection_response(b"Server overloaded: test").expect("should detect");
         let any_err: anyhow::Error = err.into();
         assert!(crate::error::match_error_chain(
             any_err.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
     }
@@ -782,7 +784,8 @@ where
 ///
 /// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
 /// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
-/// `ResourceExhausted` / `Cancelled`), or `wrap_with_fault_detection`'s
+/// `WorkerOverloaded` / `ResourceExhausted` / `Cancelled`), or
+/// `wrap_with_fault_detection`'s
 /// report-down / overload / migration won't fire.
 ///
 /// The removal watcher behind `on_instance_removed` / `on_instance_added` is

@@ -24,6 +24,7 @@ dependencies = [
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
+    "tqdm>=4.0.0",
 ]
 
 classifiers = [
@@ -88,6 +89,10 @@ mocker = [
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
+
+[project.entry-points."aisimulate.sweep_config_providers"]
+"dynamo.planner" = "dynamo.planner.simulation:create_provider"
+"dynamo.router" = "dynamo.router.simulation:create_provider"
 
 [dependency-groups]
 docs = [
@@ -369,6 +374,13 @@ ignore_errors = true
 # Manual planner helpers are operational scripts, not typed library surfaces.
 module = ["dynamo.planner.manual.*"]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# AI Simulate is a separate, optional distribution. Load its types when it is
+# installed without reporting errors that originate inside that distribution.
+module = ["aisimulate", "aisimulate.*"]
+follow_imports = "silent"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on backend framework internals.

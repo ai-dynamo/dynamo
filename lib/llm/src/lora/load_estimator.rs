@@ -438,6 +438,14 @@ impl LoadEstimator {
             .remove(lora_name);
     }
 
+    pub(crate) fn reset(&self) {
+        self.data.clear();
+        self.predictors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     pub fn start_polling(
         self: Arc<Self>,
         scheduler: Arc<KvScheduler>,
