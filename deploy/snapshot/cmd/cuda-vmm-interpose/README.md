@@ -50,10 +50,12 @@ PID. While the CUDA process lock is held, the coordinator poisons the dedicated
 Redis database, loads the RDB, verifies the expected generation and
 manifest-bound state digest, and validates all graph metadata and allocation
 bytes. The non-restored coordinator also verifies its `NODE_NAME` against the
-source node, and each restored shim queries the real driver for the UUID
-currently mapped to every source ordinal. The shim rejects node changes, GPU changes,
-ordinal reordering, and access descriptors that are not exactly one read/write
-DEVICE descriptor on the allocation GPU.
+source node, and each restored shim scans the real driver for every saved source
+GPU UUID. The shim accepts a process-local ordinal change only when the source
+UUID has exactly one current match, then reconciles the allocation property and
+access descriptor ordinals before replay. It rejects node changes, GPU identity
+changes, absent or ambiguous source UUIDs, and access descriptors that are not
+exactly one read/write DEVICE descriptor on the allocation GPU.
 
 Processes launched through the shim but without capture-visible shared VMM
 mappings, such as a launcher, are not durable VMM graph participants. After
@@ -286,7 +288,7 @@ must enforce these assumptions:
 | Every participating process uses the launcher and resolves managed APIs through the preload/resolver path. | Static binaries, alternate loader namespaces, preload suppression, explicit-handle `dlvsym`, or direct explicit-handle lookup of a managed API can bypass tracking and produce an incomplete graph. cuda-python's explicit `dlsym` lookup of the CUDA resolver is supported. |
 | A process does not fork before CUDA use and then continue without `exec`. | The child inherits the parent's participant ID, listener FD, and socket path but not the control thread. It cannot create an independent endpoint, and checkpoint eventually fails through participant/process-set drift. Fork followed by `exec` reinitializes the launcher-scoped shim. |
 | Checkpoint and restore run on one logical node, with the same accessible IMEX channel and ready fabric state for FABRIC resources. | Cross-node routing is unsupported. A node, GPU, IMEX channel, or fabric-state change invalidates local brokerage and can cause `CUDA_ERROR_NOT_PERMITTED` or restore failure. |
-| The restore uses the same architecture, CUDA ABI, shim build, and compatible GPU placement. | Opaque CUDA property/access bytes or device ordinals can have different meaning. Detectable preflight mismatches fail while locked; replay-time CUDA failures fail the restore and trigger target teardown. |
+| The restore uses the same architecture, CUDA ABI, shim build, and source GPU UUID placement. | Same-UUID process-local ordinal reindexing is reconciled while locked. Different GPU identity or other opaque CUDA property/access changes fail preflight; replay-time CUDA failures fail the restore and trigger target teardown. |
 | Redis is dedicated to this job and the restore command atomically loads the supplied RDB. | Another writer or non-atomic load can replace/mix state; digest, generation, or poison checks reject detectable drift. |
 
 Queued `SCM_RIGHTS` FDs, received-but-not-imported FDs, and stale/unconsumed

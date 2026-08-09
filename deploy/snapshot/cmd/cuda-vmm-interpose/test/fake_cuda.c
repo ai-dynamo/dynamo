@@ -44,6 +44,7 @@ static int last_exported_fd = -1;
 static int last_internal_export_alias = -1;
 static int internal_export_aliases[32];
 static CUmemAllocationHandleType handle_types[32];
+static CUdevice create_devices[32];
 static int last_imported_fd = -1;
 static unsigned char last_imported_fabric[CU_IPC_HANDLE_SIZE];
 static int colliding_export_source = -1;
@@ -60,11 +61,19 @@ static CUmemGenericAllocationHandle released_handles[16];
 static pthread_t initial_thread;
 static _Thread_local CUcontext current_context;
 static CUcontext last_context;
+static int device_count = 1;
+static CUdevice device_identities[16];
 
 __attribute__((constructor)) static void
 initialize_fake_cuda(void)
 {
+  size_t index;
+
   initial_thread = pthread_self();
+  for (index = 0;
+       index < sizeof(device_identities) / sizeof(device_identities[0]);
+       index++)
+    device_identities[index] = (CUdevice)index;
 }
 
 static int
@@ -228,6 +237,30 @@ fake_cuda_create_count(void)
   return create_count;
 }
 
+CUdevice
+fake_cuda_create_device(unsigned int index)
+{
+  return index < create_count &&
+          index < sizeof(create_devices) / sizeof(create_devices[0])
+      ? create_devices[index]
+      : -1;
+}
+
+void
+fake_cuda_set_device_count(int count)
+{
+  device_count = count;
+}
+
+void
+fake_cuda_set_device_identity(CUdevice ordinal, CUdevice identity)
+{
+  if (ordinal >= 0 &&
+      (size_t)ordinal <
+          sizeof(device_identities) / sizeof(device_identities[0]))
+    device_identities[ordinal] = identity;
+}
+
 unsigned int
 fake_cuda_import_count(void)
 {
@@ -286,10 +319,25 @@ cuCtxSetCurrent(CUcontext context)
 CUresult CUDAAPI
 cuDeviceGetUuid_v2(CUuuid* uuid, CUdevice device)
 {
+  CUdevice identity;
   size_t index;
 
+  if (device < 0 || device >= device_count ||
+      (size_t)device >=
+          sizeof(device_identities) / sizeof(device_identities[0]))
+    return CUDA_ERROR_INVALID_DEVICE;
+  identity = device_identities[device];
   for (index = 0; index < sizeof(uuid->bytes); index++)
-    uuid->bytes[index] = (char)(index + device + 1);
+    uuid->bytes[index] = (char)(index + identity + 1);
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuDeviceGetCount(int* count)
+{
+  if (count == NULL)
+    return CUDA_ERROR_INVALID_VALUE;
+  *count = device_count;
   return CUDA_SUCCESS;
 }
 
@@ -302,6 +350,8 @@ cuMemCreate(
 
   (void)size;
   (void)flags;
+  if (create_count < sizeof(create_devices) / sizeof(create_devices[0]))
+    create_devices[create_count] = properties->location.id;
   create_count++;
   active_handle_count++;
   *output = next_handle++;
@@ -581,6 +631,8 @@ cuGetProcAddress_v2(
     *output = (void*)&cuCtxSetCurrent;
   else if (strcmp(symbol, "cuDeviceGetUuid_v2") == 0)
     *output = (void*)&cuDeviceGetUuid_v2;
+  else if (strcmp(symbol, "cuDeviceGetCount") == 0)
+    *output = (void*)&cuDeviceGetCount;
   else if (strcmp(symbol, "cuMemcpyDtoH_v2") == 0)
     *output = (void*)&cuMemcpyDtoH_v2;
   else if (strcmp(symbol, "cuMemcpyHtoD_v2") == 0)

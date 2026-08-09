@@ -84,6 +84,7 @@ struct allocation {
   uint32_t role;
   uint32_t object_kind;
   CUmemAllocationHandleType requested_handle_type;
+  int source_device_ordinal;
   int device_ordinal;
   CUuuid gpu_uuid;
   bool exported;
@@ -534,7 +535,6 @@ placement_seen(const struct allocation* allocation)
 
   for (previous = allocations; previous != allocation; previous = previous->next) {
     if (previous->detached &&
-        previous->device_ordinal == allocation->device_ordinal &&
         memcmp(
             previous->gpu_uuid.bytes, allocation->gpu_uuid.bytes,
             sizeof(allocation->gpu_uuid.bytes)) == 0)
@@ -543,14 +543,30 @@ placement_seen(const struct allocation* allocation)
   return false;
 }
 
+static struct dyn_vmm_placement*
+find_placement(struct dyn_vmm_placement* placements, size_t count, const CUuuid* gpu_uuid)
+{
+  size_t index;
+
+  for (index = 0; index < count; index++) {
+    if (memcmp(placements[index].source_gpu_uuid, gpu_uuid->bytes, sizeof(gpu_uuid->bytes)) == 0)
+      return &placements[index];
+  }
+  return NULL;
+}
+
 static int
 query_placement(int client, struct dyn_vmm_header* response)
 {
+  typedef CUresult(CUDAAPI * count_fn)(int*);
   typedef CUresult(CUDAAPI * uuid_fn)(CUuuid*, CUdevice);
+  count_fn get_count = (count_fn)real_symbol("cuDeviceGetCount");
   uuid_fn get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid_v2");
   struct allocation* allocation;
   struct dyn_vmm_placement* placements;
+  int device_count;
   size_t count = 0;
+  size_t index;
 
   if (get_uuid == NULL)
     get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid");
@@ -561,37 +577,120 @@ query_placement(int client, struct dyn_vmm_header* response)
       count++;
   }
   placements = calloc(count == 0 ? 1 : count, sizeof(*placements));
-  if (get_uuid == NULL || placements == NULL) {
+  if (placements == NULL) {
     free(placements);
     set_error(response, "cannot query current CUDA GPU placement");
     return send_header(client, response, -1);
   }
-  count = 0;
+  if (count == 0) {
+    if (send_header(client, response, -1) != 0) {
+      free(placements);
+      return -1;
+    }
+    free(placements);
+    return 0;
+  }
+  if (get_count == NULL || get_uuid == NULL) {
+    free(placements);
+    set_error(response, "cannot query current CUDA GPU placement");
+    return send_header(client, response, -1);
+  }
+  index = 0;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    CUuuid current;
-
     if (!allocation->detached)
       continue;
     if (placement_seen(allocation))
       continue;
-    if (get_uuid(&current, allocation->device_ordinal) != CUDA_SUCCESS) {
+    placements[index].device_ordinal = -1;
+    memcpy(placements[index].source_gpu_uuid, allocation->gpu_uuid.bytes, sizeof(placements[index].source_gpu_uuid));
+    index++;
+  }
+  if (get_count(&device_count) != CUDA_SUCCESS || device_count < 0) {
+    free(placements);
+    set_error(response, "cannot query current CUDA device count");
+    return send_header(client, response, -1);
+  }
+  if ((uintmax_t)device_count > (uintmax_t)INT32_MAX + 1) {
+    free(placements);
+    set_error(response, "CUDA device ordinal cannot be represented");
+    return send_header(client, response, -1);
+  }
+  for (int device = 0; device < device_count; device++) {
+    CUuuid current;
+
+    if (get_uuid(&current, device) != CUDA_SUCCESS) {
       free(placements);
-      set_error(response, "cannot query current UUID for CUDA device ordinal");
+      set_error(response, "cannot query UUID for visible CUDA device");
       return send_header(client, response, -1);
     }
-    placements[count].device_ordinal = allocation->device_ordinal;
-    memcpy(
-        placements[count].source_gpu_uuid, allocation->gpu_uuid.bytes,
-        sizeof(placements[count].source_gpu_uuid));
-    memcpy(
-        placements[count].current_gpu_uuid, current.bytes,
-        sizeof(placements[count].current_gpu_uuid));
-    count++;
+    for (index = 0; index < count; index++) {
+      if (memcmp(placements[index].source_gpu_uuid, current.bytes, sizeof(current.bytes)) != 0)
+        continue;
+      if (placements[index].device_ordinal >= 0) {
+        free(placements);
+        set_error(response, "source CUDA GPU UUID is visible at multiple ordinals");
+        return send_header(client, response, -1);
+      }
+      placements[index].device_ordinal = (int32_t)device;
+      memcpy(placements[index].current_gpu_uuid, current.bytes, sizeof(placements[index].current_gpu_uuid));
+    }
+  }
+  for (index = 0; index < count; index++) {
+    if (placements[index].device_ordinal < 0) {
+      free(placements);
+      set_error(response, "source CUDA GPU UUID is not currently visible");
+      return send_header(client, response, -1);
+    }
+  }
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    const struct allocation* previous;
+    size_t access_index;
+
+    if (!allocation->detached)
+      continue;
+    if (find_placement(placements, count, &allocation->gpu_uuid) == NULL ||
+        allocation->properties.location.type != CU_MEM_LOCATION_TYPE_DEVICE ||
+        allocation->properties.location.id != allocation->device_ordinal ||
+        (allocation->access_count != 0 && allocation->access == NULL)) {
+      free(placements);
+      set_error(response, "detached CUDA placement metadata is inconsistent");
+      return send_header(client, response, -1);
+    }
+    for (previous = allocations; previous != allocation; previous = previous->next) {
+      if (previous->detached &&
+          memcmp(previous->gpu_uuid.bytes, allocation->gpu_uuid.bytes, sizeof(allocation->gpu_uuid.bytes)) == 0 &&
+          previous->source_device_ordinal != allocation->source_device_ordinal) {
+        free(placements);
+        set_error(response, "source CUDA GPU UUID has inconsistent saved ordinals");
+        return send_header(client, response, -1);
+      }
+    }
+    for (access_index = 0; access_index < allocation->access_count; access_index++) {
+      if (allocation->access[access_index].location.type != CU_MEM_LOCATION_TYPE_DEVICE ||
+          allocation->access[access_index].location.id != allocation->device_ordinal) {
+        free(placements);
+        set_error(response, "detached CUDA access placement is inconsistent");
+        return send_header(client, response, -1);
+      }
+    }
+  }
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    struct dyn_vmm_placement* placement;
+    size_t access_index;
+
+    if (!allocation->detached)
+      continue;
+    placement = find_placement(placements, count, &allocation->gpu_uuid);
+    allocation->device_ordinal = placement->device_ordinal;
+    allocation->properties.location.id = placement->device_ordinal;
+    for (access_index = 0; access_index < allocation->access_count; access_index++) {
+      if (allocation->access[access_index].location.type == CU_MEM_LOCATION_TYPE_DEVICE)
+        allocation->access[access_index].location.id = placement->device_ordinal;
+    }
   }
   response->count = (uint32_t)count;
   response->payload_size = count * sizeof(*placements);
-  if (send_header(client, response, -1) != 0 ||
-      write_all(client, placements, (size_t)response->payload_size) != 0) {
+  if (send_header(client, response, -1) != 0 || write_all(client, placements, (size_t)response->payload_size) != 0) {
     free(placements);
     return -1;
   }
@@ -746,6 +845,7 @@ record_gpu_identity(struct allocation* allocation)
   if (get_uuid == NULL)
     get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid");
   allocation->device_ordinal = allocation->properties.location.id;
+  allocation->source_device_ordinal = allocation->device_ordinal;
   return get_uuid != NULL &&
           get_uuid(&allocation->gpu_uuid, allocation->device_ordinal) ==
               CUDA_SUCCESS
@@ -1360,8 +1460,8 @@ detach(
 
 static int
 decode_record(
-    const struct dyn_vmm_header* request, const char* payload, struct dyn_vmm_record* record,
-    const CUmemAllocationProp** properties, const CUmemAccessDesc** access,
+    const struct dyn_vmm_header* request, char* payload, struct dyn_vmm_record* record,
+    CUmemAllocationProp** properties, CUmemAccessDesc** access,
     size_t* metadata_size)
 {
   uint64_t decoded_size;
@@ -1377,8 +1477,8 @@ decode_record(
     return -1;
   *properties = record->properties_size == 0
       ? NULL
-      : (const CUmemAllocationProp*)(payload + sizeof(*record));
-  *access = (const CUmemAccessDesc*)(
+      : (CUmemAllocationProp*)(payload + sizeof(*record));
+  *access = (CUmemAccessDesc*)(
       payload + sizeof(*record) + record->properties_size);
   *metadata_size = (size_t)decoded_size;
   if (record->object_kind != DYN_VMM_ALLOCATION ||
@@ -1386,6 +1486,33 @@ decode_record(
       (record->flags & ~DYN_VMM_APPLICATION_HANDLE_LIVE) != 0)
     return -1;
   return 0;
+}
+
+static int
+reconcile_restore_metadata(
+    struct allocation* allocation, const struct dyn_vmm_record* record, CUmemAllocationProp* properties,
+    CUmemAccessDesc* access)
+{
+  size_t index;
+
+  if (record->access_count != allocation->access_count)
+    return -1;
+  if (properties != NULL) {
+    if (properties->location.type != CU_MEM_LOCATION_TYPE_DEVICE ||
+        properties->location.id != allocation->source_device_ordinal)
+      return -1;
+    properties->location.id = allocation->device_ordinal;
+    if (memcmp(properties, &allocation->properties, sizeof(*properties)) != 0)
+      return -1;
+  }
+  for (index = 0; index < record->access_count; index++) {
+    if (access[index].location.type == CU_MEM_LOCATION_TYPE_DEVICE) {
+      if (access[index].location.id != allocation->source_device_ordinal)
+        return -1;
+      access[index].location.id = allocation->device_ordinal;
+    }
+  }
+  return memcmp(access, allocation->access, record->access_count * sizeof(*access)) == 0 ? 0 : -1;
 }
 
 #ifdef DYN_VMM_TESTING
@@ -1407,7 +1534,7 @@ test_failure(const char* stage)
 
 static int
 restore_owner(
-    int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response, const char* payload,
+    int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response, char* payload,
     int passed_fd)
 {
   typedef CUresult(CUDAAPI * copy_type)(CUdeviceptr, const void*, size_t);
@@ -1419,8 +1546,8 @@ restore_owner(
   export_fn export_handle = (export_fn)real_symbol("cuMemExportToShareableHandle");
   release_fn release = (release_fn)real_symbol("cuMemRelease");
   struct dyn_vmm_record record;
-  const CUmemAllocationProp* properties;
-  const CUmemAccessDesc* access;
+  CUmemAllocationProp* properties;
+  CUmemAccessDesc* access;
   const char* contents;
   size_t metadata_size;
   struct allocation* allocation;
@@ -1462,7 +1589,8 @@ restore_owner(
       allocation->device_ordinal != record.device_ordinal ||
       memcmp(
           allocation->gpu_uuid.bytes, record.gpu_uuid,
-          sizeof(record.gpu_uuid)) != 0) {
+          sizeof(record.gpu_uuid)) != 0 ||
+      reconcile_restore_metadata(allocation, &record, properties, access) != 0) {
     set_error(response, "owner restore metadata does not match detached process state");
     return send_header(client, response, -1);
   }
@@ -1603,8 +1731,8 @@ restore_importer(
   access_fn set_access = (access_fn)real_symbol("cuMemSetAccess");
   release_fn release = (release_fn)real_symbol("cuMemRelease");
   struct dyn_vmm_record record;
-  const CUmemAllocationProp* properties;
-  const CUmemAccessDesc* access;
+  CUmemAllocationProp* properties;
+  CUmemAccessDesc* access;
   char* contents;
   size_t metadata_size;
   struct allocation* allocation;
@@ -1652,7 +1780,8 @@ restore_importer(
       allocation->device_ordinal != record.device_ordinal ||
       memcmp(
           allocation->gpu_uuid.bytes, record.gpu_uuid,
-          sizeof(record.gpu_uuid)) != 0)
+          sizeof(record.gpu_uuid)) != 0 ||
+      reconcile_restore_metadata(allocation, &record, properties, access) != 0)
     goto failed;
   if (import_handle == NULL || map == NULL || unmap == NULL ||
       set_access == NULL || release == NULL ||

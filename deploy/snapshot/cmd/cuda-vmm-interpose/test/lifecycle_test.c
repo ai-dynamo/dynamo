@@ -26,6 +26,9 @@
 #include "../protocol.h"
 
 unsigned int fake_cuda_create_count(void);
+CUdevice fake_cuda_create_device(unsigned int);
+void fake_cuda_set_device_count(int);
+void fake_cuda_set_device_identity(CUdevice, CUdevice);
 unsigned int fake_cuda_import_count(void);
 unsigned int fake_cuda_release_count(void);
 unsigned int fake_cuda_map_count(void);
@@ -1268,7 +1271,7 @@ test_owner_importer_success(void)
 }
 
 static void
-test_fabric_owner_importer_restore(bool fail_import)
+test_fabric_owner_importer_restore(bool fail_import, bool reindex)
 {
   CUmemGenericAllocationHandle owner;
   CUmemGenericAllocationHandle importer;
@@ -1327,7 +1330,47 @@ test_fabric_owner_importer_restore(bool fail_import)
   detach_record(importer_record, DYN_VMM_DETACH_IMPORTS, 1);
   detach_record(owner_record, DYN_VMM_DETACH_OWNERS, 1);
 
+  if (reindex) {
+    struct dyn_vmm_placement* placement;
+
+    memset(&request, 0, sizeof(request));
+    request.magic = DYN_VMM_MAGIC;
+    request.version = DYN_VMM_VERSION;
+    request.operation = DYN_VMM_QUERY_PLACEMENT;
+    fake_cuda_set_device_count(4);
+    fake_cuda_set_device_identity(0, 3);
+    fake_cuda_set_device_identity(1, 1);
+    fake_cuda_set_device_identity(2, 2);
+    fake_cuda_set_device_identity(3, 3);
+    response = exchange_fd(&request, NULL, &ignored, -1, &received_fd, 0);
+    require(
+        response.status != 0 && received_fd < 0 && strstr(response.message, "not currently visible") != NULL,
+        "placement query accepted an absent source GPU UUID");
+    free(ignored);
+
+    fake_cuda_set_device_identity(1, 0);
+    fake_cuda_set_device_identity(3, 0);
+    response = exchange_fd(&request, NULL, &ignored, -1, &received_fd, 0);
+    require(
+        response.status != 0 && received_fd < 0 && strstr(response.message, "multiple ordinals") != NULL,
+        "placement query accepted an ambiguous source GPU UUID");
+    free(ignored);
+
+    fake_cuda_set_device_identity(1, 1);
+    response = exchange(&request, NULL, &ignored, &received_fd);
+    placement = ignored;
+    require(
+        response.count == 1 && response.payload_size == sizeof(*placement) && received_fd < 0 &&
+            placement->device_ordinal == 3 && placement->reserved == 0 &&
+            memcmp(placement->source_gpu_uuid, owner_record->gpu_uuid, sizeof(placement->source_gpu_uuid)) == 0 &&
+            memcmp(placement->current_gpu_uuid, owner_record->gpu_uuid, sizeof(placement->current_gpu_uuid)) == 0,
+        "placement query did not resolve the source GPU UUID at ordinal 3");
+    free(ignored);
+  }
+
   owner_payload = restore_payload(owner_record, owner_record, &owner_payload_size, 1, 1);
+  if (reindex)
+    ((struct dyn_vmm_record*)owner_payload)->device_ordinal = 3;
   memset(&request, 0, sizeof(request));
   request.magic = DYN_VMM_MAGIC;
   request.version = DYN_VMM_VERSION;
@@ -1342,6 +1385,8 @@ test_fabric_owner_importer_restore(bool fail_import)
       "FABRIC owner restore returned the wrong broker shape");
 
   importer_metadata = restore_payload(importer_record, importer_record, &importer_metadata_size, 1, 0);
+  if (reindex)
+    ((struct dyn_vmm_record*)importer_metadata)->device_ordinal = 3;
   importer_payload_size = importer_metadata_size + DYN_VMM_FABRIC_HANDLE_SIZE;
   importer_payload = malloc(importer_payload_size);
   require(importer_payload != NULL, "cannot allocate FABRIC importer payload");
@@ -1366,6 +1411,16 @@ test_fabric_owner_importer_restore(bool fail_import)
           fake_cuda_active_handle_count() == 2 && fake_cuda_active_mapping_count() == 2 &&
           fake_cuda_multicast_bind_count() == 0,
       "FABRIC importer restore violated transport or lifecycle invariants");
+  if (reindex) {
+    CUmemAccessDesc owner_access = fake_cuda_access_descriptor(4);
+    CUmemAccessDesc importer_access = fake_cuda_access_descriptor(5);
+
+    require(
+        fake_cuda_create_device(1) == 3 && owner_access.location.type == CU_MEM_LOCATION_TYPE_DEVICE &&
+            owner_access.location.id == 3 && importer_access.location.type == CU_MEM_LOCATION_TYPE_DEVICE &&
+            importer_access.location.id == 3,
+        "FABRIC owner/importer replay did not use resolved ordinal 3");
+  }
 
 done:
   free(importer_payload);
@@ -1858,11 +1913,15 @@ main(int argc, char** argv)
     return 0;
   }
   if (argc == 2 && strcmp(argv[1], "fabric-owner-importer-success") == 0) {
-    test_fabric_owner_importer_restore(false);
+    test_fabric_owner_importer_restore(false, false);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "fabric-ordinal-reindex") == 0) {
+    test_fabric_owner_importer_restore(false, true);
     return 0;
   }
   if (argc == 2 && strcmp(argv[1], "fabric-importer-failure") == 0) {
-    test_fabric_owner_importer_restore(true);
+    test_fabric_owner_importer_restore(true, false);
     return 0;
   }
   const int application_live = argc == 2 && strcmp(argv[1], "live") == 0;

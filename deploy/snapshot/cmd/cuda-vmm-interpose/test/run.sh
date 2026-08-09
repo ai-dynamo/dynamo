@@ -124,6 +124,11 @@ LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
 DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
 DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
 LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" fabric-ordinal-reindex
+
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
   "$build/lifecycle_test" fabric-importer-failure
 
 for scenario in capability-self canonical-capability-path colliding-raw-identity cross-process; do
