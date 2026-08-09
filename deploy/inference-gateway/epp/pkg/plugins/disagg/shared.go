@@ -27,6 +27,11 @@ limitations under the License.
 package disagg
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -46,7 +51,60 @@ const (
 
 	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
 	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
+	// PrefillReservationStateKey makes prefill scoring idempotent within one scheduling cycle.
+	PrefillReservationStateKey = plugins.StateKey("disagg-prefill-reservation")
+
+	prefillReservationNonceBytes = 16
+	prefillReservationMACBytes   = 16
 )
+
+var (
+	prefillReservationKeyOnce sync.Once
+	prefillReservationKey     [32]byte
+	prefillReservationKeyErr  error
+)
+
+func reservationSigningKey() ([]byte, error) {
+	prefillReservationKeyOnce.Do(func() {
+		_, prefillReservationKeyErr = rand.Read(prefillReservationKey[:])
+	})
+	if prefillReservationKeyErr != nil {
+		return nil, fmt.Errorf("generate prefill reservation signing key: %w", prefillReservationKeyErr)
+	}
+	return prefillReservationKey[:], nil
+}
+
+func newPrefillReservationID() (string, error) {
+	key, err := reservationSigningKey()
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, prefillReservationNonceBytes)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("generate prefill reservation nonce: %w", err)
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(nonce)
+	signedID := append(nonce, mac.Sum(nil)[:prefillReservationMACBytes]...)
+	return hex.EncodeToString(signedID), nil
+}
+
+func isPrefillReservationID(reservationID string) bool {
+	key, err := reservationSigningKey()
+	if err != nil {
+		return false
+	}
+	signedID, err := hex.DecodeString(reservationID)
+	if err != nil || len(signedID) != prefillReservationNonceBytes+prefillReservationMACBytes {
+		return false
+	}
+	nonce := signedID[:prefillReservationNonceBytes]
+	receivedMAC := signedID[prefillReservationNonceBytes:]
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(nonce)
+	expectedMAC := mac.Sum(nil)[:prefillReservationMACBytes]
+	return hmac.Equal(receivedMAC, expectedMAC)
+}
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
 type PrefillEnabledState struct {
@@ -58,6 +116,23 @@ func (s *PrefillEnabledState) Clone() plugins.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
 }
 
+// PrefillReservationState records the tracked selection made during this cycle.
+type PrefillReservationState struct {
+	ID        string
+	WorkerID  string
+	DpRank    uint32
+	HasDpRank bool
+}
+
+// Clone implements plugins.StateData.
+func (s *PrefillReservationState) Clone() plugins.StateData {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	return &clone
+}
+
 // readPrefillEnabled reads the PrefillEnabledState from CycleState.
 func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 	state, err := schedtypes.ReadCycleStateKey[*PrefillEnabledState](cycleState, PrefillEnabledStateKey)
@@ -65,6 +140,19 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 		return state.Enabled
 	}
 	return false
+}
+
+func readPrefillReservation(cycleState *schedtypes.CycleState) *PrefillReservationState {
+	state, err := schedtypes.ReadCycleStateKey[*PrefillReservationState](cycleState, PrefillReservationStateKey)
+	if err == nil {
+		return state
+	}
+	return nil
+}
+
+func clearPrefillReservation(cycleState *schedtypes.CycleState) {
+	cycleState.Write(PrefillReservationStateKey, &PrefillReservationState{})
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 }
 
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.

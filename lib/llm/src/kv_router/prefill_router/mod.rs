@@ -121,7 +121,7 @@ struct PreparedPrefill {
     topology_constraints: Option<RoutingConstraints>,
 }
 
-/// Advisory prefill worker selection result.
+/// Prefill worker selection result for advisory queries or tracked reservations.
 pub enum PrefillQueryOutcome {
     Routed {
         worker_id: u64,
