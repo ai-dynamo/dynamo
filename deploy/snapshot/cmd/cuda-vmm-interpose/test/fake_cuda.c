@@ -43,9 +43,9 @@ static unsigned int multicast_bind_count;
 static int last_exported_fd = -1;
 static int last_internal_export_alias = -1;
 static int internal_export_aliases[32];
+static CUmemAllocationHandleType handle_types[32];
 static int last_imported_fd = -1;
 static unsigned char last_imported_fabric[CU_IPC_HANDLE_SIZE];
-static CUmemAllocationHandleType last_imported_type;
 static int colliding_export_source = -1;
 static CUdeviceptr map_addresses[16];
 static CUdeviceptr access_addresses[16];
@@ -298,12 +298,16 @@ cuMemCreate(
     CUmemGenericAllocationHandle* output, size_t size,
     const CUmemAllocationProp* properties, unsigned long long flags)
 {
+  size_t index;
+
   (void)size;
-  (void)properties;
   (void)flags;
   create_count++;
   active_handle_count++;
   *output = next_handle++;
+  index = (size_t)(*output - UINT64_C(0x1234));
+  if (index < sizeof(handle_types) / sizeof(handle_types[0]))
+    handle_types[index] = properties->requestedHandleTypes;
   return CUDA_SUCCESS;
 }
 
@@ -411,6 +415,7 @@ cuMemImportFromShareableHandle(
 {
   struct stat status;
   int fd = (int)(uintptr_t)os_handle;
+  size_t index;
 
   if (type == CU_MEM_HANDLE_TYPE_FABRIC) {
     memcpy(last_imported_fabric, os_handle, sizeof(last_imported_fabric));
@@ -419,10 +424,12 @@ cuMemImportFromShareableHandle(
   } else {
     last_imported_fd = fd;
   }
-  last_imported_type = type;
   import_count++;
   active_handle_count++;
   *output = next_handle++;
+  index = (size_t)(*output - UINT64_C(0x1234));
+  if (index < sizeof(handle_types) / sizeof(handle_types[0]))
+    handle_types[index] = CU_MEM_HANDLE_TYPE_NONE;
   return CUDA_SUCCESS;
 }
 
@@ -430,13 +437,18 @@ CUresult CUDAAPI
 cuMemGetAllocationPropertiesFromHandle(
     CUmemAllocationProp* properties, CUmemGenericAllocationHandle handle)
 {
+  size_t index = (size_t)(handle - UINT64_C(0x1234));
+
   if (!real_handle(handle))
     return CUDA_ERROR_INVALID_HANDLE;
   memset(properties, 0, sizeof(*properties));
   properties->type = CU_MEM_ALLOCATION_TYPE_PINNED;
   properties->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   properties->location.id = 0;
-  properties->requestedHandleTypes = last_imported_type;
+  properties->requestedHandleTypes =
+      index < sizeof(handle_types) / sizeof(handle_types[0])
+          ? handle_types[index]
+          : CU_MEM_HANDLE_TYPE_NONE;
   return CUDA_SUCCESS;
 }
 

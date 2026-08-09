@@ -1424,9 +1424,11 @@ test_fabric_repeated_export_and_self_import(void)
   CUmemGenericAllocationHandle owner;
   CUmemGenericAllocationHandle importer;
   CUmemGenericAllocationHandle repeated_importer;
+  CUmemAllocationProp imported_properties;
   struct dyn_vmm_fabric_token first;
   struct dyn_vmm_fabric_token second;
 
+  memset(&imported_properties, 0, sizeof(imported_properties));
   establish_fabric_mapping(&owner, &first, 0x100000);
   require(
       cuMemExportToShareableHandle(&second, owner, CU_MEM_HANDLE_TYPE_FABRIC, 0) == CUDA_SUCCESS,
@@ -1441,6 +1443,10 @@ test_fabric_repeated_export_and_self_import(void)
       cuMemImportFromShareableHandle(&importer, &first, CU_MEM_HANDLE_TYPE_FABRIC) == CUDA_SUCCESS &&
           fake_cuda_export_count() == 3 && fake_cuda_import_count() == 1,
       "same-process FABRIC token import failed");
+  require(
+      cuMemGetAllocationPropertiesFromHandle(&imported_properties, importer) == CUDA_SUCCESS &&
+          imported_properties.requestedHandleTypes == CU_MEM_HANDLE_TYPE_NONE,
+      "FABRIC import incorrectly required re-exportable allocation properties");
   require(
       cuMemImportFromShareableHandle(&repeated_importer, &first, CU_MEM_HANDLE_TYPE_FABRIC) == CUDA_SUCCESS &&
           repeated_importer != importer && fake_cuda_export_count() == 4 && fake_cuda_import_count() == 2,

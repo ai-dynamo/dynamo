@@ -2441,20 +2441,13 @@ cuMemImportFromShareableHandle(
       fail("cannot record VMM capability import");
       result = CUDA_ERROR_INVALID_VALUE;
     } else {
-      if (allocation->properties.requestedHandleTypes != type) {
-        if (release == NULL || release(real_handle) != CUDA_SUCCESS)
-          fail_cleanup("cannot release cross-type imported CUDA handle");
-        free(allocation);
-        fail("real CUDA import returned cross-type allocation properties");
-        result = CUDA_ERROR_INVALID_VALUE;
-        goto done;
-      }
       memcpy(allocation->allocation_uuid, allocation_uuid, sizeof(allocation->allocation_uuid));
       allocation->exported = true;
       allocation->real_handle = real_handle;
       allocation->application_handle_live = true;
       allocation->role = DYN_VMM_IMPORTER;
       allocation->object_kind = DYN_VMM_ALLOCATION;
+      /* CUDA reports re-exportable types, not the transport used to import. */
       allocation->requested_handle_type = type;
       allocation->next = allocations;
       allocations = allocation;
