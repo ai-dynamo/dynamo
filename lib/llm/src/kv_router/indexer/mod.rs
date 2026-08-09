@@ -595,6 +595,14 @@ mod tests {
         }
         flush_indexer(&indexer).await;
 
+        // Flush before the reset so BOTH ranks' setup events are known-applied.
+        // `reset_worker_dp_rank_and_wait` only waits for the tiers of the rank being
+        // reset, so without this the retained rank's lower-tier event can still be in
+        // flight when the assertions below read it — the race behind the flake on the
+        // concurrent indexer. Every other test in this module already flushes before
+        // asserting.
+        flush_indexer(&indexer).await;
+
         indexer
             .reset_worker_dp_rank_and_wait(reset_rank.worker_id, reset_rank.dp_rank)
             .await
