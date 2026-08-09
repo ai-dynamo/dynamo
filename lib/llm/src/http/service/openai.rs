@@ -1944,7 +1944,8 @@ where
 /// Read the pre-commit peek window from the environment.
 ///
 /// `Some(dur)` — poll for that duration before committing SSE.
-/// `None` — the peek is explicitly disabled with a value of `0`.
+/// `None` — the peek is disabled entirely (default). Set a positive value to
+/// enable it, or `0` to disable it explicitly.
 ///
 /// Read live per streaming request. Reading `std::env::var` is a hashmap
 /// lookup — sub-microsecond, negligible next to the peek window
@@ -1953,14 +1954,12 @@ where
 // FIXME: unify env-var initialization with the rest of `env_llm::*` once that
 // module gets a standard reader.
 pub(super) fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
-    const DEFAULT_MS: u64 = 500;
     match std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_MS)
     {
-        0 => None,
-        ms => Some(std::time::Duration::from_millis(ms)),
+        Some(0) | None => None,
+        Some(ms) => Some(std::time::Duration::from_millis(ms)),
     }
 }
 
