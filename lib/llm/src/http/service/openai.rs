@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    error::HttpError,
+    error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -67,7 +67,10 @@ use crate::protocols::openai::{
         NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
         PoolingEndianness, PoolingOutput,
     },
-    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    responses::{
+        NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
+        chat_completion_to_response,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -171,6 +174,21 @@ fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
         .metric_error_type
         .clone()
         .unwrap_or_else(|| classify_error_for_metrics(response.0, &response.1.message))
+}
+
+fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
+    const CONTEXT: &str = "Failed to convert responses request";
+
+    match error.downcast_ref::<ResponsesConversionError>() {
+        Some(ResponsesConversionError::InvalidArgument(message)) => ErrorMessage::from_anyhow(
+            invalid_argument(format!("{CONTEXT}: {message}")).into(),
+            CONTEXT,
+        ),
+        Some(ResponsesConversionError::NotImplemented(message)) => {
+            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        }
+        None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -3068,11 +3086,7 @@ async fn responses(
             error = %e,
             "Failed to convert NvCreateResponse to UnifiedRequest",
         );
-        let err_response = ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "Failed to convert responses request: "
-                + &e.to_string(),
-        );
+        let err_response = responses_conversion_error_response(e);
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -3083,6 +3097,14 @@ async fn responses(
     let mut chat_request = unified_request.into_inner();
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+    if let Err(error) = chat_request.validate() {
+        let err_response = ErrorMessage::from_anyhow(
+            invalid_argument(error.to_string()).into(),
+            "Invalid responses request",
+        );
+        inflight_guard.mark_error(ErrorType::Validation);
         return Err(err_response);
     }
 
@@ -3375,15 +3397,15 @@ pub(crate) fn model_not_ready_message(model_name: &str) -> String {
 /// namespace.
 ///
 /// Returns `503 Service Unavailable` with a structured body when the model
-/// isn't ready to serve. Models the frontend has never heard of fall through
-/// here; the per-handler engine lookup later in the request path returns a
-/// 404 instead, which is the right shape for "unknown model".
+/// isn't ready to serve. Models absent from the committed catalog, including
+/// discovered models still being built, fall through here; the per-handler
+/// engine lookup later in the request path returns a 404 instead.
 pub(crate) fn check_model_serving_ready(
     state: &Arc<service_v2::State>,
     model_name: &str,
 ) -> Result<(), ErrorResponse> {
-    let Some(model) = state.manager().get_model(model_name) else {
-        // Unknown model — let the per-endpoint engine accessor produce the
+    let Some(model) = state.manager().get_committed_model(model_name) else {
+        // Not committed — let the per-endpoint engine accessor produce the
         // canonical 404. The readiness gate has nothing to say.
         return Ok(());
     };
@@ -3681,20 +3703,20 @@ async fn get_model_openai(
     // per-model readiness sub-resource (Mechanism 4). This means a model
     // literally named `foo/ready` is still retrievable and never shadowed.
     //
-    // Exact match is resolved against ALL registered models (`get_model`), not
-    // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
-    // still wins over the readiness sub-resource of a sibling `foo`.
+    // Exact match is resolved against every committed model, not just the
+    // displayable ones, so a committed-but-not-yet-ready `foo/ready` still
+    // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
-    if state.manager().get_model(model_id).is_some() {
+    if state.manager().get_committed_model(model_id).is_some() {
         return get_model_retrieve(&state, model_id);
     }
 
-    // Readiness sub-resource. Resolves against all registered models (above
-    // exact check failed, so `model_id` is not itself a registered model);
-    // the whole point of this endpoint is to diagnose models that are
-    // registered but not yet ready, so it must find them too.
+    // Readiness sub-resource. Resolves against all committed models (above
+    // exact check failed, so `model_id` is not itself a committed model);
+    // the whole point of this endpoint is to diagnose committed models that
+    // are not yet ready, so it must find them too.
     if let Some(base) = model_id.strip_suffix("/ready")
-        && state.manager().get_model(base).is_some()
+        && state.manager().get_committed_model(base).is_some()
     {
         return get_model_readiness(&state, base);
     }
@@ -3753,7 +3775,7 @@ fn get_model_readiness(
 ) -> Result<Response, ErrorResponse> {
     let model = state
         .manager()
-        .get_model(model_id)
+        .get_committed_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
     Ok(Json(model.namespace_readiness()).into_response())
 }
@@ -6296,6 +6318,20 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn untyped_responses_conversion_errors_remain_internal() {
+        let response = responses_conversion_error_response(anyhow::anyhow!(
+            "internal response conversion details"
+        ));
+
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "Failed to convert responses request");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Internal
         );
     }
 
