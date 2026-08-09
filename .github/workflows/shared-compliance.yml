@@ -61,8 +61,8 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -70,7 +70,7 @@ jobs:
         id: calculate-target-tag
         shell: bash
         env:
-          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
+          ECR_REPOSITORY: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
           TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
@@ -88,6 +88,7 @@ jobs:
         with:
           image: ${{ steps.calculate-target-tag.outputs.runtime_image }}
           artifact_name: compliance-${{ inputs.target_tag_plain }}-${{ matrix.cuda_version }}-${{ matrix.platform }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           arch: ${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}

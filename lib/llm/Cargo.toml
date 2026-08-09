@@ -216,6 +216,7 @@ llm-multimodal = { version = "=1.7.0", optional = true }
 llm-tokenizer = { version = "=1.4.1", optional = true }
 
 [dev-dependencies]
+dynamo-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
 assert_matches = "1.5"

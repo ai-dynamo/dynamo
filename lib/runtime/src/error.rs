@@ -55,8 +55,13 @@ pub enum ErrorType {
     ResponseTimeout,
     /// The request was cancelled (e.g., client disconnected).
     Cancelled,
-    /// The system does not have enough resources to handle the request.
+    /// The capacity constraint cannot be relieved by selecting another worker.
+    /// This most commonly means the whole eligible worker pool is exhausted.
     ResourceExhausted,
+    /// One selected worker is out of capacity while others may still have room.
+    /// Distinct from [`Self::ResourceExhausted`] so a request whose routing
+    /// constraints permit reassignment can migrate; both surface as HTTP 529.
+    WorkerOverloaded,
     /// No backend worker is currently available to handle the request.
     Unavailable,
     /// Error originating from a backend engine.
@@ -74,6 +79,7 @@ impl fmt::Display for ErrorType {
             ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
+            ErrorType::WorkerOverloaded => write!(f, "WorkerOverloaded"),
             ErrorType::Unavailable => write!(f, "Unavailable"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
@@ -476,6 +482,7 @@ mod tests {
             ErrorType::ResourceExhausted.to_string(),
             "ResourceExhausted"
         );
+        assert_eq!(ErrorType::WorkerOverloaded.to_string(), "WorkerOverloaded");
         assert_eq!(ErrorType::Unavailable.to_string(), "Unavailable");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
