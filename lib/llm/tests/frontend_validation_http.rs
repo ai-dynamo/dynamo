@@ -341,6 +341,109 @@ async fn unary_and_late_stream_errors_keep_classification_and_envelopes() {
 
 #[tokio::test]
 #[serial]
+async fn anthropic_overload_statuses_use_overloaded_error() {
+    temp_env::async_with_vars(PEEK_ENABLED_ENV, async {
+        let cases = [
+            (
+                ErrorType::Unavailable,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable",
+            ),
+            (
+                ErrorType::ResourceExhausted,
+                reqwest::StatusCode::from_u16(529).unwrap(),
+                "Service temporarily overloaded",
+            ),
+        ];
+        let scripts = cases.iter().map(|(error_type, _, _)| {
+            vec![backend_error(
+                *error_type,
+                "private backend overload detail",
+            )]
+        });
+        let svc = HarnessService::start_with_scripts(scripts, []).await;
+
+        for (_, expected_status, expected_message) in cases {
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": true
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["error"]["type"], "overloaded_error");
+            assert_eq!(body["error"]["message"], expected_message);
+            assert!(!body.to_string().contains("private backend overload detail"));
+        }
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_overload_statuses_use_server_error_events() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let cases = [
+            (ErrorType::Unavailable, "Service temporarily unavailable"),
+            (
+                ErrorType::ResourceExhausted,
+                "Service temporarily overloaded",
+            ),
+        ];
+        let scripts = cases.iter().map(|(error_type, _)| {
+            vec![backend_error(
+                *error_type,
+                "private backend overload detail",
+            )]
+        });
+        let svc = HarnessService::start_with_scripts(scripts, []).await;
+
+        for (_, expected_message) in cases {
+            let response = svc
+                .client
+                .post(format!("{}/v1/responses", svc.base_url))
+                .json(&json!({"model": MODEL, "input": "ping", "stream": true}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let events = parse_json_sse(&response.text().await.unwrap())
+                .await
+                .unwrap();
+            let failed = events
+                .iter()
+                .find(|event| event.event == "response.failed")
+                .expect("missing response.failed event");
+            assert_eq!(failed.data["response"]["error"]["code"], "server_error");
+            assert_eq!(
+                failed.data["response"]["error"]["message"],
+                expected_message
+            );
+            assert!(
+                !failed
+                    .data
+                    .to_string()
+                    .contains("private backend overload detail")
+            );
+        }
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn native_stream_errors_are_terminal_and_recorded_as_failures() {
     temp_env::async_with_vars(BASE_ENV, async {
         let partial = load_agent_fixture("text.sse").await.unwrap()[0].clone();
