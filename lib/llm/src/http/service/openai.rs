@@ -4272,8 +4272,9 @@ async fn audio_speech(
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold audio stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold audio stream")
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Failed to fold audio stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     // Check for failure before marking success

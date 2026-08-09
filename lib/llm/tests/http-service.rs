@@ -8,6 +8,7 @@ use dynamo_llm::protocols::{
     codec::SseLineCodec,
     convert_sse_stream,
     openai::{
+        audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
@@ -189,6 +190,9 @@ struct AlwaysFailEngine {}
 /// first stream event — modeling a text-only model refusing multimodal input.
 struct InvalidArgumentEngine {}
 
+/// Audio engine that models worker-side request validation after dispatch.
+struct InvalidArgumentAudiosEngine {}
+
 /// Engine that rejects during request admission, before a response stream exists.
 struct AdmissionInvalidArgumentEngine {}
 
@@ -217,6 +221,43 @@ impl
                     DynamoError::builder()
                         .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
                         .message("Received multimodal data but multimodal processing is not enabled")
+                        .build(),
+                ),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for InvalidArgumentAudiosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        use dynamo_runtime::error::BackendError;
+
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::<NvAudioSpeechResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
+                        .message(
+                            "ValidationError: NvCreateAudioSpeechRequest task_type must be \
+                             'CustomVoice', 'VoiceDesign', or 'Base'",
+                        )
                         .build(),
                 ),
             };
@@ -1535,6 +1576,74 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
     assert!(
         text.contains("Received multimodal data but multimodal processing is not enabled"),
         "expected typed backend error message forwarded to client; got: {text}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Worker-side audio request validation must remain a client error after the
+/// response stream crosses the Rust frontend aggregation boundary.
+#[tokio::test]
+async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let registry = Registry::new();
+    let card = ModelDeploymentCard::with_name_only("tts-model");
+    manager
+        .add_audios_model(
+            "tts-model",
+            card.mdcsum(),
+            Arc::new(InvalidArgumentAudiosEngine {}),
+        )
+        .unwrap();
+
+    let metrics = state.metrics_clone();
+    metrics.register(&registry).unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/audio/speech"))
+        .json(&serde_json::json!({
+            "model": "tts-model",
+            "input": "The quick brown fox jumps over the lazy dog.",
+            "voice": "vivian",
+            "language": "English",
+            "task_type": "NotARealTaskType",
+        }))
+        .send()
+        .await
+        .expect("POST /v1/audio/speech");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Backend(InvalidArgument) on /v1/audio/speech must return HTTP 400; got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("task_type"),
+        "expected the backend validation message to name the offending field; got: {text}"
+    );
+    compare_counter(
+        &metrics,
+        "tts-model",
+        &Endpoint::Audios,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
     );
 
     cancel_token.cancel();
