@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
 use tokio::sync::watch;
 
 use crate::{
@@ -36,6 +36,9 @@ pub struct WorkerSet {
     /// Exact serving pool identity. Discovery-backed WorkerSets always set
     /// this; in-process models have no distributed endpoint.
     endpoint_id: Option<EndpointId>,
+
+    /// Endpoint handle used only by committed topology reconciliation.
+    topology_endpoint: Option<Endpoint>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -77,6 +80,7 @@ impl WorkerSet {
         Self {
             namespace,
             endpoint_id: None,
+            topology_endpoint: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -105,8 +109,13 @@ impl WorkerSet {
         self.endpoint_id.as_ref()
     }
 
-    pub(crate) fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
-        self.endpoint_id = Some(endpoint_id);
+    pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
+        self.endpoint_id = Some(endpoint.id());
+        self.topology_endpoint = Some(endpoint);
+    }
+
+    pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
+        self.topology_endpoint.as_ref()
     }
 
     pub fn mdcsum(&self) -> &str {

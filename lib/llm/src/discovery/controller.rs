@@ -202,6 +202,7 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     reconciliations: JoinSet<ReconciliationResult>,
     active_builds: usize,
     max_concurrent_builds: usize,
+    next_build_generation: u64,
 }
 
 impl<H: ControllerHost> ModelDiscoveryController<H> {
@@ -221,6 +222,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             reconciliations: JoinSet::new(),
             active_builds: 0,
             max_concurrent_builds: max_concurrent_builds.max(1),
+            next_build_generation: 1,
         }
     }
 
@@ -641,15 +643,17 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             };
 
             let cancellation = CancellationToken::new();
+            let generation = self.next_build_generation;
+            self.next_build_generation = self.next_build_generation.wrapping_add(1).max(1);
             let spec = GroupSpec {
                 key: key.clone(),
                 fingerprint: fingerprint.clone(),
-                generation: group.generation,
+                generation,
                 representative,
             };
             group.status = GroupStatus::Building {
                 fingerprint,
-                generation: group.generation,
+                generation,
                 cancellation: cancellation.clone(),
             };
 
@@ -1299,6 +1303,34 @@ mod tests {
 
         assert!(host.members(&group_key()).is_empty());
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn recreated_group_rejects_prepared_result_from_prior_lifetime() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance(1, "same");
+
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        let first_spec = starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        let stale = controller.builds.join_next().await.unwrap().unwrap();
+        controller.active_builds -= 1;
+
+        controller.apply_removed(&first.key);
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        let replacement_spec = starts.recv().await.unwrap();
+        assert_ne!(first_spec.generation, replacement_spec.generation);
+
+        controller.apply_build_result(stale);
+        assert!(host.members(&group_key()).is_empty());
+        assert_eq!(host.discarded.load(Ordering::SeqCst), 1);
+
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
     #[tokio::test]

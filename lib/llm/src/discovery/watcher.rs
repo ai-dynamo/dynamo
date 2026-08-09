@@ -15,7 +15,6 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     DistributedRuntime,
-    component::Endpoint,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
@@ -151,17 +150,6 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
         .any(|capability| supports_generate_capability(card, capability))
 }
 
-const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
-
-fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
-    matches!(
-        card.runtime_config
-            .runtime_data
-            .get(ENCODER_RESULT_HANDOFF_CAPABILITY),
-        Some(serde_json::Value::Bool(true))
-    )
-}
-
 // Generate's opaque request state is not yet verified for migration replay.
 const GENERATE_MIGRATION_LIMIT: u32 = 0;
 
@@ -242,64 +230,9 @@ where
     worker_selector_factory: WorkerSelectorFactory<Sel>,
 }
 
-enum PreparedActivation {
-    None,
-    Prefill {
-        endpoint: Endpoint,
-        enable_encoder_routing: bool,
-    },
-    Encoder {
-        endpoint: Endpoint,
-    },
-}
-
-struct PreparationLease {
-    manager: Arc<ModelManager>,
-    model_name: String,
-    namespace: String,
-    remove_prefill_waiter: bool,
-    remove_encoder_waiter: bool,
-    armed: bool,
-}
-
-impl PreparationLease {
-    fn new(manager: Arc<ModelManager>, model_name: String, namespace: String) -> Self {
-        Self {
-            manager,
-            model_name,
-            namespace,
-            remove_prefill_waiter: false,
-            remove_encoder_waiter: false,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for PreparationLease {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if self.remove_prefill_waiter {
-            self.manager
-                .remove_decode_prefill_waiter(&self.model_name, &self.namespace);
-        }
-        if self.remove_encoder_waiter {
-            self.manager
-                .remove_consumer_encoder_waiter(&self.model_name, &self.namespace);
-        }
-    }
-}
-
 pub(crate) struct PreparedWorkerSet {
     worker_set: Option<WorkerSet>,
     card: ModelDeploymentCard,
-    activation: PreparedActivation,
-    lease: PreparationLease,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -532,14 +465,9 @@ where
         );
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
-        let mut lease = PreparationLease::new(
-            self.manager.clone(),
-            card.name().to_string(),
-            namespace.clone(),
-        );
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
-        worker_set.set_endpoint_id(endpoint.id());
+        worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
         // A surface-less Encode worker is reached only through EncoderRouter.
@@ -557,10 +485,6 @@ where
             return Ok(PreparedWorkerSet {
                 worker_set: Some(worker_set),
                 card: card.clone(),
-                activation: PreparedActivation::Encoder {
-                    endpoint: component.endpoint(&mcid.endpoint),
-                },
-                lease,
             });
         }
 
@@ -598,11 +522,6 @@ where
             return Ok(PreparedWorkerSet {
                 worker_set: Some(worker_set),
                 card: card.clone(),
-                activation: PreparedActivation::Prefill {
-                    endpoint: component.endpoint(&mcid.endpoint),
-                    enable_encoder_routing: supports_encoder_result_handoff(card),
-                },
-                lease,
             });
         }
 
@@ -700,39 +619,15 @@ where
             // P/D rendezvous. Aggregated and Encode endpoints are independent
             // serving leaves and must not claim or perturb that pairing.
             let model_name = card.name().to_string();
-            let prefill_receiver = if needs_preprocessed_routing
+            let prefill_chooser = if needs_preprocessed_routing
                 && effective_worker_type(card.worker_type, card.model_type) == WorkerType::Decode
             {
-                lease.remove_prefill_waiter = true;
-                match self
-                    .manager
-                    .register_prefill_router(&model_name, &namespace, &endpoint.id())
-                {
-                    Ok(receiver) => receiver,
-                    Err(error) => {
-                        tracing::error!(
-                            model_name,
-                            namespace,
-                            %error,
-                            "Refusing ambiguous endpoint-scoped P/D topology; ordinary serving remains enabled"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            // Chat and completions on this decode endpoint share one prefill chooser.
-            let prefill_chooser = prefill_receiver.map(|rx| {
-                // Create prefill-specific config with track_active_blocks disabled
                 let mut prefill_config = router_config.kv_router_config.clone();
                 prefill_config.router_track_active_blocks = false;
-                // Prefill KV events are emitted by prefill workers; do not inherit
-                // decode-only speculative hash mode.
                 let prefill_enable_eagle = false;
 
-                PrefillRouter::new_with_selector_factory(
-                    rx,
+                Some(PrefillRouter::new_with_selector_factory(
+                    None,
                     self.manager.clone(),
                     router_config.router_mode,
                     card.kv_cache_block_size,
@@ -744,17 +639,14 @@ where
                     model_name.clone(),
                     namespace.clone(),
                     prefill_enable_eagle,
-                    // Hand the monitor directly so the prefill Client can be attached
-                    // to it on activation (no namespace lookup).
                     worker_monitor.clone(),
-                )
-            });
+                ))
+            } else {
+                None
+            };
 
             let encoder_chooser = if needs_preprocessed_routing {
-                lease.remove_encoder_waiter = true;
-                self.manager
-                    .register_encoder_router(&model_name, &namespace)
-                    .map(|rx| EncoderRouter::new(rx, model_name.clone(), namespace.clone()))
+                Some(EncoderRouter::new(model_name.clone(), namespace.clone()))
             } else {
                 None
             };
@@ -1089,8 +981,6 @@ where
         Ok(PreparedWorkerSet {
             worker_set: Some(worker_set),
             card: card.clone(),
-            activation: PreparedActivation::None,
-            lease,
         })
     }
 
@@ -1189,41 +1079,7 @@ where
                 .iter()
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
-            || {
-                let namespace = &spec.representative.mcid.namespace;
-                match &prepared.activation {
-                    PreparedActivation::None => {}
-                    PreparedActivation::Prefill {
-                        endpoint,
-                        enable_encoder_routing,
-                    } => {
-                        if *enable_encoder_routing {
-                            self.manager
-                                .enable_encoder_routing(prepared.card.name(), namespace);
-                        }
-                        if let Err(error) = self.manager.activate_prefill_router(
-                            prepared.card.name(),
-                            namespace,
-                            endpoint.clone(),
-                        ) {
-                            tracing::warn!(
-                                model_name = prepared.card.name(),
-                                %error,
-                                "Prefill group committed but router activation was already satisfied"
-                            );
-                        }
-                    }
-                    PreparedActivation::Encoder { endpoint } => {
-                        self.manager.activate_encoder_router(
-                            prepared.card.name(),
-                            namespace,
-                            endpoint.clone(),
-                        );
-                    }
-                }
-            },
         )?;
-        prepared.lease.disarm();
         self.emit_update(ModelUpdate::Added(prepared.card.clone()));
         let mut adapter_names = HashSet::new();
         for adapter in adapters {
@@ -1316,34 +1172,7 @@ where
     }
 
     fn remove_group(&self, key: &GroupKey) {
-        let Some(removed) = self.manager.remove_discovery_group(&key.id(), |removed| {
-            let card = &removed.representative;
-            let namespace = &removed.namespace;
-            match effective_worker_type(card.worker_type, card.model_type) {
-                WorkerType::Prefill => {
-                    self.manager
-                        .remove_prefill_activator(card.name(), namespace);
-                    self.manager
-                        .deactivate_prefill_router_for_decode(card.name(), namespace);
-                }
-                WorkerType::Encode if card.model_type.is_empty() => {
-                    self.manager
-                        .remove_encoder_activator(card.name(), namespace);
-                    self.manager
-                        .deactivate_encoder_router_for_consumers(card.name(), namespace);
-                }
-                WorkerType::Decode => {
-                    self.manager
-                        .remove_decode_prefill_waiter(card.name(), namespace);
-                    self.manager
-                        .remove_consumer_encoder_waiter(card.name(), namespace);
-                }
-                WorkerType::Aggregated | WorkerType::Encode => {
-                    self.manager
-                        .remove_consumer_encoder_waiter(card.name(), namespace);
-                }
-            }
-        }) else {
+        let Some(removed) = self.manager.remove_discovery_group(&key.id()) else {
             return;
         };
         let removed_members = removed.cards.len();
@@ -1535,23 +1364,6 @@ mod tests {
             &card,
             &[OTHER_GENERATE_CAPABILITY]
         ));
-    }
-
-    #[test]
-    fn encoder_result_handoff_requires_explicit_worker_capability() {
-        let mut card = ModelDeploymentCard::with_name_only("model");
-        card.needs = vec![vec![WorkerType::Encode]];
-        assert!(!supports_encoder_result_handoff(&card));
-
-        card.runtime_config
-            .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, true)
-            .unwrap();
-        assert!(supports_encoder_result_handoff(&card));
-
-        card.runtime_config
-            .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, false)
-            .unwrap();
-        assert!(!supports_encoder_result_handoff(&card));
     }
 
     #[tokio::test]
