@@ -772,12 +772,23 @@ pub fn validate_suffix(suffix: Option<&str>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+const MAX_OUTPUT_TOKENS: u32 = 1_048_576;
+
 /// Validates max_tokens parameter
 pub fn validate_max_tokens(max_tokens: Option<u32>) -> Result<(), anyhow::Error> {
     if let Some(tokens) = max_tokens
         && tokens == 0
     {
         anyhow::bail!("Max tokens must be greater than 0, got {}", tokens);
+    }
+    if let Some(tokens) = max_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
+            tokens
+        );
     }
     Ok(())
 }
@@ -791,6 +802,15 @@ pub fn validate_max_completion_tokens(
     {
         anyhow::bail!(
             "Max completion tokens must be greater than 0, got {}",
+            tokens
+        );
+    }
+    if let Some(tokens) = max_completion_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max completion tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
             tokens
         );
     }
