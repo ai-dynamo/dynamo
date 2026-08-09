@@ -262,6 +262,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	if ldPath := os.Getenv("LD_LIBRARY_PATH"); ldPath != "" {
+		args = append(args, "--inherited-ld-path", ldPath)
+	}
+	if path := os.Getenv("PATH"); path != "" {
+		args = append(args, "--inherited-path", path)
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
