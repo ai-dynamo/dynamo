@@ -1013,12 +1013,17 @@ where
         normalize_legacy_prefill_topology(&mut card);
         self.apply_tokenizer_backend_override(&mut card);
         validate_card_shape(&card)?;
+        anyhow::ensure!(
+            mcid.model_suffix.is_some() == card.lora.is_some(),
+            "LoRA discovery identity and card metadata disagree"
+        );
         let endpoint_id = model_card_endpoint_id(&mcid);
         let group_key = GroupKey {
             model_name: card.name().to_string(),
             worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
         };
         let fingerprint = materialization_fingerprint(&card, &self.router_config)?;
+        let projection_fingerprint = lora_projection_fingerprint(&card)?;
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1026,6 +1031,7 @@ where
             card,
             group_key,
             fingerprint,
+            projection_fingerprint,
         }))
     }
 
@@ -1105,26 +1111,10 @@ where
         Ok(())
     }
 
-    fn add_group_member(&self, key: &GroupKey, member: &DesiredInstance) -> anyhow::Result<()> {
-        self.manager
-            .add_discovery_group_member(&key.id(), member.key.clone(), member.card.clone())
-    }
-
-    fn remove_group_member(&self, key: &GroupKey, instance_key: &str) -> anyhow::Result<()> {
-        self.manager
-            .remove_discovery_group_member(&key.id(), instance_key)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "instance {instance_key:?} missing from committed group {:?}",
-                    key.id()
-                )
-            })?;
-        Ok(())
-    }
-
-    fn sync_group_adapters(
+    fn replace_group(
         &self,
         key: &GroupKey,
+        members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
         let group_id = key.id();
@@ -1148,8 +1138,12 @@ where
                 )
             })
             .collect::<HashMap<_, _>>();
-        self.manager.sync_discovery_group_adapters(
+        self.manager.replace_discovery_group(
             &group_id,
+            members
+                .iter()
+                .map(|member| (member.key.clone(), member.card.clone()))
+                .collect(),
             adapters
                 .iter()
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
@@ -1207,36 +1201,6 @@ where
 
     async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
         self.drt.discovery().list(DiscoveryQuery::AllModels).await
-    }
-
-    fn project_lora(
-        &self,
-        endpoint_id: &EndpointId,
-        removed_worker_ids: &HashSet<u64>,
-        desired: &[(ModelCardInstanceId, ModelDeploymentCard)],
-    ) {
-        use crate::kv_router::protocols::WorkerWithDpRank;
-
-        let tracker = self.manager.lora_state_tracker_for(endpoint_id);
-        for worker_id in removed_worker_ids {
-            tracker.handle_worker_removal(WorkerWithDpRank::new(*worker_id, 0));
-        }
-
-        let mut projections = HashMap::new();
-        for (mcid, card) in desired {
-            let projection = projections
-                .entry(WorkerWithDpRank::new(mcid.instance_id, 0))
-                .or_insert_with(|| (None, Vec::new()));
-            if let Some(lora) = card.lora.as_ref() {
-                projection.1.push(lora.clone());
-            } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
-                projection.0 = Some(capacity);
-            }
-        }
-        for (worker, (base_capacity, mut loras)) in projections {
-            loras.sort_by(|left, right| left.name.cmp(&right.name));
-            tracker.replace_worker_projection(worker, base_capacity, &loras);
-        }
     }
 }
 
@@ -1297,6 +1261,17 @@ fn materialization_fingerprint(
     Ok(blake3::hash(&bytes).to_string())
 }
 
+fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<String> {
+    let mut value = serde_json::json!({
+        "display_name": &card.display_name,
+        "aliases": &card.aliases,
+        "lora": &card.lora,
+        "base_capacity": card.runtime_config.max_gpu_lora_count,
+    });
+    canonicalize_json(&mut value);
+    Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
+}
+
 fn canonicalize_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
@@ -1313,32 +1288,6 @@ fn canonicalize_json(value: &mut serde_json::Value) {
             }
         }
         _ => {}
-    }
-}
-
-/// Seed the LoRA state tracker from a worker's MDC.
-///
-/// - Adapter card (`card.lora` is `Some`): register the loaded adapter and worker capacity.
-/// - Base worker card advertising `runtime_config.max_gpu_lora_count`: seed capacity-only (no
-///   phantom adapter) so the controller sees idle-but-LoRA-capable workers before the first
-///   adapter load. Returns `None`.
-/// - Otherwise (non-LoRA worker): no-op, returns `None`.
-///
-/// Used by focused unit tests for the individual MDC projections consumed by the controller.
-#[cfg(test)]
-fn seed_lora_state_from_card(
-    state_tracker: &crate::lora::LoraStateTracker,
-    worker: crate::kv_router::protocols::WorkerWithDpRank,
-    card: &ModelDeploymentCard,
-) -> Option<String> {
-    if let Some(lora_info) = card.lora.as_ref() {
-        state_tracker.handle_mdc_addition(worker, lora_info);
-        Some(lora_info.name.clone())
-    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
-        state_tracker.set_worker_capacity(worker, capacity);
-        None
-    } else {
-        None
     }
 }
 
@@ -1421,6 +1370,7 @@ mod tests {
             mcid,
             endpoint_id,
             fingerprint: materialization_fingerprint(&card, &RouterConfig::default()).unwrap(),
+            projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             card,
             group_key: key.clone(),
         };
@@ -1443,64 +1393,6 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
-    }
-
-    #[test]
-    fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
-        // jh-nv (watcher base-card seeding): a base worker card (lora=None) carrying
-        // runtime_config.max_gpu_lora_count must seed capacity-only so the controller sees the
-        // idle LoRA-capable worker before any adapter loads. Pins the base-card -> capacity flow
-        // that the discovery loop relies on.
-        let st = crate::lora::LoraStateTracker::new();
-        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(7, 0);
-        let mut card = ModelDeploymentCard::with_name_only("base-model");
-        card.runtime_config.max_gpu_lora_count = Some(4);
-        assert!(card.lora.is_none());
-
-        let adapter = seed_lora_state_from_card(&st, worker, &card);
-        assert_eq!(adapter, None, "a base card registers no adapter name");
-        assert_eq!(
-            st.list_workers(),
-            vec![worker],
-            "idle LoRA-capable worker must be visible to the controller"
-        );
-        assert_eq!(st.total_lora_slots(), 4);
-    }
-
-    #[test]
-    fn base_card_without_capacity_seeds_nothing() {
-        // A non-LoRA base card must not seed any worker capacity.
-        let st = crate::lora::LoraStateTracker::new();
-        let card = ModelDeploymentCard::with_name_only("base-model");
-        assert!(card.runtime_config.max_gpu_lora_count.is_none());
-
-        let adapter = seed_lora_state_from_card(
-            &st,
-            crate::kv_router::protocols::WorkerWithDpRank::new(1, 0),
-            &card,
-        );
-        assert_eq!(adapter, None);
-        assert!(
-            st.list_workers().is_empty(),
-            "a non-LoRA base card must not seed capacity"
-        );
-    }
-
-    #[test]
-    fn adapter_card_registers_adapter_and_returns_name() {
-        // An adapter card registers the loaded adapter and its capacity in the desired ledger.
-        let st = crate::lora::LoraStateTracker::new();
-        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(3, 0);
-        let mut card = ModelDeploymentCard::with_name_only("base-model");
-        card.lora = Some(crate::model_card::LoraInfo {
-            name: "adapter-x".to_string(),
-            max_gpu_lora_count: Some(2),
-        });
-
-        let adapter = seed_lora_state_from_card(&st, worker, &card);
-        assert_eq!(adapter.as_deref(), Some("adapter-x"));
-        assert!(st.is_loaded("adapter-x", &worker));
-        assert_eq!(st.total_lora_slots(), 2);
     }
 
     #[test]

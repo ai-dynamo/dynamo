@@ -14,7 +14,7 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
-    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
     selector::WorkerSelector,
 };
 
@@ -26,7 +26,7 @@ use super::{
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
-    discovery::{Discovery, DiscoverySpec},
+    discovery::{Discovery, DiscoverySpec, ModelCardInstanceId},
     pipeline::network::RequestPlanePayloadCodec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
@@ -41,8 +41,9 @@ use crate::{
         DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         topology_taint,
     },
+    lora::state_tracker::LoraWorkerProjection,
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
-    model_card::ModelDeploymentCard,
+    model_card::{LoraInfo, ModelDeploymentCard},
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -64,6 +65,7 @@ struct LoraEndpointDomain {
     load_estimator: Arc<LoadEstimator>,
     filter: Arc<LoraFilter>,
     controller_started: AtomicBool,
+    controller_cancel: parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>,
 }
 
 impl LoraEndpointDomain {
@@ -80,7 +82,19 @@ impl LoraEndpointDomain {
             load_estimator: Arc::new(LoadEstimator::new()),
             filter,
             controller_started: AtomicBool::new(false),
+            controller_cancel: parking_lot::Mutex::new(None),
         }
+    }
+
+    fn shutdown(&self) {
+        if let Some(cancel) = self.controller_cancel.lock().take() {
+            cancel.cancel();
+        }
+        self.controller_started.store(false, Ordering::Release);
+        self.routing_table.clear();
+        self.load_estimator.reset();
+        self.state_tracker
+            .replace_endpoint_projection(HashMap::new());
     }
 }
 
@@ -118,7 +132,16 @@ struct CommittedDiscoveryGroup {
     cards: HashMap<String, ModelDeploymentCard>,
     adapters: HashMap<String, ModelDeploymentCard>,
     representative: ModelDeploymentCard,
+    worker_set: Arc<WorkerSet>,
 }
+
+#[derive(Default)]
+struct PendingLoraProjection {
+    base_capacities: Vec<u32>,
+    adapters: HashMap<String, LoraInfo>,
+}
+
+type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
 
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
@@ -157,13 +180,13 @@ pub struct ModelManager {
 
     /// Exact endpoint → independent LoRA allocation and load domain.
     lora_domains: DashMap<EndpointId, Arc<LoraEndpointDomain>>,
+    committed_lora_endpoints: parking_lot::Mutex<HashSet<EndpointId>>,
     lora_enabled: bool,
     /// Per-decode-endpoint LoRA load-feed subscription handles, so we start exactly one feed
     /// per endpoint and can restart it if the previous one exited (avoids double counting on
     /// rebuilds while keeping the feed durable).
     lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
     lora_controller_cancel: parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>,
-    lora_controller_handles: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     /// Alias → primary model name mapping. Used to normalize metrics labels.
     alias_to_primary: DashMap<String, String>,
@@ -194,10 +217,10 @@ impl ModelManager {
             hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
+            committed_lora_endpoints: parking_lot::Mutex::new(HashSet::new()),
             lora_enabled: crate::lora::lora_serving_enabled(),
             lora_load_feeds: DashMap::new(),
             lora_controller_cancel: parking_lot::Mutex::new(None),
-            lora_controller_handles: parking_lot::Mutex::new(Vec::new()),
             alias_to_primary: DashMap::new(),
             reservation_lock: parking_lot::Mutex::new(()),
         }
@@ -226,40 +249,162 @@ impl ModelManager {
         }));
     }
 
-    fn publish_cards_locked(&self) {
-        let current = self.catalog.load_full();
-        let cards = self
-            .cards
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-        self.catalog.store(Arc::new(CommittedCatalog {
-            models: current.models.clone(),
-            cards: Arc::new(cards),
-            aliases: current.aliases.clone(),
-        }));
-    }
+    fn lora_projection_locked(&self) -> EndpointLoraProjection {
+        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, PendingLoraProjection>> =
+            HashMap::new();
+        for group in self.discovery_groups.iter() {
+            for (key, card) in &group.cards {
+                let Ok(mcid) = ModelCardInstanceId::from_path(key) else {
+                    continue;
+                };
+                let endpoint_id = EndpointId {
+                    namespace: mcid.namespace.clone(),
+                    component: mcid.component.clone(),
+                    name: mcid.endpoint.clone(),
+                };
+                let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                let worker_projection = pending
+                    .entry(endpoint_id)
+                    .or_default()
+                    .entry(worker)
+                    .or_default();
+                if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+                    worker_projection.base_capacities.push(capacity);
+                }
 
-    fn publish_models_and_cards_locked(&self, changed_models: &HashSet<String>) {
-        let current = self.catalog.load_full();
-        let mut models = (*current.models).clone();
-        for name in changed_models {
-            if let Some(model) = self.models.get(name) {
-                models.insert(name.clone(), Arc::new(model.snapshot()));
-            } else {
-                models.remove(name);
+                for (adapter_key, adapter_card) in &group.adapters {
+                    let Ok(adapter_mcid) = ModelCardInstanceId::from_path(adapter_key) else {
+                        continue;
+                    };
+                    if adapter_mcid.namespace != mcid.namespace
+                        || adapter_mcid.component != mcid.component
+                        || adapter_mcid.endpoint != mcid.endpoint
+                        || adapter_mcid.instance_id != mcid.instance_id
+                    {
+                        continue;
+                    }
+                    if let Some(lora) = &adapter_card.lora {
+                        worker_projection
+                            .adapters
+                            .insert(lora.name.clone(), lora.clone());
+                    }
+                }
             }
         }
-        let cards = self
-            .cards
+
+        pending
+            .into_iter()
+            .map(|(endpoint_id, workers)| {
+                let workers = workers
+                    .into_iter()
+                    .filter_map(|(worker, mut projection)| {
+                        projection.base_capacities.sort_unstable();
+                        projection.base_capacities.dedup();
+                        if projection.base_capacities.len() > 1 {
+                            tracing::warn!(
+                                endpoint = %endpoint_id,
+                                worker_id = worker.worker_id,
+                                capacities = ?projection.base_capacities,
+                                "Base MDCs disagree on LoRA capacity; using the conservative minimum"
+                            );
+                        }
+                        let mut loras = projection.adapters.into_values().collect::<Vec<_>>();
+                        loras.sort_by(|left, right| left.name.cmp(&right.name));
+                        let mut adapter_capacities = loras
+                            .iter()
+                            .filter_map(|lora| lora.max_gpu_lora_count)
+                            .collect::<Vec<_>>();
+                        adapter_capacities.sort_unstable();
+                        adapter_capacities.dedup();
+                        if adapter_capacities.len() > 1 {
+                            tracing::warn!(
+                                endpoint = %endpoint_id,
+                                worker_id = worker.worker_id,
+                                capacities = ?adapter_capacities,
+                                "Adapter MDCs disagree on LoRA capacity; using the conservative minimum"
+                            );
+                        }
+                        let capacity = projection
+                            .base_capacities
+                            .first()
+                            .copied()
+                            .or_else(|| adapter_capacities.first().copied())
+                            .or_else(|| (!loras.is_empty()).then_some(4))?;
+                        Some((worker, LoraWorkerProjection { capacity, loras }))
+                    })
+                    .collect();
+                (endpoint_id, workers)
+            })
+            .collect()
+    }
+
+    fn union_lora_projection(
+        before: &EndpointLoraProjection,
+        after: &EndpointLoraProjection,
+    ) -> EndpointLoraProjection {
+        let mut union = before.clone();
+        for (endpoint, workers) in after {
+            let endpoint_union = union.entry(endpoint.clone()).or_default();
+            for (worker, projection) in workers {
+                let Some(existing) = endpoint_union.get_mut(worker) else {
+                    endpoint_union.insert(*worker, projection.clone());
+                    continue;
+                };
+                existing.capacity = existing.capacity.min(projection.capacity);
+                let mut loras = existing
+                    .loras
+                    .iter()
+                    .chain(&projection.loras)
+                    .map(|lora| (lora.name.clone(), lora.clone()))
+                    .collect::<HashMap<_, _>>()
+                    .into_values()
+                    .collect::<Vec<_>>();
+                loras.sort_by(|left, right| left.name.cmp(&right.name));
+                existing.loras = loras;
+            }
+        }
+        union
+    }
+
+    fn publish_lora_projection_locked(&self, projection: EndpointLoraProjection) {
+        let mut endpoints = self.committed_lora_endpoints.lock();
+        let next_endpoints = projection.keys().cloned().collect::<HashSet<_>>();
+        for endpoint_id in endpoints.union(&next_endpoints) {
+            let workers = projection.get(endpoint_id).cloned().unwrap_or_default();
+            if let Some(domain) = self.lora_domains.get(endpoint_id) {
+                domain.state_tracker.replace_endpoint_projection(workers);
+            } else if !workers.is_empty() {
+                self.lora_domain(endpoint_id)
+                    .state_tracker
+                    .replace_endpoint_projection(workers);
+            }
+        }
+        *endpoints = next_endpoints;
+        drop(endpoints);
+        self.prune_idle_lora_domains();
+    }
+
+    fn prune_idle_lora_domains(&self) {
+        let committed = self.committed_lora_endpoints.lock().clone();
+        let removable = self
+            .lora_domains
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-        self.catalog.store(Arc::new(CommittedCatalog {
-            models: Arc::new(models),
-            cards: Arc::new(cards),
-            aliases: current.aliases.clone(),
-        }));
+            .filter_map(|entry| {
+                (!committed.contains(entry.key())
+                    && entry.state_tracker.is_empty()
+                    && Arc::strong_count(&entry.filter) == 1)
+                    .then(|| entry.key().clone())
+            })
+            .collect::<Vec<_>>();
+        for endpoint_id in removable {
+            let Some((_, domain)) = self.lora_domains.remove(&endpoint_id) else {
+                continue;
+            };
+            domain.shutdown();
+            if let Some((_, feed)) = self.lora_load_feeds.remove(&endpoint_id.to_string()) {
+                feed.abort();
+            }
+        }
     }
 
     // -- Model access --
@@ -512,6 +657,7 @@ impl ModelManager {
         let representative = representative.clone();
 
         let _reservation = self.reservation_lock.lock();
+        let lora_before = self.lora_projection_locked();
         anyhow::ensure!(
             !self.discovery_groups.contains_key(group_id),
             "discovery group {group_id:?} is already committed"
@@ -560,8 +706,9 @@ impl ModelManager {
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
         }
         for (_, adapter) in &adapters {
+            let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
             self.get_or_create_model(adapter.name())
-                .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+                .add_worker_set(worker_set_key.to_string(), adapter_view);
         }
 
         let cards = members.into_iter().collect::<HashMap<_, _>>();
@@ -582,10 +729,14 @@ impl ModelManager {
                 cards,
                 adapters,
                 representative,
+                worker_set,
             },
         );
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
         self.reconcile_discovery_topology(&primary, &namespace);
         self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
         Ok(())
     }
 
@@ -595,6 +746,11 @@ impl ModelManager {
         adapters: impl Iterator<Item = &'a ModelDeploymentCard>,
     ) -> anyhow::Result<()> {
         for adapter in adapters {
+            let lora = adapter
+                .lora
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("adapter card is missing LoRA metadata"))?;
+            anyhow::ensure!(!lora.name.is_empty(), "LoRA adapter name cannot be empty");
             let name = adapter.name();
             anyhow::ensure!(
                 name != primary,
@@ -621,42 +777,11 @@ impl ModelManager {
         Ok(())
     }
 
-    pub(crate) fn add_discovery_group_member(
+    pub(crate) fn replace_discovery_group(
         &self,
         group_id: &str,
-        key: String,
-        card: ModelDeploymentCard,
-    ) -> anyhow::Result<()> {
-        let _reservation = self.reservation_lock.lock();
-        let mut group = self
-            .discovery_groups
-            .get_mut(group_id)
-            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
-        group.cards.insert(key.clone(), card.clone());
-        self.cards.insert(key, Arc::new(card));
-        drop(group);
-        self.publish_cards_locked();
-        Ok(())
-    }
-
-    pub(crate) fn remove_discovery_group_member(
-        &self,
-        group_id: &str,
-        key: &str,
-    ) -> Option<ModelDeploymentCard> {
-        let _reservation = self.reservation_lock.lock();
-        let mut group = self.discovery_groups.get_mut(group_id)?;
-        let removed = group.cards.remove(key)?;
-        self.cards.remove(key);
-        drop(group);
-        self.publish_cards_locked();
-        Some(removed)
-    }
-
-    pub(crate) fn sync_discovery_group_adapters(
-        &self,
-        group_id: &str,
-        desired: Vec<(String, ModelDeploymentCard)>,
+        members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
     ) -> anyhow::Result<()> {
         let _reservation = self.reservation_lock.lock();
         let group = self
@@ -665,64 +790,77 @@ impl ModelManager {
             .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
         let primary = group.primary.clone();
         let worker_set_key = group.worker_set_key.clone();
-        drop(group);
-
-        self.validate_adapter_claims(&primary, desired.iter().map(|(_, card)| card))?;
-        let worker_set = self
-            .models
-            .get(&primary)
-            .and_then(|model| model.get_worker_set(&worker_set_key))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "committed discovery group {group_id:?} lost WorkerSet {worker_set_key:?}"
-                )
-            })?;
-        let desired = desired.into_iter().collect::<HashMap<_, _>>();
-        let desired_names = desired
+        let worker_set = group.worker_set.clone();
+        let previous_member_keys = group.cards.keys().cloned().collect::<HashSet<_>>();
+        let previous_adapter_keys = group.adapters.keys().cloned().collect::<HashSet<_>>();
+        let previous_adapter_names = group
+            .adapters
             .values()
             .map(|card| card.name().to_string())
             .collect::<HashSet<_>>();
+        drop(group);
+
+        anyhow::ensure!(
+            !members.is_empty(),
+            "cannot replace with an empty discovery group"
+        );
+        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+        let members = members.into_iter().collect::<HashMap<_, _>>();
+        let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
+        let desired_member_keys = members.keys().cloned().collect::<HashSet<_>>();
+        let desired_adapter_keys = adapters.keys().cloned().collect::<HashSet<_>>();
+        let desired_adapter_names = adapters
+            .values()
+            .map(|card| card.name().to_string())
+            .collect::<HashSet<_>>();
+        let adapter_views = adapters
+            .values()
+            .map(|card| {
+                (
+                    card.name().to_string(),
+                    Arc::new(worker_set.adapter_view(card.clone())),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let lora_before = self.lora_projection_locked();
+
+        for key in previous_member_keys.difference(&desired_member_keys) {
+            self.cards.remove(key);
+        }
+        for key in previous_adapter_keys.difference(&desired_adapter_keys) {
+            self.cards.remove(key);
+        }
+        for (key, card) in members.iter().chain(adapters.iter()) {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+
         let mut group = self
             .discovery_groups
             .get_mut(group_id)
             .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
-        let removed_names = group
-            .adapters
-            .iter()
-            .filter(|(key, _)| !desired.contains_key(*key))
-            .map(|(_, card)| card.name().to_string())
-            .collect::<HashSet<_>>();
-        for key in group
-            .adapters
-            .keys()
-            .filter(|key| !desired.contains_key(*key))
+        group.representative = members
+            .values()
+            .next()
             .cloned()
-            .collect::<Vec<_>>()
-        {
-            group.adapters.remove(&key);
-            self.cards.remove(&key);
-        }
-        for (key, card) in desired {
-            self.cards.insert(key.clone(), Arc::new(card.clone()));
-            group.adapters.insert(key, card);
-        }
+            .expect("non-empty members checked above");
+        group.cards = members;
+        group.adapters = adapters;
         drop(group);
 
-        for name in &desired_names {
-            self.get_or_create_model(name)
-                .add_worker_set(worker_set_key.clone(), worker_set.clone());
+        for (name, adapter_view) in adapter_views {
+            self.get_or_create_model(&name)
+                .add_worker_set(worker_set_key.clone(), adapter_view);
         }
-        for name in removed_names.difference(&desired_names) {
+        for name in previous_adapter_names.difference(&desired_adapter_names) {
             if let Some(model) = self.models.get(name) {
                 model.remove_worker_set(&worker_set_key);
             }
             self.remove_model_if_empty(name);
         }
-        let changed_models = desired_names
-            .union(&removed_names)
-            .cloned()
-            .collect::<HashSet<_>>();
-        self.publish_models_and_cards_locked(&changed_models);
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
         Ok(())
     }
 
@@ -737,6 +875,7 @@ impl ModelManager {
     ///
     pub(crate) fn remove_discovery_group(&self, group_id: &str) -> Option<RemovedDiscoveryGroup> {
         let _reservation = self.reservation_lock.lock();
+        let lora_before = self.lora_projection_locked();
         let (_, group) = self.discovery_groups.remove(group_id)?;
         let representative = group.representative.clone();
         let topology_namespace = group.namespace.clone();
@@ -778,8 +917,11 @@ impl ModelManager {
             representative,
             cards,
         };
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
         self.reconcile_discovery_topology(&group.primary, &topology_namespace);
         self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
         Some(removed)
     }
 
@@ -1953,18 +2095,20 @@ impl ModelManager {
                 ema_alpha: config.ema_alpha,
                 ..Default::default()
             });
-        let handle = crate::lora::LoraController::start_for_endpoint(
+        let domain_cancel = cancel_token.child_token();
+        *domain.controller_cancel.lock() = Some(domain_cancel.clone());
+        let _handle = crate::lora::LoraController::start_for_endpoint(
             endpoint_id.clone(),
             config,
             domain.routing_table.clone(),
             domain.state_tracker.clone(),
             domain.load_estimator.clone(),
-            cancel_token,
+            domain_cancel,
         );
-        self.lora_controller_handles.lock().push(handle);
     }
 
-    pub fn lora_state_tracker_for(&self, endpoint_id: &EndpointId) -> LoraStateTracker {
+    #[cfg(test)]
+    pub(crate) fn lora_state_tracker_for(&self, endpoint_id: &EndpointId) -> LoraStateTracker {
         self.lora_domain(endpoint_id).state_tracker.clone()
     }
 
@@ -3017,40 +3161,72 @@ mod tests {
     }
 
     #[test]
-    fn discovery_group_projects_adapter_cards_onto_the_base_worker_set() {
+    fn discovery_group_derives_adapter_model_and_lora_projection() {
         let manager = ModelManager::new();
-        let base = ModelDeploymentCard::with_name_only("base");
+        let mut base = ModelDeploymentCard::with_name_only("base");
+        base.runtime_config.max_gpu_lora_count = Some(6);
         let mut adapter = ModelDeploymentCard::with_name_only("adapter");
         adapter.lora = Some(crate::model_card::LoraInfo {
             name: "adapter".to_string(),
-            max_gpu_lora_count: Some(4),
+            max_gpu_lora_count: None,
         });
         let worker_set = WorkerSet::new(
             "deployment".to_string(),
             base.mdcsum().to_string(),
             base.clone(),
         );
+        let base_mcid = ModelCardInstanceId {
+            namespace: "namespace".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 17,
+            model_suffix: None,
+        };
+        let adapter_mcid = ModelCardInstanceId {
+            model_suffix: Some("adapter".to_string()),
+            ..base_mcid.clone()
+        };
 
         manager
             .commit_discovery_group(
                 "adapter-group",
                 "base-workers",
                 worker_set,
-                vec![("base-instance".to_string(), base)],
-                vec![("adapter-instance".to_string(), adapter)],
+                vec![(base_mcid.to_path(), base)],
+                vec![(adapter_mcid.to_path(), adapter)],
             )
             .unwrap();
 
         assert_eq!(manager.get_model_cards().len(), 2);
-        assert!(
-            manager
-                .get_committed_model("adapter")
-                .is_some_and(|model| model.has_worker_set("base-workers"))
+        let base_worker_set = manager
+            .get_committed_model("base")
+            .and_then(|model| model.get_worker_set("base-workers"))
+            .unwrap();
+        let adapter_worker_set = manager
+            .get_committed_model("adapter")
+            .and_then(|model| model.get_worker_set("base-workers"))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&base_worker_set, &adapter_worker_set));
+        assert_eq!(adapter_worker_set.card().name(), "adapter");
+        assert_eq!(
+            adapter_worker_set
+                .card()
+                .lora
+                .as_ref()
+                .map(|lora| lora.name.as_str()),
+            Some("adapter")
         );
+
+        let endpoint_id = EndpointId::from("namespace.worker.generate");
+        let tracker = manager.lora_state_tracker_for(&endpoint_id);
+        let worker = WorkerWithDpRank::new(17, 0);
+        assert!(tracker.is_loaded("adapter", &worker));
+        assert_eq!(tracker.total_lora_slots(), 6);
 
         manager.remove_discovery_group("adapter-group").unwrap();
         assert!(manager.get_model_cards().is_empty());
         assert!(manager.get_committed_model("adapter").is_none());
+        assert!(tracker.is_empty());
     }
 
     fn topology_card(role: WorkerType) -> ModelDeploymentCard {
