@@ -69,6 +69,16 @@ SPDX-License-Identifier: Apache-2.0
   .note{font-size:12px;color:var(--ink2);background:var(--naT);border-left:2px solid var(--axis);
     padding:10px 13px;border-radius:0 6px 6px 0;margin:14px 0 0}
   .note b{color:var(--ink)}
+  .out{margin-top:12px}
+  .out h4{font-size:12.5px;margin:18px 0 6px;color:var(--ink)}
+  .out h4 code{font-size:12px;background:none;padding:0;color:var(--ink)}
+  .out .where{font-size:11.5px;color:var(--muted);margin:0 0 6px}
+  pre.o{margin:0 0 6px;background:var(--naT);border:1px solid var(--ring);border-radius:6px;
+    padding:11px 13px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:11px;line-height:1.6;color:var(--ink);white-space:pre}
+  pre.o .c{color:var(--muted)}
+  pre.o .hl{color:var(--good);font-weight:700}
+  pre.o .wr{color:var(--warning);font-weight:700}
   ul{margin:8px 0 0;padding-left:19px;color:var(--ink2)} li{margin:4px 0} li b{color:var(--ink)}
 </style>
 </head>
@@ -119,6 +129,101 @@ SPDX-License-Identifier: Apache-2.0
     <h2>Per bench</h2>
     <div class="tabs" role="tablist" id="tabs"></div>
     <div id="panels"></div>
+  </section>
+
+
+  <section>
+    <h2>What each bench actually produces</h2>
+    <p class="lede">Eight are criterion benches and share one output shape. Two are not, and print their own. Every path below is relative to the workspace root.</p>
+
+    <div class="out">
+      <h4>The criterion shape — eight of ten</h4>
+      <p class="where">stdout, plus <code>target/criterion/&lt;group&gt;/&lt;id&gt;/</code> on disk</p>
+<pre class="o"><span class="c">$ cargo bench -p dynamo-kv-router --bench policy_queue</span>
+
+policy_queue/drain_4096_exact/4096
+                        time:   [1.8421 ms 1.8503 ms 1.8594 ms]
+                        thrpt:  [2.2029 Melem/s 2.2137 Melem/s 2.2236 Melem/s]
+<span class="c">                 change:</span>
+<span class="hl">                        time:   [-4.1122% -3.2016% -2.2534%] (p = 0.00 &lt; 0.05)</span>
+<span class="hl">                        thrpt:  [+2.3053% +3.3075% +4.2885%]</span>
+<span class="hl">                        Performance has improved.</span>
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe</pre>
+      <div class="note"><strong>The <code>change:</code> block only appears when a baseline exists in <code>target/criterion/</code>.</strong> On a clean checkout, in CI, or after <code>cargo clean</code>, you get the three-number time estimate and nothing else — no comparison, no p-value, no verdict. That block is the entire regression-detection capability, and it is the part CI never sees.</div>
+    </div>
+
+    <div class="out">
+      <h4>Per-bench identifiers</h4>
+      <p class="where">these are the names that appear in output and become directory names on disk</p>
+      <table>
+        <thead><tr><th style="width:27%">Bench</th><th style="width:14%">Unit</th><th>Groups and IDs it emits</th></tr></thead>
+        <tbody>
+          <tr><td><code>policy_queue</code></td><td>Melem/s</td><td><code>pop_once_exact</code>, <code>drain_4096_exact</code>, <code>drain_10000_exact_blocked</code>, <code>drain_one_per_exact_lane</code>, <code>build_one_per_exact_lane</code>, <code>drain_shared</code></td></tr>
+          <tr><td><code>tracking_hash</code></td><td>Melem/s</td><td><code>tracking_hash/</code> × <code>public</code>, <code>keyed-xxh3</code>, <code>keyed-blake3-reference</code> — a three-way hash comparison</td></tr>
+          <tr><td><code>tcp_codec_perf</code></td><td><b>MiB/s</b></td><td><code>tcp_request_encoding</code>, <code>tcp_request_decoding</code>, <code>tcp_response_encoding</code>, <code>tcp_response_decoding</code>, <code>tcp_request_roundtrip</code></td></tr>
+          <tr><td><code>compute_pool_overhead</code></td><td>time only</td><td><code>compute_overhead</code> × <code>direct</code> / <code>spawn_blocking</code> / <code>rayon_offload</code>; <code>parallel_tasks</code> × <code>spawn_blocking_parallel</code> / <code>rayon_parallel</code>; <code>block_in_place_overhead</code></td></tr>
+          <tr><td><code>tokenizer_simple</code></td><td>elem/s</td><td><code>hf_encode</code>, <code>fastokens_encode</code>, <code>hf_batch_encode</code>, <code>fastokens_batch_encode</code>, <code>tokenizer_decoder</code>, <code>tokenizer_decoder_big</code>, <code>tiktoken_encode</code>, <code>tiktoken_decoder</code></td></tr>
+          <tr><td><code>block_manager</code></td><td>time only</td><td><code>match_blocks_active_hit</code>, <code>match_blocks_inactive_hit</code>, <code>bulk_drop</code></td></tr>
+          <tr><td><code>transfer_context_v2</code></td><td>events/s</td><td><code>blocking_sync</code>, <code>async_sync</code>, <code>concurrent_async</code>, <code>throughput</code> × <code>events_per_sec</code></td></tr>
+          <tr><td><code>request_trace_finish_metadata</code></td><td>elem/s</td><td><code>postprocessor</code> × <code>finish_metadata_on</code> / <code>finish_metadata_off</code>; <code>tool_calls</code> × <code>record_unique</code> / <code>skip_argument_only_chunks</code></td></tr>
+        </tbody>
+      </table>
+      <div class="note"><strong>Three of these are built as A/B comparisons and say so in their IDs</strong> — <code>tracking_hash</code> pits xxh3 against a blake3 reference, <code>tokenizer_simple</code> pits HF against fastokens against tiktoken, and <code>request_trace_finish_metadata</code> measures tracing on versus off. They answer "which is faster" directly, without needing a stored baseline. That is the one form of comparison available today in CI conditions — and nothing reads it.</div>
+    </div>
+
+    <div class="out">
+      <h4><code>tokenizer_dataset</code> — not criterion</h4>
+      <p class="where">stdout only; no files written</p>
+<pre class="o"><span class="c">$ RUN_BENCH=1 cargo bench -p dynamo-llm --bench tokenizer_dataset</span>
+
+[setup] Downloading tokenizer for Qwen/Qwen3-8B...
+[setup] Tokenizer: /home/user/.cache/huggingface/...
+[setup] Downloading dataset THUDM/LongBench-v2...
+[setup] Loaded 100 samples
+
+===  LongBench-v2 (100 samples)  ===
+  Total chars:        4821337
+  Total tokens:       1183902
+  ---
+  HF total:              8134.52 ms
+  fastokens total:       2971.08 ms
+<span class="hl">  Speedup:                  2.74x</span></pre>
+      <div class="note">Emits a <strong>direct speedup ratio over real data</strong>, plus a correctness check that fails the run on any mismatch. No criterion machinery, so no confidence interval and no stored history — but it is the only bench whose number carries an accuracy guarantee.</div>
+    </div>
+
+    <div class="out">
+      <h4><code>kv_router_bench</code> — not criterion, not a micro bench</h4>
+      <p class="where">stdout; a Tier 2 stress harness with its own CLI</p>
+<pre class="o"><span class="c">$ cargo bench -p dynamo-llm --bench kv_router_bench --features kv-router-stress -- --help</span>
+
+Discovering workers from etcd...
+Published 4096/4096 events
+Waiting for event processing...
+Tree construction: 3.42s
+*** WARMUP COMPLETE ***
+WARMUP_END_TIMESTAMP=1754...
+Submitted 10000 requests
+Waiting for in-flight requests...
+========================================
+<span class="wr">  routing decision latency, p50 / p99 over the request stream</span></pre>
+      <div class="note">Measures <strong>routing decision latency under sustained load</strong> through the real HTTP path and NATS event plane. Emits a <code>WARMUP_END_TIMESTAMP</code> so an external tool can slice the measurement window — the only bench here designed for downstream processing rather than human reading.</div>
+    </div>
+
+    <div class="out">
+      <h4>Where results go, and how long they last</h4>
+      <table>
+        <thead><tr><th style="width:32%">Artifact</th><th style="width:30%">Written by</th><th>Lifetime</th></tr></thead>
+        <tbody>
+          <tr><td><code>target/criterion/&lt;group&gt;/&lt;id&gt;/new/</code></td><td>the 8 criterion benches</td><td>Until <code>cargo clean</code>. <b>Never persisted in CI</b></td></tr>
+          <tr><td><code>target/criterion/&lt;group&gt;/&lt;id&gt;/base/</code></td><td><code>--save-baseline</code></td><td>Until overwritten. Local only</td></tr>
+          <tr><td><code>target/criterion/report/index.html</code></td><td>criterion <code>html_reports</code></td><td>Local only; plots and distributions</td></tr>
+          <tr><td>stdout</td><td>all ten</td><td>The terminal it ran in</td></tr>
+        </tbody>
+      </table>
+      <div class="note"><strong>Nothing is written anywhere durable.</strong> Every output above lives inside <code>target/</code> or a terminal buffer. No bench emits JSON, CSV, or any machine-readable file to a stable path, so §5's first rung — programmatic, deterministic transforms over artifacts — has nothing to read. That is the concrete blocker on systematizing analysis at this tier, and it is smaller than it sounds: criterion already writes structured data under <code>target/criterion/</code>; nothing collects it.</div>
+    </div>
   </section>
 
   <section>
