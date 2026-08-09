@@ -305,9 +305,24 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
     std::sync::OnceLock::new();
 
-/// At most one multimodal cache cleanup watcher per endpoint.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RuntimeEndpointId {
+    connection_id: u64,
+    endpoint_id: EndpointId,
+}
+
+impl RuntimeEndpointId {
+    fn for_endpoint(endpoint: &Endpoint) -> Self {
+        Self {
+            connection_id: endpoint.drt().connection_id(),
+            endpoint_id: endpoint.id(),
+        }
+    }
+}
+
+/// At most one multimodal cache cleanup watcher per runtime endpoint.
 static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
-    dashmap::DashMap<EndpointId, ()>,
+    dashmap::DashMap<RuntimeEndpointId, ()>,
 > = std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
@@ -430,11 +445,12 @@ fn spawn_multimodal_cache_cleanup_watcher(
     use tokio_stream::StreamExt as _;
 
     let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-    let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
+    let watcher_id = RuntimeEndpointId::for_endpoint(&endpoint);
+    if guard.insert(watcher_id.clone(), ()).is_some() {
         tracing::debug!(
-            ?endpoint_id,
-            "Multimodal cache cleanup watcher already running for this endpoint, skipping"
+            connection_id = watcher_id.connection_id,
+            ?watcher_id.endpoint_id,
+            "Multimodal cache cleanup watcher already running for this runtime endpoint, skipping"
         );
         return;
     }
@@ -444,7 +460,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
     let component = endpoint.component().name().to_string();
 
     tokio::spawn(async move {
-        struct GuardRelease(EndpointId);
+        struct GuardRelease(RuntimeEndpointId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
                 if let Some(map) = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get() {
@@ -452,7 +468,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
                 }
             }
         }
-        let _release = GuardRelease(endpoint_id);
+        let _release = GuardRelease(watcher_id);
 
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
@@ -3070,6 +3086,33 @@ mod tests {
         .unwrap();
 
         assert!(!map.contains_key(&endpoint_id));
+    }
+
+    #[tokio::test]
+    async fn cache_cleanup_watcher_identity_includes_runtime() {
+        let runtime = Runtime::from_current().unwrap();
+        let first = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let second = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = |distributed: &DistributedRuntime| {
+            distributed
+                .namespace("cache-watcher-identity".to_string())
+                .unwrap()
+                .component("workers".to_string())
+                .unwrap()
+                .endpoint("generate".to_string())
+        };
+        let first = RuntimeEndpointId::for_endpoint(&endpoint(&first));
+        let second = RuntimeEndpointId::for_endpoint(&endpoint(&second));
+
+        assert_eq!(first.endpoint_id, second.endpoint_id);
+        assert_ne!(first.connection_id, second.connection_id);
+        assert_ne!(first, second);
+
+        runtime.shutdown();
     }
 
     /// A `StreamingDispatch` that records what the router hands the seam, so the

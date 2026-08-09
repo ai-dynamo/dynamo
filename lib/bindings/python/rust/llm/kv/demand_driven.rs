@@ -56,7 +56,10 @@ impl KvDemandStream {
         }
     }
 
-    fn process_response(&mut self, mut response: RsAnnotated<LLMEngineOutput>) -> Option<PyObject> {
+    fn process_response(
+        &mut self,
+        mut response: RsAnnotated<LLMEngineOutput>,
+    ) -> RsAnnotated<PyObject> {
         if self.first_item {
             self.first_item = false;
             if let (Some(tracker), Some(data)) = (&self.tracker, &mut response.data) {
@@ -86,33 +89,26 @@ impl KvDemandStream {
             tracker.record_finish();
             inject_timing_from_tracker(data, tracker);
         }
-        if terminal {
+        let response = response.map_data(|data| {
+            Python::with_gil(|py| {
+                pythonize(py, &data)
+                    .map(|obj| obj.unbind())
+                    .map_err(|error| error.to_string())
+            })
+        });
+
+        if terminal || response.is_error() {
             self.finished = true;
             self.stream.take();
             self.finish_guard.observe();
         }
 
-        let py_response = Python::with_gil(|py| {
-            pythonize(py, &response.data)
-                .map(|obj| obj.unbind())
-                .map_err(|error| error.to_string())
-        });
-
-        match py_response {
-            Ok(response) => Some(response),
-            Err(error) => {
-                tracing::error!("Failed to pythonize response: {}", error);
-                self.finished = true;
-                self.stream.take();
-                self.finish_guard.observe();
-                None
-            }
-        }
+        response
     }
 }
 
 impl Stream for KvDemandStream {
-    type Item = PyObject;
+    type Item = RsAnnotated<PyObject>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.finished {
@@ -127,13 +123,7 @@ impl Stream for KvDemandStream {
 
         match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(response)) => match this.process_response(response) {
-                Some(response) => Poll::Ready(Some(response)),
-                None => {
-                    this.finished = true;
-                    Poll::Ready(None)
-                }
-            },
+            Poll::Ready(Some(response)) => Poll::Ready(Some(this.process_response(response))),
             Poll::Ready(None) => {
                 this.finished = true;
                 this.finish_guard.observe();
@@ -207,11 +197,11 @@ impl<T: 'static> Drop for DemandDrivenOwner<T> {
 
 #[pyclass]
 struct DemandDrivenResponseStream {
-    source: DemandDrivenOwner<PyObject>,
+    source: DemandDrivenOwner<RsAnnotated<PyObject>>,
 }
 
 impl DemandDrivenResponseStream {
-    fn new(stream: Pin<Box<dyn Stream<Item = PyObject> + Send>>) -> Self {
+    fn new(stream: Pin<Box<dyn Stream<Item = RsAnnotated<PyObject>> + Send>>) -> Self {
         Self {
             source: DemandDrivenOwner::new(stream),
         }
@@ -229,10 +219,16 @@ impl DemandDrivenResponseStream {
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let source = self.source.state();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            source
-                .next()
-                .await
-                .ok_or_else(|| PyStopAsyncIteration::new_err("Stream exhausted"))
+            loop {
+                let response = source
+                    .next()
+                    .await
+                    .ok_or_else(|| PyStopAsyncIteration::new_err("Stream exhausted"))?;
+                let response = response.ok().map_err(PyValueError::new_err)?;
+                if let Some(data) = response.data {
+                    return Ok(data);
+                }
+            }
         })
     }
 }

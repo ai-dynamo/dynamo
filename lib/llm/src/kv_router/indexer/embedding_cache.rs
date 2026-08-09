@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -60,9 +60,18 @@ pub struct EmbeddingCacheIndexer {
     started: Arc<AtomicBool>,
 }
 
-type SharedIndexerMap = HashMap<(u64, String), Arc<dyn MultimodalCacheIndex>>;
+type SharedIndexerKey = (u64, String);
+type SharedIndexerMap = HashMap<SharedIndexerKey, Weak<dyn MultimodalCacheIndex>>;
 
 static SHARED_INDEXERS: OnceLock<Mutex<SharedIndexerMap>> = OnceLock::new();
+
+fn shared_indexer(
+    indexers: &mut SharedIndexerMap,
+    indexer_key: &SharedIndexerKey,
+) -> Option<Arc<dyn MultimodalCacheIndex>> {
+    indexers.retain(|_, indexer| indexer.strong_count() > 0);
+    indexers.get(indexer_key).and_then(Weak::upgrade)
+}
 
 pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn MultimodalCacheIndex>> {
     let indexer_key = (endpoint.drt().connection_id(), endpoint.id().to_string());
@@ -71,14 +80,14 @@ pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn Mult
         .lock()
         .await;
 
-    if let Some(indexer) = indexers.get(&indexer_key) {
-        return Some(Arc::clone(indexer));
+    if let Some(indexer) = shared_indexer(&mut indexers, &indexer_key) {
+        return Some(indexer);
     }
 
     match EmbeddingCacheIndexer::for_endpoint(endpoint).await {
         Ok(indexer) => {
-            let indexer = Arc::new(indexer) as Arc<dyn MultimodalCacheIndex>;
-            indexers.insert(indexer_key, Arc::clone(&indexer));
+            let indexer: Arc<dyn MultimodalCacheIndex> = indexer;
+            indexers.insert(indexer_key, Arc::downgrade(&indexer));
             Some(indexer)
         }
         Err(error) => {
@@ -92,8 +101,8 @@ pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn Mult
 }
 
 impl EmbeddingCacheIndexer {
-    pub async fn for_endpoint(endpoint: &Endpoint) -> anyhow::Result<Self> {
-        let indexer = Self::default();
+    pub async fn for_endpoint(endpoint: &Endpoint) -> anyhow::Result<Arc<Self>> {
+        let indexer = Arc::new(Self::default());
         indexer.start_subscriber(endpoint).await?;
         Ok(indexer)
     }
@@ -157,7 +166,7 @@ impl EmbeddingCacheIndexer {
         }
     }
 
-    pub async fn start_subscriber(&self, endpoint: &Endpoint) -> anyhow::Result<()> {
+    pub async fn start_subscriber(self: &Arc<Self>, endpoint: &Endpoint) -> anyhow::Result<()> {
         if self.started.swap(true, Ordering::AcqRel) {
             tracing::debug!("Embedding cache indexer subscriber already started, skipping");
             return Ok(());
@@ -178,7 +187,7 @@ impl EmbeddingCacheIndexer {
             }
         };
 
-        let indexer = self.clone();
+        let indexer = Arc::clone(self);
         tokio::spawn(async move {
             let mut subscriber = subscriber;
             const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
@@ -300,10 +309,30 @@ impl MultimodalCacheIndex for EmbeddingCacheIndexer {
 
 #[cfg(test)]
 mod tests {
-    use super::EmbeddingCacheIndexer;
+    use super::*;
     use crate::kv_router::publisher::{
         MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCacheUpdate,
     };
+
+    #[test]
+    fn shared_indexer_cache_prunes_dropped_entries() {
+        let live_key = (1, "live".to_string());
+        let stale_key = (2, "stale".to_string());
+        let live: Arc<dyn MultimodalCacheIndex> = Arc::new(EmbeddingCacheIndexer::default());
+        let stale: Arc<dyn MultimodalCacheIndex> = Arc::new(EmbeddingCacheIndexer::default());
+        let mut indexers = HashMap::from([
+            (live_key.clone(), Arc::downgrade(&live)),
+            (stale_key.clone(), Arc::downgrade(&stale)),
+        ]);
+        drop(stale);
+
+        assert!(shared_indexer(&mut indexers, &live_key).is_some());
+        assert!(!indexers.contains_key(&stale_key));
+
+        drop(live);
+        assert!(shared_indexer(&mut indexers, &live_key).is_none());
+        assert!(indexers.is_empty());
+    }
 
     #[test]
     fn delta_removes_stale_worker_keys() {

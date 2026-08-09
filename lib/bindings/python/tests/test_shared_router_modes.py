@@ -30,6 +30,18 @@ async def _generate(_request, _context=None):
     yield {"token_ids": [4], "finish_reason": "stop"}
 
 
+def _token_generator(token_id):
+    async def generate(_request, _context=None):
+        yield {"token_ids": [token_id], "finish_reason": "stop"}
+
+    return generate
+
+
+async def _generate_error(_request, _context=None):
+    raise RuntimeError("intentional shared-router failure")
+    yield
+
+
 @pytest.fixture
 async def router_endpoint(temp_file_store):
     endpoint_path = f"router-{uuid.uuid4().hex}.worker.generate"
@@ -78,6 +90,66 @@ async def bare_router_endpoint(temp_file_store):
         instances = await client.wait_for_instances()
         assert len(instances) == 1
         yield endpoint, instances[0], Path(temp_file_store)
+    finally:
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server_task
+        router_runtime.shutdown()
+        worker_runtime.shutdown()
+
+
+@pytest.fixture
+async def two_worker_router_endpoint(temp_file_store):
+    endpoint_path = f"two-worker-router-{uuid.uuid4().hex}.worker.generate"
+    loop = asyncio.get_running_loop()
+    worker_runtimes = [
+        DistributedRuntime(loop, "file", "tcp"),
+        DistributedRuntime(loop, "file", "tcp"),
+    ]
+    worker_endpoints = [runtime.endpoint(endpoint_path) for runtime in worker_runtimes]
+    for endpoint in worker_endpoints:
+        await endpoint.register_endpoint_instance()
+
+    tokens_by_worker = {
+        endpoint.connection_id(): token_id
+        for endpoint, token_id in zip(worker_endpoints, [11, 22], strict=True)
+    }
+    server_tasks = [
+        asyncio.ensure_future(endpoint.serve_endpoint(_token_generator(token_id)))
+        for endpoint, token_id in zip(worker_endpoints, [11, 22], strict=True)
+    ]
+    router_runtime = DistributedRuntime(loop, "file", "tcp")
+    endpoint = router_runtime.endpoint(endpoint_path)
+    client = await endpoint.client()
+    try:
+        instances = await client.wait_for_instances()
+        assert set(instances) == set(tokens_by_worker)
+        yield endpoint, tokens_by_worker
+    finally:
+        for task in server_tasks:
+            task.cancel()
+        for task in server_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        router_runtime.shutdown()
+        for runtime in worker_runtimes:
+            runtime.shutdown()
+
+
+@pytest.fixture
+async def error_router_endpoint(temp_file_store):
+    endpoint_path = f"error-router-{uuid.uuid4().hex}.worker.generate"
+    loop = asyncio.get_running_loop()
+    worker_runtime = DistributedRuntime(loop, "file", "tcp")
+    worker_endpoint = worker_runtime.endpoint(endpoint_path)
+    server_task = asyncio.ensure_future(worker_endpoint.serve_endpoint(_generate_error))
+    router_runtime = DistributedRuntime(loop, "file", "tcp")
+    endpoint = router_runtime.endpoint(endpoint_path)
+    client = await endpoint.client()
+    try:
+        instances = await client.wait_for_instances()
+        assert len(instances) == 1
+        yield endpoint
     finally:
         server_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -176,6 +248,45 @@ async def test_non_kv_reservation_ids_are_atomic_and_reusable(router_endpoint, m
         0,
     )
     await router.free("reservation")
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_shared_generate_honors_reserved_worker(two_worker_router_endpoint):
+    endpoint, tokens_by_worker = two_worker_router_endpoint
+    router = KvRouter(endpoint, router_mode=RouterMode.RoundRobin)
+    selected_worker, dp_rank, _ = await router.best_worker(
+        [1, 2, 3], request_id="reservation"
+    )
+    assert dp_rank is None
+
+    try:
+        stream = await router.generate(
+            [1, 2, 3],
+            "test-model",
+            worker_id=selected_worker,
+        )
+        responses = [response async for response in stream]
+        assert responses[0]["token_ids"] == [tokens_by_worker[selected_worker]]
+    finally:
+        await router.free("reservation")
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("response_buffer_size", [0, 100])
+async def test_shared_generate_propagates_stream_errors(
+    error_router_endpoint, response_buffer_size
+):
+    router = KvRouter(error_router_endpoint, router_mode=RouterMode.RoundRobin)
+
+    with pytest.raises(ValueError, match="intentional shared-router failure"):
+        stream = await router.generate(
+            [1, 2, 3],
+            "test-model",
+            response_buffer_size=response_buffer_size,
+        )
+        _ = [response async for response in stream]
 
 
 @pytest.mark.asyncio
