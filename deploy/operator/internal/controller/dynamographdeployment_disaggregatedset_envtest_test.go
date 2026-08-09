@@ -146,7 +146,10 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		By("enabling DisaggregatedSet and keeping DCD services while DS is pending")
 		markEnvtestCutoverDCDsReady(ctx, current)
 		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		current.Annotations = map[string]string{consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue}
+		if current.Annotations == nil {
+			current.Annotations = map[string]string{}
+		}
+		current.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = consts.KubeLabelValueTrue
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
@@ -170,6 +173,14 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
 		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(BeEmpty())
 		Expect(envtestCutoverServiceUIDs(ctx, current.Namespace, serviceUIDs)).To(Equal(serviceUIDs))
+		for name := range serviceUIDs {
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
+			owner := metav1.GetControllerOf(service)
+			Expect(owner).NotTo(BeNil())
+			Expect(owner.Kind).To(Equal(dynamoGraphDeploymentKind))
+			Expect(owner.UID).To(Equal(current.UID))
+		}
 
 		modelServiceName := dynamo.GenerateServiceName("shared-smoke-model")
 		modelService := &corev1.Service{}
@@ -186,6 +197,13 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
 		replacementDCDs := ownedEnvtestCutoverDCDs(ctx, current)
 		Expect(replacementDCDs).To(HaveLen(2))
+		for name := range serviceUIDs {
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
+			owner := metav1.GetControllerOf(service)
+			Expect(owner).NotTo(BeNil())
+			Expect(owner.Kind).To(Equal(dynamoGraphDeploymentKind))
+		}
 		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs)
 		markEnvtestCutoverDCDsReady(ctx, current)
 
@@ -307,7 +325,10 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 })
 
 func newEnvtestDSReconcilers() (*DynamoGraphDeploymentReconciler, *DynamoComponentDeploymentReconciler) {
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{LWS: true, DisaggregatedSet: true}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{
+		Gate:         features.Gates{LWS: true, DisaggregatedSet: true},
+		Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
+	}
 	operatorConfig := &configv1alpha1.OperatorConfiguration{
 		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		Namespace: configv1alpha1.NamespaceConfiguration{Restricted: envtestNamespace},
@@ -392,7 +413,10 @@ func createComponentServices(
 		})
 		Expect(err).NotTo(HaveOccurred())
 		service := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dcds[i].Name, Namespace: dcds[i].Namespace}, service)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      dynamo.NormalizeKubeResourceName(dcds[i].Name),
+			Namespace: dcds[i].Namespace,
+		}, service)).To(Succeed())
 		serviceUIDs[service.Name] = service.UID
 	}
 	return serviceUIDs
@@ -403,7 +427,7 @@ func ownedEnvtestCutoverDCDs(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) []nvidiacomv1beta1.DynamoComponentDeployment {
 	list := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	Expect(k8sClient.List(ctx, list)).To(Succeed())
+	Expect(k8sClient.List(ctx, list, client.InNamespace(dgd.Namespace))).To(Succeed())
 	owned := make([]nvidiacomv1beta1.DynamoComponentDeployment, 0, len(list.Items))
 	for i := range list.Items {
 		if metav1.IsControlledBy(&list.Items[i], dgd) {
@@ -423,6 +447,7 @@ func markEnvtestCutoverDCDsReady(
 		dcd.Status.Conditions = []metav1.Condition{{
 			Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
 			Status:             metav1.ConditionTrue,
+			ObservedGeneration: dcd.Generation,
 			Reason:             "CutoverTestReady",
 			LastTransitionTime: metav1.Now(),
 		}}

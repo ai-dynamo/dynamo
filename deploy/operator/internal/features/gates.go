@@ -169,6 +169,13 @@ type Gates struct {
 	GPUDiscovery     bool `json:"gpuDiscovery"`
 }
 
+// Capabilities reports detected APIs independently from whether the operator
+// selected the feature that normally consumes them. Compatibility cleanup may
+// still need an API after its workload pathway has been disabled.
+type Capabilities struct {
+	DisaggregatedSetAPI bool
+}
+
 // Defaults returns the default feature gates.
 func Defaults() Gates {
 	return Gates{
@@ -177,8 +184,13 @@ func Defaults() Gates {
 }
 
 // New detects cluster capabilities and resolves them with operator configuration.
-func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
+func New(
+	ctx context.Context,
+	mgr ctrl.Manager,
+	config *configv1alpha1.OperatorConfiguration,
+) (Gates, Capabilities, error) {
 	gates := Defaults()
+	capabilities := Capabilities{}
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
@@ -193,62 +205,63 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 			podSnapshotResource.Resource,
 		)
 		if detectErr != nil {
-			return Gates{}, detectErr
+			return Gates{}, Capabilities{}, detectErr
 		}
 		if gates.Checkpoint, err = resolve(ptr.To(true), podSnapshotAvailable,
 			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot API was not detected in the cluster"); err != nil {
-			return Gates{}, err
+			return Gates{}, Capabilities{}, err
 		}
 	}
 	groveAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "grove.io", "", "")
 	if err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, groveAvailable,
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 
 	lwsAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
 	if err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	volcanoAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.volcano.sh", "", "")
 	if err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	disaggregatedSetAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "disaggregatedset.x-k8s.io", "v1", "")
 	if err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
+	capabilities.DisaggregatedSetAPI = disaggregatedSetAvailable
 	// The DS pathway lists and watches the LWS children created by the DS
 	// controller. Do not register those watches when the LWS API is absent.
 	lwsOptedOut := config.Orchestrators.LWS.Enabled != nil && !*config.Orchestrators.LWS.Enabled
 	gates.DisaggregatedSet = !lwsOptedOut && lwsAvailable && disaggregatedSetAvailable
 	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
 		if !lwsAvailable {
-			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
+			return Gates{}, Capabilities{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
 		}
 		if !volcanoAvailable {
-			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the Volcano API group was not detected in the cluster")
+			return Gates{}, Capabilities{}, fmt.Errorf("LWS is explicitly enabled in config but the Volcano API group was not detected in the cluster")
 		}
 		gates.LWS = true
 	}
 
 	if ptr.Deref(config.Orchestrators.VolcanoScheduler.Enabled, false) {
 		if !volcanoAvailable {
-			return Gates{}, fmt.Errorf("Volcano scheduler integration is explicitly enabled in config but the Volcano API group was not detected in the cluster")
+			return Gates{}, Capabilities{}, fmt.Errorf("Volcano scheduler integration is explicitly enabled in config but the Volcano API group was not detected in the cluster")
 		}
 		gates.VolcanoScheduler = true
 	}
 
 	kaiSchedulerAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.run.ai", "", "")
 	if err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled, kaiSchedulerAvailable,
 		"Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster"); err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	draAvailable, err := detectAPIAvailability(
 		ctx,
@@ -258,20 +271,20 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		"",
 	)
 	if err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	if gates.DRA, err = resolve(config.DRA.Enabled, draAvailable,
 		"DRA is explicitly enabled in config but the resource.k8s.io/v1 API was not detected in the cluster (requires Kubernetes 1.34+)"); err != nil {
-		return Gates{}, err
+		return Gates{}, Capabilities{}, err
 	}
 	if config.ServiceMesh.IsEnabled() {
 		istioAvailable, detectErr := DetectIstioDestinationRuleAvailability(ctx, mgr.GetConfig())
 		if detectErr != nil {
-			return Gates{}, detectErr
+			return Gates{}, Capabilities{}, detectErr
 		}
 		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, istioAvailable,
 			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
-			return Gates{}, err
+			return Gates{}, Capabilities{}, err
 		}
 	}
 
@@ -280,7 +293,7 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		logValues = append(logValues, string(name), gates.Enabled(name))
 	}
 	log.FromContext(ctx).Info("Resolved operator feature gates", logValues...)
-	return gates, nil
+	return gates, capabilities, nil
 }
 
 // DetectInferencePoolAvailability checks whether the Gateway API Inference Extension is registered.

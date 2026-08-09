@@ -24,6 +24,8 @@ import "github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 type RuntimeConfig struct {
 	// Gate contains the resolved operator features.
 	Gate features.Gates
+	// Capabilities contains detected APIs even when their workload feature is disabled.
+	Capabilities features.Capabilities
 	// ExcludedNamespaces for cluster-wide mode namespace filtering
 	ExcludedNamespaces ExcludedNamespacesInterface
 }

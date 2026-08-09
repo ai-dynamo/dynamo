@@ -60,13 +60,6 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			provider:    workloadProviderGrove,
 			wantProgram: &groveProgram{},
 		},
-		{
-			name: "explicit DisaggregatedSet opt-in selects DS program",
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationEnableDisaggregatedSet: commonconsts.KubeLabelValueTrue,
-			},
-			wantProgram: &disaggregatedSetProgram{},
-		},
 	}
 
 	for _, tt := range tests {
@@ -98,6 +91,7 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, grove.scalingAdapters)
 				assert.NotNil(t, grove.topology)
 			}
+			t.Log("Verify the DisaggregatedSet program dependencies")
 			if ds, ok := got.(*disaggregatedSetProgram); ok {
 				assert.NotNil(t, ds.sharedResources)
 				assert.NotNil(t, ds.rollout)
@@ -149,6 +143,49 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 	t.Log("Verify status accumulation does not mutate the request object")
 	assert.NotContains(t, dgd.Status.Checkpoints, "decode")
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestComponentFallbackPreservesEligibilityConditionOnError(t *testing.T) {
+	reconcileErr := errors.New("worker hash update failed")
+	dgd := newEnvtestDSHappyPathDGD("fallback-error")
+	dgd.Namespace = "default"
+	dgd.Generation = 7
+	hashes, err := desiredWorkerHashes(dgd)
+	require.NoError(t, err)
+	dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] = hashes.v1
+
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+				return reconcileErr
+			},
+		}).
+		Build()
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+	operatorConfig.Namespace.Restricted = dgd.Namespace
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:      kubeClient,
+		Recorder:    record.NewFakeRecorder(1),
+		Config:      operatorConfig,
+		RBACManager: &MockRBACManager{},
+		RuntimeConfig: &commonController.RuntimeConfig{
+			Gate: features.Gates{LWS: true},
+		},
+	}
+	program := reconciler.newComponentProgram()
+	program.disaggregatedSetFallbackReason = "DisaggregatedSet workload pathway is disabled"
+
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.ErrorIs(t, err, reconcileErr)
+	condition := meta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, "FallbackToComponentProgram", condition.Reason)
+	assert.Equal(t, int64(7), condition.ObservedGeneration)
+	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	assert.Len(t, result.Events, 1)
 }
 
 func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) {

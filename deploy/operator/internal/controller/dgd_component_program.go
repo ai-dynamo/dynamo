@@ -24,18 +24,21 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type componentProgram struct {
-	sharedResources *dgdSharedResourcesReconciler
-	rollout         *dgdWorkerRolloutReconciler
-	restart         *dgdRestartReconciler
-	restartProgress *componentRestartProgressResolver
-	workloads       *componentWorkloadsReconciler
-	scalingAdapters *dgdScalingAdaptersReconciler
-	legacyCleanup   func(context.Context, *nvidiacomv1beta1.DynamoGraphDeployment) error
-	lwsEnabled      bool
+	sharedResources                *dgdSharedResourcesReconciler
+	rollout                        *dgdWorkerRolloutReconciler
+	restart                        *dgdRestartReconciler
+	restartProgress                *componentRestartProgressResolver
+	workloads                      *componentWorkloadsReconciler
+	scalingAdapters                *dgdScalingAdaptersReconciler
+	legacyCleanup                  *disaggregatedSetCompatibilityCleanup
+	disaggregatedSetFallbackReason string
+	lwsEnabled                     bool
 }
 
 // newComponentProgram wires the DCD pathway at the DGD composition root.
@@ -57,10 +60,8 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		restartProgress: newComponentRestartProgressResolver(r.Client),
 		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		legacyCleanup: func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
-			return r.cleanupDisaggregatedSetOnLegacyPath(ctx, dgd, true)
-		},
-		lwsEnabled: r.RuntimeConfig.Gate.Enabled(features.LWS),
+		legacyCleanup:   r.newDisaggregatedSetCompatibilityCleanup(true),
+		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
 }
 
@@ -87,6 +88,24 @@ func (p *componentProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
+
+	if p.disaggregatedSetFallbackReason != "" {
+		changed := setDisaggregatedSetEligibilityCondition(
+			&programResult,
+			req.DGD.Generation,
+			metav1.ConditionFalse,
+			"FallbackToComponentProgram",
+			p.disaggregatedSetFallbackReason,
+		)
+		if changed {
+			programResult.Eventf(
+				corev1.EventTypeWarning,
+				"DisaggregatedSetFallback",
+				"DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s",
+				p.disaggregatedSetFallbackReason,
+			)
+		}
+	}
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
 	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
@@ -138,8 +157,11 @@ func (p *componentProgram) Reconcile(
 		}
 	}
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful && p.legacyCleanup != nil {
-		if err := p.legacyCleanup(ctx, req.DGD); err != nil {
+		if err := p.legacyCleanup.Reconcile(ctx, req.DGD); err != nil {
 			return programResult, err
+		}
+		if p.disaggregatedSetFallbackReason == "" {
+			apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, "DisaggregatedSetEligible")
 		}
 	}
 
