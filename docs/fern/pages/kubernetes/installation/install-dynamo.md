@@ -185,6 +185,8 @@ The Dynamo install command above includes commented flags for each optional comp
 
 Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for details on orchestrator selection and configuration.
 
+DisaggregatedSet is an opt-in multinode pathway below Grove. To request it, install an LWS release that serves `disaggregatedset.x-k8s.io/v1` and set `nvidia.com/enable-disaggregatedset: "true"` on the DGD. When Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`. Installing the DS API alone does not change existing deployments.
+
 #### Grove + KAI Scheduler
 
 There are two ways to enable Grove and KAI Scheduler, controlled by which flags you uncomment in the Dynamo install command:

@@ -343,6 +343,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		}))
 	}
 	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		disaggregatedSetWatches := newDisaggregatedSetWatchMapper(r.Client)
 		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
@@ -350,7 +351,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).Watches(
 			&leaderworkersetv1.LeaderWorkerSet{},
-			handler.EnqueueRequestsFromMapFunc(r.mapDisaggregatedSetChildLWSToDGD),
+			handler.EnqueueRequestsFromMapFunc(disaggregatedSetWatches.MapChildLWSToDGD),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc:  func(ce event.CreateEvent) bool { return true },
 				DeleteFunc:  func(de event.DeleteEvent) bool { return true },

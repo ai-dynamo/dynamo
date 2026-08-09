@@ -22,14 +22,12 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type disaggregatedSetProgram struct {
-	owner           disaggregatedSetProgramOwner
 	sharedResources *dgdSharedResourcesReconciler
 	rollout         *dgdWorkerRolloutReconciler
 	restart         *dgdRestartReconciler
@@ -37,17 +35,9 @@ type disaggregatedSetProgram struct {
 	scalingAdapters *dgdScalingAdaptersReconciler
 }
 
-type disaggregatedSetProgramOwner interface {
-	shouldUseDisaggregatedSet(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (bool, string)
-	newComponentProgram() *componentProgram
-	restoreDisaggregatedSetServiceOwnershipToDCDs(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error
-	deleteDisaggregatedSetIfExists(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error
-}
-
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggregatedSetProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &disaggregatedSetProgram{
-		owner: r,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -60,7 +50,7 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggre
 		),
 		rollout:         rollout,
 		restart:         newDGDRestartReconciler(),
-		workloads:       newDisaggregatedSetWorkloadsReconciler(r, rollout),
+		workloads:       r.newDisaggregatedSetWorkloadsReconciler(rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 	}
 }
@@ -81,37 +71,6 @@ func (p *disaggregatedSetProgram) Reconcile(
 		programResult.Fail(req.DGD.Generation, reason, retErr)
 	}()
 
-	useDS, fallbackReason := p.owner.shouldUseDisaggregatedSet(req.DGD)
-	if !useDS {
-		fallbackProgram := p.owner.newComponentProgram()
-		programResult, retErr = fallbackProgram.Reconcile(ctx, req)
-		if fallbackReason != "" {
-			programResult.Eventf(
-				corev1.EventTypeWarning,
-				"DisaggregatedSetFallback",
-				"DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s",
-				fallbackReason,
-			)
-		}
-		if retErr != nil {
-			return programResult, retErr
-		}
-		setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionFalse, "FallbackToComponentProgram", fallbackReason)
-		if programResult.Status.State != nvidiacomv1beta1.DGDStateSuccessful {
-			// Keep the DisaggregatedSet and its service ownership until the
-			// fallback workloads are ready, so the switch causes no downtime.
-			return programResult, nil
-		}
-		if err := p.owner.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, req.DGD); err != nil {
-			retErr = fmt.Errorf("failed to restore DisaggregatedSet service ownership: %w", err)
-			return programResult, retErr
-		}
-		if err := p.owner.deleteDisaggregatedSetIfExists(ctx, req.DGD); err != nil {
-			retErr = fmt.Errorf("failed to delete stale DisaggregatedSet: %w", err)
-			return programResult, retErr
-		}
-		return programResult, nil
-	}
 	setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionTrue, "Selected", "DisaggregatedSet pathway selected")
 
 	if err := p.reconcileWorkerRollout(ctx, req.DGD); err != nil {
@@ -153,7 +112,13 @@ func setDisaggregatedSetEligibilityCondition(
 	status metav1.ConditionStatus,
 	reason string,
 	message string,
-) {
+) bool {
+	previous := apiMeta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
+	changed := previous == nil ||
+		previous.Status != status ||
+		previous.ObservedGeneration != generation ||
+		previous.Reason != reason ||
+		previous.Message != message
 	apiMeta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{
 		Type:               "DisaggregatedSetEligible",
 		Status:             status,
@@ -161,6 +126,7 @@ func setDisaggregatedSetEligibilityCondition(
 		Reason:             reason,
 		Message:            message,
 	})
+	return changed
 }
 
 func (p *disaggregatedSetProgram) reconcileWorkerRollout(

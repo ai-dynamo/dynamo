@@ -21,39 +21,97 @@ import (
 	"context"
 	"sort"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type disaggregatedSetWorkloadsReconciler struct {
-	owner   disaggregatedSetWorkloadsOwner
-	rollout *dgdWorkerRolloutReconciler
+	client.Client
+	Config                   *configv1alpha1.OperatorConfiguration
+	RuntimeConfig            *commoncontroller.RuntimeConfig
+	Recorder                 record.EventRecorder
+	DockerSecretRetriever    dockerSecretRetriever
+	rollout                  *dgdWorkerRolloutReconciler
+	renderer                 *dcdWorkloadRenderer
+	componentWorkloads       *componentWorkloadsReconciler
+	componentRestartProgress *componentRestartProgressResolver
 }
 
-type disaggregatedSetWorkloadsOwner interface {
-	reconcileDisaggregatedSetResources(
-		ctx context.Context,
-		dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-		restartState *dynamo.RestartState,
-		checkpointInfos map[string]*checkpoint.CheckpointInfo,
-	) (ReconcileResult, error)
+type disaggregatedSetCompatibilityCleanup struct {
+	apiAvailable       bool
+	restoreDCDServices bool
+	workloads          *disaggregatedSetWorkloadsReconciler
+}
 
-	getUpdatedInProgressForDisaggregatedSet(
-		ctx context.Context,
-		dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-		componentsToCheck []string,
-	) []string
+func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler(
+	rollout *dgdWorkerRolloutReconciler,
+) *disaggregatedSetWorkloadsReconciler {
+	return newDisaggregatedSetWorkloadsReconciler(
+		r.Client,
+		r.Recorder,
+		r.Config,
+		r.RuntimeConfig,
+		r.DockerSecretRetriever,
+		rollout,
+	)
+}
+
+func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetCompatibilityCleanup(
+	restoreDCDServices bool,
+) *disaggregatedSetCompatibilityCleanup {
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	apiAvailable := r.RuntimeConfig != nil && r.RuntimeConfig.Capabilities.DisaggregatedSetAPI
+	return &disaggregatedSetCompatibilityCleanup{
+		apiAvailable:       apiAvailable,
+		restoreDCDServices: restoreDCDServices,
+		workloads:          r.newDisaggregatedSetWorkloadsReconciler(rollout),
+	}
+}
+
+func (r *disaggregatedSetCompatibilityCleanup) Reconcile(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	if !r.apiAvailable {
+		return nil
+	}
+	if r.restoreDCDServices {
+		if err := r.workloads.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, dgd); err != nil {
+			return err
+		}
+	}
+	return r.workloads.deleteDisaggregatedSetIfExists(ctx, dgd)
 }
 
 func newDisaggregatedSetWorkloadsReconciler(
-	owner disaggregatedSetWorkloadsOwner,
+	k8sClient client.Client,
+	recorder record.EventRecorder,
+	config *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *commoncontroller.RuntimeConfig,
+	dockerSecretRetriever dockerSecretRetriever,
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
+	componentWorkloads := newComponentWorkloadsReconciler(k8sClient, recorder, rollout)
 	return &disaggregatedSetWorkloadsReconciler{
-		owner:   owner,
-		rollout: rollout,
+		Client:                   k8sClient,
+		Config:                   config,
+		RuntimeConfig:            runtimeConfig,
+		Recorder:                 recorder,
+		DockerSecretRetriever:    dockerSecretRetriever,
+		rollout:                  rollout,
+		renderer:                 newDCDWorkloadRenderer(k8sClient, config, runtimeConfig, dockerSecretRetriever),
+		componentWorkloads:       componentWorkloads,
+		componentRestartProgress: newComponentRestartProgressResolver(k8sClient),
 	}
+}
+
+func (r *disaggregatedSetWorkloadsReconciler) GetRecorder() record.EventRecorder {
+	return r.Recorder
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) ResolveRestart(
@@ -78,7 +136,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
-	return r.owner.reconcileDisaggregatedSetResources(ctx, dgd, restartState, checkpointInfos)
+	return r.reconcileDisaggregatedSetResources(ctx, dgd, restartState, checkpointInfos)
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) computeRestartStatus(
@@ -145,7 +203,7 @@ func (r *disaggregatedSetWorkloadsReconciler) computeParallelRestartStatus(
 		}
 	}
 
-	updatedInProgress := r.owner.getUpdatedInProgressForDisaggregatedSet(ctx, dgd, componentsToCheck)
+	updatedInProgress := r.getUpdatedInProgressForDisaggregatedSet(ctx, dgd, componentsToCheck)
 	if len(updatedInProgress) == 0 {
 		return &nvidiacomv1beta1.RestartStatus{
 			ObservedID: specID,
@@ -191,7 +249,7 @@ func (r *disaggregatedSetWorkloadsReconciler) computeSequentialRestartStatus(
 		}
 	}
 
-	updatedInProgress := r.owner.getUpdatedInProgressForDisaggregatedSet(ctx, dgd, []string{currentComponent})
+	updatedInProgress := r.getUpdatedInProgressForDisaggregatedSet(ctx, dgd, []string{currentComponent})
 	if len(updatedInProgress) > 0 {
 		return &nvidiacomv1beta1.RestartStatus{
 			ObservedID: specID,

@@ -34,7 +34,6 @@ type groveProgram struct {
 	restartProgress *groveRestartProgressResolver
 	workloads       *groveWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
-	legacyCleanup   func(context.Context, *nvidiacomv1beta1.DynamoGraphDeployment) error
 	topology        *dgdGroveTopologyConditionReconciler
 	gate            features.Gate
 }
@@ -143,9 +142,10 @@ func (p *groveProgram) Reconcile(
 		}
 	}
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful && p.legacyCleanup != nil {
-		if err := p.legacyCleanup(ctx, req.DGD); err != nil {
+		if err := p.legacyCleanup.Reconcile(ctx, req.DGD); err != nil {
 			return programResult, err
 		}
+		apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, "DisaggregatedSetEligible")
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)

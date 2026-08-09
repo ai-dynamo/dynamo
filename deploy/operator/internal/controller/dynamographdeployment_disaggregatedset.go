@@ -79,24 +79,28 @@ func newDisaggregatedSetObject() *unstructured.Unstructured {
 	return obj
 }
 
-func (r *DynamoGraphDeploymentReconciler) wantsDisaggregatedSet(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+func wantsDisaggregatedSet(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	if dgd == nil || dgd.Annotations == nil {
 		return false
 	}
 	return strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet]) == consts.KubeLabelValueTrue
 }
 
-func (r *DynamoGraphDeploymentReconciler) shouldUseDisaggregatedSet(
+func shouldUseDisaggregatedSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeConfig *commoncontroller.RuntimeConfig,
 ) (bool, string) {
-	if !r.wantsDisaggregatedSet(dgd) {
+	if !wantsDisaggregatedSet(dgd) {
 		return false, ""
 	}
-	if r.RuntimeConfig == nil {
+	if runtimeConfig == nil {
 		return false, "runtime config is not initialized"
 	}
-	if !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+	if !runtimeConfig.Capabilities.DisaggregatedSetAPI {
 		return false, "DisaggregatedSet API is not available"
+	}
+	if !runtimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		return false, "DisaggregatedSet workload pathway is disabled"
 	}
 	selection, reason := selectDisaggregatedSetComponents(dgd)
 	if reason != "" {
@@ -105,7 +109,7 @@ func (r *DynamoGraphDeploymentReconciler) shouldUseDisaggregatedSet(
 	if len(selection.componentToRole) < 2 {
 		return false, "DisaggregatedSet requires at least two eligible multinode worker roles"
 	}
-	if !r.RuntimeConfig.Gate.Enabled(features.LWS) {
+	if !runtimeConfig.Gate.Enabled(features.LWS) {
 		for i := range dgd.Spec.Components {
 			component := &dgd.Spec.Components[i]
 			if component.GetNumberOfNodes() <= 1 {
@@ -258,7 +262,7 @@ func disaggregatedSetName(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
 	return truncateDNSLabelWithHash(dynamo.NormalizeKubeResourceName(dgd.Name), maxDisaggregatedSetNameLength)
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
+func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
@@ -298,7 +302,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 		return ReconcileResult{}, fmt.Errorf("failed to generate DynamoComponentDeployments for DisaggregatedSet path: %w", err)
 	}
 
-	checkpointGated, err := applyDisaggregatedSetCheckpointStartupPolicies(dcds, checkpointInfos, selection)
+	checkpointGated, err := r.applyDisaggregatedSetCheckpointStartupPolicies(dcds, checkpointInfos, selection)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
@@ -312,7 +316,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 		return ReconcileResult{}, err
 	}
 
-	if err := r.reconcileDisaggregatedSetSideResources(ctx, dgd, dcds, selection); err != nil {
+	selectedServiceNames, err := r.reconcileDisaggregatedSetSideResources(ctx, dgd, dcds, selection)
+	if err != nil {
 		return ReconcileResult{}, err
 	}
 	dsReady, dsReason, dsStatuses, err := r.checkDisaggregatedSetReadiness(ctx, syncedDS, selection)
@@ -343,6 +348,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 		return ReconcileResult{}, err
 	}
 	resources = append(resources, nonSelectedResources...)
+	desiredServiceNames, err := r.reconcileDisaggregatedSetServiceOwnership(ctx, dgd, dcds, selection, selectedServiceNames)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 
 	if dsReady {
 		if err := r.deleteGrovePodCliqueSetOnDisaggregatedSetPath(ctx, dgd); err != nil {
@@ -355,14 +364,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 
 	result := r.checkResourcesReadiness(resources)
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
-		if err := r.deleteStaleDisaggregatedSetComponentServices(ctx, dgd, dcds, selection); err != nil {
+		if err := r.deleteStaleDisaggregatedSetComponentServices(ctx, dgd, desiredServiceNames); err != nil {
 			return ReconcileResult{}, err
 		}
 	}
 	return result, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDisaggregatedSet(
+func (r *disaggregatedSetWorkloadsReconciler) getExistingRestartAnnotationsDisaggregatedSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	selection disaggregatedSetSelection,
@@ -420,13 +429,13 @@ func restartAnnotationsFromDisaggregatedSet(
 	return restartAnnotations, nil
 }
 
-func applyDisaggregatedSetCheckpointStartupPolicies(
+func (r *disaggregatedSetWorkloadsReconciler) applyDisaggregatedSetCheckpointStartupPolicies(
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 	selection disaggregatedSetSelection,
 ) (bool, error) {
 	for _, componentName := range sortedDCDKeys(dcds) {
-		if err := applyDCDCheckpointStartupPolicy(dcds[componentName], checkpointInfos[componentName]); err != nil {
+		if err := r.applyDCDCheckpointStartupPolicy(dcds[componentName], checkpointInfos[componentName]); err != nil {
 			return false, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", componentName, err)
 		}
 	}
@@ -455,7 +464,7 @@ func applyDisaggregatedSetCheckpointStartupPolicies(
 	return gateSelectedRoles, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetNonSelectedDCDs(
+func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetNonSelectedDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
@@ -476,12 +485,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetNonSelectedDC
 		if err != nil {
 			return nil, fmt.Errorf("failed to sync non-DisaggregatedSet DynamoComponentDeployment %s: %w", dcd.Name, err)
 		}
+		dcds[componentName] = syncedDCD
 		resources = append(resources, syncedDCD)
 	}
 	return resources, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) generateDisaggregatedSet(
+func (r *disaggregatedSetWorkloadsReconciler) generateDisaggregatedSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
@@ -528,12 +538,11 @@ func (r *DynamoGraphDeploymentReconciler) generateDisaggregatedSet(
 }
 
 // buildDisaggregatedSetRole reuses the shared DCD workload renderer.
-func (r *DynamoGraphDeploymentReconciler) buildDisaggregatedSetRole(
+func (r *disaggregatedSetWorkloadsReconciler) buildDisaggregatedSetRole(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (map[string]any, error) {
-	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
-	leaderPodTemplateSpec, workerPodTemplateSpec, err := renderer.renderMultinodePodTemplateSpecs(ctx, dcd)
+	leaderPodTemplateSpec, workerPodTemplateSpec, err := r.renderer.renderMultinodePodTemplateSpecs(ctx, dcd)
 	if err != nil {
 		return nil, err
 	}
@@ -564,38 +573,118 @@ func (r *DynamoGraphDeploymentReconciler) buildDisaggregatedSetRole(
 	return map[string]any{"spec": lwsSpecUnstructured}, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetSideResources(
+func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResources(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	selection disaggregatedSetSelection,
-) error {
+) (map[string]struct{}, error) {
+	desiredServiceNames := map[string]struct{}{}
 	if err := dynamo.ReconcileModelServicesForComponents(ctx, r, dgd, selectedComponentsByName(dgd, selection), dgd.Namespace); err != nil {
-		return fmt.Errorf("failed to reconcile DisaggregatedSet model services: %w", err)
+		return nil, fmt.Errorf("failed to reconcile DisaggregatedSet model services: %w", err)
 	}
 	if err := r.adoptSelectedModelServices(ctx, dgd, selection); err != nil {
-		return err
+		return nil, err
 	}
 
-	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
 	for _, componentName := range sortedSelectionComponentNames(selection) {
 		dcd := dcds[componentName]
 		if dcd == nil {
-			return fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
+			return nil, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
 		_, syncedService, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.Service, bool, error) {
-			return renderer.generateService(ctx, dcd)
+			return r.renderer.generateService(ctx, dcd)
 		})
 		if err != nil {
-			return fmt.Errorf("failed to reconcile DisaggregatedSet component service for %q: %w", componentName, err)
+			return nil, fmt.Errorf("failed to reconcile DisaggregatedSet component service for %q: %w", componentName, err)
 		}
 		if syncedService != nil {
+			desiredServiceNames[syncedService.Name] = struct{}{}
 			if err := r.ensureControlledByDGD(ctx, dgd, syncedService); err != nil {
-				return fmt.Errorf("failed to adopt DisaggregatedSet component service %s/%s: %w", syncedService.Namespace, syncedService.Name, err)
+				return nil, fmt.Errorf("failed to adopt DisaggregatedSet component service %s/%s: %w", syncedService.Namespace, syncedService.Name, err)
 			}
 		}
 	}
-	return nil
+	return desiredServiceNames, nil
+}
+
+type disaggregatedSetDesiredServiceOwner struct {
+	dgd bool
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment
+}
+
+func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetServiceOwnership(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	selection disaggregatedSetSelection,
+	selectedServiceNames map[string]struct{},
+) (map[string]struct{}, error) {
+	owners := make(map[string]disaggregatedSetDesiredServiceOwner, len(dcds))
+	for serviceName := range selectedServiceNames {
+		owners[serviceName] = disaggregatedSetDesiredServiceOwner{dgd: true}
+	}
+
+	for componentName, dcd := range dcds {
+		if dcd == nil {
+			continue
+		}
+		if _, selected := selection.componentToRole[componentName]; selected {
+			continue
+		}
+		owners[dynamo.NormalizeKubeResourceName(dcd.Name)] = disaggregatedSetDesiredServiceOwner{dcd: dcd}
+	}
+
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.ModelRef == nil || component.ModelRef.Name == "" {
+			continue
+		}
+		serviceName := dynamo.GenerateServiceName(component.ModelRef.Name)
+		if _, selected := selection.componentToRole[component.ComponentName]; selected {
+			owners[serviceName] = disaggregatedSetDesiredServiceOwner{dgd: true}
+			continue
+		}
+		if _, exists := owners[serviceName]; exists {
+			continue
+		}
+		if dcd := dcds[component.ComponentName]; dcd != nil {
+			owners[serviceName] = disaggregatedSetDesiredServiceOwner{dcd: dcd}
+		}
+	}
+
+	serviceNames := make([]string, 0, len(owners))
+	for serviceName := range owners {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+	for _, serviceName := range serviceNames {
+		service := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}, service); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to get desired Service %s/%s: %w", dgd.Namespace, serviceName, err)
+		}
+		owner := owners[serviceName]
+		if owner.dgd {
+			if err := r.ensureControlledByDGD(ctx, dgd, service); err != nil {
+				return nil, fmt.Errorf("failed to assign Service %s/%s to DynamoGraphDeployment: %w", service.Namespace, service.Name, err)
+			}
+			continue
+		}
+		if owner.dcd != nil {
+			if err := r.ensureControlledByDCD(ctx, dgd, owner.dcd, service); err != nil {
+				return nil, fmt.Errorf("failed to assign Service %s/%s to DynamoComponentDeployment %s: %w", service.Namespace, service.Name, owner.dcd.Name, err)
+			}
+		}
+	}
+
+	desiredServiceNames := make(map[string]struct{}, len(owners))
+	for serviceName := range owners {
+		desiredServiceNames[serviceName] = struct{}{}
+	}
+	return desiredServiceNames, nil
 }
 
 func selectedComponentsByName(
@@ -621,7 +710,7 @@ func sortedSelectionComponentNames(selection disaggregatedSetSelection) []string
 	return names
 }
 
-func (r *DynamoGraphDeploymentReconciler) adoptSelectedModelServices(
+func (r *disaggregatedSetWorkloadsReconciler) adoptSelectedModelServices(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	selection disaggregatedSetSelection,
@@ -657,7 +746,7 @@ func (r *DynamoGraphDeploymentReconciler) adoptSelectedModelServices(
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) canAdoptModelServiceForDisaggregatedSet(
+func (r *disaggregatedSetWorkloadsReconciler) canAdoptModelServiceForDisaggregatedSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	service *corev1.Service,
@@ -685,7 +774,7 @@ func sortedDCDKeys(dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment) 
 	return keys
 }
 
-func (r *DynamoGraphDeploymentReconciler) syncDisaggregatedSet(
+func (r *disaggregatedSetWorkloadsReconciler) syncDisaggregatedSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *unstructured.Unstructured,
@@ -711,28 +800,50 @@ func (r *DynamoGraphDeploymentReconciler) syncDisaggregatedSet(
 		)
 	}
 
-	desired.SetResourceVersion(current.GetResourceVersion())
-	desired.SetUID(current.GetUID())
-	desired.SetCreationTimestamp(current.GetCreationTimestamp())
-	if !disaggregatedSetDesiredStateEqual(current, desired) {
-		if err := r.Update(ctx, desired); err != nil {
-			return false, nil, fmt.Errorf("failed to update DisaggregatedSet %s: %w", key, err)
-		}
-		return true, desired, nil
+	original := current.DeepCopy()
+	labels := maps.Clone(current.GetLabels())
+	if labels == nil {
+		labels = map[string]string{}
 	}
-	return false, current, nil
+	maps.Copy(labels, desired.GetLabels())
+	current.SetLabels(labels)
+	annotations := maps.Clone(current.GetAnnotations())
+	if annotations == nil && len(desired.GetAnnotations()) > 0 {
+		annotations = map[string]string{}
+	}
+	maps.Copy(annotations, desired.GetAnnotations())
+	current.SetAnnotations(annotations)
+	setDGDControllerOwnerReference(dgd, current)
+	current.Object["spec"] = desired.Object["spec"]
+	if disaggregatedSetDesiredStateEqual(original, current) {
+		return false, current, nil
+	}
+
+	// Let the API server apply structural defaults before deciding whether the
+	// controller-owned desired state differs from the live object.
+	if err := r.Patch(ctx, current, client.MergeFrom(original), client.DryRunAll); err != nil {
+		return false, nil, fmt.Errorf("failed to dry-run patch DisaggregatedSet %s: %w", key, err)
+	}
+	if disaggregatedSetDesiredStateEqual(original, current) {
+		return false, current, nil
+	}
+	if err := r.Patch(ctx, current, client.MergeFrom(original)); err != nil {
+		return false, nil, fmt.Errorf("failed to patch DisaggregatedSet %s: %w", key, err)
+	}
+	return true, current, nil
 }
 
 func disaggregatedSetDesiredStateEqual(a, b *unstructured.Unstructured) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return equality.Semantic.DeepEqual(a.GetLabels(), b.GetLabels()) &&
-		equality.Semantic.DeepEqual(a.GetOwnerReferences(), b.GetOwnerReferences()) &&
-		equality.Semantic.DeepEqual(a.Object["spec"], b.Object["spec"])
+	return equality.Semantic.DeepEqual(a.Object["spec"], b.Object["spec"]) &&
+		equality.Semantic.DeepEqual(a.GetLabels(), b.GetLabels()) &&
+		equality.Semantic.DeepEqual(a.GetAnnotations(), b.GetAnnotations()) &&
+		equality.Semantic.DeepEqual(a.GetOwnerReferences(), b.GetOwnerReferences())
 }
 
-func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetIfExists(
+func (r *disaggregatedSetWorkloadsReconciler) deleteDisaggregatedSetIfExists(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
@@ -753,7 +864,7 @@ func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetIfExists(
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) deleteOwnedSelectedDCDs(
+func (r *disaggregatedSetWorkloadsReconciler) deleteOwnedSelectedDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	selection disaggregatedSetSelection,
@@ -771,29 +882,11 @@ func (r *DynamoGraphDeploymentReconciler) deleteOwnedSelectedDCDs(
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) deleteStaleDisaggregatedSetComponentServices(
+func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetComponentServices(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
-	selection disaggregatedSetSelection,
+	desiredServiceNames map[string]struct{},
 ) error {
-	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
-	desiredServiceNames := map[string]struct{}{}
-	for _, componentName := range sortedSelectionComponentNames(selection) {
-		dcd := dcds[componentName]
-		if dcd == nil {
-			return fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
-		}
-		svc, deleteRequested, err := renderer.generateService(ctx, dcd)
-		if err != nil {
-			return fmt.Errorf("failed to render desired component Service for %q: %w", componentName, err)
-		}
-		if deleteRequested || svc == nil {
-			continue
-		}
-		desiredServiceNames[svc.Name] = struct{}{}
-	}
-
 	serviceList := &corev1.ServiceList{}
 	if err := r.List(ctx, serviceList, client.InNamespace(dgd.Namespace), client.MatchingLabels{
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
@@ -810,9 +903,6 @@ func (r *DynamoGraphDeploymentReconciler) deleteStaleDisaggregatedSetComponentSe
 		if componentName == "" {
 			continue
 		}
-		if _, selected := selection.componentToRole[componentName]; !selected {
-			continue
-		}
 		if _, desired := desiredServiceNames[service.Name]; desired {
 			continue
 		}
@@ -823,7 +913,7 @@ func (r *DynamoGraphDeploymentReconciler) deleteStaleDisaggregatedSetComponentSe
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) listOwnedSelectedDCDs(
+func (r *disaggregatedSetWorkloadsReconciler) listOwnedSelectedDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	selection disaggregatedSetSelection,
@@ -847,7 +937,7 @@ func (r *DynamoGraphDeploymentReconciler) listOwnedSelectedDCDs(
 	return selectedDCDs, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) ensureControlledByDGD(
+func (r *disaggregatedSetWorkloadsReconciler) ensureControlledByDGD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	obj client.Object,
@@ -879,13 +969,10 @@ func (r *DynamoGraphDeploymentReconciler) ensureControlledByDGD(
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) restoreDisaggregatedSetServiceOwnershipToDCDs(
+func (r *disaggregatedSetWorkloadsReconciler) restoreDisaggregatedSetServiceOwnershipToDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	if r.RuntimeConfig == nil || !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
-		return nil
-	}
 	ds := newDisaggregatedSetObject()
 	if err := r.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -967,7 +1054,7 @@ func (r *DynamoGraphDeploymentReconciler) restoreDisaggregatedSetServiceOwnershi
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) ensureControlledByDCD(
+func (r *disaggregatedSetWorkloadsReconciler) ensureControlledByDCD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -1138,7 +1225,7 @@ func checkDisaggregatedSetReadiness(
 	return true, "All DisaggregatedSet roles are ready", statuses
 }
 
-func (r *DynamoGraphDeploymentReconciler) checkDisaggregatedSetReadiness(
+func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	ctx context.Context,
 	ds *unstructured.Unstructured,
 	selection disaggregatedSetSelection,
@@ -1357,13 +1444,21 @@ func leaderWorkerSetStatusChanged(oldObj, newObj client.Object) bool {
 		!equality.Semantic.DeepEqual(oldLWS.GetOwnerReferences(), newLWS.GetOwnerReferences())
 }
 
-func (r *DynamoGraphDeploymentReconciler) mapDisaggregatedSetChildLWSToDGD(ctx context.Context, obj client.Object) []ctrl.Request {
+type disaggregatedSetWatchMapper struct {
+	reader client.Reader
+}
+
+func newDisaggregatedSetWatchMapper(reader client.Reader) *disaggregatedSetWatchMapper {
+	return &disaggregatedSetWatchMapper{reader: reader}
+}
+
+func (r *disaggregatedSetWatchMapper) MapChildLWSToDGD(ctx context.Context, obj client.Object) []ctrl.Request {
 	setName := obj.GetLabels()[disaggregatedsetv1.SetNameLabelKey]
 	if setName == "" {
 		return nil
 	}
 	ds := newDisaggregatedSetObject()
-	if err := r.Get(ctx, types.NamespacedName{Name: setName, Namespace: obj.GetNamespace()}, ds); err != nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: setName, Namespace: obj.GetNamespace()}, ds); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log.FromContext(ctx).Error(err, "failed to map DisaggregatedSet child LeaderWorkerSet", "leaderWorkerSet", obj.GetName())
 		}
@@ -1376,7 +1471,7 @@ func (r *DynamoGraphDeploymentReconciler) mapDisaggregatedSetChildLWSToDGD(ctx c
 	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: owner.Name, Namespace: ds.GetNamespace()}}}
 }
 
-func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForDisaggregatedSet(
+func (r *disaggregatedSetWorkloadsReconciler) getUpdatedInProgressForDisaggregatedSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	inProgress []string,
@@ -1432,7 +1527,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForDisaggregatedSe
 	return updatedInProgress
 }
 
-func (r *DynamoGraphDeploymentReconciler) deleteGrovePodCliqueSetOnDisaggregatedSetPath(
+func (r *disaggregatedSetWorkloadsReconciler) deleteGrovePodCliqueSetOnDisaggregatedSetPath(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
@@ -1456,64 +1551,42 @@ func (r *DynamoGraphDeploymentReconciler) deleteGrovePodCliqueSetOnDisaggregated
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) cleanupDisaggregatedSetOnLegacyPath(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	restoreDCDServiceOwnership bool,
-) error {
-	if restoreDCDServiceOwnership {
-		if err := r.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, dgd); err != nil {
-			return err
-		}
-	}
-	if r.RuntimeConfig == nil || !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
-		return nil
-	}
-	return r.deleteDisaggregatedSetIfExists(ctx, dgd)
-}
-
-func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
+func (r *disaggregatedSetWorkloadsReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (dynamo.RollingUpdateContext, error) {
-	return newDGDWorkerRolloutReconciler(r.Client, r.Recorder).buildRollingUpdateContext(ctx, dgd)
+	return r.rollout.buildRollingUpdateContext(ctx, dgd)
 }
 
-func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(
+func (r *disaggregatedSetWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (map[string]string, error) {
-	return (&componentWorkloadsReconciler{
-		syncer:  newDGDResourceSyncer(r.Client, r.Recorder),
-		rollout: newDGDWorkerRolloutReconciler(r.Client, r.Recorder),
-	}).getExistingRestartAnnotationsDCD(ctx, dgd)
+	return r.componentWorkloads.getExistingRestartAnnotationsDCD(ctx, dgd)
 }
 
-func (r *DynamoGraphDeploymentReconciler) preserveExistingDCDBackendFramework(
+func (r *disaggregatedSetWorkloadsReconciler) preserveExistingDCDBackendFramework(
 	ctx context.Context,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
-	return (&componentWorkloadsReconciler{
-		syncer:  newDGDResourceSyncer(r.Client, r.Recorder),
-		rollout: newDGDWorkerRolloutReconciler(r.Client, r.Recorder),
-	}).preserveExistingBackendFramework(ctx, desired)
+	return r.componentWorkloads.preserveExistingBackendFramework(ctx, desired)
 }
 
-func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
+func (r *disaggregatedSetWorkloadsReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
 	return checkResourcesReadiness(resources)
 }
 
-func applyDCDCheckpointStartupPolicy(
+func (r *disaggregatedSetWorkloadsReconciler) applyDCDCheckpointStartupPolicy(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) error {
-	return (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(dcd, checkpointInfo)
+	return r.componentWorkloads.applyCheckpointStartupPolicy(dcd, checkpointInfo)
 }
 
-func (r *DynamoGraphDeploymentReconciler) checkComponentFullyUpdated(
+func (r *disaggregatedSetWorkloadsReconciler) checkComponentFullyUpdated(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
 ) (bool, string) {
-	return newComponentRestartProgressResolver(r.Client).checkComponentFullyUpdated(ctx, dgd, componentName)
+	return r.componentRestartProgress.checkComponentFullyUpdated(ctx, dgd, componentName)
 }

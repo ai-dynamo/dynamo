@@ -20,14 +20,20 @@ The installation guide includes the exact Helm commands for [LWS and Volcano](..
 
 ## Orchestrator Selection
 
-For multinode deployments, the Dynamo operator selects an orchestrator based on what is installed:
+For multinode deployments, the operator applies this routing precedence:
+
+1. Grove, when its API is available and `nvidia.com/enable-grove` is not `"false"`.
+2. Opt-in DisaggregatedSet (DS), when Grove is not selected, the DGD sets `nvidia.com/enable-disaggregatedset: "true"`, and the DS API and requested roles are supported.
+3. The standard DynamoComponentDeployment (DCD) pathway, which requires LWS and Volcano for multinode components.
+
+Installing the DS API does not move existing DGDs to DS. DS requires explicit opt-in, and Grove has higher routing priority.
 
 | Cluster state | Operator behavior |
 | --- | --- |
-| Grove and LWS installed | Uses Grove by default. |
-| Grove and LWS installed, DGD has `nvidia.com/enable-grove: "false"` | Uses LWS. |
-| Only LWS installed | Uses LWS. |
-| Neither Grove nor LWS installed | Rejects multinode deployments. |
+| Grove is available and `nvidia.com/enable-grove` is not `"false"` | Uses Grove. |
+| Grove is disabled or unavailable and DS is explicitly requested | Uses DS when the DS API and requested roles are supported. |
+| Grove and DS are not selected or DS cannot be used | Uses the standard DCD pathway. |
+| No selected pathway supports the multinode components | Rejects the deployment. |
 
 To force the LWS path when Grove is also present:
 
@@ -41,6 +47,12 @@ metadata:
 spec:
   # ...
 ```
+
+## DisaggregatedSet Path
+
+Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1`, then add `nvidia.com/enable-disaggregatedset: "true"` to the DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
+
+Dynamo falls back to the standard DCD pathway when the DS request cannot be honored. Multinode components on that fallback require LWS and Volcano.
 
 ## Multinode Spec
 
