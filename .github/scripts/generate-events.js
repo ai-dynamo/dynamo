@@ -99,6 +99,22 @@ function toEvent(e, isPast) {
   };
 }
 
+/**
+ * How many events the committed file currently holds.
+ *
+ * Counted by matching the one field every event object carries exactly once,
+ * rather than importing the file, since it is TypeScript. A missing file (first
+ * run, fresh checkout) counts as zero rather than failing.
+ */
+function countExistingEvents() {
+  try {
+    return (fs.readFileSync(OUT, 'utf8').match(/"addUrl":/g) || []).length;
+  } catch (err) {
+    if (err.code === 'ENOENT') return 0;
+    throw err;
+  }
+}
+
 async function main() {
   const events = await ical.async.fromURL(ICS_URL);
   const now = new Date();
@@ -160,6 +176,28 @@ async function main() {
     `export const GENERATED_ON = ${JSON.stringify(generatedOn)};\n\n` +
     `export const UPCOMING_EVENTS: DynamoEvent[] = ${JSON.stringify(upcoming, null, 2)};\n\n` +
     `export const PAST_EVENTS: DynamoEvent[] = ${JSON.stringify(past, null, 2)};\n`;
+
+  // Floor guard: never publish a calendar that has gone empty.
+  //
+  // node-ical turns a non-200 body into {} rather than throwing, so a calendar
+  // that has been unshared or made private -- or a transient Google serve --
+  // parses cleanly into zero events. That was self-correcting while this file
+  // only ever existed inside the runner: one publish was wrong and the next
+  // fixed it. Now that it is committed to main and is the source of truth, a
+  // blank result blanks both grids on the live site and stays that way until
+  // someone notices, behind a commit titled like every other refresh. Fail the
+  // run instead and leave the last good calendar in place.
+  const existingCount = countExistingEvents();
+  if (upcoming.length + past.length === 0 && existingCount > 0) {
+    const veventCount = Object.values(events).filter(
+      (e) => e.type === 'VEVENT',
+    ).length;
+    throw new Error(
+      `Calendar fetch yielded no usable events (${veventCount} VEVENT(s) parsed) ` +
+        `while ${path.basename(OUT)} currently holds ${existingCount}. ` +
+        'Refusing to overwrite it with an empty calendar.',
+    );
+  }
 
   fs.writeFileSync(OUT, body);
   console.log(`Wrote ${OUT}: ${upcoming.length} upcoming, ${past.length} past.`);

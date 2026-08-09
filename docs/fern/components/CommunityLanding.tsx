@@ -12,7 +12,7 @@ import {
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
-import { resolveToday } from "./calendar-today";
+import { resolveCalendarMonth, resolveToday } from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -134,13 +134,16 @@ function buildMonthCells(year: number, month: number) {
 }
 
 function FullCalendar() {
-  // The grid follows the current month, not the next event. Keying it off
-  // UPCOMING_EVENTS[0] meant an empty calendar fell back to PAST_EVENTS[0] and
-  // sat on a month that had already gone by -- and because the today marker
-  // was resolved independently, it then matched no cell in the month on show,
-  // so the grid lost its highlight entirely.
+  // Today's month when it has events, else the nearest event's month. Keying
+  // it off UPCOMING_EVENTS[0] meant an empty calendar fell back to
+  // PAST_EVENTS[0] and sat on a month that had already gone by -- and because
+  // the today marker was resolved independently, it then matched no cell in the
+  // month on show, so the grid lost its highlight entirely. Resolving both from
+  // one helper keeps them in agreement; falling back to the nearest event keeps
+  // this grid, which renders full event slots, from shipping empty whenever the
+  // next event is in another month.
+  const { year, month } = resolveCalendarMonth();
   const today = resolveToday();
-  const { year, month } = today;
   const events = [...UPCOMING_EVENTS, ...PAST_EVENTS].filter(
     (event) => Number(event.year) === year && MONTH_INDEX[event.month] === month,
   );
@@ -176,8 +179,16 @@ function FullCalendar() {
         <div className="dynamo-community-calendar__grid">
           {buildMonthCells(year, month).map((day, index) => {
             const dayEvents = day === null ? [] : eventsByDay.get(day) ?? [];
-            // The grid renders today's own month, so the day alone settles it.
-            const isToday = day !== null && day === today.day;
+            // The grid does not always render today's own month, so the month
+            // has to match too -- otherwise the highlight lands on the
+            // same-numbered day of whichever month is on show. A null `today`
+            // (stale or malformed GENERATED_ON) marks nothing at all.
+            const isToday =
+              day !== null &&
+              today !== null &&
+              today.year === year &&
+              today.month === month &&
+              day === today.day;
             return (
               <div
                 className={`dynamo-community-calendar__day${day === null ? ' is-empty' : ''}${dayEvents.length ? ' has-event' : ''}${isToday ? ' is-today' : ''}`}

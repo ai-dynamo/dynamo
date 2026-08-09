@@ -14,7 +14,7 @@ import {
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
-import { resolveToday } from "./calendar-today";
+import { resolveCalendarMonth, resolveToday } from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -97,10 +97,17 @@ function UpcomingEvent({ event }: { event: DynamoEvent }) {
 }
 
 export function EventsCalendar() {
-  // The grid follows the current month, not the next event. Keying it off
-  // UPCOMING_EVENTS[0] meant an empty calendar fell back to PAST_EVENTS[0] and
-  // sat on a month that had already gone by.
-  const { year, month, day: selectedDay } = resolveToday();
+  // Today's month when it has events, else the nearest event's month. Keying
+  // the grid off UPCOMING_EVENTS[0] meant an empty calendar fell back to
+  // PAST_EVENTS[0] and sat on a month that had already gone by; keying it hard
+  // to today's month instead would empty the grid whenever the next event is
+  // in another month, which is the ordinary case.
+  const { year, month } = resolveCalendarMonth();
+  const today = resolveToday();
+  // Mark today only when the grid is actually showing today's month, so the
+  // highlight can never land on the same-numbered day of some other month.
+  const selectedDay =
+    today && today.year === year && today.month === month ? today.day : null;
   const days = buildMonthDays(year, month);
 
   // Days in the displayed month that have something scheduled, so the grid
