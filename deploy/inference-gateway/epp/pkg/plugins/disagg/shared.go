@@ -67,6 +67,19 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 	return false
 }
 
+func readCyclePrefillReservation(cycleState *schedtypes.CycleState) *PrefillReservationState {
+	state, err := schedtypes.ReadCycleStateKey[*PrefillReservationState](cycleState, prefillReservationCycleStateKey)
+	if err == nil {
+		return state
+	}
+	return nil
+}
+
+func clearCyclePrefillReservation(cycleState *schedtypes.CycleState) {
+	cycleState.Delete(prefillReservationCycleStateKey)
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+}
+
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
 func buildRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	return dynscorer.BuildOpenAIRequestJSON(req)

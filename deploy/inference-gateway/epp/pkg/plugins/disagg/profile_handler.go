@@ -26,6 +26,8 @@ import (
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
+
+	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
 
 const (
@@ -53,13 +55,31 @@ func DisaggProfileHandlerFactory(name string, rawParameters json.RawMessage, _ p
 // NewDisaggProfileHandler initializes a new DisaggProfileHandler.
 func NewDisaggProfileHandler() *DisaggProfileHandler {
 	return &DisaggProfileHandler{
-		typedName: plugins.TypedName{Type: DisaggProfileHandlerType, Name: DisaggProfileHandlerType},
+		typedName:              plugins.TypedName{Type: DisaggProfileHandlerType, Name: DisaggProfileHandlerType},
+		freePrefillReservation: dynscorer.CallFreePrefillRequest,
 	}
 }
 
 // DisaggProfileHandler is a ProfileHandler that orchestrates prefill/decode disaggregated serving.
 type DisaggProfileHandler struct {
-	typedName plugins.TypedName
+	typedName              plugins.TypedName
+	freePrefillReservation func(string, uint64, uint32) error
+}
+
+func (h *DisaggProfileHandler) rollbackPrefillReservation(ctx context.Context, cycleState *schedtypes.CycleState, reason string) {
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+	reservation := readCyclePrefillReservation(cycleState)
+	if reservation == nil || reservation.ReservationID == "" {
+		return
+	}
+	if err := h.freePrefillReservation(reservation.ReservationID, reservation.WorkerID, reservation.DpRank); err != nil {
+		log.FromContext(ctx).V(logutil.DEFAULT).Error(err,
+			"DisaggProfileHandler: failed to roll back prefill reservation",
+			"reservationID", reservation.ReservationID,
+			"reason", reason)
+		return
+	}
+	clearCyclePrefillReservation(cycleState)
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -102,7 +122,7 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 		if _, decodeDone := profileResults[DecodeProfileName]; !decodeDone {
 			if prefillResult == nil {
 				logger.Info("DisaggProfileHandler: prefill profile failed (no workers?), falling back to aggregated decode")
-				cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+				h.rollbackPrefillReservation(ctx, cycleState, "prefill profile produced no result")
 			}
 
 			if decodeProfile, ok := profiles[DecodeProfileName]; ok {
@@ -117,10 +137,11 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 }
 
 // ProcessResults aggregates the profile run results and designates the primary profile.
-func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, _ *schedtypes.InferenceRequest,
+func (h *DisaggProfileHandler) ProcessResults(ctx context.Context, cycleState *schedtypes.CycleState, _ *schedtypes.InferenceRequest,
 	profileResults map[string]*schedtypes.ProfileRunResult) (*schedtypes.SchedulingResult, error) {
 
 	if len(profileResults) == 0 {
+		h.rollbackPrefillReservation(ctx, cycleState, "no scheduling profile results")
 		return nil, errors.New("disagg profile handler received no profile results")
 	}
 
@@ -133,6 +154,7 @@ func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.C
 	}
 
 	if profileResults[primaryProfile] == nil {
+		h.rollbackPrefillReservation(ctx, cycleState, "primary scheduling profile failed")
 		return nil, fmt.Errorf("primary profile '%s' failed to produce a result", primaryProfile)
 	}
 
