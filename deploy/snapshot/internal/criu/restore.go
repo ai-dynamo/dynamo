@@ -79,14 +79,12 @@ func ExecuteRestore(
 		return 0, nil, err
 	}
 
-	c := criulib.MakeCriu()
-	// criu is always sourced from the injected binary bundle — never from the
-	// checkpoint-time BinaryPath, which refers to the agent filesystem.
-	criuBin := filepath.Join(bundleDir, "criu")
-	if _, err := os.Stat(criuBin); err != nil {
+	criuBin, err := bundledCRIUPath(bundleDir)
+	if err != nil {
 		cleanup()
-		return 0, nil, fmt.Errorf("criu binary not found at %s (injected from agent): %w", criuBin, err)
+		return 0, nil, err
 	}
+	c := criulib.MakeCriu()
 	c.SetCriuPath(criuBin)
 
 	netNsFile, err := os.Open(netNsPath)
@@ -224,6 +222,17 @@ func rewriteCRIULibDir(criuOpts *criurpc.CriuOpts, workDir, criuBundleDir string
 	}
 	criuOpts.ConfigFile = proto.String(overridePath)
 	return nil
+}
+
+// bundledCRIUPath returns the path to the criu binary inside bundleDir.
+// BinaryPath in the checkpoint manifest refers to the agent filesystem and is
+// unusable inside the placeholder namespace; criu must always come from the injected bundle.
+func bundledCRIUPath(bundleDir string) (string, error) {
+	path := filepath.Join(bundleDir, "criu")
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("criu binary not found in injected bundle at %s: %w", path, err)
+	}
+	return path, nil
 }
 
 func overrideLibDir(conf, libDir string) string {
