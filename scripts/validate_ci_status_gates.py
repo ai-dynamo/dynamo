@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Validate the aggregate `*-status-check` gates in .github/workflows/.
+
+Those jobs are what branch protection requires, and each one collapses the
+results of every job it needs into a single jq expression:
+
+    jq -e 'to_entries | map(.value.result)
+           | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+so the literal list of accepted results decides what can pass the merge gate.
+A job killed by its own `timeout-minutes` is reported as `cancelled`, not
+`failure`; accepting `cancelled` therefore turns a matrix of tests that never
+finished into a green required check. `failure` is just as wrong, and jq's
+`-e` flag is what turns a false result into a non-zero exit.
+
+This checks that every status-check job has a parseable allowlist and that
+the allowlist accepts only results that really mean nothing broke: `success`
+and `skipped` (jobs gated off by the changed-files filters).
+
+Usage:
+    python3 validate_ci_status_gates.py [repo_root]
+    python3 validate_ci_status_gates.py --test
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+WORKFLOWS_DIR = Path(".github") / "workflows"
+STATUS_CHECK_SUFFIX = "-status-check"
+ACCEPTED_RESULTS = frozenset({"success", "skipped"})
+# The `[...]` literal the jq expression tests each job result against, e.g.
+# '["success", "skipped"] | any($result == .)'.
+ALLOWLIST = re.compile(r"(\[[^\[\]]*\])\s*\|\s*any\(\s*\$result\s*==\s*\.\s*\)")
+
+
+def check_workflow(name, text, errors):
+    """Check one workflow's status-check gates; return how many were found."""
+    try:
+        workflow = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        errors.append(f"{name}: invalid YAML: {exc}")
+        return 0
+
+    jobs = (workflow or {}).get("jobs")
+    if not isinstance(jobs, dict):
+        return 0
+
+    found = 0
+    for job_id, job in sorted(jobs.items()):
+        if not job_id.endswith(STATUS_CHECK_SUFFIX) or not isinstance(job, dict):
+            continue
+        found += 1
+        steps = job.get("steps") or []
+        runs = [s.get("run", "") for s in steps if isinstance(s, dict)]
+        allowlists = [m for run in runs for m in ALLOWLIST.findall(run)]
+        if not allowlists:
+            errors.append(
+                f"{name}: job '{job_id}' has no parseable jq result allowlist; "
+                f"a status-check job must aggregate needs with "
+                f"\"jq -e '... | any($result == .)'\""
+            )
+            continue
+        for raw in allowlists:
+            try:
+                accepted = set(json.loads(raw))
+            except json.JSONDecodeError:
+                errors.append(
+                    f"{name}: job '{job_id}' has an unreadable result "
+                    f"allowlist {raw}"
+                )
+                continue
+            for result in sorted(accepted - ACCEPTED_RESULTS):
+                errors.append(
+                    f"{name}: job '{job_id}' accepts '{result}' as a passing "
+                    f"result; only {', '.join(sorted(ACCEPTED_RESULTS))} mean "
+                    f"the jobs it gates actually ran"
+                )
+    return found
+
+
+def run_tests():
+    """Self-test the gate parser against hand-written workflow bodies."""
+    good = """
+jobs:
+  deploy-status-check:
+    if: always()
+    steps:
+      - name: Check all deploy test jobs
+        run: |
+          # A comment above the gate must not hide it.
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+"""
+    cases = [
+        ("clean gate", good, []),
+        (
+            "cancelled accepted",
+            good.replace('"skipped"', '"skipped", "cancelled"'),
+            ["accepts 'cancelled'"],
+        ),
+        (
+            "failure accepted",
+            good.replace('"skipped"', '"skipped", "failure"'),
+            ["accepts 'failure'"],
+        ),
+        (
+            "gate replaced by a bare echo",
+            """
+jobs:
+  deploy-status-check:
+    steps:
+      - run: echo ok
+""",
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "non-gate job is not our business",
+            """
+jobs:
+  deploy-cleanup:
+    steps:
+      - run: jq -e 'all(. as $result | ["success", "cancelled"] | any($result == .))'
+""",
+            [],
+        ),
+    ]
+
+    failures = []
+    for label, text, expected in cases:
+        errors = []
+        check_workflow("test.yaml", text, errors)
+        if len(errors) != len(expected) or not all(
+            fragment in error for fragment, error in zip(expected, errors)
+        ):
+            failures.append(f"{label}: expected {expected}, got {errors}")
+
+    for failure in failures:
+        print(f"FAIL: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"all {len(cases)} status-gate parser cases passed")
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--test":
+        return run_tests()
+
+    root = Path(args[0]) if args else Path(__file__).parents[1]
+    workflows = root / WORKFLOWS_DIR
+    if not workflows.is_dir():
+        print(f"error: {workflows} is not a directory", file=sys.stderr)
+        return 1
+
+    errors = []
+    gates = 0
+    paths = sorted(p for p in workflows.iterdir() if p.suffix in (".yml", ".yaml"))
+    for path in paths:
+        gates += check_workflow(
+            str(path.relative_to(root)), path.read_text(encoding="utf-8"), errors
+        )
+
+    if not gates:
+        errors.append(
+            f"{WORKFLOWS_DIR}: no '*{STATUS_CHECK_SUFFIX}' job found; the merge "
+            f"gates were renamed and this check is no longer validating anything"
+        )
+
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        print(f"\n{len(errors)} status-gate error(s)", file=sys.stderr)
+        return 1
+    print(f"validated {gates} CI status-check gates: OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
