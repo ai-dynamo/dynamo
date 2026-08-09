@@ -62,6 +62,17 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+<ParamField path="DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS" type="integer" default="unset">
+  Maximum time in milliseconds that the Frontend waits before committing streaming HTTP response
+  headers while inspecting the first non-annotation backend frame for an error. A positive value
+  enables the peek for Chat Completions, Completions, Responses, and Anthropic Messages streaming
+  requests. Unset, `0`, or invalid values disable it.
+
+  The Frontend reads the value for each streaming request, so changes apply without a restart.
+  Enabling the peek can delay response headers by up to the configured duration, but it stops
+  waiting as soon as the first non-annotation frame arrives.
+</ParamField>
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded
