@@ -111,6 +111,18 @@ func routerBookingID(request *schedtypes.InferenceRequest) string {
 	return request.RequestId
 }
 
+func forceAggregatedRouting(request *schedtypes.InferenceRequest) {
+	if request == nil {
+		return
+	}
+	if request.Headers == nil {
+		request.Headers = map[string]string{}
+	}
+	request.Headers[RoutingModeHeader] = "aggregated"
+	delete(request.Headers, PrefillWorkerIDHeader)
+	delete(request.Headers, PrefillDpRankHeader)
+}
+
 func cleanupRouterBooking(ctx context.Context, request *schedtypes.InferenceRequest, bookingID string, reason string) bool {
 	if bookingID == "" {
 		return true
@@ -123,9 +135,7 @@ func cleanupRouterBooking(ctx context.Context, request *schedtypes.InferenceRequ
 	}
 	if request != nil && prefillReservationID(request) == bookingID {
 		delete(request.Headers, PrefillReservationIDHeader)
-		delete(request.Headers, PrefillWorkerIDHeader)
-		delete(request.Headers, PrefillDpRankHeader)
-		request.Headers[RoutingModeHeader] = "aggregated"
+		forceAggregatedRouting(request)
 	}
 	return true
 }
@@ -179,20 +189,26 @@ func cleanupCancelledRouterBooking(ctx context.Context, request *schedtypes.Infe
 	}
 }
 
+func finalizePrefillRollback(cycleState *schedtypes.CycleState, request *schedtypes.InferenceRequest, cleanupSucceeded bool) bool {
+	if cleanupSucceeded {
+		clearPrefillReservation(cycleState)
+		return true
+	}
+	// Keep the reservation state and ID available for another cleanup attempt,
+	// but strip the selected prefill worker so a fallback cannot be forwarded as
+	// a disaggregated request with stale routing metadata.
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+	forceAggregatedRouting(request)
+	return false
+}
+
 func rollbackPrefillReservation(ctx context.Context, cycleState *schedtypes.CycleState, request *schedtypes.InferenceRequest, reason string) bool {
 	reservation := readPrefillReservation(cycleState)
 	bookingID := ""
 	if reservation != nil {
 		bookingID = reservation.ID
 	}
-	if cleanupRouterBooking(ctx, request, bookingID, reason) {
-		clearPrefillReservation(cycleState)
-		return true
-	}
-	// Keep the reservation state and header available for another cleanup
-	// attempt, but force any fallback dispatch to use aggregated serving.
-	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
-	return false
+	return finalizePrefillRollback(cycleState, request, cleanupRouterBooking(ctx, request, bookingID, reason))
 }
 
 func rollbackPrefillReservationAtTerminal(ctx context.Context, cycleState *schedtypes.CycleState, request *schedtypes.InferenceRequest, reason string) {

@@ -159,6 +159,54 @@ func TestResponseBodyConcurrentChunksAttemptMarkOnceAndEOSCleansUp(t *testing.T)
 	}
 }
 
+func TestFailedPrefillRollbackForcesAggregatedRoutingAndKeepsReservation(t *testing.T) {
+	reservationID := mustPrefillReservationID(t)
+	cycleState := schedtypes.NewCycleState()
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: true})
+	cycleState.Write(PrefillReservationStateKey, &PrefillReservationState{
+		ID:        reservationID,
+		WorkerID:  "7",
+		DpRank:    3,
+		HasDpRank: true,
+	})
+	request := &schedtypes.InferenceRequest{
+		RequestId: "client-request-id",
+		Headers: map[string]string{
+			PrefillReservationIDHeader: reservationID,
+			PrefillWorkerIDHeader:      "7",
+			PrefillDpRankHeader:        "3",
+			RoutingModeHeader:          "disaggregated",
+		},
+	}
+
+	if rollbackPrefillReservation(context.Background(), cycleState, request, "test uninitialized router cleanup") {
+		t.Fatal("expected failed cleanup to report an incomplete rollback")
+	}
+
+	if readPrefillEnabled(cycleState) {
+		t.Fatal("expected failed cleanup to disable disaggregated fallback")
+	}
+	reservation := readPrefillReservation(cycleState)
+	if reservation == nil || reservation.ID != reservationID {
+		t.Fatalf("reservation state = %#v, want ID %q retained", reservation, reservationID)
+	}
+	if got := request.Headers[PrefillReservationIDHeader]; got != reservationID {
+		t.Fatalf("reservation ID = %q, want %q", got, reservationID)
+	}
+	if got := routerBookingID(request); got != reservationID {
+		t.Fatalf("router booking ID = %q, want retained reservation ID %q", got, reservationID)
+	}
+	if got := request.Headers[RoutingModeHeader]; got != "aggregated" {
+		t.Fatalf("routing mode = %q, want aggregated", got)
+	}
+	if _, ok := request.Headers[PrefillWorkerIDHeader]; ok {
+		t.Fatal("expected aggregated fallback to remove prefill worker header")
+	}
+	if _, ok := request.Headers[PrefillDpRankHeader]; ok {
+		t.Fatal("expected aggregated fallback to remove prefill DP-rank header")
+	}
+}
+
 func responseBodyTestRequest(t *testing.T) *schedtypes.InferenceRequest {
 	t.Helper()
 	return &schedtypes.InferenceRequest{
