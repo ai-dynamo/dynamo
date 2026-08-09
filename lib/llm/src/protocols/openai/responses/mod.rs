@@ -285,9 +285,9 @@ fn convert_input_content_to_user_content(
             }
             InputContent::InputImage(img) => {
                 let url_str = match (img.file_id.as_deref(), img.image_url.as_deref()) {
-                    (None, None) | (Some(_), Some(_)) => {
+                    (None, None) => {
                         return Err(ResponsesConversionError::InvalidArgument(
-                            "input_image requires exactly one of file_id or image_url".to_string(),
+                            "input_image requires file_id or image_url".to_string(),
                         )
                         .into());
                     }
@@ -303,7 +303,7 @@ fn convert_input_content_to_user_content(
                         )
                         .into());
                     }
-                    (None, Some(url_str)) => url_str,
+                    (_, Some(url_str)) => url_str,
                 };
                 let url = url::Url::parse(url_str).map_err(|error| {
                     ResponsesConversionError::InvalidArgument(format!(
@@ -1507,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_input_items_with_image() {
+    fn test_input_items_with_file_id_and_image_url_prefers_url() {
         let req = NvCreateResponse {
             inner: CreateResponse {
                 input: InputParam::Items(vec![InputItem::Item(Item::Message(MessageItem::Input(
@@ -1518,7 +1518,7 @@ mod tests {
                             }),
                             InputContent::InputImage(InputImageContent {
                                 detail: Default::default(), // ImageDetail::Auto
-                                file_id: None,
+                                file_id: Some("file_123".into()),
                                 image_url: Some("https://example.com/cat.jpg".into()),
                             }),
                         ],

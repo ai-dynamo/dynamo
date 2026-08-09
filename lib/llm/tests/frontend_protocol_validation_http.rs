@@ -115,7 +115,7 @@ async fn responses_conversion_distinguishes_invalid_from_unsupported() {
             for (content, message) in [
                 (
                     json!({"type": "input_image"}),
-                    "requires exactly one of file_id or image_url",
+                    "requires file_id or image_url",
                 ),
                 (
                     json!({"type": "input_file"}),
