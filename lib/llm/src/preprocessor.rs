@@ -85,7 +85,10 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt::{
+    MediaRequestExt, ToolArgumentsMode, ToolArgumentsModeGuard, detect_tool_arguments_mode,
+    mdc_jinja_template_text, prompt_formatter_from_mdc,
+};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -447,6 +450,10 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
+    /// Whether the loaded chat template requires tool_calls[*].function.arguments
+    /// as a parsed serde_json object (vs. the OpenAI wire-schema JSON string).
+    /// Derived once from the Jinja template source at construction.
+    tool_arguments_mode: ToolArgumentsMode,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -969,6 +976,12 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        // Detect argument mode from the Jinja template source once at construction.
+        // Falls back to JsonString (no-op normalization) for models without a .jinja file.
+        let tool_arguments_mode = mdc_jinja_template_text(&mdc)
+            .as_deref()
+            .map(detect_tool_arguments_mode)
+            .unwrap_or_default();
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -1172,6 +1185,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             kv_cache_block_size,
             tool_call_parser,
+            tool_arguments_mode,
             media_loader,
             token_budget,
             #[cfg(feature = "mm-routing")]
@@ -1256,6 +1270,7 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            let _mode_guard = ToolArgumentsModeGuard::new(self.tool_arguments_mode);
             self.apply_template(request)
                 .with_context(|| "Failed to apply prompt template")?
         };
@@ -3359,12 +3374,37 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input per choice.index so n > 1 is handled correctly.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            if is_glm47 && let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
+                    {
+                        cr.entry(choice.index)
+                            .or_default()
+                            .input_text
+                            .push_str(content);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3383,7 +3423,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -3395,7 +3435,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -3405,7 +3445,59 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete <tool_call>
+            // block. rfind skips complete blocks, so earlier parsed tool calls are
+            // never duplicated as raw content. Recovered content WILL contain raw
+            // <tool_call> markup — callers that require strict "no tool tags in content"
+            // must filter on finish_reason=length.
+            let mut recoveries: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+            if is_glm47 && let Some(ref data) = nv_chunk.data {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    let state = cr.entry(choice.index).or_default();
+                    if matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
+                        let recovered = state.input_text.rfind("<tool_call>").and_then(|start| {
+                            let tail = &state.input_text[start..];
+                            if !tail.contains("</tool_call>") {
+                                Some(tail.to_string())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(recovered) = recovered {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                recovered_bytes = recovered.len(),
+                                "glm47 streaming: partial <tool_call> emitted as content \
+                                 on length finish (TRT-LLM parity; raw markup in content)"
+                            );
+                            let mut rec = nv_chunk.clone();
+                            if let Some(ref mut rd) = rec.data {
+                                rd.inner.usage = None;
+                                rd.llm_metrics = None;
+                                rd.inner.choices.retain(|c| c.index == choice.index);
+                                for rc in &mut rd.inner.choices {
+                                    rc.delta.content =
+                                        Some(ChatCompletionMessageContent::Text(recovered.clone()));
+                                    rc.delta.tool_calls = None;
+                                    rc.finish_reason = None;
+                                }
+                            }
+                            recoveries.push(rec);
+                        }
+                    }
+                }
             }
+
+            let mut out = Vec::with_capacity(recoveries.len() + 1);
+            out.extend(recoveries);
+            out.push(nv_chunk);
+            futures::stream::iter(out)
         })
     }
 
@@ -4136,6 +4228,7 @@ impl
             &next,
             &self.formatter,
             &self.tokenizer,
+            self.tool_arguments_mode,
         );
 
         let final_stream = crate::request_trace::wrap_chat_request_end_stream(
