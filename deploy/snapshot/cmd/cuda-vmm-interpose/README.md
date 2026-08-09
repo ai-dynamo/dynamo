@@ -228,8 +228,10 @@ The implementation detects and rejects:
   state, or accessible IMEX channel is absent or mismatched, or when exporter
   and importer do not share the same channel;
 - fork after CUDA initialization as observed by `pthread_atfork`;
-- missing current `NODE_NAME`, target-node changes, GPU UUID changes at a
-  source ordinal, and ordinal reordering;
+- missing current `NODE_NAME` and target-node changes; the same physical GPU UUID
+  at a changed process-local CUDA ordinal is accepted, but an absent source UUID,
+  a source UUID visible ambiguously at multiple ordinals, or a different physical
+  GPU identity is rejected;
 - inconsistent manifest VMM fields, a missing/empty/non-regular
   `cuda-vmm.rdb`, or an RDB artifact without manifest opt-in;
 - a checkpoint-side RDB source that is not a regular non-empty file after
