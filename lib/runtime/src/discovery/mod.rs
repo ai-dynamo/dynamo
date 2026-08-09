@@ -23,7 +23,10 @@ mod kube;
 pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
-use crate::component::{DeviceType, Instance, TransportType};
+use crate::{
+    component::{DeviceType, Instance, TransportType},
+    pipeline::network::RequestPlanePayloadCodec,
+};
 pub use utils::watch_and_extract_field;
 
 /// Largest publisher ID exactly representable by float64-backed JSON metadata.
@@ -554,6 +557,9 @@ pub enum DiscoverySpec {
         /// Optional execution device for this endpoint instance.
         /// Used by hetero routing to distinguish CPU and CUDA workers.
         device_type: Option<DeviceType>,
+        /// Payload codec accepted by this endpoint's request-plane worker.
+        /// `None` represents a legacy JSON-only worker.
+        request_plane_codec: Option<RequestPlanePayloadCodec>,
     },
     Model {
         namespace: String,
@@ -642,6 +648,7 @@ impl DiscoverySpec {
                 endpoint,
                 transport,
                 device_type,
+                request_plane_codec,
             } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
@@ -649,6 +656,7 @@ impl DiscoverySpec {
                 instance_id: default_instance_id,
                 transport,
                 device_type,
+                request_plane_codec,
             }),
             Self::Model {
                 namespace,
@@ -1308,7 +1316,7 @@ pub trait Discovery: Send + Sync {
 }
 
 #[cfg(test)]
-mod event_channel_scope_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -1347,5 +1355,41 @@ mod event_channel_scope_tests {
         let path = id.to_path();
         assert!(!path.contains("ns.with/slash"));
         assert_eq!(EventSourceInstanceId::from_path(&path).unwrap(), id);
+    }
+
+    #[test]
+    fn endpoint_codec_metadata_round_trips_and_defaults_when_omitted() {
+        let instance = DiscoverySpec::Endpoint {
+            namespace: "default".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: Some(RequestPlanePayloadCodec::Msgpack),
+        }
+        .into_instance(42);
+
+        let mut metadata = serde_json::to_value(&instance).unwrap();
+        assert_eq!(metadata["request_plane_codec"], "msgpack");
+        let round_trip: DiscoveryInstance = serde_json::from_value(metadata.clone()).unwrap();
+        match round_trip {
+            DiscoveryInstance::Endpoint(instance) => assert_eq!(
+                instance.request_plane_codec,
+                Some(RequestPlanePayloadCodec::Msgpack)
+            ),
+            _ => panic!("expected endpoint discovery metadata"),
+        }
+
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("request_plane_codec");
+        let legacy: DiscoveryInstance = serde_json::from_value(metadata).unwrap();
+        match legacy {
+            DiscoveryInstance::Endpoint(instance) => {
+                assert_eq!(instance.request_plane_codec, None)
+            }
+            _ => panic!("expected endpoint discovery metadata"),
+        }
     }
 }

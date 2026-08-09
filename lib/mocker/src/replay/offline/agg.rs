@@ -754,9 +754,7 @@ where
     fn drive_ready_workers(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self
-                .engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+            let effects = self.engine.drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);
