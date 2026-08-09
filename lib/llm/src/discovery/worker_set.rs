@@ -349,7 +349,9 @@ impl WorkerSet {
             videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
             audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
             tensor_engine: lora_context_engine(&self.tensor_engine, &lora_name),
-            realtime_engine: self.realtime_engine.clone(),
+            // Realtime is bidirectional, so the server-streaming LoRA context wrapper cannot
+            // inject the adapter identity. Fail closed instead of serving the base weights.
+            realtime_engine: None,
             generate_engine,
             worker_monitor: self.worker_monitor.clone(),
             prefill_router: self.prefill_router.clone(),
@@ -486,6 +488,22 @@ mod tests {
             observed_lora.lock().unwrap().as_deref(),
             Some("adapter-model")
         );
+    }
+
+    #[test]
+    fn adapter_view_does_not_advertise_unwrapped_realtime_engine() {
+        let mut base = make_worker_set("ns1", "abc123");
+        base.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+
+        let adapter = base.adapter_view(adapter_card);
+
+        assert!(base.has_realtime_engine());
+        assert!(!adapter.has_realtime_engine());
     }
 
     #[test]

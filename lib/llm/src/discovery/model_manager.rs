@@ -169,6 +169,10 @@ pub struct ModelManager {
     discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
+    ///
+    /// NOTE: These shared receivers currently live for the manager lifetime. Rebinding to a new
+    /// endpoint therefore leaves the previous watcher cached; safe eviction requires shared
+    /// ownership tracking because multiple routers may consume the same endpoint watch.
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
     /// Per-endpoint HiCache state and its one Mooncake event subscriber.
