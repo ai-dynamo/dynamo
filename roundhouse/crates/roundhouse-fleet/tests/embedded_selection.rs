@@ -105,8 +105,16 @@ async fn pricing_is_query_only_and_books_no_load() {
     let assembler = assembler_with_turns(4);
     let query = query_from(&assembler);
 
-    let first = fleet.price(&query).await.unwrap().expect("a worker is registered");
-    let second = fleet.price(&query).await.unwrap().expect("a worker is registered");
+    let first = fleet
+        .price(&query)
+        .await
+        .unwrap()
+        .expect("a worker is registered");
+    let second = fleet
+        .price(&query)
+        .await
+        .unwrap()
+        .expect("a worker is registered");
 
     // Distinct pending selections, and neither booked anything -- the whole
     // point of the select/reserve split. An implementation that booked on
@@ -137,7 +145,10 @@ async fn a_quote_can_be_abandoned_for_a_frontier_target() {
     // The fleet is undisturbed: a later turn prices exactly as if the
     // abandoned quote never happened.
     let later = fleet.price(&query_from(&assembler)).await.unwrap().unwrap();
-    assert_eq!(later.effective_prefill_tokens, _abandoned.effective_prefill_tokens);
+    assert_eq!(
+        later.effective_prefill_tokens,
+        _abandoned.effective_prefill_tokens
+    );
     assert_eq!(later.load, Some(0.0));
 }
 

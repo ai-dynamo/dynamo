@@ -75,7 +75,10 @@ impl FleetQuery {
                 // `i64::MAX`.
                 block_hashes: Some(self.block_hashes.iter().map(|hash| *hash as i64).collect()),
                 sequence_hashes: Some(
-                    self.sequence_hashes.iter().map(|hash| *hash as i64).collect(),
+                    self.sequence_hashes
+                        .iter()
+                        .map(|hash| *hash as i64)
+                        .collect(),
                 ),
                 isl_tokens: Some(self.isl_tokens),
                 lora_name: None,
@@ -286,7 +289,11 @@ impl LocalFleet for EmbeddedFleet {
         // Query-only. Nothing is booked, so abandoning this quote in favour of
         // a frontier target costs only a pending-cache entry that expires.
         let selection_id = format!("rh_{}", uuid::Uuid::new_v4().simple());
-        let response = match self.service.select(query.to_select_request(selection_id)).await {
+        let response = match self
+            .service
+            .select(query.to_select_request(selection_id))
+            .await
+        {
             Ok(response) => response,
             // Only "nothing schedulable" and "not warmed up yet" are routing
             // inputs. Everything else is a real fault and must surface --
@@ -436,12 +443,19 @@ mod tests {
 
         let candidate = quote.to_candidate(0.6, 90.0);
         assert_eq!(candidate.expected_prefill_tokens, 512.0);
-        assert_eq!(candidate.expected_cost_usd, 0.0, "local capacity is not priced in dollars");
+        assert_eq!(
+            candidate.expected_cost_usd, 0.0,
+            "local capacity is not priced in dollars"
+        );
         assert_eq!(candidate.load, Some(0.25));
         assert!(candidate.cache_hit_ratio(4_096) > 0.87);
         assert_eq!(
             candidate.target,
-            Target::Local { worker_id: 7, dp_rank: 0, model: "llama".into() }
+            Target::Local {
+                worker_id: 7,
+                dp_rank: 0,
+                model: "llama".into()
+            }
         );
     }
 }

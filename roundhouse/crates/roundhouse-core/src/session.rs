@@ -207,7 +207,10 @@ impl<S: SessionStore> Session<S> {
     /// The projection is updated from what the store actually assigned rather
     /// than from what was submitted, so in-memory state can never claim a
     /// sequence number the log does not have.
-    async fn commit(&mut self, kinds: Vec<SessionEventKind>) -> Result<Vec<SessionEvent>, SessionError> {
+    async fn commit(
+        &mut self,
+        kinds: Vec<SessionEventKind>,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
         let events = self.store.append_events(&self.lease, kinds).await?;
         for event in &events {
             self.state.apply(event);
@@ -452,7 +455,12 @@ mod tests {
             .unwrap();
         let response_id = admission.response_id().clone();
         session
-            .mark_incomplete(&response_id, "partial", IncompleteReason::OwnerLost, Usage::default())
+            .mark_incomplete(
+                &response_id,
+                "partial",
+                IncompleteReason::OwnerLost,
+                Usage::default(),
+            )
             .await
             .unwrap();
 
@@ -475,12 +483,19 @@ mod tests {
             .await
             .unwrap();
         let response_id = admission.response_id().clone();
-        let target = Target::Local { worker_id: 7, dp_rank: 0, model: "llama".into() };
+        let target = Target::Local {
+            worker_id: 7,
+            dp_rank: 0,
+            model: "llama".into(),
+        };
         session
             .record_routing(&response_id, decision_for(target.clone(), 4_096))
             .await
             .unwrap();
-        session.append_output(&response_id, "part one ").await.unwrap();
+        session
+            .append_output(&response_id, "part one ")
+            .await
+            .unwrap();
         session
             .complete(&response_id, "part one and two", Usage::default())
             .await

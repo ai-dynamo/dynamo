@@ -194,7 +194,9 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::SessionNotFound(lease.session_id.clone()))?;
 
         match &record.lease {
-            Some(current) if current.node_id == lease.node_id && !current.is_expired_at(now_ms()) => {
+            Some(current)
+                if current.node_id == lease.node_id && !current.is_expired_at(now_ms()) =>
+            {
                 let renewed = Lease {
                     expires_at_ms: now_ms() + ttl_ms,
                     ..lease.clone()
@@ -229,10 +231,9 @@ impl SessionStore for MemoryStore {
             .get_mut(&lease.session_id)
             .ok_or_else(|| StoreError::SessionNotFound(lease.session_id.clone()))?;
 
-        let held = record
-            .lease
-            .as_ref()
-            .is_some_and(|current| current.node_id == lease.node_id && !current.is_expired_at(now_ms()));
+        let held = record.lease.as_ref().is_some_and(|current| {
+            current.node_id == lease.node_id && !current.is_expired_at(now_ms())
+        });
         if !held {
             return Err(StoreError::LeaseLost {
                 session_id: lease.session_id.clone(),
@@ -315,25 +316,55 @@ mod tests {
     #[tokio::test]
     async fn a_live_lease_blocks_another_node() {
         let (store, sid) = store_with_session().await;
-        assert!(store.acquire_lease(&sid, "node-a", 5_000).await.unwrap().is_some());
-        assert!(store.acquire_lease(&sid, "node-b", 5_000).await.unwrap().is_none());
+        assert!(
+            store
+                .acquire_lease(&sid, "node-a", 5_000)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .acquire_lease(&sid, "node-b", 5_000)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn an_expired_lease_is_takeable_and_the_loser_cannot_append() {
         let (store, sid) = store_with_session().await;
-        let stale = store.acquire_lease(&sid, "node-a", 5_000).await.unwrap().unwrap();
+        let stale = store
+            .acquire_lease(&sid, "node-a", 5_000)
+            .await
+            .unwrap()
+            .unwrap();
 
         store.expire_lease_now(&sid).await;
-        let fresh = store.acquire_lease(&sid, "node-b", 5_000).await.unwrap().unwrap();
+        let fresh = store
+            .acquire_lease(&sid, "node-b", 5_000)
+            .await
+            .unwrap()
+            .unwrap();
 
         // The successor writes; the displaced owner is fenced out.
         store
-            .append_events(&fresh, vec![SessionEventKind::Error { message: "ok".into() }])
+            .append_events(
+                &fresh,
+                vec![SessionEventKind::Error {
+                    message: "ok".into(),
+                }],
+            )
             .await
             .unwrap();
         let err = store
-            .append_events(&stale, vec![SessionEventKind::Error { message: "no".into() }])
+            .append_events(
+                &stale,
+                vec![SessionEventKind::Error {
+                    message: "no".into(),
+                }],
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::LeaseLost { .. }));
@@ -342,14 +373,22 @@ mod tests {
     #[tokio::test]
     async fn sequence_numbers_are_contiguous_and_replay_is_gapless() {
         let (store, sid) = store_with_session().await;
-        let lease = store.acquire_lease(&sid, "node-a", 5_000).await.unwrap().unwrap();
+        let lease = store
+            .acquire_lease(&sid, "node-a", 5_000)
+            .await
+            .unwrap()
+            .unwrap();
 
         let first = store
             .append_events(
                 &lease,
                 vec![
-                    SessionEventKind::SessionCreated { model_policy: "affinity".into() },
-                    SessionEventKind::Error { message: "one".into() },
+                    SessionEventKind::SessionCreated {
+                        model_policy: "affinity".into(),
+                    },
+                    SessionEventKind::Error {
+                        message: "one".into(),
+                    },
                 ],
             )
             .await
@@ -357,7 +396,12 @@ mod tests {
         assert_eq!(first.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
 
         let second = store
-            .append_events(&lease, vec![SessionEventKind::Error { message: "two".into() }])
+            .append_events(
+                &lease,
+                vec![SessionEventKind::Error {
+                    message: "two".into(),
+                }],
+            )
             .await
             .unwrap();
         assert_eq!(second[0].seq, 3);
@@ -371,11 +415,19 @@ mod tests {
     #[tokio::test]
     async fn renew_fails_once_the_lease_was_taken_over() {
         let (store, sid) = store_with_session().await;
-        let lease = store.acquire_lease(&sid, "node-a", 5_000).await.unwrap().unwrap();
+        let lease = store
+            .acquire_lease(&sid, "node-a", 5_000)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(store.renew_lease(&lease, 5_000).await.unwrap().is_some());
 
         store.expire_lease_now(&sid).await;
-        store.acquire_lease(&sid, "node-b", 5_000).await.unwrap().unwrap();
+        store
+            .acquire_lease(&sid, "node-b", 5_000)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(store.renew_lease(&lease, 5_000).await.unwrap().is_none());
     }
 }

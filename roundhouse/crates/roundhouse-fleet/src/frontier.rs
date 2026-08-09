@@ -257,6 +257,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(chunks[0], FrontierChunk::OutputText("hello".into()));
-        assert!(matches!(chunks[1], FrontierChunk::Done { output_tokens: 5, .. }));
+        assert!(matches!(
+            chunks[1],
+            FrontierChunk::Done {
+                output_tokens: 5,
+                ..
+            }
+        ));
     }
 }

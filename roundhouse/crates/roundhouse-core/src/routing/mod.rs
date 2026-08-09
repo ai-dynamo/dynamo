@@ -74,7 +74,9 @@ impl Target {
     /// be recognized as warm regardless of rank.
     pub fn ledger_key(&self) -> String {
         match self {
-            Target::Local { worker_id, model, .. } => format!("local:{model}:{worker_id}"),
+            Target::Local {
+                worker_id, model, ..
+            } => format!("local:{model}:{worker_id}"),
             Target::Frontier { provider, model } => format!("frontier:{provider}:{model}"),
         }
     }
@@ -206,9 +208,21 @@ mod tests {
 
     #[test]
     fn ledger_key_ignores_dp_rank_but_separates_workers() {
-        let a = Target::Local { worker_id: 1, dp_rank: 0, model: "llama".into() };
-        let b = Target::Local { worker_id: 1, dp_rank: 3, model: "llama".into() };
-        let c = Target::Local { worker_id: 2, dp_rank: 0, model: "llama".into() };
+        let a = Target::Local {
+            worker_id: 1,
+            dp_rank: 0,
+            model: "llama".into(),
+        };
+        let b = Target::Local {
+            worker_id: 1,
+            dp_rank: 3,
+            model: "llama".into(),
+        };
+        let c = Target::Local {
+            worker_id: 2,
+            dp_rank: 0,
+            model: "llama".into(),
+        };
         assert_eq!(a.ledger_key(), b.ledger_key());
         assert_ne!(a.ledger_key(), c.ledger_key());
     }

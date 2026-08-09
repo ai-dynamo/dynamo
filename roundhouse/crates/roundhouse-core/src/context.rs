@@ -155,11 +155,8 @@ impl TokenBuffer {
     /// Recompute every hash from scratch. Reference implementation for tests.
     #[cfg(test)]
     fn recomputed_from_scratch(&self) -> (Vec<LocalBlockHash>, Vec<SequenceHash>) {
-        let blocks = compute_block_hash_for_seq(
-            &self.tokens,
-            self.block_size,
-            BlockHashOptions::default(),
-        );
+        let blocks =
+            compute_block_hash_for_seq(&self.tokens, self.block_size, BlockHashOptions::default());
         let mut chain: Vec<SequenceHash> = Vec::with_capacity(blocks.len());
         for block_hash in &blocks {
             let next = match chain.last() {
@@ -238,7 +235,10 @@ mod tests {
         let (expected_blocks, expected_chain) = buffer.recomputed_from_scratch();
         assert_eq!(buffer.block_hashes(), expected_blocks.as_slice());
         assert_eq!(buffer.sequence_hashes(), expected_chain.as_slice());
-        assert_eq!(buffer.block_hashes().len(), buffer.isl_tokens() / BLOCK as usize);
+        assert_eq!(
+            buffer.block_hashes().len(),
+            buffer.isl_tokens() / BLOCK as usize
+        );
     }
 
     #[test]
@@ -306,11 +306,12 @@ mod tests {
     fn rehydrating_from_items_reproduces_the_buffer_exactly() {
         let mut original = ContextAssembler::new(ByteTokenizer, BLOCK);
         for turn in 0..6 {
-            original.push(Item::user_text(format!("turn {turn} with some padding text")));
+            original.push(Item::user_text(format!(
+                "turn {turn} with some padding text"
+            )));
         }
 
-        let restored =
-            ContextAssembler::rehydrate(ByteTokenizer, BLOCK, original.items().to_vec());
+        let restored = ContextAssembler::rehydrate(ByteTokenizer, BLOCK, original.items().to_vec());
 
         // This is the failover path: a successor node replays the item log and
         // must arrive at byte-identical routing inputs.

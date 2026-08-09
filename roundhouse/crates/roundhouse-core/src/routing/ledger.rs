@@ -261,20 +261,33 @@ mod tests {
     #[test]
     fn an_unseen_target_has_no_warm_prefix() {
         let ledger = CacheLedger::new();
-        assert_eq!(ledger.expected_cached_tokens(&frontier("anthropic"), 0, 5_000), 0.0);
+        assert_eq!(
+            ledger.expected_cached_tokens(&frontier("anthropic"), 0, 5_000),
+            0.0
+        );
     }
 
     #[test]
     fn a_warm_prefix_is_capped_by_the_current_prompt_length() {
         let mut ledger = CacheLedger::new();
         let target = frontier("anthropic");
-        ledger.register(&target, CacheModel::Deterministic { ttl_ms: 5 * MINUTE }, ProviderPricing::free());
+        ledger.register(
+            &target,
+            CacheModel::Deterministic { ttl_ms: 5 * MINUTE },
+            ProviderPricing::free(),
+        );
         ledger.record(&target, 0, 4_000);
 
         // Prompt shrank below what we last sent; only the overlap can be warm.
-        assert_eq!(ledger.expected_cached_tokens(&target, MINUTE, 1_000), 1_000.0);
+        assert_eq!(
+            ledger.expected_cached_tokens(&target, MINUTE, 1_000),
+            1_000.0
+        );
         // Prompt grew; the warm part is still the earlier prefix.
-        assert_eq!(ledger.expected_cached_tokens(&target, MINUTE, 9_000), 4_000.0);
+        assert_eq!(
+            ledger.expected_cached_tokens(&target, MINUTE, 9_000),
+            4_000.0
+        );
     }
 
     #[test]
@@ -287,7 +300,11 @@ mod tests {
             cache_write_per_mtok_usd: 3.75,
             output_per_mtok_usd: 15.0,
         };
-        ledger.register(&target, CacheModel::Deterministic { ttl_ms: 5 * MINUTE }, pricing);
+        ledger.register(
+            &target,
+            CacheModel::Deterministic { ttl_ms: 5 * MINUTE },
+            pricing,
+        );
 
         // Never seen: the whole prompt is a cache write.
         let cold = ledger.estimate_cost_usd(&target, 0, 100_000, 500);
@@ -304,7 +321,11 @@ mod tests {
     fn invalidation_clears_warm_prefixes_after_a_compaction() {
         let mut ledger = CacheLedger::new();
         let target = frontier("anthropic");
-        ledger.register(&target, CacheModel::Deterministic { ttl_ms: 5 * MINUTE }, ProviderPricing::free());
+        ledger.register(
+            &target,
+            CacheModel::Deterministic { ttl_ms: 5 * MINUTE },
+            ProviderPricing::free(),
+        );
         ledger.record(&target, 0, 50_000);
         assert!(ledger.expected_cached_tokens(&target, MINUTE, 50_000) > 0.0);
 
@@ -316,10 +337,20 @@ mod tests {
     fn expiry_returns_the_target_to_cold_pricing() {
         let mut ledger = CacheLedger::new();
         let target = frontier("anthropic");
-        ledger.register(&target, CacheModel::Deterministic { ttl_ms: 5 * MINUTE }, ProviderPricing::free());
+        ledger.register(
+            &target,
+            CacheModel::Deterministic { ttl_ms: 5 * MINUTE },
+            ProviderPricing::free(),
+        );
         ledger.record(&target, 0, 10_000);
 
-        assert_eq!(ledger.expected_cached_tokens(&target, 4 * MINUTE, 10_000), 10_000.0);
-        assert_eq!(ledger.expected_cached_tokens(&target, 6 * MINUTE, 10_000), 0.0);
+        assert_eq!(
+            ledger.expected_cached_tokens(&target, 4 * MINUTE, 10_000),
+            10_000.0
+        );
+        assert_eq!(
+            ledger.expected_cached_tokens(&target, 6 * MINUTE, 10_000),
+            0.0
+        );
     }
 }

@@ -114,7 +114,12 @@ impl RoutingPolicy for AffinityPolicy {
             return Err(RoutingError::NoViableCandidate);
         }
 
-        let prefill = normalize(&pool.iter().map(|c| c.expected_prefill_tokens).collect::<Vec<_>>());
+        let prefill = normalize(
+            &pool
+                .iter()
+                .map(|c| c.expected_prefill_tokens)
+                .collect::<Vec<_>>(),
+        );
         let cost = normalize(&pool.iter().map(|c| c.expected_cost_usd).collect::<Vec<_>>());
         let ttft = normalize(&pool.iter().map(|c| c.expected_ttft_ms).collect::<Vec<_>>());
 
@@ -172,7 +177,7 @@ impl EscalationPolicy {
         // Never audit the opening turn: there is no history to check yet, and
         // paying frontier prices for turn zero of every session is exactly the
         // cost this design exists to avoid.
-        turn_index > 0 && turn_index % self.audit_every == 0
+        turn_index > 0 && turn_index.is_multiple_of(self.audit_every)
     }
 }
 
