@@ -217,35 +217,6 @@ async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
             assert_anthropic_400(response, "tools[0].input_schema: field required").await;
         }
 
-        let response = svc
-            .client
-            .post(format!("{}/v1/messages/count_tokens", svc.base_url))
-            .json(&json!({
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "ping"}],
-                "tools": [{
-                    "type": "web_search_20260209",
-                    "name": "web_search"
-                }]
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_anthropic_501(response, "server tool type \"web_search_20260209\"").await;
-
-        let response = svc
-            .client
-            .post(format!("{}/v1/messages/count_tokens", svc.base_url))
-            .json(&json!({
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "ping"}],
-                "tools": [{"type": "custom", "name": "get_weather"}]
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_anthropic_400(response, "tools[0].input_schema: field required").await;
-
         for request_type in [RequestType::Unary, RequestType::Stream] {
             for (error_type, expected) in [
                 (ErrorType::NotImplemented, 1),

@@ -750,13 +750,8 @@ async fn handler_count_tokens(
             error.message(),
         ));
     }
-    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
-    }
+    // Count Tokens does not convert or execute tools, so keep tool definitions
+    // permissive here. TODO: Add validation when Anthropic server tools are supported.
     if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
