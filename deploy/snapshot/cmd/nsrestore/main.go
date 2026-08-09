@@ -23,8 +23,8 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
-	inheritedLDPath := flag.String("inherited-ld-path", "", "LD_LIBRARY_PATH inherited from the agent process")
-	inheritedPath := flag.String("inherited-path", "", "PATH inherited from the agent process")
+	inheritedLDPath := flag.String("inherited-ld-path", "", "agent's LD_LIBRARY_PATH to prepend to the bundle lib path (empty = bundle only)")
+	inheritedPath := flag.String("inherited-path", "", "agent's PATH to append after the bundle dir (empty = bundle only)")
 	flag.Parse()
 
 	if *checkpointPath == "" {

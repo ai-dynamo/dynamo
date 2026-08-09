@@ -192,20 +192,19 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 // to the injected bundle. The dump-time libdir points to the agent filesystem and
 // is unreachable inside the placeholder namespace; the override replaces it.
 // Returns the path of the written override file.
-// When configFilePath is nil (no checkpoint criu.conf), the override is written from
-// an empty base — overrideLibDir appends a libdir line, producing a minimal config.
-func rewriteCRIULibDir(configFilePath *string, workDir, criuBundleDir string) (string, error) {
+// existingConfigFile is nil when the checkpoint was dumped without a criu.conf;
+// in that case the override is written from an empty base so CRIU always finds
+// its plugins at the injected path.
+func rewriteCRIULibDir(existingConfigFile *string, workDir, criuBundleDir string) (string, error) {
 	if workDir == "" {
 		return "", fmt.Errorf("rewriteCRIULibDir: workDir is required")
 	}
 
 	var baseConf string
-	// configFilePath is nil when the checkpoint was dumped without a criu.conf.
-	// We still write the libdir override from an empty base in that case.
-	if configFilePath != nil {
-		data, err := os.ReadFile(*configFilePath)
+	if existingConfigFile != nil {
+		data, err := os.ReadFile(*existingConfigFile)
 		if err != nil {
-			return "", fmt.Errorf("read criu config %s: %w", *configFilePath, err)
+			return "", fmt.Errorf("read criu config %s: %w", *existingConfigFile, err)
 		}
 		baseConf = string(data)
 	}
