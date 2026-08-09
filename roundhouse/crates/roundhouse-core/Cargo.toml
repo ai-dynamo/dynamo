@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "roundhouse-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session state machine, context assembly, and routing policy for Roundhouse"
+
+[dependencies]
+# Default features only (`default = []`), so this is the protocols + hashing
+# surface with no axum/zmq/reqwest and no `dynamo-runtime`. `roundhouse-fleet`
+# is what turns on `standalone-selection`.
+dynamo-kv-router = { workspace = true, default-features = false }
+dynamo-tokens = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

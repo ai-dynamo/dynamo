@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "roundhouse-fleet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local Dynamo fleet and frontier-provider execution backends for Roundhouse"
+
+[dependencies]
+roundhouse-core = { workspace = true }
+
+# `standalone-selection` is what provides the embedded `SelectionService`.
+# It pulls axum/reqwest/zmq (system libzmq) but still no `dynamo-runtime`.
+dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-tokens = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

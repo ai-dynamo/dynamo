@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "roundhouse-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP/SSE transport and binary for Roundhouse"
+
+[[bin]]
+name = "roundhouse"
+path = "src/main.rs"
+
+[dependencies]
+roundhouse-core = { workspace = true }
+roundhouse-fleet = { workspace = true }
+roundhouse-store-redis = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
