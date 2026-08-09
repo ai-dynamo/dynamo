@@ -90,7 +90,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := hostInspectDuration + injectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
+	restoreDuration := hostInspectDuration + injectDuration + result.TotalDuration()
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
 			"duration": restoreDuration.String(),
