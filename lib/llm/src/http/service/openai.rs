@@ -176,6 +176,21 @@ fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
         .unwrap_or_else(|| classify_error_for_metrics(response.0, &response.1.message))
 }
 
+fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
+    const CONTEXT: &str = "Failed to convert responses request";
+
+    match error.downcast_ref::<ResponsesConversionError>() {
+        Some(ResponsesConversionError::InvalidArgument(message)) => ErrorMessage::from_anyhow(
+            invalid_argument(format!("{CONTEXT}: {message}")).into(),
+            CONTEXT,
+        ),
+        Some(ResponsesConversionError::NotImplemented(message)) => {
+            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        }
+        None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
+}
+
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
 /// `Backend(InvalidArgument)`; both variants are 400-worthy.
@@ -3071,17 +3086,7 @@ async fn responses(
             error = %e,
             "Failed to convert NvCreateResponse to UnifiedRequest",
         );
-        let err_response = match e.downcast_ref::<ResponsesConversionError>() {
-            Some(ResponsesConversionError::NotImplemented(message)) => {
-                ErrorMessage::not_implemented_error(format!(
-                    "{VALIDATION_PREFIX}Failed to convert responses request: {message}"
-                ))
-            }
-            _ => ErrorMessage::from_anyhow(
-                invalid_argument(format!("Failed to convert responses request: {e}")).into(),
-                "Failed to convert responses request",
-            ),
-        };
+        let err_response = responses_conversion_error_response(e);
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -6313,6 +6318,20 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn untyped_responses_conversion_errors_remain_internal() {
+        let response = responses_conversion_error_response(anyhow::anyhow!(
+            "internal response conversion details"
+        ));
+
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "Failed to convert responses request");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Internal
         );
     }
 
