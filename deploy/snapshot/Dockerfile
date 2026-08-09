@@ -250,7 +250,7 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 
 # ip and iptables are forked by criu during network-namespace restore; tar by
 # runtime.ApplyRootfsDiff. All three resolve through PATH inside the namespace.
-RUN cp "$(command -v ip)" "$(command -v iptables)" "$(command -v tar)" /snapshot-binaries/ \
+RUN cp -L "$(command -v ip)" "$(command -v iptables)" "$(command -v tar)" /snapshot-binaries/ \
     && chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
                 /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
                 /snapshot-binaries/ip /snapshot-binaries/iptables /snapshot-binaries/tar

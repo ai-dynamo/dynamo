@@ -50,7 +50,7 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounter Mounter) (int, error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounter Mounter) (placeholderPID int, retErr error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -75,8 +75,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	injectDuration := time.Since(injectStart)
 	defer func() {
-		if cleanupErr := mp.Unmount(ctx); cleanupErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if cleanupErr := mp.Unmount(cleanupCtx); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
+			if retErr == nil {
+				retErr = fmt.Errorf("unmount agent bundle: %w", cleanupErr)
+			}
 		}
 	}()
 

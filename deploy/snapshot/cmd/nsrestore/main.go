@@ -79,7 +79,11 @@ func useInjectedBundle(inheritedLDPath, inheritedPATH string) error {
 	if err := os.Setenv("LD_LIBRARY_PATH", libDir); err != nil {
 		return err
 	}
-	if err := os.Setenv("PATH", bundleDir+":"+inheritedPATH); err != nil {
+	newPATH := bundleDir
+	if inheritedPATH != "" {
+		newPATH = bundleDir + ":" + inheritedPATH
+	}
+	if err := os.Setenv("PATH", newPATH); err != nil {
 		return err
 	}
 	cuda.SetHelperBinaryPath(filepath.Join(bundleDir, "cuda-checkpoint-helper"))

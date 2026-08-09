@@ -199,20 +199,24 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 // from the injected bundle rather than the dump-time path
 // (/usr/local/lib/snapshot/criu-plugins), which only exists on the agent, not in
 // the placeholder namespace. The override is written to the work dir (runtime state)
-// so the original dump-time config is left intact.
+// so the original dump-time config is left intact. When no checkpoint criu.conf
+// exists (criuOpts.ConfigFile == nil), an override is still written from an empty
+// base so CRIU always finds its plugins at the injected path.
 func rewriteCRIULibDir(criuOpts *criurpc.CriuOpts, workDir, criuBundleDir string, log logr.Logger) error {
-	if criuOpts.ConfigFile == nil {
-		return nil
-	}
 	if workDir == "" {
 		log.Info("criu WorkDir unset; skipping libdir override — criu will use dump-time plugin path")
 		return nil
 	}
-	data, err := os.ReadFile(criuOpts.GetConfigFile())
-	if err != nil {
-		log.Error(err, "failed to read criu config file; skipping libdir override", "path", criuOpts.GetConfigFile())
-		return nil
+
+	var data []byte
+	if criuOpts.ConfigFile != nil {
+		var err error
+		data, err = os.ReadFile(criuOpts.GetConfigFile())
+		if err != nil {
+			return fmt.Errorf("read criu config file %s: %w", criuOpts.GetConfigFile(), err)
+		}
 	}
+
 	overridePath := filepath.Join(workDir, "criu-restore.conf")
 	conf := overrideLibDir(string(data), filepath.Join(criuBundleDir, "criu-plugins"))
 	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
