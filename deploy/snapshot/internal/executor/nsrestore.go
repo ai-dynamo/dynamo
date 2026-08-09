@@ -21,8 +21,7 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
-	// BundleDir is the path where the agent's binary bundle is mounted inside
-	// this namespace. Defaults to /tmp/snapshot-binaries if empty.
+	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
 

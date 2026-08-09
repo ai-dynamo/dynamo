@@ -114,7 +114,7 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
-	injector, err := nsmount.New("/snapshot-binaries", "/tmp/snapshot-binaries", log)
+	injector, err := nsmount.New(nsmount.SnapshotBinSrc, nsmount.SnapshotBinDst, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create binary injector: %w", err)
 	}

@@ -15,6 +15,13 @@ import (
 	"github.com/go-logr/logr"
 )
 
+const (
+	// SnapshotBinSrc is the agent-side directory containing the binary bundle.
+	SnapshotBinSrc = "/snapshot-binaries"
+	// SnapshotBinDst is the mount destination inside the placeholder namespace.
+	SnapshotBinDst = "/tmp/snapshot-binaries"
+)
+
 // MountPoint represents an active bind-mount of a directory inside a foreign
 // namespace. The caller must call Unmount when done.
 type MountPoint interface {

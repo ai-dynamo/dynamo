@@ -12,11 +12,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 )
-
-// bundleDir is the mount point where the agent injects its binary bundle into
-// this namespace. Must match the dst passed to nsmount.New in the agent's controller.
-const bundleDir = "/tmp/snapshot-binaries"
 
 func main() {
 	// Logs go to stderr so stdout is reserved for the structured result.
@@ -26,13 +23,14 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
 	flag.Parse()
 
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
 
-	if err := useInjectedBundle(os.Getenv("LD_LIBRARY_PATH"), os.Getenv("PATH")); err != nil {
+	if err := useInjectedBundle(*bundleDir); err != nil {
 		fatal(log, err, "failed to point lookups at the injected bundle")
 	}
 
@@ -41,7 +39,7 @@ func main() {
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
-		BundleDir:      bundleDir,
+		BundleDir:      *bundleDir,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)
@@ -65,25 +63,17 @@ func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{})
 // useInjectedBundle points every binary and library lookup at the agent bundle
 // mounted into this namespace. The placeholder ships no restore tooling, so
 // criu, its shared libraries, and the binaries criu forks (ip, iptables) must
-// all resolve from the mount.
+// all resolve from the bundle.
 //
 // These are set on nsrestore's own environment rather than per-command: criu is
 // launched by go-criu, and criu in turn forks ip/iptables, so neither child is
 // reachable through an exec.Cmd we control. Both inherit this environment.
 // nsrestore itself is a static binary, so LD_LIBRARY_PATH does not affect it.
-func useInjectedBundle(inheritedLDPath, inheritedPATH string) error {
-	libDir := filepath.Join(bundleDir, "lib")
-	if inheritedLDPath != "" {
-		libDir += ":" + inheritedLDPath
-	}
-	if err := os.Setenv("LD_LIBRARY_PATH", libDir); err != nil {
+func useInjectedBundle(bundleDir string) error {
+	if err := os.Setenv("LD_LIBRARY_PATH", filepath.Join(bundleDir, "lib")); err != nil {
 		return err
 	}
-	newPATH := bundleDir
-	if inheritedPATH != "" {
-		newPATH = bundleDir + ":" + inheritedPATH
-	}
-	if err := os.Setenv("PATH", newPATH); err != nil {
+	if err := os.Setenv("PATH", bundleDir); err != nil {
 		return err
 	}
 	cuda.SetHelperBinaryPath(filepath.Join(bundleDir, "cuda-checkpoint-helper"))
