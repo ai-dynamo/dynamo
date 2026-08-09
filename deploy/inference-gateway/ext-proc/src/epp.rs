@@ -166,6 +166,7 @@ struct RoutingReservationGuard {
     prefill_router: Arc<PrefillRouter>,
     decode_router: Arc<KvRouter>,
     reservation_id: String,
+    runtime_handle: tokio::runtime::Handle,
     armed: bool,
 }
 
@@ -183,11 +184,13 @@ impl RoutingReservationGuard {
         prefill_router: Arc<PrefillRouter>,
         decode_router: Arc<KvRouter>,
         reservation_id: String,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
             prefill_router,
             decode_router,
             reservation_id,
+            runtime_handle,
             armed: true,
         }
     }
@@ -195,6 +198,16 @@ impl RoutingReservationGuard {
     fn disarm(&mut self) {
         self.armed = false;
     }
+}
+
+fn spawn_reservation_cleanup(
+    runtime_handle: &tokio::runtime::Handle,
+    cleanup: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    // A reservation guard can be dropped by a caller that is no longer
+    // entered into a Tokio runtime. The captured server runtime remains the
+    // cleanup executor in that case.
+    drop(runtime_handle.spawn(cleanup));
 }
 
 impl Drop for RoutingReservationGuard {
@@ -205,7 +218,7 @@ impl Drop for RoutingReservationGuard {
         let prefill_router = self.prefill_router.clone();
         let decode_router = self.decode_router.clone();
         let reservation_id = std::mem::take(&mut self.reservation_id);
-        tokio::spawn(async move {
+        spawn_reservation_cleanup(&self.runtime_handle, async move {
             match tokio::time::timeout(
                 BOOKKEEPING_TIMEOUT,
                 free_request_from_routers(prefill_router, decode_router, reservation_id.clone()),
@@ -1136,6 +1149,7 @@ impl EndpointPicker for Router {
             self.prefill_router.clone(),
             self.decode_router.clone(),
             reservation_id.clone(),
+            self.runtime.secondary(),
         );
 
         // Try prefill routing first (disaggregated mode).
@@ -1320,6 +1334,27 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_runtime_handle_spawns_cleanup_from_plain_thread() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let runtime_handle = runtime.handle().clone();
+        let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
+
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            spawn_reservation_cleanup(&runtime_handle, async move {
+                cleanup_tx.send(()).unwrap();
+            });
+        })
+        .join()
+        .unwrap();
+
+        runtime.block_on(cleanup_rx).unwrap();
+    }
 
     #[test]
     fn tenant_header_overrides_body_cache_namespace() {

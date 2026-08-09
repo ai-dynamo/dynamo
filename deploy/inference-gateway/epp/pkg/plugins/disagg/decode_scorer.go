@@ -229,16 +229,62 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
 func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
 	return &DynDecodeScorer{
-		typedName:   plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState: plugins.NewPluginState(ctx),
+		typedName:           plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
+		pluginState:         plugins.NewPluginState(ctx),
+		markPrefillComplete: dynscorer.CallMarkPrefillComplete,
+		freeRequest:         dynscorer.CallFreeRequest,
 	}
+}
+
+type prefillMarkAttemptState struct {
+	stopContextCleanup func() bool
 }
 
 // DynDecodeScorer is a scorer plugin for the decode scheduling profile.
 type DynDecodeScorer struct {
-	typedName      plugins.TypedName
-	pluginState    *plugins.PluginState
-	firstTokenSeen sync.Map
+	typedName            plugins.TypedName
+	pluginState          *plugins.PluginState
+	prefillMarkAttempted sync.Map
+	markPrefillComplete  func(string) error
+	freeRequest          func(string) error
+}
+
+func (s *DynDecodeScorer) beginPrefillMarkAttempt(ctx context.Context, bookingID string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+
+	state := &prefillMarkAttemptState{}
+	state.stopContextCleanup = context.AfterFunc(ctx, func() {
+		// CompareAndDelete prevents an old cancelled callback from deleting a
+		// newer lifecycle state if a booking ID is ever reused.
+		s.prefillMarkAttempted.CompareAndDelete(bookingID, state)
+	})
+
+	if _, alreadyAttempted := s.prefillMarkAttempted.LoadOrStore(bookingID, state); alreadyAttempted {
+		state.stopContextCleanup()
+		return false
+	}
+
+	// Cancellation can race with registering the callback and publishing the
+	// state. Remove the exact state synchronously so a cancelled queued chunk
+	// cannot leave a marker behind or initiate a new FFI call.
+	if ctx.Err() != nil {
+		state.stopContextCleanup()
+		s.prefillMarkAttempted.CompareAndDelete(bookingID, state)
+		return false
+	}
+
+	return true
+}
+
+func (s *DynDecodeScorer) clearPrefillMarkAttempt(bookingID string) {
+	stateValue, ok := s.prefillMarkAttempted.LoadAndDelete(bookingID)
+	if !ok {
+		return
+	}
+	state := stateValue.(*prefillMarkAttemptState)
+	state.stopContextCleanup()
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -438,8 +484,8 @@ func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.
 	// A single terminal callback needs only free: free is idempotent and also
 	// releases any remaining prefill load.
 	if response.EndOfStream {
-		s.firstTokenSeen.Delete(bookingID)
-		if err := dynscorer.CallFreeRequest(bookingID); err != nil {
+		s.clearPrefillMarkAttempt(bookingID)
+		if err := s.freeRequest(bookingID); err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to free request",
 				"requestID", request.RequestId)
 			if prefillReservationID(request) == bookingID {
@@ -454,9 +500,11 @@ func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.
 
 	// The framework does not expose token contents here. Treat the first
 	// non-terminal body callback as the earliest observable prefill completion.
-	if _, alreadySeen := s.firstTokenSeen.LoadOrStore(bookingID, true); !alreadySeen {
-		if err := dynscorer.CallMarkPrefillComplete(bookingID); err != nil {
-			s.firstTokenSeen.Delete(bookingID)
+	// The marker records an attempt, not success: a failed synchronous FFI call
+	// must not be retried on every streamed chunk. End-of-stream free releases
+	// any remaining prefill load.
+	if s.beginPrefillMarkAttempt(ctx, bookingID) {
+		if err := s.markPrefillComplete(bookingID); err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
 				"requestID", request.RequestId)
 		} else {
@@ -464,5 +512,4 @@ func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.
 				"requestID", request.RequestId)
 		}
 	}
-
 }
