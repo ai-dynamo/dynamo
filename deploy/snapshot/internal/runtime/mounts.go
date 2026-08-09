@@ -129,9 +129,9 @@ func RemountProcSys(rw bool) error {
 func remountProcSys(rw bool, mounted bool, currentFlags uintptr, mount func(string, string, string, uintptr, string) error) error {
 	const target = "/proc/sys"
 	// A bind remount requires a mount root, which privileged OCI containers
-	// do not create for readonlyPaths.
+	// do not create for readonlyPaths. Make it recursive to preserve descendants.
 	if rw && !mounted {
-		if err := mount(target, target, "", syscall.MS_BIND, ""); err != nil {
+		if err := mount(target, target, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 			return fmt.Errorf("failed to bind mount %s for rw remount: %w", target, err)
 		}
 	}

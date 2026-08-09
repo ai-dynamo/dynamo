@@ -34,9 +34,26 @@ func TestRemountProcSys(t *testing.T) {
 			name: "read-write creates bind mount",
 			rw:   true,
 			wantCalls: []mountCall{
-				{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND},
+				{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND | syscall.MS_REC},
 				{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT},
 			},
+		},
+		{
+			name:      "read-write bind mount error",
+			rw:        true,
+			failCall:  1,
+			wantCalls: []mountCall{{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND | syscall.MS_REC}},
+			wantError: "failed to bind mount /proc/sys for rw remount: invalid argument",
+		},
+		{
+			name:     "read-write remount error after creating bind mount",
+			rw:       true,
+			failCall: 2,
+			wantCalls: []mountCall{
+				{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND | syscall.MS_REC},
+				{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT},
+			},
+			wantError: "failed to remount /proc/sys rw: invalid argument",
 		},
 		{
 			name:    "read-only",
