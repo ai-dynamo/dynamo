@@ -919,7 +919,10 @@ mod effective_config_tests {
             ],
             || {
                 let cfg = DistributedConfig::from_settings();
-                assert!(matches!(cfg.discovery_backend, DiscoveryBackend::KvStore(_)));
+                assert!(matches!(
+                    cfg.discovery_backend,
+                    DiscoveryBackend::KvStore(_)
+                ));
                 assert_eq!(cfg.request_plane, RequestPlaneMode::Tcp);
                 assert_eq!(cfg.event_transport_kind, EventTransportKind::Zmq);
                 // ZMQ event plane + TCP request plane + no NATS_SERVER => no NATS client.
@@ -937,7 +940,10 @@ mod effective_config_tests {
             ],
             || {
                 let cfg = DistributedConfig::from_settings();
-                assert!(matches!(cfg.discovery_backend, DiscoveryBackend::Kubernetes));
+                assert!(matches!(
+                    cfg.discovery_backend,
+                    DiscoveryBackend::Kubernetes
+                ));
             },
         );
 
