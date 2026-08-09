@@ -456,7 +456,7 @@ where
         let client = endpoint
             .client()
             .await?
-            .with_admitted_instances_and_cancellation(admitted_ids, cancellation);
+            .with_admitted_instances_and_cancellation(admitted_ids, cancellation.clone());
         let instance_watcher = client.instance_avail_watcher();
         tracing::debug!(
             model_name = card.name(),
@@ -467,6 +467,7 @@ where
         let namespace = mcid.namespace.clone();
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
+        worker_set.set_lifecycle_cancellation(cancellation);
         worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -1211,19 +1212,30 @@ where
     fn project_lora(
         &self,
         endpoint_id: &EndpointId,
-        reset_worker_ids: &HashSet<u64>,
+        removed_worker_ids: &HashSet<u64>,
         desired: &[(ModelCardInstanceId, ModelDeploymentCard)],
     ) {
         use crate::kv_router::protocols::WorkerWithDpRank;
 
         let tracker = self.manager.lora_state_tracker_for(endpoint_id);
-        for worker_id in reset_worker_ids {
+        for worker_id in removed_worker_ids {
             tracker.handle_worker_removal(WorkerWithDpRank::new(*worker_id, 0));
         }
-        let mut desired = desired.to_vec();
-        desired.sort_by_key(|(mcid, _)| (mcid.model_suffix.is_some(), mcid.to_path()));
+
+        let mut projections = HashMap::new();
         for (mcid, card) in desired {
-            seed_lora_state_from_card(&tracker, WorkerWithDpRank::new(mcid.instance_id, 0), &card);
+            let projection = projections
+                .entry(WorkerWithDpRank::new(mcid.instance_id, 0))
+                .or_insert_with(|| (None, Vec::new()));
+            if let Some(lora) = card.lora.as_ref() {
+                projection.1.push(lora.clone());
+            } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+                projection.0 = Some(capacity);
+            }
+        }
+        for (worker, (base_capacity, mut loras)) in projections {
+            loras.sort_by(|left, right| left.name.cmp(&right.name));
+            tracker.replace_worker_projection(worker, base_capacity, &loras);
         }
     }
 }
@@ -1312,8 +1324,8 @@ fn canonicalize_json(value: &mut serde_json::Value) {
 ///   adapter load. Returns `None`.
 /// - Otherwise (non-LoRA worker): no-op, returns `None`.
 ///
-/// The controller clears and rebuilds an endpoint's desired projection on every source-card
-/// change, so removals do not depend on separately remembered pending additions.
+/// Used by focused unit tests for the individual MDC projections consumed by the controller.
+#[cfg(test)]
 fn seed_lora_state_from_card(
     state_tracker: &crate::lora::LoraStateTracker,
     worker: crate::kv_router::protocols::WorkerWithDpRank,

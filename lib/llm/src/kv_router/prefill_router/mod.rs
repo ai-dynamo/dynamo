@@ -381,15 +381,15 @@ where
                 session_affinity.as_ref().clone(),
             );
         }
-        let binding = self
-            .binding
-            .load_full()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+        let Some(binding) = self.binding.load_full() else {
+            return next.generate(context.map(|_| req)).await;
+        };
         let router = &binding.router;
+        let endpoint_id = &binding.endpoint_id;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target)
+                    self.prepare_prefill_dispatch(request, target, endpoint_id)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
@@ -562,19 +562,16 @@ where
         &self,
         request: &mut PreprocessedRequest,
         target: AffinityTarget,
+        endpoint_id: &EndpointId,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
-        let binding = self.binding.load_full();
-        let endpoint_id = binding.as_ref().map(|binding| &binding.endpoint_id);
         let topology_constraints =
-            self.preflight_kv_transfer_constraints(endpoint_id, worker_id)?;
+            self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
 
-        let bootstrap_info = endpoint_id
-            .and_then(|endpoint_id| {
-                self.model_manager
-                    .get_disaggregated_endpoint(endpoint_id, worker_id)
-                    .map(|endpoint| (endpoint_id, endpoint))
-            })
+        let bootstrap_info = self
+            .model_manager
+            .get_disaggregated_endpoint(endpoint_id, worker_id)
+            .map(|endpoint| (endpoint_id, endpoint))
             .and_then(|(endpoint_id, endpoint)| {
                 let host = endpoint.bootstrap_host?;
                 let port = endpoint.bootstrap_port?;

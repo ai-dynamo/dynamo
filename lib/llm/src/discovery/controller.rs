@@ -594,13 +594,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .iter()
                 .map(|(mcid, _)| mcid.instance_id)
                 .collect::<HashSet<_>>();
-            let mut reset_workers = self
+            let previous_workers = self
                 .endpoint_workers
                 .remove(&endpoint_id)
                 .unwrap_or_default();
-            reset_workers.extend(current_workers.iter().copied());
+            let removed_workers = previous_workers
+                .difference(&current_workers)
+                .copied()
+                .collect::<HashSet<_>>();
             self.host
-                .project_lora(&endpoint_id, &reset_workers, &desired);
+                .project_lora(&endpoint_id, &removed_workers, &desired);
             if !current_workers.is_empty() {
                 self.endpoint_workers.insert(endpoint_id, current_workers);
             }

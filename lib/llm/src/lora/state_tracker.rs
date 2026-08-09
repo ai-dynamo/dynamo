@@ -51,7 +51,7 @@ const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
 /// (e.g. `loaded_locations` and `worker_to_loras` are inverse indexes of the
 /// same fact). Per-map atomicity is not enough: a concurrent addition and
 /// removal touching the same `(worker, lora)` could interleave their
-/// individual map writes and leave the indexes disagreeing. All three mutating
+/// individual map writes and leave the indexes disagreeing. All mutating
 /// handlers therefore serialize on `write_lock` for the duration of their
 /// multi-map update, so writers observe a consistent snapshot relative to one
 /// another. Readers stay lock-free on the individual `DashMap`s.
@@ -151,6 +151,75 @@ impl LoraStateTracker {
     pub fn set_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
         let _guard = self.lock_writes();
         self.record_worker_capacity(worker, capacity);
+    }
+
+    /// Replace one retained worker's complete committed LoRA projection.
+    ///
+    /// Desired entries are installed before obsolete entries are withdrawn, so lock-free
+    /// routing readers never observe an unchanged adapter as temporarily unloaded.
+    pub(crate) fn replace_worker_projection(
+        &self,
+        worker: WorkerWithDpRank,
+        base_capacity: Option<u32>,
+        loras: &[LoraInfo],
+    ) {
+        let _guard = self.lock_writes();
+        let previous = self
+            .worker_to_loras
+            .get(&worker)
+            .map(|entry| entry.clone())
+            .unwrap_or_default();
+        let mut desired = HashMap::new();
+        let mut capacity = base_capacity;
+        for lora in loras {
+            let lora_capacity = lora.max_gpu_lora_count.unwrap_or_else(|| {
+                tracing::warn!(
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    lora_name = lora.name,
+                    default = DEFAULT_MAX_GPU_LORA_COUNT,
+                    "LoRA MDC carries no max_gpu_lora_count; using default for placement capacity"
+                );
+                DEFAULT_MAX_GPU_LORA_COUNT
+            });
+            capacity = Some(lora_capacity);
+            desired.insert(lora.name.clone(), lora.clone());
+        }
+
+        if let Some(capacity) = capacity {
+            self.record_worker_capacity(worker, capacity);
+        } else {
+            self.worker_capacity.remove(&worker);
+        }
+
+        for (name, lora) in &desired {
+            self.loaded_locations
+                .entry(name.clone())
+                .or_default()
+                .insert(worker);
+            self.lora_info.insert((name.clone(), worker), lora.clone());
+        }
+
+        let desired_names = desired.into_keys().collect::<HashSet<_>>();
+        if desired_names.is_empty() {
+            self.worker_to_loras.remove(&worker);
+        } else {
+            self.worker_to_loras.insert(worker, desired_names.clone());
+        }
+
+        for name in previous.difference(&desired_names) {
+            let became_empty = if let Some(mut workers) = self.loaded_locations.get_mut(name) {
+                workers.remove(&worker);
+                workers.is_empty()
+            } else {
+                false
+            };
+            if became_empty {
+                self.loaded_locations
+                    .remove_if(name, |_, workers| workers.is_empty());
+            }
+            self.lora_info.remove(&(name.clone(), worker));
+        }
     }
 
     /// Record a worker's LoRA slot capacity, warning if it changes a previously-recorded value.
@@ -400,6 +469,26 @@ mod tests {
         assert!(tracker.is_loaded("lora-math", &w1));
         assert_eq!(tracker.total_lora_slots(), 8);
         assert_eq!(tracker.free_slots(&w1), 7);
+    }
+
+    #[test]
+    fn replace_worker_projection_reconciles_adapters_and_capacity() {
+        let tracker = LoraStateTracker::new();
+        let worker = make_worker(1);
+        let retained = make_lora_info("retained", Some(4));
+        let obsolete = make_lora_info("obsolete", Some(4));
+        tracker.handle_mdc_addition(worker, &retained);
+        tracker.handle_mdc_addition(worker, &obsolete);
+
+        let retained = make_lora_info("retained", Some(6));
+        let added = make_lora_info("added", Some(6));
+        tracker.replace_worker_projection(worker, Some(6), &[retained, added]);
+
+        assert!(tracker.is_loaded("retained", &worker));
+        assert!(tracker.is_loaded("added", &worker));
+        assert!(!tracker.is_loaded("obsolete", &worker));
+        assert_eq!(tracker.loaded_count(&worker), 2);
+        assert_eq!(tracker.free_slots(&worker), 4);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::KvWorkerMonitor,
@@ -73,6 +74,9 @@ pub struct WorkerSet {
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
+
+    /// Cancels background work created while materializing this WorkerSet.
+    lifecycle_cancellation: Option<CancellationToken>,
 }
 
 impl WorkerSet {
@@ -98,6 +102,7 @@ impl WorkerSet {
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            lifecycle_cancellation: None,
         }
     }
 
@@ -250,6 +255,18 @@ impl WorkerSet {
     /// Must be called before the WorkerSet is wrapped in Arc.
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
+    }
+
+    pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {
+        self.lifecycle_cancellation = Some(cancellation);
+    }
+}
+
+impl Drop for WorkerSet {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.lifecycle_cancellation.take() {
+            cancellation.cancel();
+        }
     }
 }
 

@@ -3375,15 +3375,15 @@ pub(crate) fn model_not_ready_message(model_name: &str) -> String {
 /// namespace.
 ///
 /// Returns `503 Service Unavailable` with a structured body when the model
-/// isn't ready to serve. Models the frontend has never heard of fall through
-/// here; the per-handler engine lookup later in the request path returns a
-/// 404 instead, which is the right shape for "unknown model".
+/// isn't ready to serve. Models absent from the committed catalog, including
+/// discovered models still being built, fall through here; the per-handler
+/// engine lookup later in the request path returns a 404 instead.
 pub(crate) fn check_model_serving_ready(
     state: &Arc<service_v2::State>,
     model_name: &str,
 ) -> Result<(), ErrorResponse> {
     let Some(model) = state.manager().get_committed_model(model_name) else {
-        // Unknown model — let the per-endpoint engine accessor produce the
+        // Not committed — let the per-endpoint engine accessor produce the
         // canonical 404. The readiness gate has nothing to say.
         return Ok(());
     };
@@ -3681,18 +3681,18 @@ async fn get_model_openai(
     // per-model readiness sub-resource (Mechanism 4). This means a model
     // literally named `foo/ready` is still retrievable and never shadowed.
     //
-    // Exact match is resolved against ALL registered models (`get_model`), not
-    // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
-    // still wins over the readiness sub-resource of a sibling `foo`.
+    // Exact match is resolved against every committed model, not just the
+    // displayable ones, so a committed-but-not-yet-ready `foo/ready` still
+    // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
     if state.manager().get_committed_model(model_id).is_some() {
         return get_model_retrieve(&state, model_id);
     }
 
-    // Readiness sub-resource. Resolves against all registered models (above
-    // exact check failed, so `model_id` is not itself a registered model);
-    // the whole point of this endpoint is to diagnose models that are
-    // registered but not yet ready, so it must find them too.
+    // Readiness sub-resource. Resolves against all committed models (above
+    // exact check failed, so `model_id` is not itself a committed model);
+    // the whole point of this endpoint is to diagnose committed models that
+    // are not yet ready, so it must find them too.
     if let Some(base) = model_id.strip_suffix("/ready")
         && state.manager().get_committed_model(base).is_some()
     {

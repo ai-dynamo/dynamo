@@ -676,7 +676,7 @@ impl Client {
             routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval: self.reconcile_interval,
         };
-        client.monitor_instance_source_with_cancellation(cancel_token);
+        client.monitor_instance_source_with_cancellation(cancel_token, false);
         client
     }
 
@@ -796,12 +796,13 @@ impl Client {
     /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
-        self.monitor_instance_source_with_cancellation(cancel_token);
+        self.monitor_instance_source_with_cancellation(cancel_token, true);
     }
 
     fn monitor_instance_source_with_cancellation(
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
+        prune_shared_occupancy: bool,
     ) {
         let reconcile_interval = self.reconcile_interval;
         let client = self.clone();
@@ -818,12 +819,14 @@ impl Client {
                 let routing_instances = client.reconcile_discovered_instances(instance_ids);
 
                 // Clean up stale occupancy counters for instances that no longer exist.
-                let registry = client.endpoint.drt().routing_occupancy_states();
-                if let Ok(registry) = registry.try_lock()
-                    && let Some(weak) = registry.get(&client.endpoint)
-                    && let Some(state) = weak.upgrade()
-                {
-                    state.retain(routing_instances.discovered_ids());
+                if prune_shared_occupancy {
+                    let registry = client.endpoint.drt().routing_occupancy_states();
+                    if let Ok(registry) = registry.try_lock()
+                        && let Some(weak) = registry.get(&client.endpoint)
+                        && let Some(state) = weak.upgrade()
+                    {
+                        state.retain(routing_instances.discovered_ids());
+                    }
                 }
 
                 tokio::select! {
