@@ -14,7 +14,11 @@ import {
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
-import { resolveCalendarMonth, resolveToday } from "./calendar-today";
+import {
+  MONTH_INDEX,
+  resolveCalendarMonth,
+  resolveToday,
+} from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -33,10 +37,6 @@ const MONTHS = [
   "November",
   "December",
 ];
-
-const MONTH_INDEX = Object.fromEntries(
-  MONTHS.map((month, index) => [month.slice(0, 3), index]),
-);
 
 function buildMonthDays(year: number, month: number) {
   const leadingBlanks = new Date(Date.UTC(year, month, 1)).getUTCDay();

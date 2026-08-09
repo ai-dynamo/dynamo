@@ -21,8 +21,17 @@ export interface CalendarDate {
 
 export type CalendarMonth = Pick<CalendarDate, "year" | "month">;
 
-/** Maps the abbreviated month names generate-events.js emits ("Jul") to an index. */
-const MONTH_INDEX: Record<string, number> = {
+/**
+ * Maps the abbreviated month names generate-events.js emits ("Jul") to an index.
+ *
+ * Exported so the grids filter their events with the same lookup
+ * resolveCalendarMonth() below picks the month with. Keeping a second copy in a
+ * component means a change to one -- a locale tweak, the generator switching to
+ * full month names -- lands the grid on a month whose event filter matches
+ * nothing, which renders empty while resolveCalendarMonth() still reports a
+ * confident answer.
+ */
+export const MONTH_INDEX: Record<string, number> = {
   Jan: 0,
   Feb: 1,
   Mar: 2,
