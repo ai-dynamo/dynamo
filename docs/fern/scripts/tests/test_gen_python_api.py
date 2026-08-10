@@ -802,14 +802,19 @@ def test_index_yml_python_registrations_do_not_shadow_each_other() -> None:
 def test_python_landing_owns_the_python_section_slug() -> None:
     """The landing page must be the Python section path.
 
-    The section carries the ``python`` slug and the README landing; every
+    The section carries the ``api/python`` slug and the README landing; every
     generated module page sits underneath as a visible sibling — the earlier
     hidden-children pattern hid the whole surface from the sidebar.
+
+    The slug is nested even though the section is not: Python API sits at the
+    top level of the tab as a peer of Rust and Kubernetes, and pinning the slug
+    is what keeps every published ``/reference/api/python/...`` URL from moving
+    with it. See ``test_api_slugs_stay_nested_under_api``.
     """
     doc = yaml.safe_load((FERN_ROOT / "index.yml").read_text(encoding="utf-8"))
     landing = _find_node_by_path(doc, "pages/reference/api/python/README.mdx")
     assert landing.get("section") == "Python API"
-    assert landing.get("slug") == "python"
+    assert landing.get("slug") == "api/python"
     module_pages = landing.get("contents")
     assert isinstance(module_pages, list)
     assert not any(

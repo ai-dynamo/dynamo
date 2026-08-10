@@ -44,28 +44,37 @@ def _reference_layout() -> list[dict[str, Any]]:
     return reference_tab["layout"]
 
 
-def _api_reference_section() -> dict[str, Any]:
-    """Return the API Reference section."""
+def _top_level(label: str) -> dict[str, Any]:
+    """Return the top-level Reference entry titled ``label``.
+
+    Python API, Rust API, and Kubernetes API are siblings directly under the
+    tab, so one lookup serves all three regardless of whether an entry is a
+    ``section`` or a ``page``.
+    """
     for entry in _reference_layout():
-        if entry.get("section") == "API Reference":
+        if entry.get("section") == label or entry.get("page") == label:
             return entry
-    raise AssertionError("API Reference section not found under reference tab")
+    raise AssertionError(f"{label} not found at the top level of the reference tab")
+
+
+def _api_landing() -> dict[str, Any]:
+    """Return the API Reference landing page."""
+    return _top_level("API Reference")
 
 
 def _kubernetes_api_section() -> dict[str, Any]:
     """Return the Kubernetes API section."""
-    for entry in _reference_layout():
-        if entry.get("section") == "Kubernetes API":
-            return entry
-    raise AssertionError("Kubernetes API section not found under reference tab")
+    return _top_level("Kubernetes API")
 
 
 def _python_api_section() -> dict[str, Any]:
-    """Return the Python API section (nested under API Reference)."""
-    for entry in _api_reference_section()["contents"]:
-        if entry.get("section") == "Python API":
-            return entry
-    raise AssertionError("Python API section not found under API Reference")
+    """Return the Python API section."""
+    return _top_level("Python API")
+
+
+def _rust_api_entry() -> dict[str, Any]:
+    """Return the Rust API entry."""
+    return _top_level("Rust API")
 
 
 _KubernetesPage = tuple[kubernetes_api_discovery.KubernetesReference, str]
@@ -130,18 +139,13 @@ def _iter_sections(node: Any) -> Iterator[dict[str, Any]]:
             yield from _iter_sections(value)
 
 
-def test_api_reference_and_python_api_sections_are_expanded_by_default() -> None:
-    """The API Reference section and its Python API child must open on screen.
+def test_python_api_section_is_expanded_by_default() -> None:
+    """The Python API section must open on screen.
 
     Fern collapses a section unless told otherwise, so an API reference that
     ships as a docs default should still surface its Python module pages the
     moment a reader lands on the tab.
     """
-    api_reference = _api_reference_section()
-    assert api_reference.get("collapsed") is False, (
-        "API Reference must set 'collapsed: false' so its Python / Rust / "
-        "Kubernetes children are visible on tab entry"
-    )
     python_section = _python_api_section()
     assert python_section.get("collapsed") is False, (
         "Python API must set 'collapsed: false' so the module pages surface "
@@ -190,21 +194,76 @@ def test_python_module_pages_are_visible_in_sidebar() -> None:
     assert hidden == [], f"Python module pages must not be hidden: {hidden}"
 
 
-def test_reference_tab_lists_python_rust_and_kubernetes() -> None:
-    """The Reference tab must surface Python, Rust, and Kubernetes API sections.
+def test_reference_tab_lists_python_rust_and_kubernetes_as_peers() -> None:
+    """The three language surfaces must be top-level siblings in the tab.
 
-    Python and Rust live under the ``API Reference`` section; Kubernetes API
-    is its own top-level section within the tab so the CRD reference and
-    additional resources fold cleanly together in the sidebar.
+    Python, Rust, and Kubernetes document one public surface each, so none of
+    them belongs a level below the others. Nesting Python and Rust under a
+    generic wrapper led the tab with the wrapper rather than with a language.
     """
-    api_reference = _api_reference_section()
-    api_reference_children = [
-        entry.get("section") or entry.get("page") for entry in api_reference["contents"]
-    ]
-    assert "Python API" in api_reference_children
-    assert "Rust API" in api_reference_children
+    for entry in (_python_api_section(), _rust_api_entry(), _kubernetes_api_section()):
+        assert entry.get("icon"), (
+            f"{entry.get('section') or entry.get('page')} must carry an icon so "
+            "the three language surfaces read as peers in the sidebar"
+        )
 
-    _kubernetes_api_section()
+    _api_landing()
+
+
+def test_every_api_surface_shares_the_api_slug_prefix() -> None:
+    """One route family covers all four API entries.
+
+    Fern derives a URL from nav depth, so these slugs are explicit for two
+    different reasons. Python and Rust are pinned so that promoting them to the
+    top level did not rewrite the ``/reference/api/...`` routes they were
+    already published under -- ``docs.yml`` points twenty anchored redirects at
+    ``reference/api/python/nixl_connect`` alone, the retired NIXL Connect class
+    pages, and each would otherwise 404. Kubernetes is pinned so it joins that
+    family instead of sitting beside it at ``/reference/kubernetes-api``.
+
+    A later edit that "tidies" any of these down to a bare slug would silently
+    move published routes, so all four are asserted together.
+    """
+    assert _api_landing().get("slug") == "api"
+    assert _python_api_section().get("slug") == "api/python"
+    assert _rust_api_entry().get("slug") == "api/rust"
+    assert _kubernetes_api_section().get("slug") == "api/kubernetes"
+
+    redirects = yaml.safe_load(DOCS_YML.read_text(encoding="utf-8"))["redirects"]
+    destinations = {r["destination"].split("#", 1)[0] for r in redirects}
+    sources = {r["source"] for r in redirects}
+
+    assert "/dynamo/dev/reference/api/python/nixl_connect" in destinations, (
+        "the NIXL Connect redirects must keep resolving to the generated "
+        "module page under its pinned slug"
+    )
+    assert "/dynamo/dev/reference/kubernetes-api/full-api-reference" in sources, (
+        "the retired /reference/kubernetes-api routes were published, so each "
+        "must redirect into the api/kubernetes family"
+    )
+    assert not any(
+        d.startswith("/dynamo/dev/reference/kubernetes-api") for d in destinations
+    ), "no redirect may still point at the retired kubernetes-api route"
+
+
+def test_api_surfaces_are_contiguous_in_the_sidebar() -> None:
+    """The four API entries must sit together, with nothing wedged between.
+
+    Making them peers was only half of it. Kubernetes API previously rendered
+    eight entries below Rust -- past Compatibility, Examples, Releases and
+    Glossary -- so the three language surfaces never read as one group even
+    though they were siblings.
+    """
+    labels = [
+        entry.get("section") or entry.get("page") for entry in _reference_layout()
+    ]
+    positions = [
+        labels.index(name)
+        for name in ("API Reference", "Python API", "Rust API", "Kubernetes API")
+    ]
+    assert positions == list(
+        range(positions[0], positions[0] + 4)
+    ), f"API surfaces must be contiguous; found them at {positions} in {labels}"
 
 
 def test_api_landing_points_kubernetes_at_colocated_route() -> None:

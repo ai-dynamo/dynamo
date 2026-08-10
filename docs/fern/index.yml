@@ -1009,6 +1009,28 @@ navigation:
         icon: fa-brands fa-rust
         path: pages/reference/api/rust/README.mdx
         slug: api/rust
+
+      - section: Kubernetes API
+        icon: fa-brands fa-kubernetes
+        slug: api/kubernetes
+        collapsed: true
+        contents:
+          - page: DynamoGraphDeployment
+            path: pages/reference/kubernetes-api/dynamo-graph-deployment.mdx
+          - page: DynamoGraphDeploymentRequest
+            path: pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx
+          - page: DynamoComponentDeployment
+            path: pages/reference/kubernetes-api/dynamo-component-deployment.mdx
+          - page: Full API Reference
+            path: pages/reference/kubernetes-api/full-api-reference.mdx
+
+          # Accessible by direct URL but not shown in the sidebar.
+          - section: Additional Resources
+            hidden: true
+            contents:
+              - page: API Reference (K8s)
+                path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+
       - page: Compatibility
         path: pages/reference/general/compatibility.mdx
         slug: compatibility
@@ -1054,27 +1076,6 @@ navigation:
         path: pages/reference/general/releases-machine-readable.mdx
         slug: releases-data
         hidden: true
-
-      - section: Kubernetes API
-        icon: fa-brands fa-kubernetes
-        slug: kubernetes-api
-        collapsed: true
-        contents:
-          - page: DynamoGraphDeployment
-            path: pages/reference/kubernetes-api/dynamo-graph-deployment.mdx
-          - page: DynamoGraphDeploymentRequest
-            path: pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx
-          - page: DynamoComponentDeployment
-            path: pages/reference/kubernetes-api/dynamo-component-deployment.mdx
-          - page: Full API Reference
-            path: pages/reference/kubernetes-api/full-api-reference.mdx
-
-          # Accessible by direct URL but not shown in the sidebar.
-          - section: Additional Resources
-            hidden: true
-            contents:
-              - page: API Reference (K8s)
-                path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
       - section: Components
         icon: sliders
