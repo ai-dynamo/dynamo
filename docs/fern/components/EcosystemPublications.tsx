@@ -19,6 +19,7 @@
  * rendering this must render <BlogStyles /> too.
  */
 import { PUBLICATIONS, type Publication } from "./publications.data";
+import { RESEARCH_PAPERS, type ResearchPaper } from "./research-papers.data";
 import { PUBLISHER_LOGOS } from "./publisher-logos.generated";
 
 const PUBLICATIONS_CSS = `
@@ -140,6 +141,27 @@ const PUBLICATIONS_CSS = `
   white-space: nowrap;
 }
 
+/* Second section on the page, so it needs air above it. */
+.dynamo-pubs__section + .dynamo-pubs__section {
+  margin-top: 4rem;
+}
+
+/* Venue chip. Papers have no publisher logo to show, and the venue is the more
+   useful signal anyway, so it takes the place the logo tile holds above. */
+.dynamo-pubs__venue {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 0.16rem 0.5rem;
+  border: 1px solid var(--dynamo-blog-rule);
+  border-radius: 999px;
+  color: var(--dynamo-blog-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
 @media (max-width: 768px) {
   .dynamo-pubs { grid-template-columns: minmax(0, 1fr); }
 }
@@ -227,12 +249,40 @@ function PublicationCard({ publication }: { publication: Publication }) {
   );
 }
 
+function ResearchCard({ paper }: { paper: ResearchPaper }) {
+  const { title, url, org, venue, date } = paper;
+  const words = title.trim().split(/\s+/);
+  const lastWord = words.pop() ?? "";
+  const leadingWords = words.join(" ");
+  return (
+    <a
+      className="dynamo-pubs__card"
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      <span className="dynamo-pubs__top">
+        <span className="dynamo-pubs__venue">{venue}</span>
+        <span className="dynamo-pubs__partner">{org}</span>
+        <span className="dynamo-pubs__date">{date}</span>
+      </span>
+      <span className="dynamo-pubs__title">
+        {leadingWords ? `${leadingWords} ` : ""}
+        <span className="dynamo-pubs__title-end">
+          {lastWord}
+          <ExternalMark />
+        </span>
+      </span>
+    </a>
+  );
+}
+
 export function EcosystemPublications() {
   return (
     <div className="dynamo-blog-home">
       <style dangerouslySetInnerHTML={{ __html: PUBLICATIONS_CSS }} />
       <section
-        className="dynamo-blog-latest"
+        className="dynamo-blog-latest dynamo-pubs__section"
         id="publications"
         aria-labelledby="publications-heading"
       >
@@ -263,6 +313,29 @@ export function EcosystemPublications() {
         <div className="dynamo-pubs">
           {PUBLICATIONS.map((publication) => (
             <PublicationCard key={publication.url} publication={publication} />
+          ))}
+        </div>
+      </section>
+
+      <section
+        className="dynamo-blog-latest dynamo-pubs__section"
+        id="research"
+        aria-labelledby="research-heading"
+      >
+        <div className="dynamo-blog-section-heading">
+          <div className="dynamo-blog-section-heading__copy">
+            <span className="dynamo-blog-kicker">From the literature</span>
+            <h2 id="research-heading">Research publications</h2>
+            <p>
+              Papers that use, extend, or benchmark Dynamo, from the teams
+              building on it and from the wider systems community.
+            </p>
+          </div>
+        </div>
+
+        <div className="dynamo-pubs">
+          {RESEARCH_PAPERS.map((paper) => (
+            <ResearchCard key={paper.url} paper={paper} />
           ))}
         </div>
       </section>
