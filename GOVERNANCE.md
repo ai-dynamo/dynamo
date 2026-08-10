@@ -69,7 +69,7 @@ A Contributor who has demonstrated sustained, quality contributions. The volume 
 
 A Trusted Contributor keeps all Contributor privileges, and gains:
 
-- Receive automatic CI approval. Once added to the approved-contributor list, the CI approval workflow posts `/ok to test` for each new head commit with no Maintainer action. Verified commit signatures are still required.
+- Receive automatic CI approval. The CI approval workflow posts `/ok to test` for each new head commit with no Maintainer action. It reads the same roster that produces [CONTRIBUTORS.md](CONTRIBUTORS.md), so the promotion itself grants this and there is no separate list to be added to. Verified commit signatures are still required.
 - Review and approve pull requests within their area of expertise, without merge authority - merge authority begins at Maintainer.
 - Open sized pull requests without a Contribution Request - the 100-core-line threshold is lifted. A CR is still required for structural changes: touching multiple areas, changing a public API, or adding a dependency.
 
@@ -89,7 +89,7 @@ A Trusted Contributor who has earned merge authority within a specific area.
 - Trigger CI for any pull request.
 - Nominate Contributors for Trusted Contributor status.
 
-*"Maintainer" refers to this governance role. Internal Maintainers hold area authority through membership in their area's CODEOWNERS team. External Maintainers cannot join those org teams, so they are listed individually in CODEOWNERS on their area's paths, and repository `write` comes from the `external_maintainers` access team, orthogonal to the area teams. Branch protection requires review from the owners of each changed path, so in both cases a Maintainer's approval satisfies the merge gate only within their own area.*
+*"Maintainer" refers to this governance role. Internal Maintainers hold area authority through membership in their area's CODEOWNERS team. External Maintainers are outside collaborators on the repository, holding the `write` permission that GitHub requires before it will recognize anyone as a code owner. They do not join the organization. They are listed individually in CODEOWNERS on their area's paths rather than added to an area team, so their ownership covers the paths they maintain and no others. Branch protection requires review from the owners of each changed path, so in both cases a Maintainer's approval satisfies the merge gate only within their own area.*
 
 ### Core Maintainer
 
@@ -104,7 +104,7 @@ A Maintainer who has demonstrated project-wide judgment and cross-area expertise
 **Privileges**
 
 - Review and approve pull requests in any area.
-- Vote on Maintainer promotions, removals, DEP approval, and governance amendments.
+- Vote on Maintainer promotions, removals, and governance amendments.
 - Propose a Maintainer to the Project Leaders for Core Maintainer appointment.
 - Decide by majority what ships in a release.
 
@@ -113,7 +113,7 @@ A Maintainer who has demonstrated project-wide judgment and cross-area expertise
 - **Contributor:** Automatic on the first merged pull request. No nomination required.
 - **Trusted Contributor:** Nominated by a Maintainer. Requires approval from a second Maintainer or a Core Maintainer.
 - **Maintainer:** Nominated by a Core Maintainer. Two-thirds supermajority vote of Core Maintainers.
-- **Core Maintainer:** Eligibility is earned against the Core Maintainer criteria above: a sustained record of merges and reviews, substantive contributions or reviews across two or more areas, and demonstrated project-wide judgment. Appointed by the Project Leaders, acting together.
+- **Core Maintainer:** Eligibility is earned against the Core Maintainer criteria above: a sustained record of merges and reviews, substantive contributions or reviews across two or more areas, and demonstrated project-wide judgment. Appointed by both Project Leaders.
 - Where a threshold names a vote of Core Maintainers, the Project Leaders vote with them and count toward the total. Candidates do not vote on their own promotion, and supermajority thresholds are computed against the set of active voters other than the candidate. The same exclusion applies to removal votes - the subject is excluded from the count.
 - Roles on the contributor ladder belong to the individual. An employer holds no claim on them. Every rung is earned against the criteria above and is never granted by affiliation, and a contributor's standing does not change when their employer does.
 
@@ -123,7 +123,7 @@ All promotion decisions are posted publicly with reasoning.
 
 ### Removal
 
-A Maintainer, Core Maintainer, or Project Leader may be proposed for removal for cause (Code of Conduct violations, sustained misalignment, conflicts of interest, failure to fulfill responsibilities). A Core Maintainer or Project Leader may block a Contributor for the same causes. The individual is given seven business days to respond before the vote. Removal requires either a two-thirds supermajority vote of Core Maintainers, or the Project Leaders acting together. The decision is posted publicly.
+A Maintainer, Core Maintainer, or Project Leader may be proposed for removal for cause (Code of Conduct violations, sustained misalignment, conflicts of interest, failure to fulfill responsibilities). A Core Maintainer or Project Leader may block a Contributor for the same causes. The individual is given seven business days to respond before the vote. Removal requires either a two-thirds supermajority vote of Core Maintainers, or the agreement of both Project Leaders. The decision is posted publicly.
 
 Contributors may resign voluntarily at any time.
 
@@ -146,8 +146,8 @@ A **Project Leader** sets engineering direction for the project from outside the
 **Privileges**
 
 - A Project Leader reviews and approves pull requests in any area, and votes alongside the Core Maintainers on every decision that requires their vote.
-- Project Leaders appoint Core Maintainers, and acting together may remove a Core Maintainer for any of the causes listed under Removal.
-- Acting together, the Project Leaders make the final determination when a two-thirds vote of Core Maintainers fails to resolve a matter. If they do not agree, the change does not proceed.
+- Project Leaders appoint Core Maintainers, and may remove one for any of the causes listed under Removal when both agree.
+- The Project Leaders make the final determination when a two-thirds vote of Core Maintainers fails to resolve a matter. Both must agree, and if they do not, the change does not proceed.
 
 ## How We Work
 
@@ -158,7 +158,7 @@ Dynamo favors iterative development and fast feedback. The project trusts Mainta
 - Maintainers and Core Maintainers may merge changes within their area of expertise without requiring prior consensus beyond the approvals below.
 - Every pull request requires approval from at least two Maintainers other than the author, counting Core Maintainers and Project Leaders. Human reviews only; AI-assisted review is a supplemental signal and does not count toward this threshold. No one merges their own work alone.
 - Changes requiring a DEP - multi-area impact, public API changes, or communication plane architecture - go through the full DEP process before landing.
-- When a pull request has unresolved objections but is considered important for the project, either a Project Leader acting alone, or any two Core Maintainers acting together, may designate it as a Strategic Initiative and commit it. They provide a brief impact statement and assign an engineer to address community feedback in the next release cycle. A Strategic Initiative cannot be used for a change that requires a DEP - a public API change, multi-area impact, or communication plane architecture. Those go through the DEP process regardless of how urgent the change is.
+- When a pull request has unresolved objections but is considered important for the project, either a single Project Leader, or any two Core Maintainers together, may designate it as a Strategic Initiative and commit it. They provide a brief impact statement and assign an engineer to address community feedback in the next release cycle. A Strategic Initiative cannot be used for a change that requires a DEP - a public API change, multi-area impact, or communication plane architecture. Those go through the DEP process regardless of how urgent the change is.
 
 Community members may open GitHub Issues or start discussions on merged features. Core Maintainers commit to addressing valid feedback - usability gaps, API concerns, performance issues - within the next release cycle, and designs or APIs in newly landed features may evolve in response to what the community surfaces.
 
@@ -167,9 +167,11 @@ Community members may open GitHub Issues or start discussions on merged features
 Two instruments gate larger changes:
 
 - **A Contribution Request (CR) is permission to build.** A CR is a GitHub issue, opened from the [Contribution Request template](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) before a sized change lands. A Maintainer approves it by adding the `approved-for-pr` label, confirming the change is welcome before the work is invested. An area's Maintainers respond to a CR within seven business days, either approving it, asking for changes, or explaining why the change is not wanted.
-- **A Dynamo Enhancement Proposal (DEP) is design consensus.** A DEP carries the formal design for architectural changes and requires Core Maintainer supermajority approval. The author opens it as its own issue using the DEP template and links it from the CR. Core Maintainers reach a decision within 30 days of a DEP being marked ready for review.
+- **A Dynamo Enhancement Proposal (DEP) is design consensus.** A DEP carries the formal design for architectural changes and links from the CR. Every DEP is sponsored by a SIG: the SIG covering the affected areas takes it on, acting through a Co-Lead or an area Maintainer, and that person is the Sponsor. The Sponsor hosts the design discussion, identifies the required reviewers, carries the proposal through review, and calls the approval vote. Where a proposal spans several SIGs, the one covering the largest share of it sponsors and the others send reviewers. Every area maps to a SIG in [SIGS.md](SIGS.md), so a proposal always has a group to go to. The Maintainers of every area the DEP touches are its reviewers, including areas outside the sponsoring SIG's scope, so sponsorship never decides who reviews. They are the people who will live with the design and who hold merge authority over the code that implements it. Approval is then a two-thirds vote of Core Maintainers, because a DEP is by definition a change no single area owns. The decision comes within 30 days of the DEP being marked ready for review.
 
 A small change needs neither, and the pull request template alone suffices. A sized change needs a CR, and an architectural change needs a CR and a DEP.
+
+Once a DEP is approved, the pull requests implementing it do not need their own Contribution Requests. The DEP is the stronger form of the same permission, and the work is often spread across several pull requests; asking for permission again on each one adds no information. Link the DEP from the pull request instead. Review is unchanged: every implementing pull request still needs its code owners and the two approvals every change needs, because the DEP agreed the design and review checks that the code matches it.
 
 ### AI-Assisted Contributions
 
@@ -190,10 +192,26 @@ Disagreement escalates in defined steps. An objection that remains unresolved af
 
 - **Within an Area.** The area's Maintainers decide. If they cannot agree, the matter escalates to Core Maintainers.
 - **Across Areas.** Core Maintainers decide, with input from affected Maintainers.
-- **Project-Wide Architecture.** Requires a [Dynamo Enhancement Proposal (DEP)](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue%20label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) and Core Maintainer approval.
+- **Project-Wide Architecture.** Requires a Dynamo Enhancement Proposal, approved by the Maintainers of every area it touches.
 - **Release Packaging.** Core Maintainers decide what ships in a release.
 
-A DEP is required when a change affects multiple areas, introduces or modifies a public API, alters communication plane architecture, or affects backend integration contracts. To propose a DEP, [open an issue](https://github.com/ai-dynamo/dynamo/issues/new/choose) using the DEP template.
+A DEP is required when a change affects multiple areas, introduces or modifies a public API, alters communication plane architecture, or affects backend integration contracts. The [Enhancement Proposals guide](https://docs.nvidia.com/dynamo/dev/contributing/enhancement-proposals) carries the template, the states a proposal moves through, and where proposals live.
+
+### Voting
+
+Every vote this document requires runs as follows.
+
+**Calling a vote.** Any Core Maintainer or Project Leader calls a vote by opening a public issue labeled `governance:vote` stating the question, the threshold it must meet, and the close date. Nominations and removals name the person, and amendments link the pull request. For a DEP, the Sponsor calls the vote once review has concluded, and the tracking issue records the outcome.
+
+**Private ballots.** Only the electorate votes, meaning Core Maintainers and Project Leaders, and no one sees an individual ballot, the Project Leaders included. Only the aggregate counts are visible. The Project Leaders name the mechanism that provides this and announce it to the electorate, and it may change without amending this document as long as it holds both properties.
+
+**Five business days**, closing early once the ballots still outstanding cannot change the outcome.
+
+**Threshold.** Every threshold is computed against the eligible voters recorded when the vote opens, never against the ballots returned, so a ballot never cast counts the same as one cast against. No separate quorum applies.
+
+**Eligibility.** The public issue records the eligible voter count and the commit of [MAINTAINERS.md](MAINTAINERS.md) it comes from, so anyone can check the arithmetic later. A candidate does not vote on their own promotion or removal and is excluded from both the count and the threshold.
+
+**Public results.** When the vote closes, the tally is posted to the issue: how many were eligible, how many voted in favor, against, and abstaining, and whether that met the threshold, along with the reasoning behind the outcome. [DECISIONS.md](DECISIONS.md) records it. Individual ballots are never published.
 
 ### Conflict Resolution
 
@@ -208,9 +226,9 @@ Special Interest Groups (SIGs) are open, standing groups that coordinate work wi
 
 SIGs coordinate and advise; they do not carry merge authority. Review and merge stay with the Maintainers of each area, and architectural changes still go through the DEP process. A SIG often spans multiple areas: the area teams (`@ai-dynamo/dynamo-<area>-codeowners`) anchor code review within the SIG's scope, while the SIG is where the roadmap and design conversation happens.
 
-Each SIG has a **SIG Lead** who runs its agenda, reports on its work, and routes items into the governance process (a Contribution Request, a DEP, or escalation to Core Maintainers).
+Each SIG has two **SIG Co-Leads**, jointly accountable for its agenda, its reporting, and routing items into the governance process (a Contribution Request, a DEP, or escalation to Core Maintainers). They also sponsor the DEPs their SIG carries. Two of them keeps a SIG running when one is unavailable. [SIGS.md](SIGS.md) sets out what the role covers.
 
-Maintainers of an ecosystem repository that a SIG coordinates have the same standing in that SIG as the main repository's area Maintainers, and can serve as SIG Lead. Code review and merge authority stay with each repository's own owners.
+Maintainers of an ecosystem repository that a SIG coordinates have the same standing in that SIG as the main repository's area Maintainers, and can serve as a Co-Lead. Code review and merge authority stay with each repository's own owners.
 
 Core Maintainers create, merge, or retire SIGs as the project evolves. [SIGS.md](SIGS.md) holds the current set, with each SIG's scope, Leads, and CODEOWNERS groups.
 
@@ -219,6 +237,8 @@ Core Maintainers create, merge, or retire SIGs as the project evolves. [SIGS.md]
 Changes to this document require a pull request and approval by a two-thirds supermajority of Core Maintainers. The initial version takes effect at adoption, ratified by the Core Maintainers listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 The roster files - [MAINTAINERS.md](MAINTAINERS.md), [SIGS.md](SIGS.md), and [CONTRIBUTORS.md](CONTRIBUTORS.md) - are not part of this document, and updating them is not a governance amendment. They record outcomes of processes defined here (promotion and removal votes, SIG lifecycle decisions): a Core Maintainer opens the roster pull request and links the decision it records.
+
+Those decisions live in [DECISIONS.md](DECISIONS.md), which carries every governance action the project has taken, its tally, and the reasoning behind it. A roster pull request that changes who holds a role cites the decision that produced it, and CI rejects one that does not.
 
 ## Code of Conduct and Security
 

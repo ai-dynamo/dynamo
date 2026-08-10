@@ -30,9 +30,15 @@
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
 
 # GOVERNANCE.md lands in this same PR; the blob/main URL 404s only until merge.
-# Remove this entry after the governance PR merges.
+# TODO(remove after the governance PR merges)
 ^https://github\.com/ai-dynamo/dynamo/blob/main/GOVERNANCE\.md$
+^https://github\.com/ai-dynamo/dynamo/blob/main/MAINTAINERS\.md$
+^https://github\.com/ai-dynamo/dynamo/blob/main/SIGS\.md$
 
+# The governance and enhancement-proposal pages land in this same PR, so they
+# 404 on the docs site until it merges and the site redeploys.
+# TODO(remove after the governance PR merges)
+^https://docs\.nvidia\.com/dynamo/dev/contributing/enhancement-proposals$
 # The v1.3.0 GitHub release tag is only published when v1.3.0 GA is cut; the
 # canonical release/support-matrix links added by the version bump 404 from CI
 # until then. Remove this entry once the v1.3.0 release is published.
@@ -46,6 +52,10 @@
 # The DGDR example manifests land with this docs refactor; the canonical
 # tree/main link in recipes/kubernetes-templates/dgdr.mdx 404s from CI until the PR is merged.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr$
+
+# This example is introduced by the same PR as its docs link, so the main-branch
+# URL returns 404 until merge.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$
 
 # The standalone on-ramp agg.yaml is added in this same PR, so blob/main links to
 # it 404 from CI until the PR merges. Remove this entry once agg.yaml lands on main
