@@ -934,8 +934,9 @@ mod tests {
             let mut tree = RadixTree::new();
             tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
                 .unwrap();
-            tree.apply_event(create_store_event(1, 0, vec![1, 2], None))
+            tree.apply_event(create_store_event(1, 0, vec![1, 2, 5], None))
                 .unwrap();
+            assert_eq!(tree.edge_lengths_for_test(), vec![1, 2, 2]);
             tree
         }
 
