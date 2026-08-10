@@ -65,6 +65,7 @@ class DynamoReplayRunnerFactory:
             replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
+            supports_disaggregated_attention_dp=False,
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:

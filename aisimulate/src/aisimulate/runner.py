@@ -78,6 +78,7 @@ class EngineReplayRunnerFactory:
         return RunnerCapabilities(
             replay_spec_api_version=1,
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
+            supports_disaggregated_attention_dp=False,
         )
 
     def create(self, worker_id: int) -> "EngineReplayRunner":

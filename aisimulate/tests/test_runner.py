@@ -101,6 +101,7 @@ def test_factory_is_pickleable_and_advertises_engine_only_capabilities():
     assert capabilities.supports_backend_topology("vllm", "agg")
     assert capabilities.supports_backend_topology("sglang", "disagg")
     assert not capabilities.supports_backend_topology("trtllm", "disagg")
+    assert not capabilities.supports_disaggregated_attention_dp
     assert capabilities.supported_hooks == ()
 
 
