@@ -14,8 +14,10 @@
  * only, so a month-only date is normalised to the first of the month and the
  * one undated entry sorts last. Keep the array in reverse-chronological order.
  *
- * `domain` keys into PUBLISHER_LOGOS. A domain with no icon falls back to the
- * publisher's initials.
+ * Logos key off `partner`, not the host of `url`: several of these are
+ * published somewhere other than the author's own site (Doubleword on
+ * TelecomTV, Deloitte on LinkedIn), and keying on the host credited the wrong
+ * company. A partner absent from PUBLISHER_LOGOS falls back to its initials.
  */
 
 export interface Publication {
@@ -25,11 +27,9 @@ export interface Publication {
   partner: string;
   /** Human-readable date exactly as published, or "Undated". */
   date: string;
-  /** Sort key, YYYY-MM-DD. Null when the source carries no date. */
+  /** Sort key, YYYY-MM-DD; the component orders on this. Null when undated. */
   iso: string | null;
-  /** Host of `url`, used to look up the publisher icon. */
-  domain: string;
-  /** The publisher has since revised the article. */
+  /** The publisher has since revised the article; shown next to the date. */
   updated?: boolean;
 }
 
@@ -40,7 +40,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Photoroom",
     date: "Jul 23, 2026",
     iso: "2026-07-23",
-    domain: "www.photoroom.com",
   },
   {
     title: "NVIDIA Vera Rubin NVL72 on CoreWeave: 10x More Tokens per Megawatt",
@@ -48,7 +47,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "CoreWeave",
     date: "Jul 21, 2026",
     iso: "2026-07-21",
-    domain: "coreweave.com",
   },
   {
     title: "Gcore Introduces Global Inference Routing Accelerated by NVIDIA Dynamo",
@@ -56,7 +54,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Gcore",
     date: "Jul 20, 2026",
     iso: "2026-07-20",
-    domain: "gcore.com",
   },
   {
     title: "SWE-1.7: Frontier Intelligence at a Fraction of the Cost",
@@ -64,7 +61,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Cognition",
     date: "Jul 8, 2026",
     iso: "2026-07-08",
-    domain: "cognition.com",
   },
   {
     title: "Booting Fast and Slow",
@@ -72,7 +68,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "H Company",
     date: "Jul 8, 2026",
     iso: "2026-07-08",
-    domain: "hcompany.ai",
   },
   {
     title: "Introducing and a Deep Dive Into Dynamo with vCluster",
@@ -80,7 +75,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "vCluster",
     date: "Jul 7, 2026",
     iso: "2026-07-07",
-    domain: "www.vcluster.com",
   },
   {
     title: "Lowering Multimodal Inference Cost with Heterogeneous E/PD Disaggregation",
@@ -88,7 +82,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Intel",
     date: "Jun 26, 2026",
     iso: "2026-06-26",
-    domain: "community.intel.com",
   },
   {
     title: "How We Built the World's Fastest API for GLM-5.2",
@@ -96,7 +89,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Jun 23, 2026",
     iso: "2026-06-23",
-    domain: "www.baseten.co",
   },
   {
     title: "RL at 1T Scale: prime-rl Performance Deep Dive",
@@ -104,7 +96,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Prime Intellect",
     date: "Jun 21, 2026",
     iso: "2026-06-21",
-    domain: "www.primeintellect.ai",
   },
   {
     title: "Keynote: Plug in and Scale: Serving LLM Models on Kubernetes Made Simple",
@@ -112,7 +103,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "AstraZeneca",
     date: "Jun 18, 2026",
     iso: "2026-06-18",
-    domain: "kccncind2026.sched.com",
   },
   {
     title: "Deploy a Dynamo Inference Service with PD Disaggregation",
@@ -120,7 +110,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Alibaba Cloud / ACK",
     date: "Jun 15, 2026",
     iso: "2026-06-15",
-    domain: "www.alibabacloud.com",
   },
   {
     title: "Deploying NVIDIA Dynamo PD Disaggregation With dstack",
@@ -128,7 +117,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "dstack",
     date: "Jun 10, 2026",
     iso: "2026-06-10",
-    domain: "dstack.ai",
   },
   {
     title: "How the UK Is Turning Sovereign AI Ambition Into Action With NVIDIA Technologies",
@@ -136,7 +124,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Doubleword",
     date: "Jun 8, 2026",
     iso: "2026-06-08",
-    domain: "www.telecomtv.com",
   },
   {
     title: "What Is Context Memory? The New Infrastructure Layer Powering AI Inference",
@@ -144,7 +131,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "WEKA",
     date: "May 28, 2026",
     iso: "2026-05-28",
-    domain: "www.weka.io",
   },
   {
     title: "NVIDIA Dynamo on AKS - Autoscaling LLM Inference",
@@ -152,7 +138,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Microsoft Azure",
     date: "May 13, 2026",
     iso: "2026-05-13",
-    domain: "techcommunity.microsoft.com",
   },
   {
     title: "Serving DeepSeek-V4: Why Million-Token Context Is an Inference Systems Problem",
@@ -160,7 +145,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Together AI",
     date: "May 11, 2026",
     iso: "2026-05-11",
-    domain: "www.together.ai",
   },
   {
     title: "NVIDIA Dynamo on AKS: Disaggregated LLM Inference with H100 GPUs",
@@ -168,7 +152,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Azure Global Black Belt",
     date: "May 8, 2026",
     iso: "2026-05-08",
-    domain: "azureglobalblackbelts.com",
   },
   {
     title: "GB200 NVL72 vs B200 on Kimi K2.5: 3.1x from Wide EP vLLM",
@@ -176,7 +159,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "SemiAnalysis / InferenceX",
     date: "Apr 23, 2026",
     iso: "2026-04-23",
-    domain: "inferencex.semianalysis.com",
   },
   {
     title: "Amazon SageMaker AI Now Supports Optimized Generative AI Inference Recommendations",
@@ -184,7 +166,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "AWS",
     date: "Apr 22, 2026",
     iso: "2026-04-22",
-    domain: "aws.amazon.com",
   },
   {
     title: "ClearML + NVIDIA Dynamo: A Production Control Plane for Distributed AI Inference at Scale",
@@ -192,7 +173,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "ClearML",
     date: "Apr 9, 2026",
     iso: "2026-04-09",
-    domain: "clear.ml",
   },
   {
     title: "NVIDIA Dynamo: Turning Disaggregated Inference Into a Production System",
@@ -200,7 +180,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Rafay",
     date: "Apr 7, 2026",
     iso: "2026-04-07",
-    domain: "rafay.co",
   },
   {
     title: "Introduction to Disaggregated Inference: Why It Matters",
@@ -208,7 +187,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Rafay",
     date: "Mar 29, 2026",
     iso: "2026-03-29",
-    domain: "rafay.co",
   },
   {
     title: "NVIDIA Dynamo 1.0: Disaggregated LLM Inference Deployment Guide (2026)",
@@ -216,7 +194,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Spheron",
     date: "Mar 25, 2026",
     iso: "2026-03-25",
-    domain: "www.spheron.network",
   },
   {
     title: "San Jose GTC 2026 Wrap-Up",
@@ -224,7 +201,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "GMI Cloud",
     date: "Mar 24, 2026",
     iso: "2026-03-24",
-    domain: "www.gmicloud.ai",
   },
   {
     title: "NVIDIA Dynamo 1.0 Is Now Available to DigitalOcean Customers",
@@ -232,7 +208,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "DigitalOcean",
     date: "Mar 19, 2026",
     iso: "2026-03-19",
-    domain: "www.digitalocean.com",
   },
   {
     title: "Infrastructure for Enterprise AI Inference With Vultr, DDN, NVIDIA Dynamo and Nemotron",
@@ -240,7 +215,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Vultr",
     date: "Mar 17, 2026",
     iso: "2026-03-17",
-    domain: "blogs.vultr.com",
   },
   {
     title: "How Rafay and NVIDIA Help Neoclouds Monetize Accelerated Computing",
@@ -248,7 +222,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Rafay",
     date: "Mar 17, 2026",
     iso: "2026-03-17",
-    domain: "docs.rafay.co",
   },
   {
     title: "Running GenAI at Amazon Ads Scale: Lessons from Building and Operating LLM Inference Systems",
@@ -256,7 +229,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Amazon Ads",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "www.nvidia.com",
   },
   {
     title: "LMCache + NVIDIA Dynamo 1.0: A Match Made in Inference Heaven",
@@ -264,7 +236,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "LMCache",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "blog.lmcache.ai",
   },
   {
     title: "2x Faster Inference With KV Cache-Aware Routing",
@@ -272,7 +243,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "www.baseten.co",
   },
   {
     title: "Reducing TTFT by CPUMaxxing Tokenization",
@@ -280,7 +250,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Crusoe",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "www.crusoe.ai",
   },
   {
     title: "Crusoe Expands NVIDIA Collaboration Across the Full AI Factory Stack",
@@ -288,7 +257,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Crusoe",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "www.crusoe.ai",
   },
   {
     title: "GMI Cloud Supports NVIDIA Dynamo 1.0 and OpenShell",
@@ -296,7 +264,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "GMI Cloud",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "www.gmicloud.ai",
   },
   {
     title: "Google Cloud AI Infrastructure at NVIDIA GTC 2026",
@@ -304,7 +271,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Google Cloud",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "cloud.google.com",
   },
   {
     title: "Together AI at NVIDIA GTC 2026",
@@ -312,7 +278,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Together AI",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
-    domain: "www.together.ai",
   },
   {
     title: "How DigitalOcean's Agentic Inference Cloud Achieved 67% Lower Inference Costs for Workato",
@@ -320,7 +285,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "DigitalOcean / Workato",
     date: "Mar 4, 2026",
     iso: "2026-03-04",
-    domain: "www.digitalocean.com",
     updated: true,
   },
   {
@@ -329,7 +293,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Alibaba Cloud community",
     date: "Mar 1, 2026",
     iso: "2026-03-01",
-    domain: "developer.aliyun.com",
   },
   {
     title: "Deloitte Drives AI Transformations With NVIDIA Dynamo and Nemotron",
@@ -337,7 +300,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Deloitte",
     date: "Mar 2026",
     iso: "2026-03-01",
-    domain: "www.linkedin.com",
   },
   {
     title: "Deployment of NVIDIA Dynamo",
@@ -345,7 +307,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "OpenNebula",
     date: "Mar 2026",
     iso: "2026-03-01",
-    domain: "docs.opennebula.io",
   },
   {
     title: "Introducing Faster, Lower-Cost LLM Inference With NVIDIA Dynamo",
@@ -353,7 +314,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Gcore",
     date: "Feb 25, 2026",
     iso: "2026-02-25",
-    domain: "gcore.com",
   },
   {
     title: "Gcore Integrates NVIDIA Dynamo as a Fully Managed Service",
@@ -361,7 +321,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Gcore",
     date: "Feb 24, 2026",
     iso: "2026-02-24",
-    domain: "gcore.com",
   },
   {
     title: "Unlocking 25x Inference Performance with SGLang on NVIDIA GB300 NVL72",
@@ -369,7 +328,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "LMSYS / SGLang",
     date: "Feb 20, 2026",
     iso: "2026-02-20",
-    domain: "www.lmsys.org",
   },
   {
     title: "The Baseten Inference Stack at NVIDIA Dynamo Day",
@@ -377,7 +335,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Feb 3, 2026",
     iso: "2026-02-03",
-    domain: "www.baseten.co",
   },
   {
     title: "CoreWeave Achieves NVIDIA Exemplar Cloud Validation for Inference",
@@ -385,7 +342,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "CoreWeave",
     date: "Jan 28, 2026",
     iso: "2026-01-28",
-    domain: "www.coreweave.com",
   },
   {
     title: "Scaling WideEP Mixture-of-Experts Inference with Google Cloud A4X (GB200) and NVIDIA Dynamo",
@@ -393,7 +349,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Google Cloud",
     date: "Jan 22, 2026",
     iso: "2026-01-22",
-    domain: "cloud.google.com",
   },
   {
     title: "Supercharging AI Inference: Pure KVA Now Integrates with NVIDIA Dynamo for Scalable, Low-Latency LLM Inference",
@@ -401,7 +356,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Everpure / Pure Storage",
     date: "Jan 14, 2026",
     iso: "2026-01-14",
-    domain: "blog.everpuredata.com",
   },
   {
     title: "NVIDIA Dynamo + VAST = Scalable, Optimized Inference",
@@ -409,7 +363,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "VAST Data",
     date: "Dec 16, 2025",
     iso: "2025-12-16",
-    domain: "www.vastdata.com",
   },
   {
     title: "Disaggregated Inference: 18 Months Later",
@@ -417,7 +370,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Hao AI Lab / UCSD",
     date: "Nov 3, 2025",
     iso: "2025-11-03",
-    domain: "haoailab.com",
   },
   {
     title: "Scaling Multi-Node LLM Inference with NVIDIA Dynamo and ND GB200 NVL72 GPUs on AKS",
@@ -425,7 +377,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Microsoft Azure / AKS",
     date: "Oct 24, 2025",
     iso: "2025-10-24",
-    domain: "blog.aks.azure.com",
   },
   {
     title: "Fast and Efficient AI Inference with New NVIDIA Dynamo Recipe on AI Hypercomputer",
@@ -433,7 +384,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Google Cloud",
     date: "Sep 10, 2025",
     iso: "2025-09-10",
-    domain: "cloud.google.com",
   },
   {
     title: "Accelerate Generative AI Inference with NVIDIA Dynamo and Amazon EKS",
@@ -441,7 +391,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "AWS",
     date: "Jul 15, 2025",
     iso: "2025-07-15",
-    domain: "aws.amazon.com",
   },
   {
     title: "Run Nvidia Dynamo on Any Cloud or Kubernetes with SkyPilot",
@@ -449,6 +398,5 @@ export const PUBLICATIONS: Publication[] = [
     partner: "SkyPilot",
     date: "Undated",
     iso: null,
-    domain: "docs.skypilot.ai",
   },
 ];

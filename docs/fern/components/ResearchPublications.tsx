@@ -12,22 +12,8 @@
  * a page rendering this must render <BlogStyles /> and <PublicationsStyles />.
  */
 import { RESEARCH_PAPERS, type ResearchPaper } from "./research-papers.data";
+import { ExternalMark } from "./PublicationsStyles";
 
-function ExternalMark() {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path
-        d="M11 4h5v5M16 4l-7 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-/** Matches the icon BlogLanding puts inside its secondary button. */
 function ResearchCard({ paper }: { paper: ResearchPaper }) {
   const { title, url, org, venue, date } = paper;
   const words = title.trim().split(/\s+/);
@@ -56,6 +42,10 @@ function ResearchCard({ paper }: { paper: ResearchPaper }) {
   );
 }
 
+// Newest first. Sorted from `iso` rather than trusting the array's order, so a
+// new entry can be appended anywhere and still land in the right place.
+const sortedPapers = [...RESEARCH_PAPERS].sort((a, b) => b.iso.localeCompare(a.iso));
+
 export function ResearchPublications() {
   return (
     <div className="dynamo-blog-home">
@@ -76,7 +66,7 @@ export function ResearchPublications() {
         </div>
 
         <div className="dynamo-pubs">
-          {RESEARCH_PAPERS.map((paper) => (
+          {sortedPapers.map((paper) => (
             <ResearchCard key={paper.url} paper={paper} />
           ))}
         </div>

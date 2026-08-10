@@ -20,30 +20,7 @@
  */
 import { PUBLICATIONS, type Publication } from "./publications.data";
 import { PUBLISHER_LOGOS } from "./publisher-logos.generated";
-
-function ExternalMark() {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path
-        d="M11 4h5v5M16 4l-7 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-/** Matches the icon BlogLanding puts inside its secondary button. */
-function ExternalLinkIcon() {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M11 4h5v5M16 4l-7 7" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M15 11v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
+import { ExternalMark } from "./PublicationsStyles";
 
 /** Fallback mark: publisher initials, e.g. "Google Cloud" -> "GC". */
 function initials(partner: string) {
@@ -90,7 +67,10 @@ function PublicationCard({ publication }: { publication: Publication }) {
       <span className="dynamo-pubs__top">
         <PublisherMark partner={partner} />
         <span className="dynamo-pubs__partner">{partner}</span>
-        <span className="dynamo-pubs__date">{date}</span>
+        <span className="dynamo-pubs__date">
+          {date}
+          {publication.updated ? " · updated" : ""}
+        </span>
       </span>
       <span className="dynamo-pubs__title">
         {leadingWords ? `${leadingWords} ` : ""}
@@ -102,6 +82,12 @@ function PublicationCard({ publication }: { publication: Publication }) {
     </a>
   );
 }
+
+// Newest first, from `iso`, so ordering does not depend on how the array is
+// maintained by hand.
+const sortedPublications = [...PUBLICATIONS].sort((a, b) =>
+  (b.iso ?? "").localeCompare(a.iso ?? ""),
+);
 
 export function EcosystemPublications() {
   return (
@@ -122,21 +108,10 @@ export function EcosystemPublications() {
               published by the customers and partners running it.
             </p>
           </div>
-          <div className="dynamo-blog-section-heading__actions">
-            <a
-              className="dynamo-blog-button dynamo-blog-button--secondary"
-              href="https://github.com/ai-dynamo/dynamo/issues/new"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Suggest a publication
-              <ExternalLinkIcon />
-            </a>
-          </div>
         </div>
 
         <div className="dynamo-pubs">
-          {PUBLICATIONS.map((publication) => (
+          {sortedPublications.map((publication) => (
             <PublicationCard key={publication.url} publication={publication} />
           ))}
         </div>

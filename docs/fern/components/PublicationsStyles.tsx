@@ -158,6 +158,24 @@ const PUBLICATIONS_CSS = `
 }
 `;
 
+/**
+ * Trailing external-link arrow on a card title. Shared, because both lists use
+ * it and a second copy is a second thing to drift.
+ */
+export function ExternalMark() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M11 4h5v5M16 4l-7 7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function PublicationsStyles() {
   return <style dangerouslySetInnerHTML={{ __html: PUBLICATIONS_CSS }} />;
 }
