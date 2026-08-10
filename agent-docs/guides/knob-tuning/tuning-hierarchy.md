@@ -26,17 +26,24 @@ If the current configuration did not engage or the run is invalid, repair or rem
 optimization.
 
 
-## Category 1 — Deployment Topology and Fit
+## Category 1 — Deployment Topology and Operating Regime
 
-First ask whether the deployment shape can efficiently serve the user workload. Topology is a hypothesis category,
-not only a deploy-time fit check: a configuration that fits can still be the wrong shape for the operating point.
-Evaluate topology in this order:
+First ask whether the deployment shape can efficiently serve the user workload. Topology sets four things at once,
+and only one of them is memory: per-rank effective batch and arithmetic intensity (the throughput axis); weight and
+KV memory footprint (the fit axis); the collective-communication pattern and volume (TP all-reduce, EP all-to-all,
+none for DP); and whether attention and weights are replicated or sharded. Do not evaluate a topology change on
+memory alone: when memory is not binding, the topology question is not closed; it moves to compute and
+communication. A configuration that fits can still be the wrong shape for the operating point. Evaluate topology in
+this order:
 
 1. Compute the model, activation, and KV-memory fit and establish the minimum viable TP, PP, and EP.
-2. Compute the effective per-rank batch at the target concurrency: a data-parallel layout that leaves each rank a
-   trivial batch under-utilizes compute even though it fits.
-3. Prefer the smallest parallelism that fits with operating headroom and a useful per-rank batch at the target
-   concurrency, then use remaining fixed-budget GPUs for replicas when the workload can benefit from them.
+2. Compute the effective per-rank batch at the target concurrency: data parallelism serves batch/N per replica,
+   shrinking per-rank batch and starving compute even though everything fits, while tensor parallelism runs the
+   whole batch through one sharded forward pass, raising per-rank batch and freeing memory at the cost of
+   collective communication.
+3. Among layouts that fit with operating headroom, prefer the one that maximizes useful per-rank batch and compute
+   efficiency at the target concurrency, then weigh its communication cost; fit is a constraint, not the objective.
+   Use remaining fixed-budget GPUs for replicas when the workload can benefit from them.
 4. Consider aggregated versus disaggregated serving only when workload shape, scale, or independent prefill/decode
    objectives justify the transfer and coordination cost.
 5. For an existing disaggregated deployment, check prefill/decode allocation and rate matching before adding workers.
