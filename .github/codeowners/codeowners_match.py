@@ -340,6 +340,24 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         )
     filetype_rules: list[FiletypeRule] = classify.get("filetype_rules", []) or []
 
+    # Advisory routing is gone. Reject leftovers rather than dropping them: an
+    # ignored ``advisory:`` block would read as non-blocking routing that is
+    # actually doing nothing, and an ignored ``advisory`` key on a filetype
+    # rule is worse still -- the rule would silently become a *blocking*
+    # owner, the opposite of what its author asked for.
+    if spec.get("advisory"):
+        raise SystemExit(
+            "areas.yaml: advisory is no longer supported; every owner in "
+            "CODEOWNERS blocks. Use shared entries, or drop the block"
+        )
+    advisory_filetype = [r for r in filetype_rules if "advisory" in r]
+    if advisory_filetype:
+        raise SystemExit(
+            "areas.yaml: classify.filetype_rules no longer supports "
+            f"'advisory' ({len(advisory_filetype)} entry/entries carry it); "
+            "remove the key -- a filetype rule always blocks"
+        )
+
     spec_shared: list[SharedSpec] = spec.get("shared", []) or []
 
     areas = [

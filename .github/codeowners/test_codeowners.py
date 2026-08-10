@@ -338,6 +338,26 @@ class TestComputeResolution:
         with pytest.raises(SystemExit, match="keyword_rules is no longer supported"):
             compute_resolution(spec)
 
+    def test_legacy_advisory_block_is_rejected(self) -> None:
+        # Advisory routing is gone. A silently ignored block would read as
+        # non-blocking routing that is in fact doing nothing at all.
+        spec = self._spec()
+        spec["advisory"] = [{"glob": "docs/", "owners": ["docs"]}]
+        with pytest.raises(SystemExit, match="advisory is no longer supported"):
+            compute_resolution(spec)
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_legacy_advisory_filetype_key_is_rejected(self, flag: bool) -> None:
+        # Worse than ignored: dropping the key would promote the rule to a
+        # *blocking* owner, the opposite of what its author asked for. Both
+        # values are rejected, since 'advisory: false' is equally stale.
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "*.md", "coowner": "docs", "advisory": flag}
+        ]
+        with pytest.raises(SystemExit, match="no longer supports"):
+            compute_resolution(spec)
+
     def test_resolution_ignores_tree_argument(self) -> None:
         # Two trees that differ only under an already-owned prefix must
         # produce byte-identical resolutions, because ``tree`` is deprecated
