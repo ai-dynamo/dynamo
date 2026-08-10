@@ -154,7 +154,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
 		if dynamo.IsIntraPodFailoverEnabled(component) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames(component)
 		}
 		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to apply checkpoint gpuMemoryService config for component %s: %w", componentName, err)
@@ -265,6 +265,11 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	if err != nil {
 		return nil, err
 	}
+	if dynamo.IsIntraPodFailoverEnabled(component) {
+		if err := dynamo.PrepareVLLMAutomaticFailoverSnapshotSource(targetContainer); err != nil {
+			return nil, err
+		}
+	}
 	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
 		gmsSpec = converted.DeepCopy()
@@ -313,15 +318,7 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		r.Client,
 		dynamoDeployment.Namespace,
 		checkpointID,
-		nvidiacomv1alpha1.DynamoCheckpointIdentity{
-			Model:            fmt.Sprintf("%s/%s", dynamoDeployment.Namespace, dynamoDeployment.Name),
-			BackendFramework: string(backendFramework),
-			ExtraParameters: map[string]string{
-				"dgdUID":       string(dynamoDeployment.UID),
-				"component":    componentName,
-				"checkpointID": checkpointID,
-			},
-		},
+		nil,
 		podTemplate,
 		targetContainerName,
 		deletionPolicy,
@@ -474,6 +471,10 @@ func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
+	dgdController := metav1.NewControllerRef(
+		dgd,
+		nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"),
+	)
 	checkpoints := &nvidiacomv1alpha1.DynamoCheckpointList{}
 	if err := r.List(
 		ctx,
@@ -485,7 +486,7 @@ func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(
 	}
 	for i := range checkpoints.Items {
 		ckpt := &checkpoints.Items[i]
-		if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		if !checkpoint.IsAutomaticCheckpointControlledBy(ckpt, dgdController) {
 			continue
 		}
 		if ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
@@ -506,7 +507,16 @@ func (r *dgdCheckpointsReconciler) detachRetainedAutoCheckpoint(
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 ) error {
 	updated := ckpt.DeepCopy()
-	updated.OwnerReferences = nil
+	for i := range updated.OwnerReferences {
+		ref := updated.OwnerReferences[i]
+		if ref.Controller != nil && *ref.Controller {
+			updated.OwnerReferences = append(
+				updated.OwnerReferences[:i],
+				updated.OwnerReferences[i+1:]...,
+			)
+			break
+		}
+	}
 	if updated.Labels != nil {
 		delete(updated.Labels, consts.KubeLabelDynamoGraphDeploymentName)
 	}

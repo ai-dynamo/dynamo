@@ -235,7 +235,7 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 	existingCheckpoint := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-" + hash, Namespace: "default"},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 			Job: v1alpha1.DynamoCheckpointJobConfig{
 				TargetContainerName: commonconsts.MainContainerName,
 				PodTemplateSpec: corev1.PodTemplateSpec{

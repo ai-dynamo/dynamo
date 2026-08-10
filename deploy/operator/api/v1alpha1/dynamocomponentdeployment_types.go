@@ -190,7 +190,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
 	// Failover configures GMS (GPU Memory Service) failover for this service.
-	// For intraPod mode: the main container is cloned into two engine containers (active + standby).
+	// For intraPod mode: the main container is cloned into one active and one or
+	// two standby engine containers.
 	// For interPod mode: the operator creates a dedicated GMS weight server pod and
 	// multiple engine pods per rank that share GPUs via DRA resource claims.
 	// +optional

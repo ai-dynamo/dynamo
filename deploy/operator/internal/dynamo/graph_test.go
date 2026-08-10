@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -8824,6 +8825,13 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 					Resources: &v1alpha1.Resources{
 						Limits: &v1alpha1.ResourceItem{GPU: "1"},
 					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:    "observer",
+							Image:   "observer:latest",
+							Command: []string{"observe"},
+						}},
+					}},
 					Failover: &v1alpha1.FailoverSpec{
 						Enabled: true,
 						Mode:    v1alpha1.GMSModeIntraPod,
@@ -8881,7 +8889,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			Ready:                   true,
 			Hash:                    "abc123def4567890",
 			CheckpointName:          "decode-checkpoint",
-			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
 		},
 	}
 
@@ -8899,14 +8907,28 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
 		assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
 			"clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
-		for _, engineName := range IntraPodFailoverEngineContainerNames() {
+		for i, engineName := range []string{"engine-0", "engine-1"} {
 			c := findContainerInClique(t, clique, engineName)
 			assert.NotEqual(t, []string{"sleep", "infinity"}, c.Command,
 				"%s in clique %q must stay cold-start-shaped in Immediate startup", engineName, clique.Name)
+			assert.Equal(t,
+				strconv.Itoa(commonconsts.DynamoFPMBasePort+i),
+				envToMap(c.Env)["DYN_FORWARDPASS_METRIC_PORT"],
+			)
+			assert.Equal(t, "agg", envToMap(c.Env)["DYN_VLLM_DISAGGREGATION_MODE"])
+			assert.Equal(t, "tcp", envToMap(c.Env)["DYN_REQUEST_PLANE"])
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
 					t.Fatalf("%s in clique %q must not mount the snapshot-control volume before the pod-create webhook runs", engineName, clique.Name)
 				}
+			}
+		}
+		sidecar := findContainerInClique(t, clique, "observer")
+		assert.Equal(t, []string{"observe"}, sidecar.Command,
+			"sidecar in clique %q must remain cold-start-shaped", clique.Name)
+		for _, m := range sidecar.VolumeMounts {
+			if m.Name == snapshotprotocol.SnapshotControlVolumeName {
+				t.Fatalf("sidecar in clique %q must not be restore-shaped", clique.Name)
 			}
 		}
 	}

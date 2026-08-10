@@ -159,6 +159,15 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				fmt.Errorf("component %q: %w", component.ComponentName, compatibilityErr),
 			)
 		}
+		for _, compatibilityErr := range dynamo.ValidateAutomaticFailoverCheckpointSource(
+			component,
+			dynamoDeployment.Spec.BackendFramework,
+		) {
+			compatibilityErrs = append(
+				compatibilityErrs,
+				fmt.Errorf("component %q: %w", component.ComponentName, compatibilityErr),
+			)
+		}
 	}
 	if compatibilityErr := errors.Join(compatibilityErrs...); compatibilityErr != nil {
 		programResult := newWorkloadProgramResult(dynamoDeployment)

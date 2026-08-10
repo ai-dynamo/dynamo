@@ -99,7 +99,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	referenced := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: reference, Namespace: "default"},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 			Job: v1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},

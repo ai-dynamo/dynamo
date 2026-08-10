@@ -34,7 +34,7 @@ import (
 
 func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 	handler := &dynamoComponentDeploymentV1Alpha1Handler{
-		handler: NewDynamoComponentDeploymentHandler(),
+		handler: NewDynamoComponentDeploymentHandler(""),
 	}
 	ctx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
 	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{
@@ -103,7 +103,7 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoComponentDeploymentHandler()
+	handler := NewDynamoComponentDeploymentHandler("")
 	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}

@@ -78,8 +78,22 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, deployment, runtimeVersionSource, runtimeVersionSource)
+}
+
+func (v *DynamoGraphDeploymentValidator) validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	requestSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSource,
+			requestSource:        requestSource,
+		},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -104,7 +118,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSource,
+			requestSource:        runtimeVersionSource,
+		},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}
@@ -288,6 +307,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			opts.grovePathway,
 			validateInferencePoolAvailability,
 		)...)
+		for _, err := range dynamo.ValidateAutomaticFailoverCheckpointSource(
+			component,
+			spec.BackendFramework,
+		) {
+			allErrs = append(allErrs, field.Forbidden(
+				componentPath.Child("experimental", "checkpoint"),
+				err.Error(),
+			))
+		}
 	}
 
 	if spec.Restart != nil {
