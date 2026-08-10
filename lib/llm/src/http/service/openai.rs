@@ -37,7 +37,7 @@ use super::{
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
+        CancellationLabels, Endpoint, ErrorType, EventConverter, InflightGuard,
         process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
@@ -189,6 +189,19 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
     }
+}
+
+/// Apply the per-model request concurrency gate after the inflight guard has
+/// incremented its gauge, recording a rejected request with the matching error type.
+fn check_model_concurrency_admission(
+    state: &Arc<service_v2::State>,
+    model: &str,
+    metric_model: &str,
+    inflight: &mut InflightGuard,
+) -> Result<(), ErrorResponse> {
+    super::admission::check_model_concurrency_gate(state, model, metric_model).inspect_err(
+        |err_response| inflight.mark_error(extract_error_type_from_response(err_response)),
+    )
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -801,6 +814,8 @@ async fn completions_single(
         &request_id,
     );
 
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -1070,6 +1085,8 @@ async fn completions_batch(
         &request_id,
     );
 
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -1318,6 +1335,8 @@ async fn embeddings(
         streaming,
         &request_id,
     );
+
+    check_model_concurrency_admission(&state, model, &metric_model, &mut inflight)?;
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -2530,6 +2549,8 @@ async fn chat_completions(
         &request_id,
     );
 
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
+
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3038,6 +3059,8 @@ async fn responses(
         streaming,
         request.id(),
     );
+
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -3829,12 +3852,15 @@ async fn images(
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
+    let canonical_model = state.manager().resolve_canonical_name(&model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
 
     // Per-model serving readiness gate (now that we have a resolved model
     // name string).
     check_model_serving_ready(&state, &model)?;
-
-    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -3847,13 +3873,17 @@ async fn images(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Images,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    check_model_concurrency_admission(&state, &canonical_model, &metric_model, &mut inflight)?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // Issue the generate call on the engine
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
@@ -3863,7 +3893,7 @@ async fn images(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3955,7 +3985,11 @@ async fn videos(
 
     // Get the model name from the request (video generation model)
     let model = request.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let canonical_model = state.manager().resolve_canonical_name(&model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -3968,20 +4002,24 @@ async fn videos(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Videos,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    check_model_concurrency_admission(&state, &canonical_model, &metric_model, &mut inflight)?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3998,7 +4036,7 @@ async fn videos(
             ctx.clone(),
             Some(state.metrics_clone()),
             CancellationLabels {
-                model: model.clone(),
+                model: metric_model.clone(),
                 endpoint: Endpoint::Videos.to_string(),
                 request_type: "stream".to_string(),
             },
@@ -4071,7 +4109,11 @@ async fn video_stream(
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let canonical_model = state.manager().resolve_canonical_name(&model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -4080,18 +4122,24 @@ async fn video_stream(
         .get_videos_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Videos,
+        true,
+        request.id(),
+    );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    check_model_concurrency_admission(&state, &canonical_model, &metric_model, &mut inflight)?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -4109,7 +4157,7 @@ async fn video_stream(
         ctx.clone(),
         Some(state.metrics_clone()),
         CancellationLabels {
-            model: model.clone(),
+            model: metric_model.clone(),
             endpoint: Endpoint::Videos.to_string(),
             request_type: "stream".to_string(),
         },
@@ -4255,7 +4303,11 @@ async fn audio_speech(
             .next()
             .unwrap_or_default()
     });
-    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let canonical_model = state.manager().resolve_canonical_name(&model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
 
     // Per-model serving readiness gate (now that we have a resolved model
     // name string).
@@ -4269,13 +4321,17 @@ async fn audio_speech(
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Audios,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    check_model_concurrency_admission(&state, &canonical_model, &metric_model, &mut inflight)?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {

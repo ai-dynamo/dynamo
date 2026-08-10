@@ -3100,6 +3100,9 @@ class EntrypointArgs:
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
+        rejection_frontend_request_concurrency_limit: Optional[int] = None,
+        rejection_frontend_runtime_task_limit: Optional[int] = None,
+        rejection_frontend_request_plane_connection_limit: Optional[int] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3134,6 +3137,12 @@ class EntrypointArgs:
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
+            rejection_frontend_request_concurrency_limit: Frontend admission gate: max concurrent requests per served model (unset=disabled)
+            rejection_frontend_runtime_task_limit: Frontend admission gate: max alive frontend runtime tasks (unset=disabled)
+            rejection_frontend_request_plane_connection_limit: Frontend admission gate:
+                best-effort sampled threshold for process-wide in-flight request-plane
+                requests/streams; concurrent arrivals can exceed it, and it is not a
+                physical TCP connection count (unset=disabled)
         """
         ...
 
