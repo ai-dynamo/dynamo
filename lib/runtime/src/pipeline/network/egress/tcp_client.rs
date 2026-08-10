@@ -1500,8 +1500,24 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get shared connection from pool (Arc, not exclusive borrow)
-        let conn = self.pool.get_connection(addr).await?;
+        // Get shared connection from pool (Arc, not exclusive borrow).
+        // A cold connection failure must use the same error type as a send failure so the
+        // request migration layer can retry it on another worker.
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connection failed");
+            let cause = crate::error::DynamoError::from(
+                e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+            );
+            anyhow::anyhow!(
+                crate::error::DynamoError::builder()
+                    .error_type(crate::error::ErrorType::CannotConnect)
+                    .message(format!("TCP connection to {addr} failed"))
+                    .cause(cause)
+                    .build()
+            )
+        })?;
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
@@ -1643,6 +1659,37 @@ mod tests {
         let client = client.unwrap();
         assert_eq!(client.transport_name(), "tcp");
         assert!(client.is_healthy());
+    }
+
+    #[tokio::test]
+    async fn test_cold_connection_failure_is_cannot_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+
+        let err = client
+            .send_request(
+                format!("{addr}/generate"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
     }
 
     /// Helper: spawn a mock TCP server that echoes requests.
