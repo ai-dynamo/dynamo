@@ -952,15 +952,7 @@ navigation:
       - page: Compatibility
         path: pages/reference/general/compatibility.mdx
         slug: compatibility
-      - page: Examples
-        path: pages/reference/general/examples.md
-        slug: examples
-      - page: Release Artifacts
-        path: pages/reference/general/release-artifacts.mdx
-        slug: release-artifacts
-      - page: Nightly Release Info
-        path: pages/reference/general/nightly-release-info.md
-        slug: nightly-release-info
+
       - section: Releases
         slug: releases
         path: pages/reference/general/releases/release-history.mdx
@@ -982,12 +974,7 @@ navigation:
             path: pages/reference/general/releases/known-issues.mdx
           - page: Deprecations
             path: pages/reference/general/releases/deprecations.mdx
-      - page: Model Early Access Builds
-        path: pages/reference/general/model-early-access-builds.mdx
-        slug: model-early-access-builds
-      - page: Glossary
-        path: pages/reference/general/glossary.md
-        slug: glossary
+
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
@@ -995,13 +982,25 @@ navigation:
         slug: releases-data
         hidden: true
 
+      - page: Release Artifacts
+        path: pages/reference/general/release-artifacts.mdx
+        slug: release-artifacts
+
+      - page: Nightly Releases
+        path: pages/reference/general/nightly-release-info.md
+        slug: nightly-release-info
+
+      - page: Model Early Access Builds
+        path: pages/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
+
       # ==================== API Reference ====================
       # docs/fern/scripts/gen_python_api.py generates the Python landing page
       # and one deterministic MDX per curated module. Each per-module page is a
       # visible sibling of the Python landing so the sidebar exposes every
-      # published module. Python API sets 'collapsed: false': Fern collapses by
-      # default, which hid the whole published surface behind a click on the tab
-      # readers open specifically to look a symbol up.
+      # published module. Python API sets 'collapsed: false' so that surface is
+      # listed rather than hidden behind a click; Kubernetes API collapses
+      # because its four pages are already named after what they document.
       #
       # Python API and Rust API sit at the top level as siblings of Kubernetes
       # API, so the three language surfaces read as peers. Their slugs stay
@@ -1012,6 +1011,7 @@ navigation:
       - page: API Reference
         path: pages/reference/api/README.mdx
         slug: api
+
       - section: Python API
         icon: fa-brands fa-python
         path: pages/reference/api/python/README.mdx
@@ -1051,6 +1051,7 @@ navigation:
           - page: dynamo.nixl_connect
             path: pages/reference/api/python/nixl_connect.mdx
             slug: nixl_connect
+
       - page: Rust API
         icon: fa-brands fa-rust
         path: pages/reference/api/rust/README.mdx
@@ -1156,6 +1157,14 @@ navigation:
         contents:
           - page: Overview
             path: pages/reference/nixl-connect/overview.mdx
+
+      - page: Examples
+        path: pages/reference/general/examples.md
+        slug: examples
+
+      - page: Glossary
+        path: pages/reference/general/glossary.md
+        slug: glossary
 
   - tab: blog
     layout:
