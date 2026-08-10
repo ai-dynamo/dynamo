@@ -1418,6 +1418,19 @@ mod tests {
         let token = stream.next().await.unwrap().data.unwrap();
         assert_eq!(token.token_ids.len(), 1);
         assert!(token.finish_reason.is_none());
+        assert_eq!(
+            token.completion_usage,
+            Some(CompletionUsage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+                prompt_tokens_details: Some(PromptTokensDetails {
+                    audio_tokens: None,
+                    cached_tokens: Some(0),
+                }),
+                completion_tokens_details: None,
+            })
+        );
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
