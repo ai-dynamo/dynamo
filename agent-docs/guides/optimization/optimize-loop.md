@@ -157,6 +157,14 @@ Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), th
 
 ## 7. Finalize
 
+Before recommending, run a correctness regression check whenever the recommended configuration differs from the
+user-provided baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
+quantization, attention or MoE backend, KV dtype or reuse): replay 8-16 fixed representative prompts with frozen
+continuations through both configurations and compare teacher-forced per-token log-probabilities, calibrating the
+tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
+scores, and no unexpected truncation. If no such check is possible, record an ask; report a waived check as
+`correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
+
 Recommend the best valid candidate for the target objective, not automatically the most recent iteration. Write the
 final configuration to `EXP_ROOT/final/recommended_config.md`, reproduction commands to
 `EXP_ROOT/final/reproduced_commands.sh`, and limitations to `EXP_ROOT/final/known_limitations.md`. Include paths to the
