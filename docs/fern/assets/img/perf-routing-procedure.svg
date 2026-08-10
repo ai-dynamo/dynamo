@@ -1,0 +1,160 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 762" width="1000" height="762" role="img" aria-label="Dynamo performance analysis routing procedure: classify, constrain, gate, run, capture and report">
+<style>
+  svg {
+    --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+    --rule:#c3c2b7; --flow:#2a78d6; --std:#eb6834; --gate:#1baf7a; --stop:#d03b3b;
+    --flowT:#e8f1fc; --stdT:#fdeee7; --gateT:#e4f6ef; --stopT:#fbeaea; --neutT:#f2f1ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    svg {
+      --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+      --rule:#383835; --flow:#3987e5; --std:#d95926; --gate:#199e70; --stop:#d03b3b;
+      --flowT:#16283d; --stdT:#3a2118; --gateT:#123027; --stopT:#3a1c1c; --neutT:#252523;
+    }
+  }
+  .t   { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .h1  { font-size:17px; font-weight:700; fill:var(--ink); }
+  .sub { font-size:11px; fill:var(--muted); }
+  .st  { font-size:12.5px; font-weight:700; fill:var(--ink); letter-spacing:.04em; }
+  .sd  { font-size:10.5px; fill:var(--ink2); }
+  .bn  { font-size:11px; font-weight:700; fill:var(--ink); }
+  .bd  { font-size:9px; fill:var(--ink2); }
+  .lg  { font-size:9.5px; fill:var(--ink2); }
+  .ln  { stroke:var(--rule); stroke-width:1.5; fill:none; }
+  .box { rx:6; stroke-width:1.5; }
+</style>
+<defs>
+  <marker id="a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M0,0 L8,4 L0,8 z" fill="var(--rule)"/>
+  </marker>
+  <marker id="as" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M0,0 L8,4 L0,8 z" fill="var(--stop)"/>
+  </marker>
+</defs>
+
+<rect width="1000" height="762" fill="var(--surface)"/>
+<text class="t h1" x="40" y="36">Dynamo performance analysis — the routing procedure</text>
+<text class="t sub" x="40" y="55">Intent picks the tool family. Constraints pick which member. Three gates run before anything is measured.</text>
+
+<rect class="box" x="390" y="76" width="220" height="28" fill="var(--neutT)" stroke="var(--rule)"/>
+<text class="t bn" x="500" y="94" text-anchor="middle">a performance question</text>
+<path class="ln" d="M500,104 L500,124" marker-end="url(#a)"/>
+
+<rect class="box" x="40" y="126" width="880" height="44" fill="var(--flowT)" stroke="var(--flow)"/>
+<rect x="40" y="126" width="4" height="44" fill="var(--flow)"/>
+<text class="t st" x="60" y="145">STEP 1 · CLASSIFY</text>
+<text class="t sd" x="60" y="161">what would count as an answer? — interpretation of intent, resolved by asking</text>
+<text class="t sd" x="900" y="153" text-anchor="end" font-weight="700">→ tool family</text>
+
+<path class="ln" d="M500,170 L500,186 M120,186 L840,186 M120,186 L120,200 M310,186 L310,200 M500,186 L500,200 M690,186 L690,200 M840,186 L840,200"/>
+
+<rect class="box" x="40" y="200" width="160" height="72" fill="var(--neutT)" stroke="var(--rule)"/>
+<text class="t bn" x="52" y="219">REGRESSION</text>
+<text class="t bd" x="52" y="236">"did my change</text>
+<text class="t bd" x="52" y="249">make it slower?"</text>
+<text class="t bd" x="52" y="264" fill="var(--flow)">⇒ verdict + CI</text>
+
+<rect class="box" x="230" y="200" width="160" height="72" fill="var(--neutT)" stroke="var(--rule)"/>
+<text class="t bn" x="242" y="219">SIZING</text>
+<text class="t bd" x="242" y="236">"how many GPUs,</text>
+<text class="t bd" x="242" y="249">what TP?"</text>
+<text class="t bd" x="242" y="264" fill="var(--flow)">⇒ config + Pareto</text>
+
+<rect class="box" x="420" y="200" width="160" height="72" fill="var(--neutT)" stroke="var(--rule)"/>
+<text class="t bn" x="432" y="219">ATTRIBUTION</text>
+<text class="t bd" x="432" y="236">"where does the</text>
+<text class="t bd" x="432" y="249">time go?"</text>
+<text class="t bd" x="432" y="264" fill="var(--flow)">⇒ a named frame</text>
+
+<rect class="box" x="610" y="200" width="160" height="72" fill="var(--neutT)" stroke="var(--rule)"/>
+<text class="t bn" x="622" y="219">CHARACTERIZE</text>
+<text class="t bd" x="622" y="236">"what is the</text>
+<text class="t bd" x="622" y="249">throughput?"</text>
+<text class="t bd" x="622" y="264" fill="var(--flow)">⇒ number + error</text>
+
+<rect class="box" x="800" y="200" width="160" height="72" fill="var(--stopT)" stroke="var(--stop)"/>
+<text class="t bn" x="812" y="219">DIAGNOSIS</text>
+<text class="t bd" x="812" y="236">"slower than it</text>
+<text class="t bd" x="812" y="249">should be"</text>
+<text class="t bd" x="812" y="264" fill="var(--stop)" font-weight="700">⚠ skips to gate</text>
+
+<path class="ln" d="M120,272 L120,292 M310,272 L310,292 M500,272 L500,292 M690,272 L690,292 M120,292 L690,292 M480,292 L480,310" marker-end="url(#a)"/>
+<path d="M880,272 L880,300 L975,300 L975,470 L920,470" fill="none" stroke="var(--stop)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#as)"/>
+<text class="t bd" x="969" y="386" fill="var(--stop)" text-anchor="middle" transform="rotate(-90 969 386)">never measures first</text>
+
+<rect class="box" x="40" y="312" width="880" height="44" fill="var(--flowT)" stroke="var(--flow)"/>
+<rect x="40" y="312" width="4" height="44" fill="var(--flow)"/>
+<text class="t st" x="60" y="331">STEP 2 · CONSTRAIN</text>
+<text class="t sd" x="60" y="347">what can you actually run? — facts about the environment, looked up not interpreted</text>
+<text class="t sd" x="900" y="339" text-anchor="end" font-weight="700">→ which member</text>
+
+<rect class="box" x="40" y="368" width="286" height="42" fill="var(--surface)" stroke="var(--rule)"/>
+<text class="t bn" x="52" y="385">substrate</text>
+<text class="t bd" x="52" y="400">no GPU · dev box · Kubernetes</text>
+
+<rect class="box" x="337" y="368" width="286" height="42" fill="var(--surface)" stroke="var(--rule)"/>
+<text class="t bn" x="349" y="385">component</text>
+<text class="t bd" x="349" y="400">frontend+router · engine · KV transfer</text>
+
+<rect class="box" x="634" y="368" width="286" height="42" fill="var(--surface)" stroke="var(--rule)"/>
+<text class="t bn" x="646" y="385">time budget</text>
+<text class="t bd" x="646" y="400">seconds · minutes · hours</text>
+
+<path class="ln" d="M480,410 L480,436" marker-end="url(#a)"/>
+
+<rect class="box" x="40" y="438" width="880" height="112" fill="var(--gateT)" stroke="var(--gate)"/>
+<rect x="40" y="438" width="4" height="112" fill="var(--gate)"/>
+<text class="t st" x="60" y="457">STEP 3 · GATE</text>
+<text class="t sd" x="176" y="457">preconditions — three of the six skills run before anything is measured</text>
+
+<rect class="box" x="56" y="468" width="196" height="42" fill="var(--surface)" stroke="var(--gate)"/>
+<text class="t bn" x="68" y="485">recipe-runner</text>
+<text class="t bd" x="68" y="500">topology → Ready</text>
+<path class="ln" d="M254,489 L272,489" marker-end="url(#a)"/>
+
+<rect class="box" x="276" y="468" width="196" height="42" fill="var(--surface)" stroke="var(--gate)"/>
+<text class="t bn" x="288" y="485">troubleshoot</text>
+<text class="t bd" x="288" y="500">broken, not slow?</text>
+<path class="ln" d="M474,489 L492,489" marker-end="url(#a)"/>
+
+<rect class="box" x="496" y="468" width="196" height="42" fill="var(--surface)" stroke="var(--gate)"/>
+<text class="t bn" x="508" y="485">interconnect-check</text>
+<text class="t bd" x="508" y="500">RDMA really on?</text>
+<path class="ln" d="M694,489 L712,489" marker-end="url(#a)"/>
+
+<rect class="box" x="716" y="468" width="196" height="42" fill="var(--surface)" stroke="var(--gate)"/>
+<text class="t bn" x="728" y="485">router-starter</text>
+<text class="t bd" x="728" y="500">mode as intended?</text>
+
+<text class="t bd" x="60" y="533" fill="var(--stop)" font-weight="700">■ any failure here ⇒ STOP.</text>
+<text class="t bd" x="205" y="533">The number you would collect describes the misconfiguration, not the system.</text>
+
+<path class="ln" d="M480,550 L480,572" marker-end="url(#a)"/>
+
+<rect class="box" x="40" y="574" width="880" height="44" fill="var(--flowT)" stroke="var(--flow)"/>
+<rect x="40" y="574" width="4" height="44" fill="var(--flow)"/>
+<text class="t st" x="60" y="593">STEP 4 · RUN UNDER PROTOCOL</text>
+<text class="t sd" x="60" y="609">full teardown between runs · warm up · n &gt; 1 · compare medians · interleave arms · one variable</text>
+
+<path class="ln" d="M480,618 L480,630 M250,630 L710,630 M250,630 L250,644 M710,630 L710,644"/>
+
+<rect class="box" x="40" y="644" width="420" height="46" fill="var(--surface)" stroke="var(--rule)"/>
+<text class="t bn" x="52" y="662">STEP 5 · CAPTURE</text>
+<text class="t bd" x="52" y="678">metrics · OTel spans · request-trace → Perfetto · flamegraphs</text>
+
+<rect class="box" x="500" y="644" width="420" height="46" fill="var(--surface)" stroke="var(--rule)"/>
+<text class="t bn" x="512" y="662">STEP 6 · REPORT</text>
+<text class="t bd" x="512" y="678">workload · concurrency · substrate · revision · n · dispersion · gates</text>
+
+<line x1="40" y1="714" x2="920" y2="714" stroke="var(--rule)" stroke-width="1"/>
+<rect x="40" y="730" width="10" height="10" rx="2" fill="var(--flowT)" stroke="var(--flow)" stroke-width="1.5"/>
+<text class="t lg" x="58" y="739">procedure stage</text>
+<rect x="176" y="730" width="10" height="10" rx="2" fill="var(--gateT)" stroke="var(--gate)" stroke-width="1.5"/>
+<text class="t lg" x="194" y="739">gate — runbook skills, all ship scripts</text>
+<rect x="424" y="730" width="10" height="10" rx="2" fill="var(--stopT)" stroke="var(--stop)" stroke-width="1.5"/>
+<text class="t lg" x="442" y="739">stop condition / bypass — always paired with a label, never color alone</text>
+</svg>
