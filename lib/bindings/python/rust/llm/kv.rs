@@ -1891,17 +1891,8 @@ impl KvRouter {
             .transpose()
             .map_err(to_pyerr)?;
 
-        // Release the GIL for this wait. It awaits worker registration, which is
-        // unbounded (kv_router.rs: `startup_watch.wait_for(..)`), and PyO3 otherwise
-        // holds the GIL for the whole #[pymethods] call -- starving every other
-        // thread, including any supervisor enforcing a deadline and CPython's
-        // signal handling.
-        //
-        // This makes the wait supervisable, not cancellable: block_on still runs to
-        // completion, and constructing directly on the main thread remains
-        // uninterruptible by SIGALRM. Callers needing a deadline must construct
-        // off-thread and enforce it themselves -- see
-        // tests/router/common.py::_create_kv_router_with_timeout.
+        // The initial-worker wait can be unbounded. Releasing the GIL makes it
+        // supervisable from another thread, but not cancellable.
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         py.allow_threads(|| {
             runtime.block_on(async move {

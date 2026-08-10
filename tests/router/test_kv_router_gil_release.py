@@ -1,24 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test: KvRouter construction must not hold the GIL.
+"""Verify that KvRouter's initial-worker wait releases the GIL.
 
-``KvRouter.__new__`` blocks until ``min_initial_workers`` register. That wait is
-unbounded by design, so the caller is responsible for its own deadline -- but the
-caller can only enforce one if the GIL is free. When the binding held the GIL
-across ``block_on`` (dynamo#12762), a router that never found workers wedged the
-whole interpreter: ``Thread.join(timeout=)`` could not resume, ``@pytest.mark.timeout``
-never fired, and only an external SIGKILL ended it. In CI that burned a full 4h
-GPU slot per occurrence.
-
-Releasing the GIL makes that wait *supervisable*, not cancellable -- ``block_on``
-still runs to completion, so the builder thread stays parked for the life of the
-process. What changes is that everyone else can now run, which is the whole point.
-
-The scenario runs in a subprocess because a regression leaves a thread parked in
-the constructor holding the GIL -- which would wedge the pytest worker itself,
-uninterruptibly. Isolating it means a regression fails one test instead of
-hanging the run.
+The scenario runs in a subprocess because a regression would pin the GIL and
+hang the pytest worker.
 """
 
 import os
@@ -35,33 +21,28 @@ pytestmark = [
     pytest.mark.router,
 ]
 
-# Long enough that a real hang cannot pass by finishing early, short enough that
-# a regression fails the suite in seconds rather than at the CI step limit.
-_SUBPROCESS_TIMEOUT_S = 90
-
-# The scenario needs no services: an in-memory store and a TCP request plane keep
-# DistributedRuntime self-contained. But `nats_enabled` in distributed.rs is true
-# if NATS_SERVER is merely *set*, and DYN_EVENT_PLANE can flip the plane to NATS
-# -- so an ambient value from the CI container makes the child connect eagerly and
-# die on a dead port. Build the child env explicitly instead of inheriting it.
-_UNSET_IN_CHILD = ("NATS_SERVER", "DYN_EVENT_PLANE")
+_SUBPROCESS_TIMEOUT_S = 45
 
 
 def _child_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _UNSET_IN_CHILD}
+    env = os.environ.copy()
     env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "1"
     return env
 
 
 _SCENARIO = textwrap.dedent(
     """
-    import asyncio, threading, time
+    import asyncio, faulthandler, threading
+
+    # Fires before the parent deadline and does not need the GIL, so a regression
+    # exits with thread stacks instead of only reporting an external kill.
+    faulthandler.dump_traceback_later(30, exit=True)
 
     from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    runtime = DistributedRuntime(loop, "mem", "tcp")
+    runtime = DistributedRuntime(loop, "mem", "tcp", event_plane="zmq")
 
     # Namespace with no registered workers, so the startup wait never completes.
     endpoint = runtime.endpoint("gilcheck.backend.generate")
@@ -69,49 +50,34 @@ _SCENARIO = textwrap.dedent(
     # Surface constructor failures instead of swallowing them -- otherwise an
     # unrelated break (API change, bad endpoint) exits the thread immediately and
     # reports as a bogus GIL assertion below.
+    router_starting = threading.Event()
     router_error = []
 
     def build_router():
         try:
+            router_starting.set()
             KvRouter(endpoint, 16, KvRouterConfig())
-        except BaseException as exc:
+        except Exception as exc:
             router_error.append(exc)
 
     t = threading.Thread(target=build_router, daemon=True)
     t.start()
-    time.sleep(1.0)
+    assert router_starting.wait(timeout=5), "router thread did not reach KvRouter"
 
-    # The premise is that the thread is parked inside the constructor. If it
-    # already returned, this run proves nothing either way.
-    if not t.is_alive():
-        raise AssertionError(
-            "router thread exited during setup, so the blocking path was never "
-            f"exercised; scenario is invalid. error={router_error!r}"
-        )
+    # join() releases the GIL while waiting. With the binding fix it returns at
+    # the timeout; with a regression it cannot resume and the watchdog exits.
+    t.join(timeout=3)
 
-    # The interpreter must keep executing bytecode while the router thread blocks.
-    ticks = 0
-    start = time.monotonic()
-    while time.monotonic() - start < 3.0:
-        ticks += 1
-        time.sleep(0.001)
-    assert ticks > 100, f"main thread starved ({ticks} ticks): GIL held across block_on"
-
-    # A free GIL is the whole property: SIGALRM delivery, Thread.join(timeout=)
-    # returning, and pytest-timeout firing are all downstream of it, so asserting
-    # them separately would only re-prove the line above.
-
-    # Any constructor completion would also free the main thread; neither an error
-    # nor a successful return proves that the blocking path stayed GIL-free.
     assert not router_error, f"router constructor raised: {router_error!r}"
     assert t.is_alive(), "router constructor returned before a worker registered"
 
+    faulthandler.cancel_dump_traceback_later()
     print("OK")
     """
 )
 
 
-@pytest.mark.timeout(120)  # outer bound; must exceed the child deadline above
+@pytest.mark.timeout(60)  # outer bound; must exceed the child deadline above
 def test_kv_router_init_releases_gil():
     """A KvRouter that never finds workers must not wedge the interpreter."""
     try:
