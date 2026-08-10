@@ -76,10 +76,8 @@ pub enum InputTrigger {
     UserMessage,
     /// A tool or function result was fed back, continuing the turn.
     ToolResult,
-    /// A non-message continuation (e.g. a raw completions prompt or assistant echo).
-    Continuation,
-    /// Could not classify the trigger.
-    Unknown,
+    /// Any request not triggered by a user message or tool result.
+    Other,
 }
 
 /// Identity metadata for agentic workloads.

@@ -48,7 +48,7 @@ pub fn classify_chat_request(request: &NvCreateChatCompletionRequest) -> InputTr
 
 fn classify_create_chat_completion_request(request: &CreateChatCompletionRequest) -> InputTrigger {
     let Some(last) = request.messages.last() else {
-        return InputTrigger::Unknown;
+        return InputTrigger::Other;
     };
 
     match last {
@@ -56,9 +56,9 @@ fn classify_create_chat_completion_request(request: &CreateChatCompletionRequest
         ChatCompletionRequestMessage::Tool(_) | ChatCompletionRequestMessage::Function(_) => {
             InputTrigger::ToolResult
         }
-        ChatCompletionRequestMessage::Assistant(_) => InputTrigger::Continuation,
+        ChatCompletionRequestMessage::Assistant(_) => InputTrigger::Other,
         ChatCompletionRequestMessage::System(_) | ChatCompletionRequestMessage::Developer(_) => {
-            InputTrigger::Unknown
+            InputTrigger::Other
         }
     }
 }
@@ -69,7 +69,7 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
         InputParam::Text(_) => InputTrigger::UserMessage,
         InputParam::Items(items) => {
             let Some(last) = items.last() else {
-                return InputTrigger::Unknown;
+                return InputTrigger::Other;
             };
             match last {
                 InputItem::Item(Item::FunctionCallOutput(_)) => InputTrigger::ToolResult,
@@ -78,18 +78,17 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                         InputTrigger::UserMessage
                     } else {
                         // System/Developer input messages have no clear trigger.
-                        InputTrigger::Unknown
+                        InputTrigger::Other
                     }
                 }
                 InputItem::Item(Item::Message(MessageItem::Output(_)))
                 | InputItem::Item(Item::FunctionCall(_))
-                | InputItem::Item(Item::Reasoning(_)) => InputTrigger::Continuation,
+                | InputItem::Item(Item::Reasoning(_)) => InputTrigger::Other,
                 InputItem::EasyMessage(easy) => match easy.role {
                     ResponseRole::User => InputTrigger::UserMessage,
-                    ResponseRole::Assistant => InputTrigger::Continuation,
-                    _ => InputTrigger::Unknown,
+                    _ => InputTrigger::Other,
                 },
-                _ => InputTrigger::Unknown,
+                _ => InputTrigger::Other,
             }
         }
     }
@@ -101,7 +100,7 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
 /// `tool_result` content blocks, so we inspect content blocks and not just role.
 pub fn classify_anthropic_request(request: &AnthropicCreateMessageRequest) -> InputTrigger {
     let Some(last) = request.messages.last() else {
-        return InputTrigger::Unknown;
+        return InputTrigger::Other;
     };
 
     match last.role {
@@ -118,17 +117,15 @@ pub fn classify_anthropic_request(request: &AnthropicCreateMessageRequest) -> In
                 }
             }
         },
-        AnthropicRole::Assistant => InputTrigger::Continuation,
-        AnthropicRole::System => InputTrigger::Unknown,
+        AnthropicRole::Assistant | AnthropicRole::System => InputTrigger::Other,
     }
 }
 
 /// Classify an OpenAI Completions request.
 ///
-/// Completions prompts are free-form string continuations, so there is no
-/// user/tool role information available.
+/// Completions prompts have no user/tool role information.
 pub fn classify_completion_request(_request: &NvCreateCompletionRequest) -> InputTrigger {
-    InputTrigger::Continuation
+    InputTrigger::Other
 }
 
 #[cfg(test)]
@@ -186,9 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn chat_unknown_empty_messages() {
+    fn chat_other_empty_messages() {
         let req = chat_request_with_messages(vec![]);
-        assert_eq!(classify_chat_request(&req), InputTrigger::Unknown);
+        assert_eq!(classify_chat_request(&req), InputTrigger::Other);
     }
 
     fn response_request_with_easy_messages(role: ResponseRole) -> NvCreateResponse {
@@ -210,8 +207,8 @@ mod tests {
     fn responses_easy_message_roles() {
         for (role, expected) in [
             (ResponseRole::User, InputTrigger::UserMessage),
-            (ResponseRole::Assistant, InputTrigger::Continuation),
-            (ResponseRole::System, InputTrigger::Unknown),
+            (ResponseRole::Assistant, InputTrigger::Other),
+            (ResponseRole::System, InputTrigger::Other),
         ] {
             assert_eq!(
                 classify_response_request(&response_request_with_easy_messages(role)),
