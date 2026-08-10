@@ -21,6 +21,7 @@ uninterruptibly. Isolating it means a regression fails one test instead of
 hanging the run.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -38,11 +39,24 @@ pytestmark = [
 # a regression fails the suite in seconds rather than at the CI step limit.
 _SUBPROCESS_TIMEOUT_S = 90
 
+# The scenario needs no services: an in-memory store and a TCP request plane keep
+# DistributedRuntime self-contained. But `nats_enabled` in distributed.rs is true
+# if NATS_SERVER is merely *set*, and DYN_REQUEST_PLANE can flip the plane to NATS
+# -- so an ambient value from the CI container makes the child connect eagerly and
+# die on a dead port. Build the child env explicitly instead of inheriting it.
+_UNSET_IN_CHILD = ("NATS_SERVER", "DYN_REQUEST_PLANE")
+
+
+def _child_env() -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in _UNSET_IN_CHILD}
+    env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "1"
+    return env
+
+
 _SCENARIO = textwrap.dedent(
     """
-    import asyncio, os, threading, time
+    import asyncio, threading, time
 
-    os.environ["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "1"
     from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
 
     loop = asyncio.new_event_loop()
@@ -106,6 +120,7 @@ def test_kv_router_init_releases_gil():
             text=True,
             timeout=_SUBPROCESS_TIMEOUT_S,
             check=False,
+            env=_child_env(),
         )
     except subprocess.TimeoutExpired:
         pytest.fail(
