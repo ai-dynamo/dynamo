@@ -979,6 +979,7 @@ class SglangStreamingPostProcessor:
         # incomplete byte-fallback sequence.
         self._decode_context_ids = list((prompt_token_ids or [])[-5:])
         self._pending_decode_ids: list[int] = []
+        self._logprob_context_ids: list[int] = []
         self._pending_logprobs_content: list[dict[str, Any]] = []
         self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
@@ -1056,14 +1057,23 @@ class SglangStreamingPostProcessor:
 
         content: list[dict[str, Any]] = []
         for index, (token_id, logprob) in enumerate(zip(token_ids, log_probs)):
-            token = self.tokenizer.decode([token_id], skip_special_tokens=False)
+            context_token_ids = (self._logprob_context_ids + token_ids[:index])[-4:]
+            token = self._decode_logprob_token(token_id, None, context_token_ids)
             candidates = top_logprobs[index] if top_logprobs else []
             openai_top_logprobs = []
             for candidate in candidates:
-                candidate_token = candidate.get("token") or ""
+                candidate_token = self._decode_logprob_token(
+                    candidate.get("token_id"),
+                    candidate.get("token"),
+                    context_token_ids,
+                )
                 candidate_bytes = candidate.get("bytes")
-                if candidate_bytes is None and candidate_token:
-                    candidate_bytes = list(candidate_token.encode("utf-8"))
+                if candidate_bytes is None:
+                    candidate_bytes = (
+                        list(candidate_token.encode("utf-8"))
+                        if candidate_token
+                        else None
+                    )
                 openai_top_logprobs.append(
                     {
                         "token": candidate_token,
@@ -1081,6 +1091,57 @@ class SglangStreamingPostProcessor:
             )
 
         return {"content": content, "refusal": None} if content else None
+
+    def _decode_logprob_token(
+        self,
+        token_id: int | None,
+        token: str | None,
+        context_token_ids: list[int],
+    ) -> str:
+        if token is None:
+            if token_id is None:
+                return ""
+            token = self.tokenizer.decode([token_id], skip_special_tokens=False)
+
+        if not token.endswith("\ufffd") or token_id is None:
+            return token
+
+        for context_size in range(1, min(len(context_token_ids), 4) + 1):
+            context = context_token_ids[-context_size:]
+            decoded = self.tokenizer.decode(
+                context + [token_id], skip_special_tokens=False
+            )
+            if decoded.endswith("\ufffd"):
+                continue
+
+            clean_end = len(context)
+            for context_index in range(len(context) - 1, -1, -1):
+                context_token = self.tokenizer.decode(
+                    [context[context_index]], skip_special_tokens=False
+                )
+                if context_token.endswith("\ufffd"):
+                    clean_end = context_index
+                else:
+                    break
+
+            clean_prefix = (
+                self.tokenizer.decode(
+                    context[:clean_end], skip_special_tokens=False
+                )
+                if clean_end
+                else ""
+            )
+            if decoded.startswith(clean_prefix):
+                return decoded[len(clean_prefix) :]
+
+            common_prefix_length = 0
+            for prefix_char, decoded_char in zip(clean_prefix, decoded):
+                if prefix_char != decoded_char:
+                    break
+                common_prefix_length += 1
+            return decoded[common_prefix_length:]
+
+        return ""
 
     def _take_pending_logprobs(self) -> dict[str, Any] | None:
         if not self._pending_logprobs_content:
@@ -1174,6 +1235,7 @@ class SglangStreamingPostProcessor:
             )
             if openai_logprobs is not None:
                 self._pending_logprobs_content.extend(openai_logprobs["content"])
+        self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
 
         if self._fast_plain_text:
             if delta_text:
