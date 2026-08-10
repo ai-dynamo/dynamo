@@ -10,8 +10,7 @@ Recipes for [Qwen/Qwen3.5-122B-A10B](https://huggingface.co/Qwen/Qwen3.5-122B-A1
 attention every 4th layer, 262,144-token context, vision input supported).
 
 Each quantized checkpoint is a self-contained recipe folder with its own
-`model-cache/`, `vllm/` profiles and perf notes. The NVFP4 B200 variant is added
-by #11665.
+`model-cache/`, `vllm/` profiles and perf notes.
 
 ## Variants
 
