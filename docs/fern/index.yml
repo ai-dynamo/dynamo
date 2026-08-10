@@ -1150,26 +1150,6 @@ navigation:
         contents:
           - page: Overview
             path: pages/reference/nixl-connect/overview.mdx
-          - page: Connector
-            path: pages/reference/nixl-connect/connector.mdx
-          - page: Device
-            path: pages/reference/nixl-connect/device.mdx
-          - page: Device Kind
-            path: pages/reference/nixl-connect/device-kind.mdx
-          - page: Descriptor
-            path: pages/reference/nixl-connect/descriptor.mdx
-          - page: Read Operation
-            path: pages/reference/nixl-connect/read-operation.mdx
-          - page: Write Operation
-            path: pages/reference/nixl-connect/write-operation.mdx
-          - page: Readable Operation
-            path: pages/reference/nixl-connect/readable-operation.mdx
-          - page: Writable Operation
-            path: pages/reference/nixl-connect/writable-operation.mdx
-          - page: Operation Status
-            path: pages/reference/nixl-connect/operation-status.mdx
-          - page: RDMA Metadata
-            path: pages/reference/nixl-connect/rdma-metadata.mdx
 
   - tab: blog
     layout:

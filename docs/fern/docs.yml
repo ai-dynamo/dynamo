@@ -47,6 +47,30 @@ versions:
     path: ./index.yml
 
 redirects:
+  # The per-class NIXL Connect pages were replaced by the generated Python API
+  # reference, which covers the same classes from source plus seven more.
+  # Keep their published URLs serving, anchored at the matching class.
+
+  - source: "/dynamo/dev/reference/nixl-connect/connector"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-connector"
+  - source: "/dynamo/dev/reference/nixl-connect/descriptor"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-descriptor"
+  - source: "/dynamo/dev/reference/nixl-connect/device"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-device"
+  - source: "/dynamo/dev/reference/nixl-connect/device-kind"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-devicekind"
+  - source: "/dynamo/dev/reference/nixl-connect/operation-status"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-operationstatus"
+  - source: "/dynamo/dev/reference/nixl-connect/rdma-metadata"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-rdmametadata"
+  - source: "/dynamo/dev/reference/nixl-connect/read-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-readoperation"
+  - source: "/dynamo/dev/reference/nixl-connect/write-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-writeoperation"
+  - source: "/dynamo/dev/reference/nixl-connect/readable-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-readableoperation"
+  - source: "/dynamo/dev/reference/nixl-connect/writable-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-writableoperation"
   # AI Simulate's experimental Spica package was renamed to Sweeper on dev only.
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica"
     destination: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/sweeper/overview"
@@ -146,25 +170,25 @@ redirects:
   - source: "/dynamo/dev/nixl-connect/overview"
     destination: "/dynamo/dev/reference/nixl-connect/overview"
   - source: "/dynamo/dev/nixl-connect/connector"
-    destination: "/dynamo/dev/reference/nixl-connect/connector"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-connector"
   - source: "/dynamo/dev/nixl-connect/device"
-    destination: "/dynamo/dev/reference/nixl-connect/device"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-device"
   - source: "/dynamo/dev/nixl-connect/device-kind"
-    destination: "/dynamo/dev/reference/nixl-connect/device-kind"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-devicekind"
   - source: "/dynamo/dev/nixl-connect/descriptor"
-    destination: "/dynamo/dev/reference/nixl-connect/descriptor"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-descriptor"
   - source: "/dynamo/dev/nixl-connect/read-operation"
-    destination: "/dynamo/dev/reference/nixl-connect/read-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-readoperation"
   - source: "/dynamo/dev/nixl-connect/write-operation"
-    destination: "/dynamo/dev/reference/nixl-connect/write-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-writeoperation"
   - source: "/dynamo/dev/nixl-connect/readable-operation"
-    destination: "/dynamo/dev/reference/nixl-connect/readable-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-readableoperation"
   - source: "/dynamo/dev/nixl-connect/writable-operation"
-    destination: "/dynamo/dev/reference/nixl-connect/writable-operation"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-writableoperation"
   - source: "/dynamo/dev/nixl-connect/operation-status"
-    destination: "/dynamo/dev/reference/nixl-connect/operation-status"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-operationstatus"
   - source: "/dynamo/dev/nixl-connect/rdma-metadata"
-    destination: "/dynamo/dev/reference/nixl-connect/rdma-metadata"
+    destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-rdmametadata"
 
   # ============================================================
   # Live-URL continuity (B2). Every URL in the production
