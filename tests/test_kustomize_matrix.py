@@ -40,48 +40,55 @@ def run_matrix(
     )
 
 
-def test_compose_applies_positional_components_and_forwards_options(tmp_path):
-    base = tmp_path / "base"
-    write_kustomization(base, "resources:\n  - config-map.yaml\n")
-    (base / "config-map.yaml").write_text(
-        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\ndata:\n  base: value\n",
-        encoding="utf-8",
-    )
-
+def test_compose_applies_positional_components_and_forwards_options(
+    tmp_path, monkeypatch
+):
     target = tmp_path / "target"
-    write_kustomization(target, "resources:\n  - ../base\n")
+    write_kustomization(target, "resources: []\n")
 
     component = tmp_path / "component"
     write_kustomization(
         component,
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n"
-        "patches:\n  - path: patch.yaml\n",
-    )
-    (component / "patch.yaml").write_text(
-        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\ndata:\n  component: value\n",
-        encoding="utf-8",
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
     )
 
     output = tmp_path / "manifest.yaml"
-    result = run_matrix(
-        "compose",
-        str(target),
-        str(component),
-        "--output",
-        str(output),
+    calls = []
+
+    def fake_run(command, **_):
+        calls.append(command)
+        generated = Path(command[2]) / "kustomization.yaml"
+        assert generated.read_text(encoding="utf-8") == (
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "sortOptions:\n"
+            "  order: fifo\n"
+            "resources:\n"
+            '  - "../target"\n'
+            "components:\n"
+            '  - "../component"\n'
+        )
+        Path(command[command.index("--output") + 1]).write_text(
+            "rendered\n", encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(command, 0)
+
+    kustomize_matrix = load_matrix_module()
+    monkeypatch.setattr(
+        kustomize_matrix, "kustomize_command", lambda: ["kustomize", "build"]
+    )
+    monkeypatch.setattr(kustomize_matrix.subprocess, "run", fake_run)
+
+    assert (
+        kustomize_matrix.compose(
+            str(target), [str(component)], ["--output", str(output)]
+        )
+        == 0
     )
 
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert output.read_text(encoding="utf-8") == (
-        "apiVersion: v1\n"
-        "data:\n"
-        "  base: value\n"
-        "  component: value\n"
-        "kind: ConfigMap\n"
-        "metadata:\n"
-        "  name: app\n"
-    )
+    assert calls[0][:2] == ["kustomize", "build"]
+    assert calls[0][3:] == ["--output", str(output)]
+    assert output.read_text(encoding="utf-8") == "rendered\n"
 
 
 def test_compose_requires_target_first():
@@ -168,7 +175,9 @@ def test_unfold_expands_matrix_and_check_detects_stale_overlay(tmp_path):
     assert "Generated Kustomize overlays are stale" in result.stderr
 
 
-def test_render_uses_leaf_component_and_preserves_source_comments(tmp_path):
+def test_render_uses_leaf_component_and_preserves_source_comments(
+    tmp_path, monkeypatch
+):
     recipe = tmp_path / "recipe"
     base = recipe / "kustomize/base"
     write_kustomization(base, "resources:\n  - config-map.yaml\n")
@@ -229,10 +238,47 @@ def test_render_uses_leaf_component_and_preserves_source_comments(tmp_path):
         encoding="utf-8",
     )
 
-    assert run_matrix("unfold", str(matrix)).returncode == 0
-    result = run_matrix("render", str(matrix))
+    def fake_kustomize_build(command, **_):
+        assert command[:2] == ["kustomize", "build"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "data:\n"
+                "  source: base\n"
+                "  parent: value\n"
+                "  leaf: value\n"
+                "metadata:\n"
+                "  name: app\n"
+                "kind: ConfigMap\n"
+                "apiVersion: v1\n"
+            ),
+            stderr="",
+        )
 
-    assert result.returncode == 0, result.stderr
+    kustomize_matrix = load_matrix_module()
+    monkeypatch.setattr(
+        kustomize_matrix, "generate_kustomize_openapi", lambda *, check: None
+    )
+    monkeypatch.setattr(
+        kustomize_matrix, "kustomize_command", lambda: ["kustomize", "build"]
+    )
+    monkeypatch.setattr(kustomize_matrix.subprocess, "run", fake_kustomize_build)
+    matrix_path = matrix
+
+    def unfold(*, check=False, clean=False):
+        return kustomize_matrix.unfold_matrix(
+            kustomize_matrix.load_matrix(str(matrix_path)), check=check, clean=clean
+        )
+
+    def render(*, check=False, clean=False):
+        return kustomize_matrix.render_matrix(
+            kustomize_matrix.load_matrix(str(matrix_path)), check=check, clean=clean
+        )
+
+    unfold()
+    render()
+
     rendered = (recipe / "deploy-aws-efa-p8d16.yaml").read_text(encoding="utf-8")
     assert (
         "# Generated file. For repository contributors, do not edit this checked-in copy.\n"
@@ -250,11 +296,11 @@ def test_render_uses_leaf_component_and_preserves_source_comments(tmp_path):
         matrix.read_text(encoding="utf-8").replace("aws-efa-p8d16", "renamed"),
         encoding="utf-8",
     )
-    assert run_matrix("unfold", str(matrix)).returncode == 0
-    assert run_matrix("render", str(matrix)).returncode == 0
+    unfold()
+    render()
     assert not (recipe / "deploy-aws-efa-p8d16.yaml").exists()
     assert (recipe / "deploy-renamed.yaml").exists()
-    assert run_matrix("render", "--check", str(matrix)).returncode == 0
+    assert render(check=True) == []
 
     relocated_matrix = recipe / "relocated-matrix.yaml"
     matrix.rename(relocated_matrix)
@@ -262,26 +308,25 @@ def test_render_uses_leaf_component_and_preserves_source_comments(tmp_path):
         relocated_matrix.read_text(encoding="utf-8").replace("renamed", "current"),
         encoding="utf-8",
     )
+    matrix_path = relocated_matrix
 
-    assert run_matrix("unfold", str(relocated_matrix)).returncode == 0
-    result = run_matrix("unfold", "--check", str(relocated_matrix))
-    assert result.returncode == 1
-    assert "overlays/renamed/kustomization.yaml" in result.stderr
+    unfold()
+    stale_overlays = unfold(check=True)
+    assert recipe / "kustomize/overlays/renamed/kustomization.yaml" in stale_overlays
     assert (recipe / "kustomize/overlays/renamed").exists()
 
-    assert run_matrix("unfold", "--clean", str(relocated_matrix)).returncode == 0
+    unfold(clean=True)
     assert not (recipe / "kustomize/overlays/renamed").exists()
 
-    result = run_matrix("render", "--check", str(relocated_matrix))
-    assert result.returncode == 1
-    assert "deploy-renamed.yaml" in result.stderr
-    assert run_matrix("render", "--clean", str(relocated_matrix)).returncode == 0
+    stale_manifests = render(check=True)
+    assert recipe / "deploy-renamed.yaml" in stale_manifests
+    render(clean=True)
     assert not (recipe / "deploy-renamed.yaml").exists()
     assert (recipe / "deploy-current.yaml").exists()
 
     manual_manifest = recipe / "deploy-manual.yaml"
     manual_manifest.write_text("apiVersion: v1\nkind: ConfigMap\n", encoding="utf-8")
-    assert run_matrix("render", "--clean", str(relocated_matrix)).returncode == 0
+    render(clean=True)
     assert manual_manifest.exists()
 
 
