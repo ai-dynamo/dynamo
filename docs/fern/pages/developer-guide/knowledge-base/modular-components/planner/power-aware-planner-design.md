@@ -20,7 +20,7 @@ subtitle: Static GPU power-cap ownership, admission, projection, and rollout saf
 | Decision | Current static behavior |
 | --- | --- |
 | Cap owner | Worker `podTemplate` annotation in the DGD |
-| Admission owner | DGD validating webhook |
+| Admission owner | DGD validating webhook with fail-closed admission |
 | Cap enforcer | Node-local Power Agent |
 | Planner reads | Settled DGD intent plus list-only Pod state |
 | Projection unit | Watts per replica: cap per GPU multiplied by GPUs per logical replica |
@@ -29,7 +29,7 @@ subtitle: Static GPU power-cap ownership, admission, projection, and rollout saf
 | Enforcement point | GPU clamp, rollout hold, then power clamp |
 | Cap or topology changes | Delete and recreate the DGD |
 | Total-budget changes | Restart the Planner |
-| Proven guarantee | Admitted targets fit the static requested-cap projection |
+| Proven guarantee | Admitted scale-ups do not push an in-budget ready baseline above the static requested-cap projection |
 | Excluded guarantee | Effective caps, measured draw, or facility power remain within the budget |
 
 ## Goals and Non-Goals
@@ -78,9 +78,10 @@ podTemplate:
       dynamo.nvidia.com/gpu-power-limit: "350"
 ```
 
-The operator renders the annotation onto worker Pods. The Power Agent watches those Pods and applies
-the requested limit through NVML or DCGM. The Planner resolves the requested limit from the DGD,
-verifies its propagation on Pods before caching it, and never writes the annotation.
+The operator renders the annotation onto worker Pods. Every 15 seconds, the Power Agent lists and
+reconciles Pods on its node and applies the requested limit through NVML or DCGM. The Planner resolves
+the requested limit from the DGD, verifies its propagation on Pods before caching it, and never writes
+the annotation.
 
 This ownership boundary prevents the Planner and Power Agent from competing over a cap. It also
 creates the main limitation: the Planner knows the requested cap, while the Power Agent knows the
@@ -110,6 +111,13 @@ multinode node count for role `r`. Delete and recreate the DGD to change any mem
 
 The webhook protects the DGD inputs, while startup settlement protects the transition from DGD intent
 to applied Pod annotations. Both are required for a stable cached projection.
+
+This invariant requires the validating webhook to be enabled, reachable, and configured with
+`webhook.failurePolicy: Fail`, which is the platform chart default. `Ignore` is an emergency-only
+bypass: if the webhook is unavailable, Kubernetes can accept DGD writes without validation. Pause DGD
+writes during that window and audit every accepted change afterward. If a cached power input might
+have changed, recreate the DGD with the intended tuple and restart the Planner against the settled
+replacement.
 
 ## Planner Access and RBAC
 
@@ -193,10 +201,13 @@ W_projected = N_p x W_p + N_d x W_d
 
 Prefill-only and decode-only modes apply the same calculation to their one required role.
 
-Startup fails with `DeploymentValidationError` when a required role is missing or ambiguous, the
-connector lacks the power-aware interface, a power input cannot be resolved, settlement cannot be
-established, or the minimum replica footprint exceeds the total budget. Invalid annotation values and
-DRA-backed power components are normally rejected earlier by DGD admission.
+Initial deployment validation reports missing or ambiguous required roles with
+`DeploymentValidationError`. A connector without the power-aware interface, an invalid cached GPU or
+topology input, or an infeasible minimum footprint also raises `DeploymentValidationError`. During
+settlement, a missing or invalid annotation raises `PowerAnnotationMissingError` or
+`PowerAnnotationInvalidError`, a failed operator rollout raises `RolloutFailedError`, and convergence
+that exceeds the 30-minute polling limit raises `TimeoutError`. DRA-backed power components are
+normally rejected earlier by DGD admission.
 
 ## Static Snapshot Lifecycle
 
@@ -221,6 +232,10 @@ partitioned by component and used only to detect terminating Pods.
 The surrounding `PlannerEnvironmentImpl.refresh()` also calls synchronous connector methods to refresh
 GPU counts and the model name. On the Kubernetes path, each call issues an additional DGD GET on the
 event-loop thread. These runtime reads do not validate annotations or recalculate the cached power caps.
+
+The rollout hold applies only after the DGD GET and Pod LIST succeed. An exception from either read
+propagates through `refresh()` and out of the Planner run loop; the Planner does not convert the error
+into an unstable snapshot or retry it inside the loop.
 
 The connector combines Pod termination state with DGD ready counts, component stability, and the
 rolling-update phase. A terminating Pod, an unstable component, or a blocking or failed rolling-update
@@ -266,7 +281,7 @@ an in-flight desired count and must remain observable.
 | Input state | Result |
 | --- | --- |
 | Effective proposal fits | Preserve the proposal |
-| Both roles are proposed and exceed the ceiling | Shrink both proportionally, respect `min_endpoint`, and never exceed either proposed count |
+| Both roles are proposed and exceed the ceiling | Apply the pair clamp within the ceiling, respect `min_endpoint`, and never exceed either post-GPU-clamp count |
 | One role is proposed and exceeds the residual budget | Charge the peer at its ready count and shrink only the proposed role |
 | The fixed peer leaves less than one role's minimum footprint | Suppress that role's scale-up instead of mutating the peer |
 | One role grows while the other shrinks and the parallel peak exceeds the budget | Emit the scale-down leg first and defer the scale-up |
@@ -289,20 +304,22 @@ Pods; the deployment-wide rollout hold covers those states conservatively.
 
 | Statement | Status | Reason |
 | --- | --- | --- |
-| An admitted target fits the static requested-cap model | Guaranteed within the cached inputs | The final power clamp runs after proposal merging and the GPU clamp |
+| An admitted scale-up from an in-budget ready baseline fits the static requested-cap model | Guaranteed within the cached inputs | The final power clamp runs after proposal merging and the GPU clamp |
 | A partial proposal does not mutate its unproposed peer | Guaranteed | Explicit proposal provenance keeps the peer fixed while charging its ready count |
 | An opposing rebalance does not intentionally exceed the modeled parallel peak | Guaranteed within the ready/target model | Scale-up legs are deferred |
 | Planner power awareness does not patch Pods | Guaranteed | The connector, RBAC, and integration test expose list-only Pod access |
 | Current replicas are automatically reduced when already over budget | Not guaranteed | The clamp changes only adjustable proposals and has no emergency reconciliation policy |
-| GPU hardware enforces the requested DGD value exactly | Not guaranteed | The Power Agent can clamp to hardware limits or fail an actuator write |
+| A runtime DGD or Pod read failure becomes a rollout hold | Not guaranteed | The exception propagates out of the Planner run loop instead of producing an unstable snapshot |
+| GPU hardware enforces the requested DGD value exactly | Not guaranteed | The Power Agent can clamp to hardware limits, apply its safe default for malformed or conflicting annotations, or fail an actuator write |
 | Actual draw stays below `total_gpu_power_limit` | Not guaranteed | The Planner observes neither effective caps nor measured draw |
 | A shared rack or cluster stays below a facility budget | Not guaranteed | The budget applies to one DGD and has no global allocator |
 | A cap update becomes visible on the existing DGD | Not supported | Admission makes the power tuple immutable |
 
 The distinction between requested and effective caps is safety-critical. If a requested value is below
-a GPU's supported minimum, the Power Agent can apply a higher effective value. An actuator failure can
-also leave hardware outside the Planner's model. Treat `total_gpu_power_limit` as an admission policy,
-not a facility protection mechanism.
+a GPU's supported minimum, the Power Agent can apply a higher effective value. Malformed or conflicting
+annotations on a GPU can select the configured safe-default cap, and an actuator failure can leave
+hardware outside the Planner's model. Treat `total_gpu_power_limit` as an admission policy, not a
+facility protection mechanism.
 
 ## Observability
 
@@ -406,7 +423,7 @@ independently.
 | Projection and clamp logic | [`budget.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/budget.py) | [`test_power_budget.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/tests/unit/test_power_budget.py) |
 | Proposal provenance and final boundary | [`pipeline.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/plugins/orchestrator/pipeline.py) and [`engine_adapter.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/plugins/orchestrator/engine_adapter.py) | [`test_pipeline.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/tests/plugins/orchestrator/test_pipeline.py) and [`test_power_budget.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/tests/unit/test_power_budget.py) |
 | Projection metrics | [`core/base.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/base.py) and [`planner_metrics.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/monitoring/planner_metrics.py) | [`test_metric_publication.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/tests/unit/test_metric_publication.py) |
-| Power Agent enforcement boundary | [`power_agent.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/power_agent.py) | [`test_apply_cap.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/tests/test_apply_cap.py) |
+| Power Agent enforcement boundary | [`power_agent.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/power_agent.py) and [`actuator.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/actuator.py) | [`test_apply_cap.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/tests/test_apply_cap.py), [`test_multi_pod_policy.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/tests/test_multi_pod_policy.py), and [`test_dcgm_actuator.py`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/power-agent/tests/test_dcgm_actuator.py) |
 | Conditional Pod RBAC | [`planner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/components/operator/templates/planner.yaml) | [`planner_rbac_test.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/tests/planner_rbac_test.yaml) |
 | No Pod mutation | [`KubernetesConnector`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py) | [`test_power_no_mutation.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/tests/integration/test_power_no_mutation.py) |
 
