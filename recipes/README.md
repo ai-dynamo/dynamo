@@ -40,7 +40,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/blackwell/)** | TensorRT-LLM | Aggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, TP4×EP4, DEEPGEMM backend | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/hopper/)** | TensorRT-LLM | Disaggregated (Hopper) | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/)** | TensorRT-LLM | Disaggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, Prefill + Decode, DEEPGEMM backend | ❌ |
-| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/)** | vLLM | Aggregated | 2x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, TP1 x `replicas: 2`, KV-aware routing; agentic profile | ❌ |
+| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/)** | vLLM | Aggregated | 2x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, TP1 x `replicas: 2`, MTP spec decode, KV-aware routing; agentic profile | ❌ |
 | **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/)** | vLLM | Disaggregated | 3x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, 1P2D over NIXL, KV-aware routing; agentic profile | ❌ |
 | **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/agg-h200-agentic/)** | vLLM | Aggregated | 4x H200 | ✅ | ✅ | Hybrid GDN+MoE, TP2 x `replicas: 2`, MTP spec decode, KV-aware routing; agentic profile | ❌ |
 | **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | ✅ | ✅ | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | ❌ |

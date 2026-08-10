@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. B200 runs the NVFP4 checkpoint at TP1; H200 runs FP8, where the weights leave less room for paged KV, so the aggregated profile shards to TP2 and adds MTP speculative decoding. Aggregated is the recommended path on both SKUs. Pick your target; every command on this page updates to match.
+All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. B200 runs the NVFP4 checkpoint at TP1; H200 runs FP8, where the weights leave less room for paged KV, so the aggregated profile shards to TP2. Both aggregated profiles add MTP speculative decoding. Aggregated is the recommended path on both SKUs. Pick your target; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -48,7 +48,7 @@ All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 1x B200 per replica, `replicas: 2` (2x)</span>
 <span><b>Parallelism</b> TP1</span>
-<span><b>Spec decode</b> None</span>
+<span><b>Spec decode</b> MTP, 3 tokens</span>
 <span><b>Routing</b> KV-aware</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
@@ -217,7 +217,7 @@ Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loo
 
 | Target | GPUs | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|------|-------------|-------------------|------------|-------------------------|
-| B200 aggregated, 2x TP1 | 2 | 50 | 52.4 | 246 ms | 1173.2 |
+| B200 aggregated, 2x TP1 + MTP | 2 | 80 | 50.4 | 335 ms | 1806.4 |
 | B200 disaggregated 1P2D | 3 | 60 | 51.4 | 1353 ms | 916.6 |
 | H200 aggregated, 2x TP2 + MTP | 4 | 64 | 52.9 | 313 ms | 720.3 |
 | H200 disaggregated 1P2D | 3 | 18 | 52.5 | 3087 ms | 256.5 |
@@ -226,12 +226,12 @@ Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loo
 
 | Target | GPU | Topology | GPUs | Spec decode | Reported point |
 |--------|-----|----------|------|-------------|----------------|
-| `agg-b200-agentic` | B200 | Aggregated | 2 | None | c50, at the 50 tok/s/user floor |
+| `agg-b200-agentic` | B200 | Aggregated | 2 | MTP, 3 tokens | c80, at the 50 tok/s/user floor |
 | `disagg-b200-agentic` | B200 | Disaggregated 1P2D | 3 | None | c60, at the 50 tok/s/user floor |
 | `agg-h200-agentic` | H200 | Aggregated | 4 | MTP, 3 tokens | c64, at the 50 tok/s/user floor |
 | `disagg-h200-agentic` | H200 | Disaggregated 1P2D | 3 | None | c18, at the 50 tok/s/user floor |
 
-Aggregated leads on both SKUs at the same operating point — 1173.2 against 916.6 output tok/s per GPU on B200, and 720.3 against 256.5 on H200. Disaggregated remains supported for deployments that scale prefill and decode independently.
+Aggregated leads on both SKUs — 1806.4 against 916.6 output tok/s per GPU on B200, and 720.3 against 256.5 on H200. Disaggregated remains supported for deployments that scale prefill and decode independently.
 
 ## Notes
 
