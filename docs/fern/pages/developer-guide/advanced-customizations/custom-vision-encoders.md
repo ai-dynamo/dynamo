@@ -61,7 +61,7 @@ provide `DYN_CUSTOM_JINJA_TEMPLATE` or `--custom-jinja-template`.
 
 > [!WARNING]
 > The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's
-> [media URL policy](../../use-cases/multimodal-serving/overview.md#security-url-validation), finite network timeouts,
+> [media URL policy](../../use-cases/multimodal-serving/overview.md), finite network timeouts,
 > response-size limits, and image decode limits rather than fetching arbitrary
 > request URLs directly.
 

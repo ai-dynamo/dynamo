@@ -9,6 +9,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | Filter | Triggers |
 |--------|----------|
 | `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
+| `dev_images` | dev / local-dev image builds only (no runtime or GPU jobs) |
 | `operator` | Kubernetes operator tests |
 | `snapshot` | Snapshot Agent + all-framework DynamoCheckpoint deploy tests |
 | `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
@@ -19,6 +20,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
 | `docs` | Nothing (classification only) |
+| `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
 | `examples` | Nothing (classification only) |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |

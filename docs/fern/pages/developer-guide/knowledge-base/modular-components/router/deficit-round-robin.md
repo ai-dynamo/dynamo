@@ -6,14 +6,14 @@ subtitle: Weighted arbitration across router policy classes
 ---
 
 The router uses a Deficit Round Robin (DRR) variant that is work-conserving
-across dispatchable physical policy-class heads. DRR determines which class
-can dispatch next; the configured FCFS or WSPT policy determines request
-order within that class.
+across dispatchable physical policy classes. DRR determines which class can
+dispatch next; the configured FCFS or WSPT policy determines request order
+within that class's shared and exact-worker lanes.
 
 This separation provides:
 
 - Weighted service across policy classes with different request sizes.
-- Independent within-class ordering and strict-priority tiers.
+- Independent within-class ordering, exact-worker lanes, and strict-priority tiers.
 - Progress for requests whose token cost is much larger than their class quantum.
 - Bounded arbitration work that does not loop once per token or DRR round.
 
@@ -40,7 +40,9 @@ amounts of credit.
 
 The scheduler maintains the following state for each physical class:
 
-- A pending heap ordered by strict priority and the class's FCFS or WSPT policy.
+- A shared pending heap for requests that can use any eligible worker.
+- One pending heap per exact-worker target, ordered by the same strict priority
+  and FCFS or WSPT policy.
 - A deficit containing earned but unspent credit.
 - A quantum controlling how quickly the deficit grows.
 
@@ -50,13 +52,15 @@ the configured class order from becoming a permanent preference.
 
 ## Selecting the Next Request
 
-For each class in cursor order, the scheduler examines only the class head:
+For each class in cursor order, the scheduler selects a class candidate by
+comparing the dispatchable shared-heap head with the dispatchable head of each
+exact-worker lane. It then applies DRR to that candidate:
 
 1. If the class is empty, reset its deficit to zero.
-2. If its head cannot currently dispatch, retain its deficit but add no credit.
-3. If existing deficit covers the head cost, dispatch it without adding another quantum.
-4. Otherwise, add one quantum and dispatch if the head is now affordable.
-5. If the head remains unaffordable, continue to the next class.
+2. If none of its lane heads can currently dispatch, retain its deficit but add no credit.
+3. If existing deficit covers the selected candidate's cost, dispatch it without adding another quantum.
+4. Otherwise, add one quantum and dispatch if the candidate is now affordable.
+5. If the candidate remains unaffordable, continue to the next class.
 
 Quantum is granted per ring round, not per request. A class that retained
 enough credit can dispatch multiple requests from the same weighted allocation:
@@ -128,16 +132,18 @@ unbounded burst while preserving work they had already earned.
 
 ## Dispatchability and Head-of-Line Behavior
 
-A class head is dispatchable when its eligible workers are not all above the
-class busy threshold. If no eligible endpoint remains, the head proceeds to
-worker selection so the router can return the appropriate error instead of
-parking it indefinitely. Eligibility continues to enforce exact pins, worker
-allow-lists, DP-rank bounds, taints, and overload filtering.
+A shared head is dispatchable when its eligible workers are not all above the
+class busy threshold. An exact-worker lane head is checked against its target
+worker. If no eligible endpoint remains, the candidate proceeds to worker
+selection so the router can return the appropriate error instead of parking it
+indefinitely. Eligibility continues to enforce exact pins, worker allow-lists,
+DP-rank bounds, taints, and overload filtering.
 
-Only the class head participates in arbitration. A constrained or pinned head
-can therefore block later requests in the same class even if those later
-requests could use another worker. This is intentional current behavior;
-FCFS/WSPT ordering is not bypassed to search deeper in a class heap.
+Head-of-line blocking is lane-local. The shared heap does not search past a
+blocked shared head, and an exact-worker lane does not search past its own
+blocked head. A blocked exact-worker lane does not prevent another exact-worker
+lane, or a dispatchable shared head, from competing for the class. FCFS/WSPT
+ordering is not bypassed within any individual lane.
 
 New arrivals also join an existing backlog in their resolved class instead of
 bypassing queued work. Queue limits, ordering, and DRR charging apply equally
@@ -151,19 +157,31 @@ One arbitration call performs:
 2. One linear calculation for bulk virtual rounds when required.
 3. At most one final ring scan.
 
-For `C` configured classes, arbitration is therefore `O(C)` regardless of the
-request cost or quantum. The queue actor calls arbitration repeatedly while
-work remains dispatchable, but each individual selection is bounded and
-continuation draining remains local to the actor.
+For `C` configured classes and `L` exact-worker lane heads that must be
+inspected or rechecked, arbitration is `O(C + L log L)` in the worst case,
+regardless of request cost or quantum. Candidate exact-worker heads are tree
+indexed, so ordinary selections do not need to rescan every ready lane; a
+worker-state recheck can visit the affected blocked lanes and pay the tree
+update factor. The queue actor calls arbitration repeatedly while work remains
+dispatchable, but each individual selection is bounded and continuation
+draining remains local to the actor.
 
-With only the synthetic no-YAML `default` class, the ring contains one class
-and DRR reduces to ordinary single-queue dispatch.
+With only the synthetic no-YAML `default` class, the ring contains one class.
+DRR reduces to single-class arbitration, but exact-worker requests still use
+their separate lanes.
 
 ## Configuration
 
 Set each physical class's `quantum` in the router policy YAML:
 
 ```yaml
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 3072
+    bucket: uncached
+
 policy_classes:
   - name: cached
     policy_family: standard
@@ -184,3 +202,105 @@ cache-bucket schema, thresholds, and per-worker queue limits, see
 [Configuration and Tuning](configuration-and-tuning.md#policy-class-queues). See
 the tested [sample policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml)
 for a complete profile.
+
+## Prioritize Premium Requests with Policy Classes
+
+Policy classes help a shared deployment protect premium traffic during demand
+spikes. Under sustained prefill pressure, the router gives premium requests a
+larger share of queued service while regular requests continue receiving
+service. When premium demand subsides, regular traffic can use all available
+capacity.
+
+### Configure Premium and Regular Classes
+
+This example mirrors the CPU Mocker regression test: one aggregated worker
+serves four concurrent sequences, and every request has 512 uncached input
+tokens and generates one output token. Save the following configuration as
+`policy-classes.yaml`:
+
+```yaml
+default_policy_family: regular
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: premium
+    policy_family: premium
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 512
+    prefill_busy_threshold: 1536
+    request_queue_limit_per_worker: 1024
+  - name: regular
+    policy_family: regular
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 128
+    prefill_busy_threshold: 1536
+    request_queue_limit_per_worker: 1024
+```
+
+Start the backend worker, then launch the frontend with load tracking and the
+policy configuration:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --load-aware \
+    --router-policy-config ./policy-classes.yaml
+```
+
+In this one-output-token, four-wide workload,
+`prefill_busy_threshold: 1536` admits four 512-token requests before sustained
+prefill pressure causes later requests to enter the policy queues. While both
+queues remain backlogged, the `512:128` quantum ratio gives premium four times
+the DRR credit. Tune the threshold to the request sizes and prefill pressure at
+which queueing should begin in your deployment.
+
+### Select a Class on Each Request
+
+Send the requested policy family in the `x-dynamo-meta-policy-class` header:
+
+```bash
+curl http://localhost:8000/v1/completions \
+    -H "content-type: application/json" \
+    -H "x-dynamo-meta-policy-class: premium" \
+    -d '{"model":"YOUR_MODEL","prompt":"YOUR_PROMPT","max_tokens":1}'
+
+curl http://localhost:8000/v1/completions \
+    -H "content-type: application/json" \
+    -H "x-dynamo-meta-policy-class: regular" \
+    -d '{"model":"YOUR_MODEL","prompt":"YOUR_PROMPT","max_tokens":1}'
+```
+
+Requests with a missing or unrecognized class header use the `regular`
+default family in this configuration. See
+[Policy-Class Queues](configuration-and-tuning.md#policy-class-queues) for the
+complete class and cache-bucket resolution rules.
+
+### Observe the Premium Share
+
+The regression workload releases 320 distinct 512-token prompts from each
+class at the same time. This keeps both queues backlogged with identical
+request costs. An equal-share control changes the regular quantum from `128`
+to `512`. Across four fresh CPU Mocker runs, the test observed:
+
+| Configuration | First 320 client completions | Regular requests left when premium finishes |
+|---|---|---:|
+| Equal `512:512` | 159-161 premium and 159-161 regular | 0-3 |
+| Weighted `512:128` | 254-257 premium and 63-66 regular | 237-240 |
+
+The weighted configuration shifts the first 320 completions from an even
+split to approximately 4:1. Premium receives substantially more service, and
+regular still completes 63-66 requests during the same window. Measuring a
+completion prefix captures the service share while both queues are active.
+
+Each request costs 512 uncached tokens in this workload. Premium earns 512
+tokens of DRR credit per round and regular earns 128, producing the ideal
+`256:64` split. Equal request costs make the queued token-service ratio visible
+directly in request completions; with varied request sizes, `quantum` continues
+to control the share of uncached-token service.
+
+The CPU Mocker regression test at
+`tests/router/test_policy_class.py`
+asserts both the larger premium share and continued regular progress.

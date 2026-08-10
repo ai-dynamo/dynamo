@@ -27,6 +27,7 @@ description: 'Route buildkit workers and bootstrap buildx builder for dynamo bui
 #       builder_name: my-builder
 #       flavor: general
 #       arch: 'linux/amd64,linux/arm64'
+#       namespace: buildkit
 #
 #   # Initialize for single architecture with specific flavor and CUDA version:
 #   - uses: ./.github/actions/init-dynamo-builder
@@ -35,6 +36,7 @@ description: 'Route buildkit workers and bootstrap buildx builder for dynamo bui
 #       flavor: vllm
 #       arch: 'linux/amd64'
 #       cuda_version: '12.9'
+#       namespace: buildkit
 
 inputs:
   builder_name:
@@ -64,8 +66,7 @@ inputs:
     default: '400Gi'
   namespace:
     description: 'Kubernetes namespace for buildkit pods'
-    required: false
-    default: 'buildkit'
+    required: true
   replicas:
     description: 'Number of buildkit replicas'
     required: false
@@ -95,6 +96,8 @@ runs:
       if: inputs.fresh_builder != 'true'
       continue-on-error: true
       shell: bash
+      env:
+        BUILDKIT_NAMESPACE: ${{ inputs.namespace }}
       run: |
         CUDA_ARG=""
         if [[ -n "${{ inputs.cuda_version }}" ]]; then

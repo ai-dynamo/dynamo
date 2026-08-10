@@ -22,12 +22,13 @@ try:
     from dynamo._core import ReasoningConfig as ReasoningConfig
     from dynamo._core import SglangArgs as SglangArgs
     from dynamo._core import TrtllmArgs as TrtllmArgs
-    from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 except ImportError:
     # The Rust extension is provided by ai-dynamo-runtime. Keep importing the
     # package itself cheap in static tooling environments where _core is absent.
     pass
 else:
+    from dynamo.replay.api import run_trace_replay as _run_trace_replay
+
     __all__.extend(
         [
             "MockEngineArgs",
@@ -54,12 +55,13 @@ else:
         sla_ttft_ms=None,
         sla_itl_ms=None,
         sla_e2e_ms=None,
+        capture_per_request=False,
     ):
         if isinstance(trace_files, (str, os.PathLike)):
             trace_files = [trace_files]
         else:
             trace_files = list(trace_files)
-        return _run_mocker_trace_replay(
+        return _run_trace_replay(
             trace_files,
             extra_engine_args=extra_engine_args,
             router_config=router_config,
@@ -77,30 +79,5 @@ else:
             sla_ttft_ms=sla_ttft_ms,
             sla_itl_ms=sla_itl_ms,
             sla_e2e_ms=sla_e2e_ms,
+            capture_per_request=capture_per_request,
         )
-
-
-try:
-    from dynamo._core import AicEngineConfig as AicEngineConfig
-    from dynamo._core import EngineCapacity as EngineCapacity
-    from dynamo._core import EngineCapacityRequest as EngineCapacityRequest
-    from dynamo._core import EnginePerfLimits as EnginePerfLimits
-    from dynamo._core import OptimizationTarget as OptimizationTarget
-    from dynamo._core import RustEnginePerfModel as RustEnginePerfModel
-    from dynamo._core import RustEnginePerfOptions as RustEnginePerfOptions
-except ImportError:
-    # These classes are available only when the Python extension is built with
-    # the optional aic-forward-pass Cargo feature.
-    pass
-else:
-    __all__.extend(
-        [
-            "AicEngineConfig",
-            "EngineCapacity",
-            "EngineCapacityRequest",
-            "EnginePerfLimits",
-            "OptimizationTarget",
-            "RustEnginePerfModel",
-            "RustEnginePerfOptions",
-        ]
-    )

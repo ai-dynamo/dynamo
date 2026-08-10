@@ -47,7 +47,6 @@ func main() {
 		}
 	}()
 
-
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

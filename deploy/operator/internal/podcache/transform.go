@@ -13,6 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 )
 
 // Configure installs Transform on the single typed Pod cache while preserving
@@ -83,6 +85,8 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 		// Model endpoint classification requires the main container's command
 		// and arguments.
 		Containers: projectContainers(in.Containers),
+		// GMS Pod replacement requires native init-sidecar identity.
+		InitContainers: projectInitContainers(in.InitContainers),
 		// Topology label discovery inspects DownwardAPI label field paths.
 		Volumes: projectTopologyVolumes(in.Volumes),
 	}
@@ -101,6 +105,19 @@ func projectContainers(in []corev1.Container) []corev1.Container {
 		}
 	}
 	return out
+}
+
+func projectInitContainers(in []corev1.Container) []corev1.Container {
+	for i := range in {
+		if in[i].Name != gms.ServerContainerName {
+			continue
+		}
+		return []corev1.Container{{
+			Name:          in[i].Name,
+			RestartPolicy: in[i].RestartPolicy,
+		}}
+	}
+	return nil
 }
 
 func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
@@ -149,9 +166,10 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		Phase: in.Phase,
 		// Model endpoint classification requires the Kubernetes Ready condition.
 		Conditions: projectReadyConditions(in.Conditions),
-		// DGDR diagnostics inspect waiting and terminated container failures.
-		ContainerStatuses:     projectContainerStatuses(in.ContainerStatuses),
-		InitContainerStatuses: projectContainerStatuses(in.InitContainerStatuses),
+		// DGDR diagnostics inspect container failures.
+		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
+		// GMS Pod replacement also requires init-sidecar restart counts.
+		InitContainerStatuses: projectInitContainerStatuses(in.InitContainerStatuses),
 	}
 }
 
@@ -178,6 +196,16 @@ func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerSta
 		out[i] = corev1.ContainerStatus{
 			Name:  in[i].Name,
 			State: projectContainerState(in[i].State),
+		}
+	}
+	return out
+}
+
+func projectInitContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
+	out := projectContainerStatuses(in)
+	for i := range out {
+		if in[i].Name == gms.ServerContainerName {
+			out[i].RestartCount = in[i].RestartCount
 		}
 	}
 	return out

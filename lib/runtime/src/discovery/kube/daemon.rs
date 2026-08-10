@@ -28,6 +28,31 @@ struct CachedCrMetadata {
     uid: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CrRevision {
+    generation: i64,
+    uid: Option<String>,
+}
+
+struct AggregatedSnapshot {
+    snapshot: MetadataSnapshot,
+    revisions: HashMap<u64, CrRevision>,
+}
+
+fn snapshot_has_changes(
+    snapshot: &MetadataSnapshot,
+    previous_snapshot: &MetadataSnapshot,
+    revisions: &HashMap<u64, CrRevision>,
+    previous_revisions: &HashMap<u64, CrRevision>,
+) -> bool {
+    let metadata_changed = snapshot.has_changes_from(previous_snapshot);
+    let revisions_changed = revisions != previous_revisions;
+    if revisions_changed && !metadata_changed {
+        tracing::debug!("DynamoWorkerMetadata CR identity changed");
+    }
+    metadata_changed || revisions_changed
+}
+
 /// Readiness data source for the discovery daemon.
 ///
 /// Pod mode watches EndpointSlices (one entry per ready pod).
@@ -199,6 +224,7 @@ impl DiscoveryDaemon {
         // Event-driven loop with debouncing
         let mut sequence = 0u64;
         let mut prev_snapshot = MetadataSnapshot::empty();
+        let mut prev_revisions = HashMap::new();
         // Keeps transient invalid CR updates from looking like removals.
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
@@ -214,9 +240,16 @@ impl DiscoveryDaemon {
                         .aggregate_snapshot(&source, &cr_reader, &mut valid_cr_cache, sequence)
                         .await
                     {
-                        Ok(snapshot) => {
-                            if snapshot.has_changes_from(&prev_snapshot) {
+                        Ok(aggregated) => {
+                            let AggregatedSnapshot { snapshot, revisions } = aggregated;
+                            if snapshot_has_changes(
+                                &snapshot,
+                                &prev_snapshot,
+                                &revisions,
+                                &prev_revisions,
+                            ) {
                                 prev_snapshot = snapshot.clone();
+                                prev_revisions = revisions;
 
                                 if watch_tx.send(Arc::new(snapshot)).is_err() {
                                     tracing::debug!("No watch subscribers, daemon stopping");
@@ -248,7 +281,7 @@ impl DiscoveryDaemon {
         cr_reader: &reflector::Store<DynamoWorkerMetadata>,
         valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
         sequence: u64,
-    ) -> Result<MetadataSnapshot> {
+    ) -> Result<AggregatedSnapshot> {
         let start = std::time::Instant::now();
 
         let ready_entries = source.ready_entries();
@@ -291,7 +324,7 @@ impl DiscoveryDaemon {
                 continue;
             }
 
-            match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
+            match super::crd::deserialize_metadata(arc_cr.spec.data.clone()) {
                 Ok(metadata) => {
                     tracing::trace!("Loaded metadata from CR '{cr_name}'");
                     let cached = CachedCrMetadata {
@@ -323,11 +356,19 @@ impl DiscoveryDaemon {
 
         let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
         let mut generations: HashMap<u64, i64> = HashMap::new();
+        let mut revisions: HashMap<u64, CrRevision> = HashMap::new();
 
         for (instance_id, cr_key) in ready_entries {
             if let Some(cached) = cr_map.get(&cr_key) {
                 instances.insert(instance_id, cached.metadata.clone());
                 generations.insert(instance_id, cached.generation);
+                revisions.insert(
+                    instance_id,
+                    CrRevision {
+                        generation: cached.generation,
+                        uid: cached.uid.clone(),
+                    },
+                );
                 tracing::trace!(
                     "Included '{}' (instance_id={:x}, generation={}) in snapshot",
                     cr_key,
@@ -340,6 +381,13 @@ impl DiscoveryDaemon {
                 {
                     instances.insert(instance_id, cached.metadata.clone());
                     generations.insert(instance_id, cached.generation);
+                    revisions.insert(
+                        instance_id,
+                        CrRevision {
+                            generation: cached.generation,
+                            uid: cached.uid.clone(),
+                        },
+                    );
                     tracing::trace!(
                         "Included cached metadata for '{}' (instance_id={:x}, generation={}) because current CR data is not valid",
                         cr_key,
@@ -371,11 +419,14 @@ impl DiscoveryDaemon {
             elapsed
         );
 
-        Ok(MetadataSnapshot {
-            instances,
-            generations,
-            sequence,
-            timestamp: std::time::Instant::now(),
+        Ok(AggregatedSnapshot {
+            snapshot: MetadataSnapshot {
+                instances,
+                generations,
+                sequence,
+                timestamp: std::time::Instant::now(),
+            },
+            revisions,
         })
     }
 }
@@ -430,6 +481,34 @@ fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> Option<String> {
 mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
+
+    #[test]
+    fn snapshot_detects_recreated_cr_with_same_generation() {
+        let mut previous_snapshot = MetadataSnapshot::empty();
+        previous_snapshot.generations.insert(1, 1);
+        let current_snapshot = previous_snapshot.clone();
+        let previous_revisions = HashMap::from([(
+            1,
+            CrRevision {
+                generation: 1,
+                uid: Some("uid-1".to_string()),
+            },
+        )]);
+        let current_revisions = HashMap::from([(
+            1,
+            CrRevision {
+                generation: 1,
+                uid: Some("uid-2".to_string()),
+            },
+        )]);
+
+        assert!(snapshot_has_changes(
+            &current_snapshot,
+            &previous_snapshot,
+            &current_revisions,
+            &previous_revisions,
+        ));
+    }
 
     fn cached_cr(uid: &str) -> CachedCrMetadata {
         CachedCrMetadata {

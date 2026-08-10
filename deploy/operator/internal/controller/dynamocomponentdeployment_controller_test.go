@@ -45,6 +45,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -66,6 +67,98 @@ const (
 func init() {
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
 		panic(err)
+	}
+}
+
+func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+					Failover:         &v1beta1.FailoverSpec{},
+				},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoComponentDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored))
+	require.False(t, controller_common.ContainsFinalizer(&stored))
+	available := meta.FindStatusCondition(
+		stored.Status.Conditions,
+		v1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+	)
+	require.NotNil(t, available)
+	require.Equal(t, metav1.ConditionFalse, available.Status)
+	require.Equal(t, dcd.Generation, available.ObservedGeneration)
+	require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
+	require.Equal(t,
+		"Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
+			"Snapshot with active/passive failover is temporarily unsupported",
+		available.Message,
+	)
+	require.Zero(t, stored.Status.ObservedGeneration)
+}
+
+func TestDynamoComponentDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {
+	now := metav1.Now()
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "worker",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover:   &v1beta1.FailoverSpec{},
+				},
+			},
+		},
+	}
+	controller_common.AddFinalizer(dcd)
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:   kubeClient,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	var stored v1beta1.DynamoComponentDeployment
+	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), &stored)
+	if !k8serrors.IsNotFound(err) {
+		require.NoError(t, err)
+		require.False(t, controller_common.ContainsFinalizer(&stored))
 	}
 }
 
@@ -633,6 +726,7 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
+	t.Log("Build a multinode DCD and the dependencies shared by reconciliation and rendering")
 	s := scheme.Scheme
 	require.NoError(t, v1alpha1.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))
@@ -694,6 +788,15 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		},
 	}
 
+	t.Log("Render the reusable component Service and multinode pod templates directly")
+	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	renderedService, renderedServiceToDelete, err := renderer.generateService(context.Background(), dcd)
+	require.NoError(t, err)
+	require.False(t, renderedServiceToDelete)
+	renderedLeaderTemplate, renderedWorkerTemplate, err := renderer.renderMultinodePodTemplateSpecs(context.Background(), dcd)
+	require.NoError(t, err)
+
+	t.Log("Compose the same resources through the DCD controller")
 	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
@@ -702,6 +805,10 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
+	t.Log("Verify controller composition preserves the reusable renderer output")
+	require.Equal(t, renderedService, service)
+	require.Equal(t, renderedLeaderTemplate, lws.Spec.LeaderWorkerTemplate.LeaderTemplate)
+	require.Equal(t, *renderedWorkerTemplate, lws.Spec.LeaderWorkerTemplate.WorkerTemplate)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
 	require.NotEqual(t, service.Name, lws.Name)
@@ -774,9 +881,9 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		},
 	}
 
-	podTemplate, err := r.generatePodTemplateSpec(
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		dynamo.RoleMain,
 	)
 	require.NoError(t, err)
@@ -949,9 +1056,9 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		},
 	}
 
-	podTemplate, err := r.generatePodTemplateSpec(
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		dynamo.RoleMain,
 	)
 	require.NoError(t, err)
@@ -1764,9 +1871,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1823,10 +1930,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1903,9 +2010,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		_, err = r.generatePodTemplateSpec(
+		_, err = r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		require.Error(t, err)
@@ -1944,10 +2051,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1990,9 +2097,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2051,9 +2158,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2094,9 +2201,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -3468,9 +3575,9 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		},
 	}
 
-	got, err := reconciler.generateWorkerPodTemplateSpec(
+	got, err := reconciler.workloadRenderer().generateWorkerPodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		map[string]string{"app": "demo"},
 	)
 	require.NoError(t, err)

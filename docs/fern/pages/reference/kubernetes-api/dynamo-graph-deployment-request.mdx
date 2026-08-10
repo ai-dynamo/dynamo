@@ -251,7 +251,7 @@ service.
 ### Optimization target
 
 <ParamField path="optimization_target" type="string" default="throughput">
-  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Rust engine performance model to target specific `ttft_ms` / `itl_ms` values. Under any target other than `sla`, the Planner forces load scaling on, throughput scaling off, and ignores `ttft_ms` / `itl_ms`.
+  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Planner engine-query layer and AIC core performance model to target specific `ttft_ms` / `itl_ms` values. Under any target other than `sla`, the Planner forces load scaling on, throughput scaling off, and ignores `ttft_ms` / `itl_ms`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>throughput</Badge> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>load</Badge> <Badge intent="note" minimal>sla</Badge></span>
 </ParamField>
@@ -285,7 +285,7 @@ service.
 </ParamField>
 
 <ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
-  Native AIConfigurator forward-pass model identity for the Rust engine performance shim, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+  Native AIConfigurator forward-pass model identity passed directly to the `aiconfigurator-core` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
 </ParamField>
 
 <Indent>

@@ -4,7 +4,7 @@
 title: vLLM Multimodal
 ---
 
-This document provides a comprehensive guide for multimodal inference using the vLLM backend in Dynamo.
+This page describes multimodal inference with the Dynamo vLLM backend.
 
 > [!WARNING]
 > **Security Requirement**: All multimodal workers require the
@@ -19,16 +19,31 @@ This document provides a comprehensive guide for multimodal inference using the 
 
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
-| **Image** | Yes | Yes | Legacy entry point only |
-| **Video** | Yes | Yes | Processed by the language-model worker |
+| **Image** | Yes | Yes | Yes |
+| **Video** | Yes, H.264/H.265 | Yes, H.264/H.265 | Processed by the language-model worker |
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
+
+> [!IMPORTANT]
+> **Video input is limited to H.264 and H.265.** The runtime images ship no software
+> video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
+> (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
+> decode engine and a container granted the `video` driver capability — see
+> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
+> additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
 
 | Format         | Example                              | Description                |
 | -------------- | ------------------------------------ | -------------------------- |
-| **HTTP/HTTPS** | `http://example.com/image.jpg`       | Remote media files         |
+| **HTTP/HTTPS** | `https://example.com/image.jpg`      | Remote media files         |
 | **Data URL**   | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
+
+> [!NOTE]
+> Media URLs are validated against a default-deny policy. `https://` and `data:` sources
+> pass; plain `http://` and hostnames that resolve to private or loopback addresses are
+> refused. To fetch media over the cluster's internal network, set
+> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
 
 ## Deployment Patterns
 
@@ -44,7 +59,7 @@ The main multimodal vLLM launchers in this repo are:
 
 ### Custom Vision Encoders
 
-The legacy aggregated vLLM worker can load an author-provided vision tower in
+The aggregated vLLM worker can load an author-provided vision tower in
 process, batch images across concurrent requests, and splice the resulting
 embeddings into the language-model prompt. See [Custom Vision
 Encoders](../../../../advanced-customizations/custom-vision-encoders.md) for the backend contract, launch instructions,
@@ -75,10 +90,10 @@ The default path keeps multimodal processing on the worker:
 1. The frontend computes an `mm_hash` for each image.
 2. A model-specific processor specification resolves the image placeholder and calculates its expanded token count.
 3. The frontend expands the placeholder in a routing-only token view and builds per-block multimodal metadata.
-4. The KV router selects the worker with the highest overlap.
+4. The KV router credits that overlap in its combined prefill-and-decode cost and selects the lowest-cost eligible worker.
 5. The frontend forwards `mm_hashes`, which the worker passes to vLLM as `multi_modal_uuids`.
 
-For `data:` URIs, the frontend hashes the decoded bytes. For HTTP URLs, it hashes the full URL by default. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
+By default, the frontend hashes the exact full URI: the complete `data:` URI string or the HTTP URL including its query string. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
 
 Launch the default path:
 
@@ -275,7 +290,7 @@ model families use the expanded prompt token IDs produced during prefill.
 > The P/D handoff does not carry video embeddings. Video and audio inputs are
 > loaded again on the decode worker. This preserves current behavior but adds
 > media download and processing work. Mixed image-and-video P/D requests retain
-> the same model-specific limitations as the legacy vLLM path.
+> the same model-specific limitations as the aggregated vLLM path.
 
 ### E/PD Serving (Encode + PD)
 

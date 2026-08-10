@@ -38,7 +38,10 @@ use crate::{
     },
 };
 
-use dynamo_kv_router::config::min_initial_workers_from_env;
+use dynamo_kv_router::{
+    config::min_initial_workers_from_env,
+    selector::{DefaultWorkerSelector, WorkerSelector},
+};
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -68,7 +71,11 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
         match item {
             MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
             MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(_) => {}
+            MultimodalData::Decoded(descriptor) => {
+                if let Some(key) = descriptor.content_hash_key() {
+                    keys.push(key.to_string());
+                }
+            }
             // Opaque UUIDs are not content-derived routing keys. UUID-only
             // reuse intentionally relies on text-prefix routing and affinity
             // to the worker that owns the processor/embedding cache entry.
@@ -83,10 +90,13 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
-pub struct PreprocessedRouting {
+pub struct PreprocessedRouting<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
-    prefill_router: Arc<PrefillRouter>,
+    prefill_router: Arc<PrefillRouter<Sel>>,
     encoder_router: Arc<EncoderRouter>,
 }
 
@@ -136,11 +146,14 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-fn router_client(
+fn router_client<Sel>(
     client: &Client,
     router_mode: RouterMode,
-    chooser: Option<&Arc<KvRouter>>,
-) -> anyhow::Result<Client> {
+    chooser: Option<&Arc<KvRouter<Sel>>>,
+) -> anyhow::Result<Client>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     if router_mode == RouterMode::KV {
         let Some(chooser) = chooser else {
             anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
@@ -184,14 +197,16 @@ fn validate_router_mode_for_lora(
     }
 }
 
-fn preprocessed_backend_engine(
+fn preprocessed_backend_engine<Sel>(
     router: LlmPushRouter,
     router_mode: RouterMode,
-    chooser: Option<Arc<KvRouter>>,
+    chooser: Option<Arc<KvRouter<Sel>>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
 {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
@@ -253,6 +268,35 @@ pub async fn build_preprocessed_routing(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_with_selector(
+        client,
+        model_manager,
+        router_mode,
+        worker_monitor,
+        chooser,
+        prefill_chooser,
+        encoder_chooser,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter<Sel>>>,
+    prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+) -> anyhow::Result<PreprocessedRouting<Sel>>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -304,13 +348,16 @@ pub async fn build_preprocessed_routing(
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
-        PrefillRouter::disabled(
+        PrefillRouter::<Sel>::disabled_with_selector(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
+    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+        prefill_router.set_decode_session_affinity(affinity.clone());
+    }
 
     let backend_engine = preprocessed_backend_engine(
         router,
@@ -474,7 +521,10 @@ where
         .link(frontend)?)
 }
 
-impl PreprocessedRouting {
+impl<Sel> PreprocessedRouting<Sel>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,

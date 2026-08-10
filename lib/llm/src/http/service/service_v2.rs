@@ -27,6 +27,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -49,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -105,6 +107,7 @@ pub struct State {
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -115,6 +118,52 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            return None;
+        }
+    };
+
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(milliseconds) => {
+            let interval = Duration::from_millis(milliseconds);
+            if std::time::Instant::now().checked_add(interval).is_some() {
+                Some(interval)
+            } else {
+                tracing::warn!(
+                    env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                    value,
+                    "ignoring SSE keep-alive interval outside the platform range"
+                );
+                None
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                value,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            None
+        }
+    }
+}
+
+fn sse_keep_alive_from_env() -> Option<Duration> {
+    parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
 }
 
 /// Lifecycle stage for the HTTP frontend.
@@ -285,6 +334,8 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    classify_endpoints_enabled: AtomicBool,
+    pooling_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
@@ -301,6 +352,8 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Pooling => self.pooling_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
@@ -324,6 +377,12 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Classify => self
+                .classify_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Pooling => self
+                .pooling_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
@@ -370,6 +429,8 @@ impl State {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                classify_endpoints_enabled: AtomicBool::new(false),
+                pooling_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
@@ -381,6 +442,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            sse_keep_alive: config.sse_keep_alive,
         }
     }
 
@@ -452,9 +514,13 @@ impl State {
         &self.cancel_token
     }
 
-    // TODO
+    /// Interval for SSE comment frames while the response stream is idle.
+    ///
+    /// Disabled by default because some OpenAI-compatible clients do not
+    /// ignore SSE comments. Provider-facing deployments can opt in with
+    /// `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS`.
     pub fn sse_keep_alive(&self) -> Option<Duration> {
-        None
+        self.sse_keep_alive
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -487,6 +553,11 @@ impl State {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 }
 
@@ -607,6 +678,11 @@ pub struct HttpServiceConfig {
     /// Distributed runtime used by the RL worker discovery API.
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Interval for SSE comment frames while a streaming response is idle.
+    /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
+    #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
+    sse_keep_alive: Option<Duration>,
 }
 
 fn default_rl_port() -> u16 {
@@ -639,6 +715,13 @@ impl HttpService {
 
     pub fn generate_api_enabled(&self) -> bool {
         self.generate_api_enabled
+    }
+
+    pub(crate) fn generate_engine_capabilities(&self) -> Vec<&'static str> {
+        self.generate_api_enabled
+            .then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .into_iter()
+            .collect()
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -897,6 +980,10 @@ static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 /// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
+/// Environment variable to set the classify endpoint path (default: `/v1/classify`)
+static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
+/// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
+static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the batch files endpoint path (default: `/v1/files`)
@@ -909,6 +996,22 @@ static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 /// `/inference/v1/generate` endpoint. Truthy value opts in; disabled by default.
 pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
     "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
+
+/// Environment variable to set the vLLM Generate endpoint path
+/// (default: `/inference/v1/generate`).
+pub(super) static HTTP_SVC_VLLM_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_VLLM_GENERATE_PATH";
+fn validate_generate_route_path(path: &str) -> Result<()> {
+    if !path.starts_with("/") {
+        anyhow::bail!("Generate route path must start with '/': {path:?}");
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.starts_with([':', '*']))
+    {
+        anyhow::bail!("Generate route path segment must not start with ':' or '*': {path:?}");
+    }
+    Ok(())
+}
 
 fn append_route_docs(
     all_docs: &mut Vec<RouteDoc>,
@@ -968,7 +1071,6 @@ impl HttpServiceConfigBuilder {
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
         let admin_api_enabled =
             config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
-
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -977,6 +1079,7 @@ impl HttpServiceConfigBuilder {
                 metrics_config,
                 frontend_api_config,
                 nvext_enabled,
+                sse_keep_alive: config.sse_keep_alive,
             },
         ));
         state
@@ -1105,7 +1208,7 @@ impl HttpServiceConfigBuilder {
             &config.request_template,
             anthropic_endpoints_enabled,
             generate_endpoint_enabled,
-        );
+        )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
@@ -1219,12 +1322,19 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
         enable_generate_endpoint: bool,
-    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -1236,6 +1346,10 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (classify_docs, classify_route) =
+            super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
+        let (pooling_docs, pooling_route) =
+            super::openai::pooling_router(state.clone(), var(HTTP_SVC_POOLING_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
@@ -1254,6 +1368,8 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
+        endpoint_routes.insert(EndpointType::Pooling, (pooling_docs, pooling_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
@@ -1276,8 +1392,12 @@ impl HttpServiceConfigBuilder {
 
         if enable_generate_endpoint {
             tracing::warn!("The vLLM-compatible /inference/v1/generate API is experimental.");
+            let generate_path = var(HTTP_SVC_VLLM_GENERATE_PATH_ENV).ok();
+            if let Some(path) = generate_path.as_deref() {
+                validate_generate_route_path(path)?;
+            }
             let (generate_docs, generate_route) =
-                super::generate::generate_router(state.clone(), None);
+                super::generate::generate_router(state.clone(), generate_path);
             endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
@@ -1305,7 +1425,7 @@ impl HttpServiceConfigBuilder {
             ));
             routes.push((docs, route));
         }
-        routes
+        Ok(routes)
     }
 }
 
@@ -1800,22 +1920,100 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_keep_alive_env_var() {
+        assert_eq!(
+            parse_sse_keep_alive(Err(std::env::VarError::NotPresent)),
+            None
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("0".to_string())), None);
+        assert_eq!(
+            parse_sse_keep_alive(Ok("5000".to_string())),
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("invalid".to_string())), None);
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            assert_eq!(
+                parse_sse_keep_alive(Err(std::env::VarError::NotUnicode(OsString::from_vec(
+                    vec![0xff]
+                ),))),
+                None
+            );
+        }
+
+        let interval = Duration::from_millis(u64::MAX);
+        let expected = std::time::Instant::now()
+            .checked_add(interval)
+            .map(|_| interval);
+        assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn generate_api_enabled_reports_resolved_startup_gate() {
         temp_env::with_var_unset(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
             let disabled = HttpService::builder().build().unwrap();
             assert!(!disabled.generate_api_enabled());
+            assert!(disabled.generate_engine_capabilities().is_empty());
 
             let enabled = HttpService::builder()
                 .enable_engine_apis(true)
                 .build()
                 .unwrap();
             assert!(enabled.generate_api_enabled());
+            assert_eq!(
+                enabled.generate_engine_capabilities(),
+                vec![VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+            );
         });
 
         temp_env::with_var(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1"), || {
             let enabled = HttpService::builder().build().unwrap();
             assert!(enabled.generate_api_enabled());
+            assert_eq!(
+                enabled.generate_engine_capabilities(),
+                vec![VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+            );
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn vllm_generate_route_path_follows_env_override() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some("/native/vllm")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let route_docs: Vec<_> = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+
+                assert!(route_docs.contains(&"POST /native/vllm".to_string()));
+                assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
+            },
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn vllm_generate_route_path_rejects_invalid_env_override() {
+        for path in ["", "native/vllm", "/:model", "/*path"] {
+            temp_env::with_var(HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some(path), || {
+                assert!(
+                    HttpService::builder()
+                        .enable_engine_apis(true)
+                        .build()
+                        .is_err()
+                );
+            });
+        }
     }
 }

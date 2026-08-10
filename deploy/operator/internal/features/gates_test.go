@@ -52,7 +52,6 @@ func TestGateRegistryIsComplete(t *testing.T) {
 
 func allEnabledGates() Gates {
 	return Gates{
-		GMSSnapshot:      true,
 		Checkpoint:       true,
 		Grove:            true,
 		LWS:              true,
@@ -61,13 +60,6 @@ func allEnabledGates() Gates {
 		DRA:              true,
 		Istio:            true,
 		GPUDiscovery:     true,
-	}
-}
-
-func TestFromEnvironment(t *testing.T) {
-	t.Setenv(GMSSnapshotEnvVar, "1")
-	if !fromEnvironment().Enabled(GMSSnapshot) {
-		t.Error("fromEnvironment().Enabled(GMSSnapshot) = false, want true")
 	}
 }
 

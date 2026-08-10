@@ -75,6 +75,7 @@ def test_aggregated_replay_uses_native_aic_engine() -> None:
         replay_concurrency=1,
         replay_mode="offline",
     )
+    report = report.summary
     assert report["num_requests"] == 2
     assert report["mean_ttft_ms"] > 0.0
     assert report["mean_tpot_ms"] > 0.0
@@ -94,6 +95,7 @@ def test_disaggregated_replay_uses_native_aic_engine() -> None:
         replay_concurrency=1,
         replay_mode="offline",
     )
+    report = report.summary
     assert report["num_requests"] == 2
     assert report["mean_ttft_ms"] > 0.0
     assert report["mean_tpot_ms"] > 0.0

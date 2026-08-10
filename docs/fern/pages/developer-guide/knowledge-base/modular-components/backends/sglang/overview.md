@@ -151,7 +151,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **KV-Aware Routing** | ✅ | — | | | | | | | | |
 | **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
 | **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
-| **Multimodal** | ✅<sup>2</sup> | <sup>1</sup> | — | 🚧 | — | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | 🚧 | — | | | | | |
 | **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
 | **LoRA** | | | | 🚧 | | | | — | | |
@@ -159,7 +159,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source](../../router/overview.md))
+> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap. The worker probes `engine.async_generate` once at startup and stops forwarding `mm_hashes` when the build does not accept it; the frontend keeps deriving image-aware routing keys regardless, so the worker's internally computed hashes never line up with them and only the text prefix overlaps. Expect image-blind cache hits on such a build rather than an error. ([Source](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md))
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](multimodal.md))
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../../concepts/fault-tolerance/request-cancellation-architecture.md))
 > 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
@@ -207,7 +207,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 ### Multi-Node TP
 
-SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.ai/advanced_features/server_arguments.html) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).
+SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.io/docs/advanced_features/server_arguments) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).
 
 ### Kubernetes Deployment
 

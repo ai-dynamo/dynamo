@@ -5,8 +5,8 @@
 
 `_build_uid_to_annotation` is scope-by-annotation-key: a pod is in scope only
 if it carries ``dynamo.nvidia.com/gpu-power-limit``. A GPU running only
-unannotated pods — a co-located non-Dynamo workload, or a Dynamo worker the
-planner has not yet annotated — must be left at its hardware default and never
+unannotated pods — a co-located non-Dynamo workload, or a Dynamo worker not yet
+annotated by the operator — must be left at its hardware default and never
 written, instead of being silently capped to the safe default.
 
 A pod that *does* carry the key but with a malformed value stays in scope so

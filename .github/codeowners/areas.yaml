@@ -94,6 +94,7 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
+  - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
@@ -214,7 +215,7 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - aisimulate/
-  - examples/aisimulate/
+  - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -431,6 +432,7 @@ areas:
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
+  - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - deploy/helm/charts/snapshot/
   - deploy/operator/internal/checkpoint/
@@ -564,6 +566,14 @@ shared:
   owners:
   - process
   - agents
+- glob: .github/workflows/fern-docs.yml
+  owners:
+  - ops
+  - docs
+- glob: .lycheeignore
+  owners:
+  - ops
+  - docs
 - glob: lib/llm/src/protocols/agents.rs
   owners:
   - frontend
@@ -656,14 +666,6 @@ shared:
   owners:
   - backend-trtllm
   - observability
-- glob: components/src/dynamo/vllm/logits_processing/
-  owners:
-  - backend-vllm
-  - frontend
-- glob: components/src/dynamo/sglang/logits_processing/
-  owners:
-  - backend-sglang
-  - frontend
 - glob: components/src/dynamo/trtllm/logits_processing/
   owners:
   - backend-trtllm
@@ -1039,6 +1041,10 @@ shared:
   owners:
   - performance
   - kv-memory
+- glob: lib/mocker/servers/sglang/
+  owners:
+  - performance
+  - backend-sglang
 - glob: lib/mocker/src/replay/planner_handle.rs
   owners:
   - performance

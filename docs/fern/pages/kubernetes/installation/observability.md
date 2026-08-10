@@ -13,7 +13,7 @@ Dynamo emits three signals — **metrics** (Prometheus), **logs** (structured te
 |--------|-----------------|--------------|
 | Metrics | `DYN_SYSTEM_PORT` (workers/router); the frontend serves metrics on its HTTP port | Prometheus |
 | Traces | `OTEL_EXPORT_ENABLED=true` + an OTLP endpoint | Tempo |
-| Logs | `DYN_LOGGING_JSONL=true` (+ `OTEL_EXPORT_ENABLED` to export) | Loki |
+| Logs | `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for console JSONL; `OTEL_EXPORT_ENABLED=true` to export | Loki |
 | FPM traces | `DYN_FPM_TRACE=1` or `--fpm-trace` | Rotating gzip JSONL files |
 | Health status | `/live` and `/health` endpoints | Supervisors or Kubernetes probes |
 | Request traces | `DYN_REQUEST_TRACE=1` or `DYN_REQUEST_TRACE_RECORDS` | Files, NATS, stderr, or OTLP logs |
@@ -115,4 +115,4 @@ helm install --values alloy-custom-values.yaml \
   alloy grafana/k8s-monitoring -n $MONITORING_NAMESPACE
 ```
 
-The Alloy values file forwards logs to Loki, restricts collection to `$DYN_NAMESPACE`, and maps the `nvidia.com/dynamo-component-type` and `nvidia.com/dynamo-graph-deployment-name` pod labels into Loki labels so the logging dashboard can filter by deployment and component. Applying the Grafana datasource and logging dashboard, and enabling JSONL logging on a deployment, are covered in [Observability](../operations/observability.mdx#logging) under Operations.
+The Alloy values file forwards logs to Loki, restricts collection to `$DYN_NAMESPACE`, and maps the `nvidia.com/dynamo-component-type` and `nvidia.com/dynamo-graph-deployment-name` pod labels into Loki labels so the logging dashboard can filter by deployment and component. Applying the Grafana datasource and logging dashboard, and enabling JSONL logging on a deployment, are covered in [Observability](../operations/observability.mdx#configure-structured-logs) under Operations.
