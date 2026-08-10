@@ -14,7 +14,7 @@
 # limitations under the License.
 
 default_install_hook_types: [pre-commit, commit-msg]
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/vllm/proto/vllm_grpc\.proto$|lib/sidecar/trtllm/proto/trtllm_service\.proto$)
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/vllm/proto/(control|inference)\.proto$|lib/sidecar/trtllm/proto/trtllm_service\.proto$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
@@ -116,6 +116,18 @@ repos:
       entry: python3 docs/fern/scripts/check_published_styles.py --test
       language: system
       files: ^docs/fern/scripts/check_published_styles\.py$
+      pass_filenames: false
+    - id: check-component-imports
+      name: Check Fern components trigger no rolldown bundling
+      entry: python3 docs/fern/scripts/check_component_imports.py
+      language: system
+      files: ^docs/fern/(components/.*\.(js|jsx|ts|tsx)|scripts/check_component_imports\.py|fern\.config\.json)$
+      pass_filenames: false
+    - id: check-component-imports-selftest
+      name: Self-test the Fern component import scanner
+      entry: python3 docs/fern/scripts/check_component_imports.py --test
+      language: system
+      files: ^docs/fern/scripts/check_component_imports\.py$
       pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
