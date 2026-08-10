@@ -50,20 +50,21 @@ PID. While the CUDA process lock is held, the coordinator poisons the dedicated
 Redis database, loads the RDB, verifies the expected generation and
 manifest-bound state digest, and validates all graph metadata and allocation
 bytes. The non-restored coordinator also verifies its `NODE_NAME` against the
-source node, and each restored shim scans the real driver for every saved source
-GPU UUID. The shim accepts a process-local ordinal change only when the source
-UUID has exactly one current match, then reconciles the allocation property and
-access descriptor ordinals before replay. It rejects node changes, GPU identity
-changes, absent or ambiguous source UUIDs, and access descriptors that are not
-exactly one read/write DEVICE descriptor on the allocation GPU.
+source node. It builds a complete identity-first source-to-target placement from
+the manifest source UUIDs and target UUIDs in current runtime ordinal order,
+then sends each restored shim only its expected source entries. Each shim
+validates all detached allocation metadata before atomically updating the
+target ordinal in allocation properties and access descriptors. The saved
+source UUID remains the allocation identity; restored shims do not enumerate
+CUDA devices during placement setup.
 
 Processes launched through the shim but without capture-visible shared VMM
 mappings, such as a launcher, are not durable VMM graph participants. After
 native CUDA restore, the coordinator accepts such an endpoint only when
-`QUERY_PLACEMENT` proves that it has zero detached managed placements. An
+an empty `SET_PLACEMENT` proves that it has zero detached managed placements. An
 unexpected endpoint with any managed placement fails closed. This does not
 support partial process restore: every durable ledger participant must still
-restore on the source node with its exact captured GPU placement.
+restore on the source node under the authoritative placement plan.
 
 After all preflight checks pass, the coordinator unlocks the CUDA processes
 immediately before the first owner replay request. This is required because
@@ -151,12 +152,12 @@ or opaque transport handles. Device ordinals can occur inside opaque
 allocation-property and access-descriptor replay records, but they are not
 durable identity. The shim admits only an access descriptor whose ordinal matches
 the allocation's transient validated device ordinal; restore uses an ordinal
-only after current UUID validation. A
+only after validating the controller-supplied source/target UUID plan. A
 deterministic SHA-256 digest over that graph
 metadata and every allocation byte is stored in Redis and the checkpoint manifest. Redis
 stores the allocation graph and contents, never POSIX FDs, logical FABRIC
 tokens, raw FABRIC handles, PIDs, or socket paths. Ledger version 2 and private
-control protocol version 3 are required; cross-version artifact restore is
+control protocol version 4 are required; cross-version artifact restore is
 unsupported. The artifact requires the same architecture, CUDA ABI, and shim
 build.
 
@@ -165,7 +166,7 @@ build.
 - CUDA Driver API VMM with `requestedHandleTypes` exactly POSIX FD (`1`) or
   exactly FABRIC (`8`). Zero, combined bitmasks such as `9`, and every other
   type are rejected.
-- FABRIC is single-node IMEX unicast only. Exporter and importer must use
+- FABRIC is single-node M2 IMEX unicast only. Exporter and importer must use
   fabric-ready hardware and have access to the same IMEX channel.
 - One owner physical allocation, one complete offset-zero mapping per
   participant, all participants launched through the shim, and one
@@ -228,10 +229,8 @@ The implementation detects and rejects:
   state, or accessible IMEX channel is absent or mismatched, or when exporter
   and importer do not share the same channel;
 - fork after CUDA initialization as observed by `pthread_atfork`;
-- missing current `NODE_NAME` and target-node changes; the same physical GPU UUID
-  at a changed process-local CUDA ordinal is accepted, but an absent source UUID,
-  a source UUID visible ambiguously at multiple ordinals, or a different physical
-  GPU identity is rejected;
+- missing current `NODE_NAME`, target-node changes, or an invalid, incomplete,
+  duplicate, or participant-inconsistent authoritative GPU placement plan;
 - inconsistent manifest VMM fields, a missing/empty/non-regular
   `cuda-vmm.rdb`, or an RDB artifact without manifest opt-in;
 - a checkpoint-side RDB source that is not a regular non-empty file after
@@ -290,11 +289,8 @@ must enforce these assumptions:
 | Every participating process uses the launcher and resolves managed APIs through the preload/resolver path. | Static binaries, alternate loader namespaces, preload suppression, explicit-handle `dlvsym`, or direct explicit-handle lookup of a managed API can bypass tracking and produce an incomplete graph. cuda-python's explicit `dlsym` lookup of the CUDA resolver is supported. |
 | A process does not fork before CUDA use and then continue without `exec`. | The child inherits the parent's participant ID, listener FD, and socket path but not the control thread. It cannot create an independent endpoint, and checkpoint eventually fails through participant/process-set drift. Fork followed by `exec` reinitializes the launcher-scoped shim. |
 | Checkpoint and restore run on one logical node, with the same accessible IMEX channel and ready fabric state for FABRIC resources. | Cross-node routing is unsupported. A node, GPU, IMEX channel, or fabric-state change invalidates local brokerage and can cause `CUDA_ERROR_NOT_PERMITTED` or restore failure. |
-| The restore uses the same architecture, CUDA ABI, shim build, and source GPU UUID placement. | Same-UUID process-local ordinal reindexing is reconciled while locked. Different GPU identity or other opaque CUDA property/access changes fail preflight; replay-time CUDA failures fail the restore and trigger target teardown. |
+| The restore uses the same architecture, CUDA ABI, and shim build. | Identity and same-node remapped GPU placements are reconciled while locked from the controller plan. Other opaque CUDA property/access changes fail preflight; replay-time CUDA failures fail the restore and trigger target teardown. |
 | Redis is dedicated to this job and the restore command atomically loads the supplied RDB. | Another writer or non-atomic load can replace/mix state; digest, generation, or poison checks reject detectable drift. |
-
-Queued `SCM_RIGHTS` FDs, received-but-not-imported FDs, and stale/unconsumed
-FABRIC tokens are unsupported and unobservable.
 
 The non-restored Snapshot coordinator reads its existing `NODE_NAME` for both
 source metadata and current restore placement; restore fails closed when that
@@ -302,10 +298,11 @@ identity is unavailable. The implementation remains single-node.
 
 ## Non-goals
 
-The interposer does not support cross-node routing, relocation, multicast
-objects or APIs/state, CUDA mempools, queued/retained transport objects,
-repeated checkpoint/restore cycles, cross-version artifacts, or native
-FlashInfer checkpoint hooks. It does not remove CUDA's native checkpoint
+The interposer does not support cross-node routing, multinode IMEX, multicast
+objects or APIs/state, CUDA mempools, unobservable retained, dangling, queued,
+or received-but-not-imported transport capabilities, repeated checkpoint/restore
+cycles, cross-version artifacts, or native application checkpoint hooks,
+including native FlashInfer hooks. It does not remove CUDA's native checkpoint
 responsibility for unrelated CUDA state or legacy CUDA IPC.
 
 Deployment admission and workload discipline must enforce these assumptions.

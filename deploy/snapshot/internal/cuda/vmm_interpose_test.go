@@ -19,9 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
@@ -49,41 +52,191 @@ func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
 	}
 }
 
-func TestValidateVMMResponseShapeRejectsTypedPayloadBeforeAllocation(t *testing.T) {
+func TestExchangeVMMRejectsNonemptySuccessBeforeReadingPayload(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
+	path := filepath.Join(t.TempDir(), "vmm.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	releasePeer := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		request := make([]byte, vmmHeaderSize)
+		if _, err := io.ReadFull(connection, request); err != nil {
+			return
+		}
+		_ = writeVMMBytes(connection, encodeVMMHeader(vmmHeader{
+			Operation:      vmmSetPlacement,
+			Count:          1,
+			AllocationUUID: [16]byte{1},
+			ObjectID:       1,
+			PayloadSize:    1,
+			Message:        "unexpected",
+			Participant:    participant,
+		}))
+		<-releasePeer
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = exchangeVMM(
+		ctx,
+		VMMProcess{SocketPath: path, Participant: participant},
+		vmmHeader{Operation: vmmSetPlacement},
+		nil,
+		-1,
+		vmmResponseEmpty,
+	)
+	close(releasePeer)
+	<-done
+	if err == nil || !strings.Contains(err.Error(), "nonempty success response") {
+		t.Fatalf("nonempty SET_PLACEMENT response error = %v", err)
+	}
+}
+
+func TestVMMPlacementPayloadSizeLimit(t *testing.T) {
+	maximumCount := vmmMaximumRedisBulk / vmmPlacementSize
+	size, err := vmmPlacementPayloadSize(maximumCount)
+	if err != nil || size != maximumCount*vmmPlacementSize {
+		t.Fatalf("maximum placement payload size = %d, %v", size, err)
+	}
+	if _, err := vmmPlacementPayloadSize(maximumCount + 1); err == nil {
+		t.Fatal("placement payload above the C limit was accepted")
+	}
+}
+
+func TestSetRestoredVMMPlacementEmptyExtraEndpoint(t *testing.T) {
+	const (
+		participant = "11111111111111111111111111111111"
+		extra       = "22222222222222222222222222222222"
+		sourceUUID  = "00112233-4455-6677-8899-aabbccddeeff"
+	)
+	managed := serveVMMProcess(t, "", participant, func(
+		request vmmResponse,
+	) (vmmResponse, error) {
+		if err := validateVMMPlacementRequest(
+			request, sourceUUID, sourceUUID, 0,
+		); err != nil {
+			return vmmResponse{}, err
+		}
+		return vmmResponse{
+			header: vmmHeader{Operation: vmmSetPlacement},
+			fd:     -1,
+		}, nil
+	})
+	extraEndpoint := func(t *testing.T, reject bool) VMMProcess {
+		return serveVMMProcess(t, "", extra, func(
+			request vmmResponse,
+		) (vmmResponse, error) {
+			if request.header.Operation != vmmSetPlacement ||
+				request.header.Count != 0 ||
+				len(request.payload) != 0 {
+				return vmmResponse{}, errors.New("extra endpoint received nonempty setup")
+			}
+			response := vmmResponse{
+				header: vmmHeader{Operation: vmmSetPlacement},
+				fd:     -1,
+			}
+			if reject {
+				response.header.Status = -1
+				response.header.Message = "detached CUDA placement metadata is inconsistent"
+			}
+			return response, nil
+		})
+	}
+	payload, err := encodeVMMPlacement([]types.VMMPlacement{{
+		SourceGPUUUID: sourceUUID,
+		TargetGPUUUID: sourceUUID,
+		TargetOrdinal: 0,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		reject    bool
+		wantError bool
+	}{
+		{name: "zero-managed endpoint accepts empty setup"},
+		{name: "managed endpoint rejects empty setup", reject: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := setRestoredVMMPlacement(
+				context.Background(),
+				[]vmmPlacementSetup{
+					{process: managed, count: 1, payload: payload},
+					{process: extraEndpoint(t, test.reject)},
+				},
+			)
+			if (err != nil) != test.wantError {
+				t.Fatalf("set placement error = %v, wantError=%t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateVMMResponseShapeRejectsInvalidShapeBeforeAllocation(t *testing.T) {
 	tests := []struct {
 		name        string
 		expectation vmmResponseExpectation
-		handleType  uint32
-		payloadSize uint64
+		response    vmmHeader
 		fdCount     int
 	}{
 		{
 			name:        "oversized fabric payload",
 			expectation: vmmResponseFabricBroker,
-			handleType:  vmmHandleFabric,
-			payloadSize: vmmFabricHandleSize + 1,
+			response: vmmHeader{
+				HandleType:  vmmHandleFabric,
+				PayloadSize: vmmFabricHandleSize + 1,
+			},
 		},
 		{
 			name:        "POSIX payload",
 			expectation: vmmResponsePOSIXBroker,
-			handleType:  vmmHandlePOSIX,
-			payloadSize: 1,
-			fdCount:     1,
+			response: vmmHeader{
+				HandleType:  vmmHandlePOSIX,
+				PayloadSize: 1,
+			},
+			fdCount: 1,
 		},
 		{
 			name:        "wrong handle type",
 			expectation: vmmResponseFabricBroker,
-			handleType:  vmmHandlePOSIX,
+			response:    vmmHeader{HandleType: vmmHandlePOSIX},
+		},
+		{
+			name:        "empty response count",
+			expectation: vmmResponseEmpty,
+			response:    vmmHeader{Count: 1},
+		},
+		{
+			name:        "empty response object metadata",
+			expectation: vmmResponseEmpty,
+			response: vmmHeader{
+				ObjectID:       1,
+				AllocationUUID: [16]byte{1},
+				Message:        "unexpected",
+			},
+		},
+		{
+			name:        "empty response FD",
+			expectation: vmmResponseEmpty,
+			fdCount:     1,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := validateVMMResponseShape(
 				vmmRestoreOwner,
-				vmmHeader{
-					HandleType:  test.handleType,
-					PayloadSize: test.payloadSize,
-				},
+				test.response,
 				test.expectation,
 				test.fdCount,
 			)
@@ -151,29 +304,27 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 	writeVMMDigestObject(digest, 1, contents)
 	expectedDigest := hex.EncodeToString(digest.Sum(nil))
 	events := make(chan string, 8)
-	placementResponse := func(operation uint16) vmmResponse {
-		payload := make([]byte, vmmPlacementSize)
-		copy(payload[8:24], parseGPUUUID(sourceUUID))
-		copy(payload[24:40], parseGPUUUID(sourceUUID))
-		return vmmResponse{
-			header:  vmmHeader{Operation: operation, Count: 1},
-			payload: payload,
-			fd:      -1,
-		}
-	}
 	owner := serveVMMProcess(
 		t, "", participantA,
 		func(request vmmResponse) (vmmResponse, error) {
 			switch request.header.Operation {
-			case vmmQueryPlacement:
-				return placementResponse(vmmQueryPlacement), nil
+			case vmmSetPlacement:
+				if err := validateVMMPlacementRequest(
+					request, sourceUUID, sourceUUID, 0,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmSetPlacement},
+					fd:     -1,
+				}, nil
 			case vmmRestoreOwner:
 				if request.header.HandleType != vmmHandleFabric ||
 					request.fd >= 0 {
 					return vmmResponse{}, errors.New("invalid FABRIC owner request shape")
 				}
 				if err := validateVMMRestoreRequest(
-					request, 1, vmmOwner, contents,
+					request, 1, vmmOwner, 0, contents,
 				); err != nil {
 					return vmmResponse{}, err
 				}
@@ -205,8 +356,16 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 		t, "", participantB,
 		func(request vmmResponse) (vmmResponse, error) {
 			switch request.header.Operation {
-			case vmmQueryPlacement:
-				return placementResponse(vmmQueryPlacement), nil
+			case vmmSetPlacement:
+				if err := validateVMMPlacementRequest(
+					request, sourceUUID, sourceUUID, 0,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmSetPlacement},
+					fd:     -1,
+				}, nil
 			case vmmRestoreImporter:
 				if request.header.HandleType != vmmHandleFabric ||
 					request.fd >= 0 ||
@@ -222,7 +381,7 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 				metadata := request.payload[:len(request.payload)-vmmFabricHandleSize]
 				request.payload = metadata
 				if err := validateVMMRestoreRequest(
-					request, 1, vmmImporter, nil,
+					request, 1, vmmImporter, 0, nil,
 				); err != nil {
 					return vmmResponse{}, err
 				}
@@ -263,6 +422,11 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 		generation,
 		expectedDigest,
 		t.TempDir(),
+		[]types.VMMPlacement{{
+			SourceGPUUUID: sourceUUID,
+			TargetGPUUUID: sourceUUID,
+			TargetOrdinal: 0,
+		}},
 		func() error {
 			events <- "unlock"
 			return nil
@@ -278,13 +442,13 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 	}
 }
 
-func TestVMMProtocolV3HandleTypeLayout(t *testing.T) {
+func TestVMMProtocolV4HandleTypeLayout(t *testing.T) {
 	encoded := encodeVMMHeader(vmmHeader{
 		Operation:  vmmRestoreOwner,
 		HandleType: vmmHandleFabric,
 	})
-	if got := binary.LittleEndian.Uint16(encoded[4:6]); got != 3 {
-		t.Fatalf("protocol version = %d, want 3", got)
+	if got := binary.LittleEndian.Uint16(encoded[4:6]); got != 4 {
+		t.Fatalf("protocol version = %d, want 4", got)
 	}
 	if got := binary.LittleEndian.Uint32(encoded[16:20]); got != vmmHandleFabric {
 		t.Fatalf("header handle type = %d, want %d", got, vmmHandleFabric)
@@ -637,6 +801,7 @@ func TestRestoreVMMRejectsNoOpRestoreCommand(t *testing.T) {
 		generation,
 		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		t.TempDir(),
+		nil,
 		func() error {
 			t.Fatal("preflight failure invoked unlock callback")
 			return nil
@@ -652,6 +817,7 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 	const (
 		generation   = "00112233445566778899aabbccddeeff"
 		sourceUUID   = "00112233-4455-6677-8899-aabbccddeeff"
+		otherUUID    = "ffeeddcc-bbaa-9988-7766-554433221100"
 		participantA = "11111111111111111111111111111111"
 		participantB = "22222222222222222222222222222222"
 	)
@@ -700,19 +866,20 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 	t.Setenv(VMMRedisRestoreCmdEnv, "/bin/true")
 	t.Setenv("NODE_NAME", "node-a")
 	preflight := []string{
+		"content:1", "content:2",
 		"placement:1:owner,2:importer",
 		"placement:2:owner,1:importer",
-		"content:1", "content:2",
 	}
 
 	tests := []struct {
-		name          string
-		corruptSecond bool
-		unlockError   error
-		failOwner     uint64
-		wantError     string
-		replayEvents  []string
-		noUnlock      bool
+		name                  string
+		corruptSecond         bool
+		rejectSecondPlacement bool
+		unlockError           error
+		failOwner             uint64
+		wantError             string
+		replayEvents          []string
+		noUnlock              bool
 	}{
 		{
 			name: "success unlocks once after all preflight",
@@ -728,6 +895,12 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 			corruptSecond: true,
 			wantError:     "content digest",
 			noUnlock:      true,
+		},
+		{
+			name:                  "second placement rejection does not unlock",
+			rejectSecondPlacement: true,
+			wantError:             "placement rejected",
+			noUnlock:              true,
 		},
 		{
 			name:        "unlock failure sends no owner replay",
@@ -760,10 +933,12 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 
 			processes := []VMMProcess{
 				serveVMMRestoreProcess(
-					t, participantA, sourceUUID, contents, 1, test.failOwner, events,
+					t, participantA, sourceUUID, contents, 1, test.failOwner,
+					false, events,
 				),
 				serveVMMRestoreProcess(
-					t, participantB, sourceUUID, contents, 2, test.failOwner, events,
+					t, participantB, sourceUUID, contents, 2, test.failOwner,
+					test.rejectSecondPlacement, events,
 				),
 			}
 			err := RestoreVMM(
@@ -772,6 +947,18 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 				generation,
 				expectedDigest,
 				t.TempDir(),
+				[]types.VMMPlacement{
+					{
+						SourceGPUUUID: sourceUUID,
+						TargetGPUUUID: sourceUUID,
+						TargetOrdinal: 1,
+					},
+					{
+						SourceGPUUUID: otherUUID,
+						TargetGPUUUID: otherUUID,
+						TargetOrdinal: 0,
+					},
+				},
 				func() error {
 					events <- "unlock"
 					return test.unlockError
@@ -789,6 +976,9 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 				gotEvents = append(gotEvents, <-events)
 			}
 			wantEvents := slices.Clone(preflight)
+			if test.corruptSecond {
+				wantEvents = wantEvents[:2]
+			}
 			if !test.noUnlock {
 				wantEvents = append(wantEvents, "unlock")
 			}
@@ -1147,9 +1337,10 @@ func TestInspectVMMKeepsIndependentOwnerUUIDsSeparate(t *testing.T) {
 	}
 }
 
-func TestValidateRestoredVMMProcessesRequiresIdentityPlacement(t *testing.T) {
+func TestValidateRestoredVMMProcessesUsesAuthoritativePlacement(t *testing.T) {
 	const participant = "11111111111111111111111111111111"
 	const sourceUUID = "00112233-4455-6677-8899-aabbccddeeff"
+	const targetUUID = "ffeeddcc-bbaa-9988-7766-554433221100"
 	ledger := vmmLedger{Participants: []vmmParticipant{{
 		ID: participant,
 		Placement: vmmPlacement{
@@ -1160,42 +1351,46 @@ func TestValidateRestoredVMMProcessesRequiresIdentityPlacement(t *testing.T) {
 	tests := []struct {
 		name        string
 		currentNode string
-		currentUUID string
+		placement   []types.VMMPlacement
 		wantError   string
 	}{
 		{
-			name:        "exact identity",
+			name:        "authoritative remap",
 			currentNode: "node-a",
-			currentUUID: sourceUUID,
+			placement: []types.VMMPlacement{{
+				SourceGPUUUID: sourceUUID,
+				TargetGPUUUID: targetUUID,
+				TargetOrdinal: 0,
+			}},
 		},
 		{
-			name:        "same ordinal different UUID",
+			name:        "missing source UUID",
 			currentNode: "node-a",
-			currentUUID: "ffeeddcc-bbaa-9988-7766-554433221100",
-			wantError:   "currently maps GPU",
+			placement: []types.VMMPlacement{{
+				SourceGPUUUID: targetUUID,
+				TargetGPUUUID: sourceUUID,
+				TargetOrdinal: 0,
+			}},
+			wantError: "absent from the authoritative placement",
 		},
 		{
 			name:        "different current node",
 			currentNode: "node-b",
-			currentUUID: sourceUUID,
-			wantError:   "target node",
+			placement: []types.VMMPlacement{{
+				SourceGPUUUID: sourceUUID,
+				TargetGPUUUID: targetUUID,
+				TargetOrdinal: 0,
+			}},
+			wantError: "target node",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			process := serveVMMPlacement(
-				t,
-				participant,
-				7,
-				sourceUUID,
-				test.currentUUID,
-			)
-
-			placement, err := validateRestoredVMMProcesses(
-				context.Background(),
-				[]VMMProcess{process},
+			setups, placement, err := validateRestoredVMMProcesses(
+				[]VMMProcess{{Participant: participant}},
 				ledger,
 				test.currentNode,
+				test.placement,
 			)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
@@ -1206,8 +1401,20 @@ func TestValidateRestoredVMMProcessesRequiresIdentityPlacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := placement[participant][sourceUUID]; got != 7 {
-				t.Fatalf("validated ordinal = %d, want 7", got)
+			if len(setups) != 1 {
+				t.Fatalf("placement setup count = %d, want 1", len(setups))
+			}
+			if err := validateVMMPlacementPayload(
+				setups[0].count,
+				setups[0].payload,
+				sourceUUID,
+				targetUUID,
+				0,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if got := placement[participant][sourceUUID]; got != 0 {
+				t.Fatalf("validated ordinal = %d, want 0", got)
 			}
 		})
 	}
@@ -1226,90 +1433,45 @@ func TestValidateRestoredVMMProcessesParticipantSet(t *testing.T) {
 			GPUUUIDs: []string{sourceUUID},
 		},
 	}}}
-	valid := func(t *testing.T) VMMProcess {
-		return serveVMMPlacement(t, participant, 7, sourceUUID, sourceUUID)
-	}
-	empty := func(t *testing.T, id string) VMMProcess {
-		return serveVMMPlacementResponse(t, id, 0, nil)
-	}
+	valid := VMMProcess{Participant: participant}
+	empty := VMMProcess{Participant: extra}
+	placementPlan := []types.VMMPlacement{{
+		SourceGPUUUID: sourceUUID,
+		TargetGPUUUID: sourceUUID,
+		TargetOrdinal: 0,
+	}}
 	tests := []struct {
 		name          string
-		processes     func(*testing.T) []VMMProcess
+		processes     []VMMProcess
 		wantError     string
 		wantPlacement bool
 	}{
 		{
-			name: "extra empty placement is ignored",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{valid(t), empty(t, extra)}
-			},
+			name:          "extra empty placement is ignored",
+			processes:     []VMMProcess{valid, empty},
 			wantPlacement: true,
 		},
 		{
-			name: "extra managed placement is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{
-					valid(t),
-					serveVMMPlacement(t, extra, 7, sourceUUID, sourceUUID),
-				}
-			},
-			wantError: "unexpected restored CUDA VMM participant",
-		},
-		{
-			name: "missing expected endpoint is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{empty(t, extra)}
-			},
+			name:      "missing expected endpoint is rejected",
+			processes: []VMMProcess{empty},
 			wantError: "has no restored shim endpoint",
 		},
 		{
-			name: "expected empty placement is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{empty(t, participant)}
-			},
-			wantError: "current GPU placement count is 0, want 1",
-		},
-		{
 			name: "duplicate participant is rejected",
-			processes: func(*testing.T) []VMMProcess {
-				return []VMMProcess{
-					{Participant: participant},
-					{Participant: participant},
-				}
+			processes: []VMMProcess{
+				{Participant: participant},
+				{Participant: participant},
 			},
 			wantError: "multiple restored shims claim participant",
-		},
-		{
-			name: "extra placement query error is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{
-					valid(t),
-					{
-						Participant: extra,
-						SocketPath:  filepath.Join(t.TempDir(), "missing.sock"),
-					},
-				}
-			},
-			wantError: "query CUDA VMM participant",
-		},
-		{
-			name: "extra placement decode error is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{
-					valid(t),
-					serveVMMPlacementResponse(t, extra, 1, nil),
-				}
-			},
-			wantError: "decode CUDA VMM participant",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			placement, err := validateRestoredVMMProcesses(
-				context.Background(),
-				test.processes(t),
+			setups, placement, err := validateRestoredVMMProcesses(
+				test.processes,
 				ledger,
 				"node-a",
+				placementPlan,
 			)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
@@ -1326,11 +1488,15 @@ func TestValidateRestoredVMMProcessesParticipantSet(t *testing.T) {
 			if len(placement) != 1 {
 				t.Fatalf("execution placement has %d participants, want 1", len(placement))
 			}
+			if len(setups) != 2 || setups[1].count != 0 ||
+				len(setups[1].payload) != 0 {
+				t.Fatalf("extra endpoint setup = %#v, want empty payload", setups)
+			}
 			if _, ok := placement[extra]; ok {
 				t.Fatal("extra empty participant was included in execution placement")
 			}
-			if got := placement[participant][sourceUUID]; got != 7 {
-				t.Fatalf("validated ordinal = %d, want 7", got)
+			if got := placement[participant][sourceUUID]; got != 0 {
+				t.Fatalf("validated ordinal = %d, want 0", got)
 			}
 		})
 	}
@@ -1762,42 +1928,49 @@ func TestReceiveVMMFDsPreservesOwnershipOnPartialParseFailure(t *testing.T) {
 	}
 }
 
-func serveVMMPlacement(
-	t *testing.T,
-	participant string,
-	ordinal int32,
-	sourceUUID string,
-	currentUUID string,
-) VMMProcess {
-	t.Helper()
-	payload := make([]byte, vmmPlacementSize)
-	binary.LittleEndian.PutUint32(payload[0:4], uint32(ordinal))
-	copy(payload[8:24], parseGPUUUID(sourceUUID))
-	copy(payload[24:40], parseGPUUUID(currentUUID))
-	return serveVMMPlacementResponse(t, participant, 1, payload)
-}
-
-func serveVMMPlacementResponse(
-	t *testing.T,
-	participant string,
+func validateVMMPlacementPayload(
 	count uint32,
 	payload []byte,
-) VMMProcess {
-	t.Helper()
-	return serveVMMProcess(t, "", participant, func(
-		request vmmResponse,
-	) (vmmResponse, error) {
-		if request.header.Operation != vmmQueryPlacement {
-			return vmmResponse{}, fmt.Errorf(
-				"unexpected VMM operation %d", request.header.Operation,
-			)
-		}
-		return vmmResponse{
-			header:  vmmHeader{Operation: vmmQueryPlacement, Count: count},
-			payload: payload,
-			fd:      -1,
-		}, nil
-	})
+	sourceUUID string,
+	targetUUID string,
+	ordinal int32,
+) error {
+	if count != 1 || len(payload) != vmmPlacementSize {
+		return fmt.Errorf(
+			"placement shape = count %d, payload %d bytes",
+			count,
+			len(payload),
+		)
+	}
+	if binary.LittleEndian.Uint32(payload[0:4]) != uint32(ordinal) ||
+		binary.LittleEndian.Uint32(payload[4:8]) != 0 ||
+		!bytes.Equal(payload[8:24], parseGPUUUID(sourceUUID)) ||
+		!bytes.Equal(payload[24:40], parseGPUUUID(targetUUID)) {
+		return errors.New("placement payload does not match authoritative plan")
+	}
+	return nil
+}
+
+func validateVMMPlacementRequest(
+	request vmmResponse,
+	sourceUUID string,
+	targetUUID string,
+	ordinal int32,
+) error {
+	if request.header.Operation != vmmSetPlacement || request.fd >= 0 {
+		return fmt.Errorf(
+			"unexpected placement operation %d or FD %d",
+			request.header.Operation,
+			request.fd,
+		)
+	}
+	return validateVMMPlacementPayload(
+		request.header.Count,
+		request.payload,
+		sourceUUID,
+		targetUUID,
+		ordinal,
+	)
 }
 
 func countMatchingFDs(t *testing.T, dev uint64, ino uint64) int {
@@ -2010,6 +2183,7 @@ func serveVMMRestoreProcess(
 	contents [][]byte,
 	ownerResource uint64,
 	failOwner uint64,
+	rejectPlacement bool,
 	events chan<- string,
 ) VMMProcess {
 	t.Helper()
@@ -2023,17 +2197,21 @@ func serveVMMRestoreProcess(
 			fd: -1,
 		}
 		switch request.header.Operation {
-		case vmmQueryPlacement:
-			placement := make([]byte, vmmPlacementSize)
-			copy(placement[8:24], parseGPUUUID(sourceUUID))
-			copy(placement[24:40], parseGPUUUID(sourceUUID))
-			response.header.Count = 1
-			response.payload = placement
+		case vmmSetPlacement:
+			if err := validateVMMPlacementRequest(
+				request, sourceUUID, sourceUUID, 1,
+			); err != nil {
+				return response, err
+			}
 			events <- "placement:" + roleSummary
+			if rejectPlacement {
+				response.header.Status = 1
+				response.header.Message = "placement rejected"
+			}
 			return response, nil
 		case vmmRestoreOwner:
 			if err := validateVMMRestoreRequest(
-				request, ownerResource, vmmOwner,
+				request, ownerResource, vmmOwner, 1,
 				contents[ownerResource-1],
 			); err != nil {
 				return response, err
@@ -2051,7 +2229,7 @@ func serveVMMRestoreProcess(
 		case vmmRestoreImporter:
 			importerResource := uint64(3) - ownerResource
 			if err := validateVMMRestoreRequest(
-				request, importerResource, vmmImporter, nil,
+				request, importerResource, vmmImporter, 1, nil,
 			); err != nil {
 				return response, err
 			}
@@ -2070,13 +2248,16 @@ func validateVMMRestoreRequest(
 	request vmmResponse,
 	resourceID uint64,
 	wantRole uint32,
+	wantOrdinal int32,
 	wantContents []byte,
 ) error {
 	if request.header.ObjectID != resourceID || len(request.payload) < vmmRecordSize {
 		return fmt.Errorf("invalid resource %d replay header", resourceID)
 	}
 	if binary.LittleEndian.Uint64(request.payload[16:24]) != resourceID ||
-		binary.LittleEndian.Uint32(request.payload[48:52]) != wantRole {
+		binary.LittleEndian.Uint32(request.payload[48:52]) != wantRole ||
+		int32(binary.LittleEndian.Uint32(request.payload[64:68])) !=
+			wantOrdinal {
 		return fmt.Errorf("invalid resource %d replay payload", resourceID)
 	}
 	metadataSize := vmmRecordSize +

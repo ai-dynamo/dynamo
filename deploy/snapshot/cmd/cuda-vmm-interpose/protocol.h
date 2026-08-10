@@ -12,7 +12,7 @@
 #include <sys/un.h>
 
 #define DYN_VMM_MAGIC 0x44564d4dU
-#define DYN_VMM_VERSION 3U
+#define DYN_VMM_VERSION 4U
 #define DYN_VMM_CAPABILITY_MAGIC 0x44564d43U
 #define DYN_VMM_CAPABILITY_VERSION 1U
 #define DYN_VMM_FABRIC_TOKEN_MAGIC 0x44564d46U
@@ -33,7 +33,7 @@ enum dyn_vmm_operation {
   DYN_VMM_RESTORE_OWNER = 5,
   DYN_VMM_RESTORE_IMPORT = 6,
   DYN_VMM_IDENTIFY = 7,
-  DYN_VMM_QUERY_PLACEMENT = 8,
+  DYN_VMM_SET_PLACEMENT = 8,
   DYN_VMM_EXPORT_OWNER = 9,
 };
 
@@ -118,7 +118,7 @@ struct dyn_vmm_placement {
   int32_t device_ordinal;
   uint32_t reserved;
   uint8_t source_gpu_uuid[DYN_VMM_GPU_UUID_SIZE];
-  uint8_t current_gpu_uuid[DYN_VMM_GPU_UUID_SIZE];
+  uint8_t target_gpu_uuid[DYN_VMM_GPU_UUID_SIZE];
 };
 
 _Static_assert(sizeof(struct dyn_vmm_header) == 256, "VMM header layout changed");

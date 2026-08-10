@@ -552,25 +552,38 @@ dyn_vmm_test_broker_shape(CUmemAllocationHandleType type, int fd, uint64_t bytes
 {
   return valid_broker_shape(type, fd, bytes_size);
 }
+
+int
+dyn_vmm_test_corrupt_detached_placement(
+    const char* field, int value)
+{
+  struct allocation* allocation;
+  int result = -1;
+
+  pthread_mutex_lock(&lock);
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    if (!allocation->detached)
+      continue;
+    if (strcmp(field, "device") == 0)
+      allocation->device_ordinal = value;
+    else if (strcmp(field, "source") == 0)
+      allocation->source_device_ordinal = value;
+    else if (strcmp(field, "properties") == 0)
+      allocation->properties.location.id = value;
+    else if (strcmp(field, "access") == 0 && allocation->access_count != 0)
+      allocation->access[0].location.id = value;
+    else
+      break;
+    result = 0;
+    break;
+  }
+  pthread_mutex_unlock(&lock);
+  return result;
+}
 #endif
 
-static bool
-placement_seen(const struct allocation* allocation)
-{
-  const struct allocation* previous;
-
-  for (previous = allocations; previous != allocation; previous = previous->next) {
-    if (previous->detached &&
-        memcmp(
-            previous->gpu_uuid.bytes, allocation->gpu_uuid.bytes,
-            sizeof(allocation->gpu_uuid.bytes)) == 0)
-      return true;
-  }
-  return false;
-}
-
-static struct dyn_vmm_placement*
-find_placement(struct dyn_vmm_placement* placements, size_t count, const CUuuid* gpu_uuid)
+static const struct dyn_vmm_placement*
+find_placement(const struct dyn_vmm_placement* placements, size_t count, const CUuuid* gpu_uuid)
 {
   size_t index;
 
@@ -582,100 +595,54 @@ find_placement(struct dyn_vmm_placement* placements, size_t count, const CUuuid*
 }
 
 static int
-query_placement(int client, struct dyn_vmm_header* response)
+set_placement(
+    int client, const struct dyn_vmm_header* request, struct dyn_vmm_header* response,
+    const struct dyn_vmm_placement* placements)
 {
-  typedef CUresult(CUDAAPI * count_fn)(int*);
-  count_fn get_count = (count_fn)real_symbol("cuDeviceGetCount");
-  struct device_identity_api identity_api;
+  const struct allocation* previous;
   struct allocation* allocation;
-  struct dyn_vmm_placement* placements;
-  int device_count;
-  size_t count = 0;
   size_t index;
 
-  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (!allocation->detached)
-      continue;
-    if (!placement_seen(allocation))
-      count++;
-  }
-  placements = calloc(count == 0 ? 1 : count, sizeof(*placements));
-  if (placements == NULL) {
-    free(placements);
-    set_error(response, "cannot query current CUDA GPU placement");
-    return send_header(client, response, -1);
-  }
-  if (count == 0) {
-    if (send_header(client, response, -1) != 0) {
-      free(placements);
-      return -1;
-    }
-    free(placements);
-    return 0;
-  }
-  if (get_count == NULL || resolve_device_identity_api(&identity_api) != 0) {
-    free(placements);
-    set_error(response, "cannot query current CUDA GPU placement");
-    return send_header(client, response, -1);
-  }
-  index = 0;
-  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (!allocation->detached)
-      continue;
-    if (placement_seen(allocation))
-      continue;
-    placements[index].device_ordinal = -1;
-    memcpy(placements[index].source_gpu_uuid, allocation->gpu_uuid.bytes, sizeof(placements[index].source_gpu_uuid));
-    index++;
-  }
-  if (get_count(&device_count) != CUDA_SUCCESS || device_count < 0) {
-    free(placements);
-    set_error(response, "cannot query current CUDA device count");
-    return send_header(client, response, -1);
-  }
-  if ((uintmax_t)device_count > (uintmax_t)INT32_MAX + 1) {
-    free(placements);
-    set_error(response, "CUDA device ordinal cannot be represented");
-    return send_header(client, response, -1);
-  }
-  for (int ordinal = 0; ordinal < device_count; ordinal++) {
-    CUuuid current;
+  for (index = 0; index < request->count; index++) {
+    size_t previous_index;
 
-    if (device_uuid(&identity_api, ordinal, &current) != CUDA_SUCCESS) {
-      free(placements);
-      set_error(response, "cannot query UUID for visible CUDA device");
+    if (placements[index].device_ordinal < 0 || placements[index].reserved != 0 ||
+        all_zero(placements[index].source_gpu_uuid, sizeof(placements[index].source_gpu_uuid)) ||
+        all_zero(placements[index].target_gpu_uuid, sizeof(placements[index].target_gpu_uuid))) {
+      set_error(response, "invalid CUDA VMM placement entry");
       return send_header(client, response, -1);
     }
-    for (index = 0; index < count; index++) {
-      if (memcmp(placements[index].source_gpu_uuid, current.bytes, sizeof(current.bytes)) != 0)
-        continue;
-      if (placements[index].device_ordinal >= 0) {
-        free(placements);
-        set_error(response, "source CUDA GPU UUID is visible at multiple ordinals");
+    for (previous_index = 0; previous_index < index; previous_index++) {
+      if (memcmp(
+              placements[previous_index].source_gpu_uuid, placements[index].source_gpu_uuid,
+              sizeof(placements[index].source_gpu_uuid)) == 0) {
+        set_error(response, "duplicate CUDA VMM source GPU UUID");
         return send_header(client, response, -1);
       }
-      placements[index].device_ordinal = (int32_t)ordinal;
-      memcpy(placements[index].current_gpu_uuid, current.bytes, sizeof(placements[index].current_gpu_uuid));
-    }
-  }
-  for (index = 0; index < count; index++) {
-    if (placements[index].device_ordinal < 0) {
-      free(placements);
-      set_error(response, "source CUDA GPU UUID is not currently visible");
-      return send_header(client, response, -1);
+      if (memcmp(
+              placements[previous_index].target_gpu_uuid, placements[index].target_gpu_uuid,
+              sizeof(placements[index].target_gpu_uuid)) == 0) {
+        set_error(response, "duplicate CUDA VMM target GPU UUID");
+        return send_header(client, response, -1);
+      }
+      if (placements[previous_index].device_ordinal == placements[index].device_ordinal) {
+        set_error(response, "duplicate CUDA VMM target ordinal");
+        return send_header(client, response, -1);
+      }
     }
   }
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    const struct allocation* previous;
+    const struct dyn_vmm_placement* placement;
     size_t access_index;
 
     if (!allocation->detached)
       continue;
-    if (find_placement(placements, count, &allocation->gpu_uuid) == NULL ||
+    placement = find_placement(placements, request->count, &allocation->gpu_uuid);
+    if (placement == NULL ||
+        allocation->device_ordinal != allocation->source_device_ordinal ||
         allocation->properties.location.type != CU_MEM_LOCATION_TYPE_DEVICE ||
         allocation->properties.location.id != allocation->device_ordinal ||
         (allocation->access_count != 0 && allocation->access == NULL)) {
-      free(placements);
       set_error(response, "detached CUDA placement metadata is inconsistent");
       return send_header(client, response, -1);
     }
@@ -683,7 +650,6 @@ query_placement(int client, struct dyn_vmm_header* response)
       if (previous->detached &&
           memcmp(previous->gpu_uuid.bytes, allocation->gpu_uuid.bytes, sizeof(allocation->gpu_uuid.bytes)) == 0 &&
           previous->source_device_ordinal != allocation->source_device_ordinal) {
-        free(placements);
         set_error(response, "source CUDA GPU UUID has inconsistent saved ordinals");
         return send_header(client, response, -1);
       }
@@ -691,19 +657,35 @@ query_placement(int client, struct dyn_vmm_header* response)
     for (access_index = 0; access_index < allocation->access_count; access_index++) {
       if (allocation->access[access_index].location.type != CU_MEM_LOCATION_TYPE_DEVICE ||
           allocation->access[access_index].location.id != allocation->device_ordinal) {
-        free(placements);
         set_error(response, "detached CUDA access placement is inconsistent");
         return send_header(client, response, -1);
       }
     }
   }
+  for (index = 0; index < request->count; index++) {
+    bool found = false;
+
+    for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+      if (allocation->detached &&
+          memcmp(
+              placements[index].source_gpu_uuid, allocation->gpu_uuid.bytes,
+              sizeof(placements[index].source_gpu_uuid)) == 0) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      set_error(response, "unknown CUDA VMM source GPU UUID");
+      return send_header(client, response, -1);
+    }
+  }
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    struct dyn_vmm_placement* placement;
+    const struct dyn_vmm_placement* placement;
     size_t access_index;
 
     if (!allocation->detached)
       continue;
-    placement = find_placement(placements, count, &allocation->gpu_uuid);
+    placement = find_placement(placements, request->count, &allocation->gpu_uuid);
     allocation->device_ordinal = placement->device_ordinal;
     allocation->properties.location.id = placement->device_ordinal;
     for (access_index = 0; access_index < allocation->access_count; access_index++) {
@@ -711,14 +693,7 @@ query_placement(int client, struct dyn_vmm_header* response)
         allocation->access[access_index].location.id = placement->device_ordinal;
     }
   }
-  response->count = (uint32_t)count;
-  response->payload_size = count * sizeof(*placements);
-  if (send_header(client, response, -1) != 0 || write_all(client, placements, (size_t)response->payload_size) != 0) {
-    free(placements);
-    return -1;
-  }
-  free(placements);
-  return 0;
+  return send_header(client, response, -1);
 }
 
 static struct allocation*
@@ -1905,7 +1880,9 @@ valid_request_shape(const struct dyn_vmm_header* request, int passed_fd)
       all_zero(request->participant_id, sizeof(request->participant_id));
 
   if (request->magic != DYN_VMM_MAGIC || request->version != DYN_VMM_VERSION ||
-      request->status != 0 || request->count != 0 || request->reserved != 0 ||
+      request->status != 0 ||
+      (request->operation != DYN_VMM_SET_PLACEMENT && request->count != 0) ||
+      request->reserved != 0 ||
       !all_zero(request->message, sizeof(request->message)) ||
       !all_zero(request->reserved_identity, sizeof(request->reserved_identity)) ||
       (!bootstrap_identify &&
@@ -1917,10 +1894,16 @@ valid_request_shape(const struct dyn_vmm_header* request, int passed_fd)
       return passed_fd < 0 && request->payload_size == 0 && request->handle_type == 0 &&
           all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) && request->object_id == 0;
     case DYN_VMM_INSPECT:
-    case DYN_VMM_QUERY_PLACEMENT:
       return !bootstrap_identify && passed_fd < 0 && request->payload_size == 0 &&
           request->handle_type == 0 && all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) &&
           request->object_id == 0;
+    case DYN_VMM_SET_PLACEMENT:
+      return !bootstrap_identify && passed_fd < 0 && request->handle_type == 0 &&
+          all_zero(request->allocation_uuid, sizeof(request->allocation_uuid)) && request->object_id == 0 &&
+          request->payload_size <= SIZE_MAX &&
+          request->payload_size <= DYN_VMM_MAXIMUM_ALLOCATION_SIZE &&
+          request->payload_size % sizeof(struct dyn_vmm_placement) == 0 &&
+          request->payload_size / sizeof(struct dyn_vmm_placement) == request->count;
     case DYN_VMM_READ_OWNER:
     case DYN_VMM_DETACH_IMPORTS:
     case DYN_VMM_DETACH_OWNERS:
@@ -2002,8 +1985,10 @@ serve(int client)
         set_error(&response, failure[0] != '\0' ? failure : "CUDA VMM shim is unhealthy");
       (void)send_header(client, &response, -1);
       break;
-    case DYN_VMM_QUERY_PLACEMENT:
-      (void)query_placement(client, &response);
+    case DYN_VMM_SET_PLACEMENT:
+      (void)set_placement(
+          client, &request, &response,
+          (const struct dyn_vmm_placement*)payload);
       break;
     case DYN_VMM_EXPORT_OWNER:
       (void)export_owner(client, &request, &response, passed_fd);

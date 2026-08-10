@@ -64,6 +64,9 @@ static CUcontext last_context;
 static int device_count = 1;
 static CUdevice device_handles[16];
 static CUdevice device_identities[16];
+static unsigned int device_get_calls;
+static unsigned int device_uuid_calls;
+static unsigned int device_count_calls;
 
 __attribute__((constructor)) static void
 initialize_fake_cuda(void)
@@ -268,6 +271,24 @@ fake_cuda_set_device_identity(CUdevice device, CUdevice identity)
 }
 
 unsigned int
+fake_cuda_device_get_calls(void)
+{
+  return device_get_calls;
+}
+
+unsigned int
+fake_cuda_device_uuid_calls(void)
+{
+  return device_uuid_calls;
+}
+
+unsigned int
+fake_cuda_device_count_calls(void)
+{
+  return device_count_calls;
+}
+
+unsigned int
 fake_cuda_import_count(void)
 {
   return import_count;
@@ -325,6 +346,7 @@ cuCtxSetCurrent(CUcontext context)
 CUresult CUDAAPI
 cuDeviceGet(CUdevice* device, int ordinal)
 {
+  device_get_calls++;
   if (device == NULL || ordinal < 0 || ordinal >= device_count ||
       (size_t)ordinal >= sizeof(device_handles) / sizeof(device_handles[0]))
     return CUDA_ERROR_INVALID_DEVICE;
@@ -338,6 +360,7 @@ cuDeviceGetUuid_v2(CUuuid* uuid, CUdevice device)
   CUdevice identity;
   size_t index;
 
+  device_uuid_calls++;
   if (uuid == NULL || device < 0 || (size_t)device >= sizeof(device_identities) / sizeof(device_identities[0]))
     return CUDA_ERROR_INVALID_DEVICE;
   identity = device_identities[device];
@@ -348,6 +371,7 @@ cuDeviceGetUuid_v2(CUuuid* uuid, CUdevice device)
 CUresult CUDAAPI
 cuDeviceGetCount(int* count)
 {
+  device_count_calls++;
   if (count == NULL)
     return CUDA_ERROR_INVALID_VALUE;
   *count = device_count;

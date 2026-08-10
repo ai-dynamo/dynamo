@@ -30,6 +30,9 @@ CUdevice fake_cuda_create_device(unsigned int);
 void fake_cuda_set_device_count(int);
 void fake_cuda_set_device_handle(int, CUdevice);
 void fake_cuda_set_device_identity(CUdevice, CUdevice);
+unsigned int fake_cuda_device_get_calls(void);
+unsigned int fake_cuda_device_uuid_calls(void);
+unsigned int fake_cuda_device_count_calls(void);
 unsigned int fake_cuda_import_count(void);
 unsigned int fake_cuda_release_count(void);
 unsigned int fake_cuda_map_count(void);
@@ -61,6 +64,8 @@ static char coordinator_participant[DYN_VMM_PARTICIPANT_ID_SIZE];
 static void establish_mapping(CUmemGenericAllocationHandle*, int*, CUdeviceptr);
 static void establish_fabric_mapping(CUmemGenericAllocationHandle*, struct dyn_vmm_fabric_token*, CUdeviceptr);
 static int fabric_token_is_valid(const struct dyn_vmm_fabric_token*);
+static struct dyn_vmm_header exchange_fd(
+    const struct dyn_vmm_header*, const void*, void**, int, int*, int);
 
 static void
 require(int condition, const char* message)
@@ -69,6 +74,65 @@ require(int condition, const char* message)
     fprintf(stderr, "%s\n", message);
     exit(1);
   }
+}
+
+static int
+corrupt_detached_placement(const char* field, int value)
+{
+  typedef int (*function_type)(const char*, int);
+  function_type function =
+      (function_type)dlsym(
+          RTLD_DEFAULT, "dyn_vmm_test_corrupt_detached_placement");
+
+  require(function != NULL, "cannot resolve placement corruption test seam");
+  return function(field, value);
+}
+
+static struct dyn_vmm_placement
+placement_from_record(
+    const struct dyn_vmm_record* record, int ordinal, bool identity)
+{
+  struct dyn_vmm_placement placement;
+
+  memset(&placement, 0, sizeof(placement));
+  placement.device_ordinal = ordinal;
+  memcpy(
+      placement.source_gpu_uuid, record->gpu_uuid,
+      sizeof(placement.source_gpu_uuid));
+  memcpy(
+      placement.target_gpu_uuid, record->gpu_uuid,
+      sizeof(placement.target_gpu_uuid));
+  if (!identity)
+    placement.target_gpu_uuid[0] ^= 0x80U;
+  return placement;
+}
+
+static struct dyn_vmm_header
+set_placement_request(
+    const struct dyn_vmm_placement* placements, uint32_t count,
+    int require_success)
+{
+  struct dyn_vmm_header request = {
+      .magic = DYN_VMM_MAGIC,
+      .version = DYN_VMM_VERSION,
+      .operation = DYN_VMM_SET_PLACEMENT,
+      .count = count,
+      .payload_size = (uint64_t)count * sizeof(*placements),
+  };
+  struct dyn_vmm_header response;
+  void* payload;
+  int received_fd;
+
+  response = exchange_fd(
+      &request, placements, &payload, -1, &received_fd, require_success);
+  require(
+      received_fd < 0 && payload == NULL,
+      "SET_PLACEMENT returned transport data");
+  if (require_success)
+    require(
+        response.count == 0 && response.payload_size == 0,
+        "SET_PLACEMENT returned a nonempty success response");
+  return response;
 }
 
 static void
@@ -491,8 +555,29 @@ test_control_request_validation(void)
   (void)exchange_header_only(request, -1);
 
   request.reserved = 0;
+  request.version = DYN_VMM_VERSION - 1;
+  (void)exchange_header_only(request, -1);
+
+  request.version = DYN_VMM_VERSION;
+  request.reserved = 0;
   request.reserved_identity[0] = 1;
   (void)exchange_header_only(request, -1);
+
+  memset(&request, 0, sizeof(request));
+  request.magic = DYN_VMM_MAGIC;
+  request.version = DYN_VMM_VERSION;
+  request.operation = DYN_VMM_SET_PLACEMENT;
+  request.count = 1;
+  (void)exchange_header_only(request, -1);
+
+  request.count = UINT32_MAX;
+  request.payload_size =
+      (uint64_t)UINT32_MAX * sizeof(struct dyn_vmm_placement);
+  (void)exchange_header_only(request, -1);
+
+  request.count = 0;
+  request.payload_size = 0;
+  (void)exchange_header_only(request, token);
 
   memset(&request, 0, sizeof(request));
   request.magic = DYN_VMM_MAGIC;
@@ -1220,6 +1305,11 @@ test_owner_importer_success(void)
           fake_cuda_active_handle_count() == 0 &&
           fake_cuda_active_mapping_count() == 0,
       "prepare did not detach importer then owner exactly once");
+  {
+    struct dyn_vmm_placement placement =
+        placement_from_record(owner_record, 0, true);
+    (void)set_placement_request(&placement, 1, 1);
+  }
 
   owner_payload = restore_payload(
       owner_record, owner_record, &owner_payload_size, 1, 1);
@@ -1371,45 +1461,19 @@ test_fabric_owner_importer_restore(bool fail_import, bool reindex)
   detach_record(owner_record, DYN_VMM_DETACH_OWNERS, 1);
 
   if (reindex) {
-    struct dyn_vmm_placement* placement;
+    struct dyn_vmm_placement placement =
+        placement_from_record(owner_record, 3, false);
+    unsigned int get_calls = fake_cuda_device_get_calls();
+    unsigned int uuid_calls = fake_cuda_device_uuid_calls();
+    unsigned int count_calls = fake_cuda_device_count_calls();
 
-    memset(&request, 0, sizeof(request));
-    request.magic = DYN_VMM_MAGIC;
-    request.version = DYN_VMM_VERSION;
-    request.operation = DYN_VMM_QUERY_PLACEMENT;
-    fake_cuda_set_device_count(4);
-    fake_cuda_set_device_handle(0, 7);
-    fake_cuda_set_device_handle(1, 8);
-    fake_cuda_set_device_handle(2, 9);
-    fake_cuda_set_device_handle(3, 10);
-    fake_cuda_set_device_identity(7, 3);
-    fake_cuda_set_device_identity(8, 1);
-    fake_cuda_set_device_identity(9, 2);
-    fake_cuda_set_device_identity(10, 3);
-    response = exchange_fd(&request, NULL, &ignored, -1, &received_fd, 0);
+    response = set_placement_request(&placement, 1, 1);
     require(
-        response.status != 0 && received_fd < 0 && strstr(response.message, "not currently visible") != NULL,
-        "placement query accepted an absent source GPU UUID");
-    free(ignored);
-
-    fake_cuda_set_device_identity(8, 0);
-    fake_cuda_set_device_identity(10, 0);
-    response = exchange_fd(&request, NULL, &ignored, -1, &received_fd, 0);
-    require(
-        response.status != 0 && received_fd < 0 && strstr(response.message, "multiple ordinals") != NULL,
-        "placement query accepted an ambiguous source GPU UUID");
-    free(ignored);
-
-    fake_cuda_set_device_identity(8, 1);
-    response = exchange(&request, NULL, &ignored, &received_fd);
-    placement = ignored;
-    require(
-        response.count == 1 && response.payload_size == sizeof(*placement) && received_fd < 0 &&
-            placement->device_ordinal == 3 && placement->reserved == 0 &&
-            memcmp(placement->source_gpu_uuid, owner_record->gpu_uuid, sizeof(placement->source_gpu_uuid)) == 0 &&
-            memcmp(placement->current_gpu_uuid, owner_record->gpu_uuid, sizeof(placement->current_gpu_uuid)) == 0,
-        "placement query did not resolve the source GPU UUID at ordinal 3");
-    free(ignored);
+        response.status == 0 &&
+            fake_cuda_device_get_calls() == get_calls &&
+            fake_cuda_device_uuid_calls() == uuid_calls &&
+            fake_cuda_device_count_calls() == count_calls,
+        "SET_PLACEMENT called CUDA enumeration or UUID APIs");
   }
 
   owner_payload = restore_payload(owner_record, owner_record, &owner_payload_size, 1, 1);
@@ -1472,6 +1536,134 @@ done:
   free(broker_bytes);
   free(owner_payload);
   free(inspect_payload);
+}
+
+static void
+test_set_placement_validation(const char* shape)
+{
+  CUmemGenericAllocationHandle first;
+  CUmemGenericAllocationHandle second;
+  struct dyn_vmm_header request = {
+      .magic = DYN_VMM_MAGIC,
+      .version = DYN_VMM_VERSION,
+      .operation = DYN_VMM_INSPECT,
+  };
+  struct dyn_vmm_header response;
+  struct dyn_vmm_record* first_record;
+  struct dyn_vmm_record* second_record;
+  struct dyn_vmm_placement placement[2];
+  void* payload;
+  int first_fd;
+  int second_fd;
+  int received_fd;
+  bool corrupted = false;
+  size_t first_size;
+
+  establish_mapping(&first, &first_fd, 0x100000);
+  if (strcmp(shape, "missing-source") == 0 ||
+      strcmp(shape, "unknown-source") == 0)
+    fake_cuda_set_device_identity(0, 1);
+  establish_mapping(&second, &second_fd, 0x200000);
+  close(first_fd);
+  close(second_fd);
+  response = exchange(&request, NULL, &payload, &received_fd);
+  require(
+      response.count == 2 && received_fd < 0,
+      "placement validation inspect omitted detached allocations");
+  first_record = payload;
+  first_size = sizeof(*first_record) + first_record->properties_size +
+      (size_t)first_record->access_count * first_record->access_size;
+  second_record = (struct dyn_vmm_record*)((char*)payload + first_size);
+  detach_record(first_record, DYN_VMM_DETACH_OWNERS, 1);
+  detach_record(second_record, DYN_VMM_DETACH_OWNERS, 2);
+  placement[0] = placement_from_record(first_record, 0, true);
+
+  if (strcmp(shape, "empty") == 0) {
+    response = set_placement_request(NULL, 0, 0);
+  } else if (strcmp(shape, "negative") == 0) {
+    placement[0].device_ordinal = -1;
+    response = set_placement_request(placement, 1, 0);
+  } else if (strcmp(shape, "reserved") == 0) {
+    placement[0].reserved = 1;
+    response = set_placement_request(placement, 1, 0);
+  } else if (strcmp(shape, "zero-source") == 0) {
+    memset(placement[0].source_gpu_uuid, 0, sizeof(placement[0].source_gpu_uuid));
+    response = set_placement_request(placement, 1, 0);
+  } else if (strcmp(shape, "zero-target") == 0) {
+    memset(placement[0].target_gpu_uuid, 0, sizeof(placement[0].target_gpu_uuid));
+    response = set_placement_request(placement, 1, 0);
+  } else if (strcmp(shape, "unknown-source") == 0) {
+    placement[0] = placement_from_record(first_record, 3, false);
+    placement[1] = placement_from_record(second_record, 1, true);
+    placement[1].source_gpu_uuid[0] ^= 0x40U;
+    response = set_placement_request(placement, 2, 0);
+  } else if (strcmp(shape, "missing-source") == 0) {
+    response = set_placement_request(placement, 1, 0);
+  } else if (
+      strcmp(shape, "duplicate-source") == 0 ||
+      strcmp(shape, "duplicate-target") == 0 ||
+      strcmp(shape, "duplicate-ordinal") == 0) {
+    placement[1] = placement[0];
+    if (strcmp(shape, "duplicate-source") != 0)
+      placement[1].source_gpu_uuid[0] ^= 0x40U;
+    if (strcmp(shape, "duplicate-target") != 0)
+      placement[1].target_gpu_uuid[0] ^= 0x40U;
+    if (strcmp(shape, "duplicate-ordinal") != 0)
+      placement[1].device_ordinal = 1;
+    response = set_placement_request(placement, 2, 0);
+  } else if (
+      strcmp(shape, "inconsistent-device") == 0 ||
+      strcmp(shape, "inconsistent-source") == 0 ||
+      strcmp(shape, "inconsistent-properties") == 0 ||
+      strcmp(shape, "inconsistent-access") == 0) {
+    const char* field = shape + strlen("inconsistent-");
+
+    if (strcmp(shape, "inconsistent-source") == 0) {
+      require(
+          corrupt_detached_placement("source", 1) == 0 &&
+              corrupt_detached_placement("device", 1) == 0 &&
+              corrupt_detached_placement("properties", 1) == 0 &&
+              corrupt_detached_placement("access", 1) == 0,
+          "cannot corrupt detached saved ordinal metadata");
+    } else {
+      require(
+          corrupt_detached_placement(field, 1) == 0,
+          "cannot corrupt detached placement metadata");
+    }
+    corrupted = true;
+    response = set_placement_request(placement, 1, 0);
+  } else {
+    require(0, "unknown SET_PLACEMENT validation shape");
+  }
+  require(
+      response.status != 0,
+      "invalid SET_PLACEMENT request was accepted");
+  if (!corrupted) {
+    placement[0] = placement_from_record(first_record, 0, true);
+    if (strcmp(shape, "missing-source") == 0 ||
+        strcmp(shape, "unknown-source") == 0) {
+      placement[1] = placement_from_record(second_record, 1, true);
+      response = set_placement_request(placement, 2, 1);
+    } else {
+      response = set_placement_request(placement, 1, 1);
+    }
+    require(
+        response.status == 0,
+        "failed SET_PLACEMENT request mutated detached metadata");
+  }
+  free(payload);
+}
+
+static void
+test_set_placement_empty_endpoint(void)
+{
+  struct dyn_vmm_header response;
+
+  bootstrap_coordinator();
+  response = set_placement_request(NULL, 0, 1);
+  require(
+      response.status == 0,
+      "zero-managed endpoint rejected empty SET_PLACEMENT");
 }
 
 static void
@@ -1970,6 +2162,14 @@ main(int argc, char** argv)
   }
   if (argc == 2 && strcmp(argv[1], "fabric-importer-failure") == 0) {
     test_fabric_owner_importer_restore(true, false);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "set-placement-empty") == 0) {
+    test_set_placement_empty_endpoint();
+    return 0;
+  }
+  if (argc == 3 && strcmp(argv[1], "set-placement-validation") == 0) {
+    test_set_placement_validation(argv[2]);
     return 0;
   }
   const int application_live = argc == 2 && strcmp(argv[1], "live") == 0;

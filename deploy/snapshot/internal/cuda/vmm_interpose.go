@@ -23,6 +23,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 const (
@@ -37,7 +39,7 @@ const (
 	vmmArtifactName     = "cuda-vmm.rdb"
 	vmmRestorePoison    = "dynamo:cuda-vmm:restore-poison"
 	vmmProtocolMagic    = 0x44564d4d
-	vmmProtocolVersion  = 3
+	vmmProtocolVersion  = 4
 	vmmLedgerVersion    = 2
 	vmmHeaderSize       = 256
 	vmmRecordSize       = 96
@@ -59,7 +61,7 @@ const (
 	vmmRestoreOwner    = 5
 	vmmRestoreImporter = 6
 	vmmIdentify        = 7
-	vmmQueryPlacement  = 8
+	vmmSetPlacement    = 8
 
 	vmmOwner    = 1
 	vmmImporter = 2
@@ -170,11 +172,17 @@ func verifyVMMHealth(ctx context.Context, processes []VMMProcess) error {
 
 type vmmExecutionPlacement map[string]map[string]int32
 
+type vmmPlacementSetup struct {
+	process VMMProcess
+	payload []byte
+	count   uint32
+}
+
 func currentVMMNode() (string, error) {
 	node := strings.TrimSpace(os.Getenv("NODE_NAME"))
 	if node == "" {
 		return "", errors.New(
-			"NODE_NAME is required for CUDA VMM identity placement validation",
+			"NODE_NAME is required for authoritative CUDA VMM placement validation",
 		)
 	}
 	return node, nil
@@ -647,6 +655,7 @@ func RestoreVMM(
 	generation string,
 	expectedDigest string,
 	checkpointDir string,
+	authoritativePlacement []types.VMMPlacement,
 	unlock func() error,
 	log logr.Logger,
 ) (retErr error) {
@@ -724,7 +733,12 @@ func RestoreVMM(
 	if err != nil {
 		return err
 	}
-	placement, err := validateRestoredVMMProcesses(ctx, processes, ledger, currentNode)
+	placementSetups, placement, err := validateRestoredVMMProcesses(
+		processes,
+		ledger,
+		currentNode,
+		authoritativePlacement,
+	)
 	if err != nil {
 		return err
 	}
@@ -764,6 +778,9 @@ func RestoreVMM(
 			"CUDA VMM Redis generation %s content digest is %q, want %q",
 			generation, actualDigest, expectedDigest,
 		)
+	}
+	if err := setRestoredVMMPlacement(ctx, placementSetups); err != nil {
+		return err
 	}
 	brokers := make([]vmmBrokerResult, len(ledger.Resources))
 	for index := range brokers {
@@ -910,6 +927,7 @@ func RestoreVMM(
 func validateVMMLedger(ledger vmmLedger) error {
 	participants := make(map[string]struct{}, len(ledger.Participants))
 	participantGPUs := make(map[string]map[string]struct{}, len(ledger.Participants))
+	usedParticipantGPUs := make(map[string]map[string]struct{}, len(ledger.Participants))
 	for _, participant := range ledger.Participants {
 		if participant.ID == "" || participant.Placement.Node == "" ||
 			len(participant.Placement.GPUUUIDs) == 0 {
@@ -933,6 +951,7 @@ func validateVMMLedger(ledger vmmLedger) error {
 			gpus[gpuUUID] = struct{}{}
 		}
 		participantGPUs[participant.ID] = gpus
+		usedParticipantGPUs[participant.ID] = make(map[string]struct{}, len(gpus))
 	}
 	for index, resource := range ledger.Resources {
 		if resource.ID != uint64(index+1) || resource.Kind != "allocation" ||
@@ -960,6 +979,7 @@ func validateVMMLedger(ledger vmmLedger) error {
 					resource.ID, mapping.GPUUUID, mapping.Participant,
 				)
 			}
+			usedParticipantGPUs[mapping.Participant][mapping.GPUUUID] = struct{}{}
 			if _, duplicate := seen[mapping.Participant]; duplicate {
 				return fmt.Errorf(
 					"ledger resource %d repeats participant %q",
@@ -989,6 +1009,14 @@ func validateVMMLedger(ledger vmmLedger) error {
 	}
 	if len(ledger.Resources) == 0 {
 		return errors.New("ledger contains no allocation resources")
+	}
+	for participant, gpus := range participantGPUs {
+		if len(gpus) != len(usedParticipantGPUs[participant]) {
+			return fmt.Errorf(
+				"ledger participant %q placement contains an unreferenced GPU",
+				participant,
+			)
+		}
 	}
 	return nil
 }
@@ -1210,28 +1238,85 @@ func readVMMRESPLine(reader *bufio.Reader) (string, error) {
 }
 
 func validateRestoredVMMProcesses(
-	ctx context.Context,
 	processes []VMMProcess,
 	ledger vmmLedger,
 	currentNode string,
-) (vmmExecutionPlacement, error) {
+	authoritative []types.VMMPlacement,
+) ([]vmmPlacementSetup, vmmExecutionPlacement, error) {
 	expected := make(map[string]vmmParticipant, len(ledger.Participants))
 	for _, participant := range ledger.Participants {
 		if participant.ID == "" || participant.Placement.Node == "" {
-			return nil, errors.New("CUDA VMM ledger has incomplete participant placement")
+			return nil, nil, errors.New("CUDA VMM ledger has incomplete participant placement")
 		}
 		if _, duplicate := expected[participant.ID]; duplicate {
-			return nil, fmt.Errorf("CUDA VMM ledger has duplicate participant %q", participant.ID)
+			return nil, nil, fmt.Errorf("CUDA VMM ledger has duplicate participant %q", participant.ID)
 		}
 		expected[participant.ID] = participant
 	}
 	if strings.TrimSpace(currentNode) == "" {
-		return nil, errors.New("current CUDA VMM node identity is required")
+		return nil, nil, errors.New("current CUDA VMM node identity is required")
+	}
+	plan := make(map[string]types.VMMPlacement, len(authoritative))
+	targetUUIDs := make(map[string]struct{}, len(authoritative))
+	targetOrdinals := make(map[int32]struct{}, len(authoritative))
+	for index, placement := range authoritative {
+		source := parseGPUUUID(placement.SourceGPUUUID)
+		target := parseGPUUUID(placement.TargetGPUUUID)
+		if source == nil || formatGPUUUID(source) != placement.SourceGPUUUID {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement entry %d has invalid source GPU UUID %q",
+				index,
+				placement.SourceGPUUUID,
+			)
+		}
+		if target == nil || formatGPUUUID(target) != placement.TargetGPUUUID {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement entry %d has invalid target GPU UUID %q",
+				index,
+				placement.TargetGPUUUID,
+			)
+		}
+		if placement.TargetOrdinal < 0 {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement entry %d has negative target ordinal %d",
+				index,
+				placement.TargetOrdinal,
+			)
+		}
+		if _, duplicate := plan[placement.SourceGPUUUID]; duplicate {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement has duplicate source GPU UUID %q",
+				placement.SourceGPUUUID,
+			)
+		}
+		if _, duplicate := targetUUIDs[placement.TargetGPUUUID]; duplicate {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement has duplicate target GPU UUID %q",
+				placement.TargetGPUUUID,
+			)
+		}
+		if _, duplicate := targetOrdinals[placement.TargetOrdinal]; duplicate {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement has duplicate target ordinal %d",
+				placement.TargetOrdinal,
+			)
+		}
+		plan[placement.SourceGPUUUID] = placement
+		targetUUIDs[placement.TargetGPUUUID] = struct{}{}
+		targetOrdinals[placement.TargetOrdinal] = struct{}{}
+	}
+	for ordinal := range len(authoritative) {
+		if _, present := targetOrdinals[int32(ordinal)]; !present {
+			return nil, nil, fmt.Errorf(
+				"CUDA VMM placement is missing target ordinal %d",
+				ordinal,
+			)
+		}
 	}
 	actual := make(map[string]VMMProcess, len(processes))
 	for _, process := range processes {
 		if _, duplicate := actual[process.Participant]; duplicate {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"multiple restored shims claim participant %q",
 				process.Participant,
 			)
@@ -1241,123 +1326,119 @@ func validateRestoredVMMProcesses(
 	for id, participant := range expected {
 		_, ok := actual[id]
 		if !ok {
-			return nil, fmt.Errorf("CUDA VMM participant %q has no restored shim endpoint", id)
+			return nil, nil, fmt.Errorf("CUDA VMM participant %q has no restored shim endpoint", id)
 		}
 		if currentNode != participant.Placement.Node {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"CUDA VMM participant %q target node is %q, source was %q",
 				id, currentNode, participant.Placement.Node,
 			)
 		}
 	}
 	placement := make(vmmExecutionPlacement, len(expected))
+	setups := make([]vmmPlacementSetup, 0, len(processes))
 	for _, process := range processes {
-		response, err := exchangeVMM(
-			ctx,
-			process,
-			vmmHeader{Operation: vmmQueryPlacement},
-			nil,
-			-1,
-			vmmResponseUntyped,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"query CUDA VMM participant %q current GPU placement: %w",
-				process.Participant,
-				err,
-			)
-		}
-		ordinals, err := decodeVMMPlacement(
-			response.header.Count,
-			response.payload,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode CUDA VMM participant %q current GPU placement: %w",
-				process.Participant,
-				err,
-			)
-		}
 		participant, managed := expected[process.Participant]
 		if !managed {
-			if len(ordinals) != 0 {
-				return nil, fmt.Errorf(
-					"unexpected restored CUDA VMM participant %q has %d detached managed placements",
-					process.Participant,
-					len(ordinals),
-				)
-			}
+			setups = append(setups, vmmPlacementSetup{process: process})
 			continue
 		}
-		want := make(map[string]struct{}, len(participant.Placement.GPUUUIDs))
+		local := make([]types.VMMPlacement, 0, len(participant.Placement.GPUUUIDs))
+		seen := make(map[string]struct{}, len(participant.Placement.GPUUUIDs))
 		for _, gpuUUID := range participant.Placement.GPUUUIDs {
-			want[gpuUUID] = struct{}{}
+			if _, duplicate := seen[gpuUUID]; duplicate {
+				return nil, nil, fmt.Errorf(
+					"CUDA VMM participant %q repeats source GPU %q",
+					process.Participant,
+					gpuUUID,
+				)
+			}
+			current, ok := plan[gpuUUID]
+			if !ok {
+				return nil, nil, fmt.Errorf(
+					"CUDA VMM participant %q source GPU %q is absent from the authoritative placement",
+					process.Participant,
+					gpuUUID,
+				)
+			}
+			seen[gpuUUID] = struct{}{}
+			local = append(local, current)
 		}
-		if len(ordinals) != len(want) {
-			return nil, fmt.Errorf(
-				"CUDA VMM participant %q current GPU placement count is %d, want %d",
+		payload, err := encodeVMMPlacement(local)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"encode CUDA VMM participant %q placement: %w",
 				process.Participant,
-				len(ordinals),
-				len(want),
+				err,
 			)
 		}
-		placement[process.Participant] = make(map[string]int32, len(ordinals))
-		for sourceUUID, current := range ordinals {
-			if _, ok := want[sourceUUID]; !ok {
-				return nil, fmt.Errorf(
-					"CUDA VMM participant %q reported unexpected source GPU %q",
-					process.Participant,
-					sourceUUID,
-				)
-			}
-			if sourceUUID != current.uuid {
-				return nil, fmt.Errorf(
-					"CUDA VMM participant %q ordinal %d currently maps GPU %q, source was %q",
-					process.Participant,
-					current.ordinal,
-					current.uuid,
-					sourceUUID,
-				)
-			}
-			placement[process.Participant][sourceUUID] = current.ordinal
+		setups = append(setups, vmmPlacementSetup{
+			process: process,
+			payload: payload,
+			count:   uint32(len(local)),
+		})
+		placement[process.Participant] = make(map[string]int32, len(local))
+		for _, current := range local {
+			placement[process.Participant][current.SourceGPUUUID] =
+				current.TargetOrdinal
 		}
 	}
-	return placement, nil
+	return setups, placement, nil
 }
 
-func decodeVMMPlacement(
-	count uint32,
-	payload []byte,
-) (map[string]struct {
-	uuid    string
-	ordinal int32
-}, error) {
-	if uint64(count)*vmmPlacementSize != uint64(len(payload)) {
-		return nil, errors.New("invalid VMM placement payload length")
+func encodeVMMPlacement(placements []types.VMMPlacement) ([]byte, error) {
+	size, err := vmmPlacementPayloadSize(len(placements))
+	if err != nil {
+		return nil, errors.New("CUDA VMM placement payload is too large")
 	}
-	result := make(map[string]struct {
-		uuid    string
-		ordinal int32
-	}, count)
-	for range count {
-		source := formatGPUUUID(payload[8:24])
-		current := formatGPUUUID(payload[24:40])
-		if source == "" || current == "" {
-			return nil, errors.New("invalid VMM placement GPU UUID")
+	payload := make([]byte, size)
+	for index, placement := range placements {
+		offset := index * vmmPlacementSize
+		source := parseGPUUUID(placement.SourceGPUUUID)
+		target := parseGPUUUID(placement.TargetGPUUUID)
+		if placement.TargetOrdinal < 0 || source == nil || target == nil {
+			return nil, fmt.Errorf("invalid CUDA VMM placement entry %d", index)
 		}
-		if _, duplicate := result[source]; duplicate {
-			return nil, fmt.Errorf("duplicate VMM source GPU UUID %q", source)
-		}
-		result[source] = struct {
-			uuid    string
-			ordinal int32
-		}{
-			uuid:    current,
-			ordinal: int32(binary.LittleEndian.Uint32(payload[0:4])),
-		}
-		payload = payload[vmmPlacementSize:]
+		binary.LittleEndian.PutUint32(
+			payload[offset:offset+4],
+			uint32(placement.TargetOrdinal),
+		)
+		copy(payload[offset+8:offset+24], source)
+		copy(payload[offset+24:offset+40], target)
 	}
-	return result, nil
+	return payload, nil
+}
+
+func vmmPlacementPayloadSize(count int) (int, error) {
+	if uint64(count) > uint64(^uint32(0)) ||
+		uint64(count) > uint64(vmmMaximumRedisBulk/vmmPlacementSize) {
+		return 0, errors.New("CUDA VMM placement payload is too large")
+	}
+	return count * vmmPlacementSize, nil
+}
+
+func setRestoredVMMPlacement(
+	ctx context.Context,
+	setups []vmmPlacementSetup,
+) error {
+	for _, setup := range setups {
+		_, err := exchangeVMM(
+			ctx,
+			setup.process,
+			vmmHeader{Operation: vmmSetPlacement, Count: setup.count},
+			setup.payload,
+			-1,
+			vmmResponseEmpty,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"set CUDA VMM participant %q placement: %w",
+				setup.process.Participant,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func findVMMProcess(processes []VMMProcess, participant string) (VMMProcess, error) {
@@ -1477,6 +1558,7 @@ type vmmResponseExpectation uint8
 
 const (
 	vmmResponseUntyped vmmResponseExpectation = iota
+	vmmResponseEmpty
 	vmmResponsePOSIXBroker
 	vmmResponseFabricBroker
 )
@@ -1502,9 +1584,12 @@ func validateVMMResponseShape(
 	expectedPayloadSize := uint64(0)
 	expectedFDs := 0
 	typedBroker := true
+	exactEmpty := false
 	switch expectation {
 	case vmmResponseUntyped:
 		typedBroker = false
+	case vmmResponseEmpty:
+		exactEmpty = true
 	case vmmResponsePOSIXBroker:
 		expectedHandleType = vmmHandlePOSIX
 		expectedFDs = 1
@@ -1518,6 +1603,17 @@ func validateVMMResponseShape(
 		return 0, fmt.Errorf(
 			"VMM operation %d returned handle type %d, want %d",
 			operation, response.HandleType, expectedHandleType,
+		)
+	}
+	if exactEmpty &&
+		(response.Count != 0 ||
+			response.PayloadSize != 0 ||
+			response.ObjectID != 0 ||
+			response.AllocationUUID != ([16]byte{}) ||
+			response.Message != "") {
+		return 0, fmt.Errorf(
+			"VMM operation %d returned a nonempty success response",
+			operation,
 		)
 	}
 	if typedBroker && response.PayloadSize != expectedPayloadSize {

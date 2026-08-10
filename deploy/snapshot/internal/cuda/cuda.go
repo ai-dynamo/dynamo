@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 const (
@@ -26,6 +29,7 @@ const (
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+var normalizedGPUUUIDPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
 
 type CheckpointPhaseTimings struct {
 	TotalDuration time.Duration
@@ -252,54 +256,106 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 	return cudaPIDs
 }
 
-// BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
-// When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
-// unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
-// Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
-// If all mappings are identity mappings, it returns an empty string so same-GPU restores use the
-// default CUDA restore path instead of forcing the GPU migration path.
-func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
+type gpuPlacement struct {
+	source        string
+	target        string
+	targetOrdinal int32
+}
+
+func normalizeGPUUUID(value string) (string, error) {
+	value = strings.TrimPrefix(value, "GPU-")
+	if !normalizedGPUUUIDPattern.MatchString(value) {
+		return "", fmt.Errorf("invalid GPU UUID %q", value)
+	}
+	return strings.ToLower(value), nil
+}
+
+func buildGPUPlacements(sourceUUIDs, targetUUIDs []string) ([]gpuPlacement, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
-		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
+		return nil, fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
 	}
 	if len(sourceUUIDs) == 0 {
-		return "", fmt.Errorf("GPU UUID list is empty")
+		return nil, fmt.Errorf("GPU UUID list is empty")
 	}
+
+	sources := make([]string, len(sourceUUIDs))
+	sourceSet := make(map[string]struct{}, len(sourceUUIDs))
+	for index, value := range sourceUUIDs {
+		uuid, err := normalizeGPUUUID(value)
+		if err != nil {
+			return nil, fmt.Errorf("source GPU UUID at index %d: %w", index, err)
+		}
+		if _, duplicate := sourceSet[uuid]; duplicate {
+			return nil, fmt.Errorf("duplicate source GPU UUID %q", value)
+		}
+		sourceSet[uuid] = struct{}{}
+		sources[index] = uuid
+	}
+
+	targets := make([]string, len(targetUUIDs))
+	targetOrdinals := make(map[string]int32, len(targetUUIDs))
+	for index, value := range targetUUIDs {
+		uuid, err := normalizeGPUUUID(value)
+		if err != nil {
+			return nil, fmt.Errorf("target GPU UUID at index %d: %w", index, err)
+		}
+		if _, duplicate := targetOrdinals[uuid]; duplicate {
+			return nil, fmt.Errorf("duplicate target GPU UUID %q", value)
+		}
+		if index > math.MaxInt32 {
+			return nil, errors.New("target GPU ordinal cannot be represented")
+		}
+		targetOrdinals[uuid] = int32(index)
+		targets[index] = uuid
+	}
+
+	mapping := make(map[string]string, len(sources))
+	usedTargets := make(map[string]struct{}, len(targets))
+	for _, source := range sources {
+		if _, present := targetOrdinals[source]; present {
+			mapping[source] = source
+			usedTargets[source] = struct{}{}
+		}
+	}
+
+	remainingTargets := make([]string, 0, len(targets)-len(usedTargets))
+	for _, target := range targets {
+		if _, used := usedTargets[target]; !used {
+			remainingTargets = append(remainingTargets, target)
+		}
+	}
+	remainingIndex := 0
+	for _, source := range sources {
+		if _, identity := mapping[source]; !identity {
+			mapping[source] = remainingTargets[remainingIndex]
+			remainingIndex++
+		}
+	}
+
+	placements := make([]gpuPlacement, len(sources))
+	for index, source := range sources {
+		target := mapping[source]
+		placements[index] = gpuPlacement{
+			source:        source,
+			target:        target,
+			targetOrdinal: targetOrdinals[target],
+		}
+	}
+	return placements, nil
+}
+
+// BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
+// Identity matches are selected first, then unmatched sources are paired with
+// unmatched targets in target order. An all-identity mapping remains omitted.
+func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	log.V(1).Info("BuildDeviceMap inputs", "source_uuids", sourceUUIDs, "target_uuids", targetUUIDs)
-
-	targetSet := make(map[string]bool, len(targetUUIDs))
-	for _, t := range targetUUIDs {
-		targetSet[t] = true
+	placements, err := buildGPUPlacements(sourceUUIDs, targetUUIDs)
+	if err != nil {
+		return "", err
 	}
-
-	// First pass: identity-map any source UUID that exists in the target set
-	mapping := make(map[string]string, len(sourceUUIDs))
-	usedTargets := make(map[string]bool, len(targetUUIDs))
-	for _, src := range sourceUUIDs {
-		if targetSet[src] {
-			mapping[src] = src
-			usedTargets[src] = true
-		}
-	}
-
-	// Second pass: pair remaining source UUIDs with remaining target UUIDs positionally
-	var remainingTargets []string
-	for _, t := range targetUUIDs {
-		if !usedTargets[t] {
-			remainingTargets = append(remainingTargets, t)
-		}
-	}
-	idx := 0
-	for _, src := range sourceUUIDs {
-		if _, ok := mapping[src]; !ok {
-			mapping[src] = remainingTargets[idx]
-			idx++
-		}
-	}
-
 	allIdentity := true
-	for _, src := range sourceUUIDs {
-		if mapping[src] != src {
+	for _, placement := range placements {
+		if placement.source != placement.target {
 			allIdentity = false
 			break
 		}
@@ -308,11 +364,89 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 		return "", nil
 	}
 
-	pairs := make([]string, len(sourceUUIDs))
-	for i, src := range sourceUUIDs {
-		pairs[i] = src + "=" + mapping[src]
+	pairs := make([]string, len(placements))
+	for index, placement := range placements {
+		pairs[index] = "GPU-" + placement.source + "=GPU-" + placement.target
 	}
 	return strings.Join(pairs, ","), nil
+}
+
+// BuildVMMPlacement creates the complete authoritative VMM placement plan.
+func BuildVMMPlacement(sourceUUIDs, targetUUIDs []string) ([]types.VMMPlacement, error) {
+	placements, err := buildGPUPlacements(sourceUUIDs, targetUUIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]types.VMMPlacement, len(placements))
+	for index, placement := range placements {
+		result[index] = types.VMMPlacement{
+			SourceGPUUUID: placement.source,
+			TargetGPUUUID: placement.target,
+			TargetOrdinal: placement.targetOrdinal,
+		}
+	}
+	return result, nil
+}
+
+// ValidateVMMPlacement verifies a transient plan against manifest source UUIDs.
+func ValidateVMMPlacement(
+	sourceUUIDs []string,
+	placements []types.VMMPlacement,
+) error {
+	if len(sourceUUIDs) != len(placements) {
+		return fmt.Errorf(
+			"CUDA VMM placement count is %d, want %d",
+			len(placements),
+			len(sourceUUIDs),
+		)
+	}
+	targetUUIDs := make([]string, len(placements))
+	for _, placement := range placements {
+		if placement.TargetOrdinal < 0 ||
+			int64(placement.TargetOrdinal) >= int64(len(placements)) {
+			return fmt.Errorf(
+				"CUDA VMM placement has invalid target ordinal %d",
+				placement.TargetOrdinal,
+			)
+		}
+		if targetUUIDs[placement.TargetOrdinal] != "" {
+			return fmt.Errorf(
+				"CUDA VMM placement has duplicate target ordinal %d",
+				placement.TargetOrdinal,
+			)
+		}
+		if normalized, err := normalizeGPUUUID(placement.SourceGPUUUID); err != nil ||
+			normalized != placement.SourceGPUUUID {
+			return fmt.Errorf(
+				"CUDA VMM placement has non-canonical source GPU UUID %q",
+				placement.SourceGPUUUID,
+			)
+		}
+		if normalized, err := normalizeGPUUUID(placement.TargetGPUUUID); err != nil ||
+			normalized != placement.TargetGPUUUID {
+			return fmt.Errorf(
+				"CUDA VMM placement has non-canonical target GPU UUID %q",
+				placement.TargetGPUUUID,
+			)
+		}
+		targetUUIDs[placement.TargetOrdinal] = placement.TargetGPUUUID
+	}
+	expected, err := BuildVMMPlacement(sourceUUIDs, targetUUIDs)
+	if err != nil {
+		return err
+	}
+	if len(expected) != len(placements) {
+		return errors.New("CUDA VMM placement is incomplete")
+	}
+	for index := range expected {
+		if expected[index] != placements[index] {
+			return fmt.Errorf(
+				"CUDA VMM placement entry %d does not match the device mapping policy",
+				index,
+			)
+		}
+	}
+	return nil
 }
 
 // LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
