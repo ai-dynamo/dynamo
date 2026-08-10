@@ -1660,6 +1660,100 @@ async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
     task.await.unwrap().unwrap();
 }
 
+/// Audio engine that completes normally but reports `status: "failed"`, the
+/// shape a worker uses to signal it could not produce audio.
+struct FailedStatusAudiosEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        Error,
+    > for FailedStatusAudiosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        Error,
+    > {
+        use dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse;
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::from_data(NvAudioSpeechResponse {
+                status: "failed".to_string(),
+                error: Some("voice cloning failed".to_string()),
+                ..NvAudioSpeechResponse::empty()
+            });
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// A worker-reported `status: "failed"` returns 400, so it must meter as a
+/// client error too. The inflight guard defaults to `internal` when unmarked,
+/// which would book this 400 as a server fault.
+#[tokio::test]
+async fn test_audio_speech_failed_status_meters_as_client_error() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let registry = Registry::new();
+    let card = ModelDeploymentCard::with_name_only("tts-model");
+    manager
+        .add_audios_model(
+            "tts-model",
+            card.mdcsum(),
+            Arc::new(FailedStatusAudiosEngine {}),
+        )
+        .unwrap();
+
+    let metrics = state.metrics_clone();
+    metrics.register(&registry).unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/audio/speech"))
+        .json(&serde_json::json!({"model": "tts-model", "input": "hello"}))
+        .send()
+        .await
+        .expect("POST /v1/audio/speech");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {text}");
+    assert!(
+        text.contains("voice cloning failed"),
+        "the worker's failure reason must reach the caller; got: {text}"
+    );
+
+    compare_counter(
+        &metrics,
+        "tts-model",
+        &Endpoint::Audios,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 /// Engine registered only so the classify/pooling routes resolve a model; the
 /// validation errors under test are rejected before the engine is reached.
 struct UncalledPoolingFamilyEngine {}
