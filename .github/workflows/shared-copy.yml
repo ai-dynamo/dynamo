@@ -14,7 +14,7 @@ on:
         description: 'Target image repository in ACR'
         required: false
         type: string
-        default: 'ai-dynamo/dynamo'
+        default: ''
       cuda_version:
         description: 'CUDA versions to copy as a JSON array'
         required: true
@@ -103,7 +103,7 @@ jobs:
           source_image: ${{ vars.ECR_REPOSITORY }}
           source_tag: ${{ steps.calculate-target-tag.outputs.source_tag }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ${{ inputs.target_image }}
+          target_image: ${{ inputs.target_image || vars.ACR_REPOSITORY }}
           target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
           source_aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           source_ecr_registry: ${{ vars.ECR_REGISTRY }}
