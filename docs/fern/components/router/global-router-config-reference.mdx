@@ -215,7 +215,7 @@ The following fields are required when `mode` is `"agg"` and are ignored in `"di
 </ParamField>
 
 <ParamField path="agg_pool_selection_strategy" type="AggPoolSelectionStrategy" default="null">
-  Grid mapping `(TTFT target, ITL target)` to an agg pool index. Required for `agg` mode. See [AggPoolSelectionStrategy](#aggpoolselectionstrategy).
+  Grid mapping `(TTFT target, ITL target)` to an agg pool index, or `(ISL, TTFT target, ITL target)` when all three optional `isl_*` fields are set. Required for `agg` mode. See [AggPoolSelectionStrategy](#aggpoolselectionstrategy).
 </ParamField>
 
 ## Additional types
@@ -296,7 +296,7 @@ Routes a request to a decode pool based on its context length (prompt + tokens g
 
 ### AggPoolSelectionStrategy
 
-Routes a request to an aggregated pool based on both its TTFT and ITL targets. Used in `mode: "agg"` where each pool handles both prefill and decode. The routing space is a 2D grid of `ttft_resolution × itl_resolution` cells. `agg_pool_mapping[ttft_idx][itl_idx]` gives the pool index.
+Routes a request to an aggregated pool based on both its TTFT and ITL targets. Used in `mode: "agg"` where each pool handles both prefill and decode. By default, the routing space is a 2D grid of `ttft_resolution × itl_resolution` cells. Configuring all three optional `isl_*` fields adds a leading ISL dimension. This dimension works whether or not chunked prefill is enabled.
 
 <ParamField path="ttft_min_ms" type="number" required={true}>
   Lower bound of the TTFT target range, in milliseconds. Also accepts the deprecated key `ttft_min`.
@@ -322,8 +322,20 @@ Routes a request to an aggregated pool based on both its TTFT and ITL targets. U
   Number of ITL grid columns (the second dimension of `agg_pool_mapping`). Must be a positive integer.
 </ParamField>
 
-<ParamField path="agg_pool_mapping" type="[][]integer" required={true}>
-  2D array of pool indices with shape `[ttft_resolution][itl_resolution]`. Each entry is a zero-based agg pool index in `[0, num_agg_pools)`. Row `i` covers the `i`-th TTFT bucket; column `j` covers the `j`-th ITL bucket.
+<ParamField path="isl_min" type="integer" default="null">
+  Optional lower bound for aggregated-mode input sequence length. Set this together with `isl_max` and `isl_resolution` to enable 3D selection.
+</ParamField>
+
+<ParamField path="isl_max" type="integer" default="null">
+  Optional upper bound for aggregated-mode input sequence length. Must be greater than `isl_min` when ISL selection is enabled.
+</ParamField>
+
+<ParamField path="isl_resolution" type="integer" default="null">
+  Optional number of aggregated-mode ISL buckets. Must be a positive integer when ISL selection is enabled.
+</ParamField>
+
+<ParamField path="agg_pool_mapping" type="[][]integer | [][][]integer" required={true}>
+  Without `isl_*`, a 2D array with shape `[ttft_resolution][itl_resolution]`. With all three `isl_*` fields, a 3D array with shape `[isl_resolution][ttft_resolution][itl_resolution]`. Each entry is a zero-based agg pool index in `[0, num_agg_pools)`. ISL, TTFT, and ITL values outside their configured ranges are clamped to the nearest bucket.
 </ParamField>
 
 <ParamField path="priority_overrides" type="[]PriorityPoolOverride" default="[]">
@@ -359,7 +371,8 @@ The router validates the configuration at startup and exits if any rule is viola
 - All `*_resolution` values must be positive integers.
 - `prefill_pool_mapping` must have exactly `isl_resolution` rows, each of length `ttft_resolution`; all pool indices must be in `[0, num_prefill_pools)`.
 - `decode_pool_mapping` must have exactly `context_length_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_decode_pools)`.
-- `agg_pool_mapping` must have exactly `ttft_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_agg_pools)`.
+- Without aggregated `isl_*` fields, `agg_pool_mapping` must have exactly `ttft_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_agg_pools)`.
+- For aggregated selection, `isl_min`, `isl_max`, and `isl_resolution` must be omitted together or set together. When set, `isl_min < isl_max`, `isl_resolution` is positive, and `agg_pool_mapping` must have shape `[isl_resolution][ttft_resolution][itl_resolution]` instead of the 2D shape above.
 - In each `priority_overrides` entry: `min_priority` must be ≤ `max_priority`, and `target_pool` must be a valid pool index for the enclosing strategy.
 
 ## Related pages
