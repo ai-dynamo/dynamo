@@ -22,10 +22,11 @@ When adding new model recipes, ensure they follow the standard structure:
 ## Kustomize Variants
 
 Use Kustomize when a recipe has a shared deployment shape plus cloud-provider or
-network-provider variants. Recipe-local sources live under
-`<deployment>/kustomize/`; shared Components reusable by multiple recipes live
-under `recipes/kustomize/components/`. Keep the checked-in manifests apply-able
-and easy to review:
+network-provider variants. Recipe-local bases, Components, and generated public
+overlays live under `<deployment>/kustomize/`. Shared Components reusable by
+multiple recipes live under `recipes/kustomize/components/`. Run the commands in
+this guide from the repository root. Keep the checked-in manifests apply-able and
+easy to review:
 
 ```text
 <deployment>/
@@ -38,8 +39,8 @@ and easy to review:
     ├── base/
     │   ├── deploy.yaml
     │   └── kustomization.yaml
-    ├── components/
-    │   └── <shared-building-block>/
+    ├── components/ (optional)
+    │   └── <recipe-specific-building-block>/
     └── overlays/
         ├── generic/
         │   └── kustomization.yaml
@@ -87,8 +88,8 @@ None of these user workflows requires `unfold` or `render`.
 ### Contributing A Variant
 
 For a matrix-backed recipe, the source of truth is
-`.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, local Components,
-and any referenced Components under
+`.kustomize-matrix.yaml`, the recipe-local `kustomize/base/`, optional
+`kustomize/components/`, and any referenced Components under
 `recipes/kustomize/components/`. The generated files are public overlay
 `kustomization.yaml` files, `deploy-<name>.yaml` manifests, and the central
 `recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` schema. Commit
@@ -100,7 +101,9 @@ The render convention is:
 - `kustomize/overlays/<name>/` renders to `deploy-<name>.yaml`.
 - `kustomize/overlays/generic/` renders to `deploy-generic.yaml`. Use it when a
   generic deployable variant exists.
-- `kustomize/components/` is for shared Kustomize building blocks and is not rendered.
+- `kustomize/components/` is for recipe-specific Kustomize building blocks and is
+  not rendered. Shared building blocks live under
+  `recipes/kustomize/components/` and are also not rendered directly.
 - Bases that patch Dynamo CRDs include the central
   `recipes/kustomize/components/dynamo-openapi/` Component. Its generated
   schema is derived from every operator CRD and lets strategic merge patches
@@ -129,13 +132,21 @@ matrix:
         - ../../../kustomize/components/aws-efa-p16d16
 ```
 
-Regenerate derived artifacts in order: `unfold` writes the checked-in Level-2
-public overlay `kustomization.yaml` files; `render` invokes Kustomize and writes
-the Level-3 `deploy-<name>.yaml` manifests and central CRD schema:
+Regenerate derived artifacts in order: `unfold` writes every checked-in Level-2
+public overlay `kustomization.yaml` file for the matrix; `render` invokes
+Kustomize and writes every Level-3 `deploy-<name>.yaml` manifest for the matrix
+and the central CRD schema:
 
 ```bash
 scripts/kustomize-matrix.py unfold <matrix.yaml>
 scripts/kustomize-matrix.py render <matrix.yaml>
+```
+
+To inspect only one concrete public overlay without regenerating the matrix,
+run:
+
+```bash
+kustomize build <deployment>/kustomize/overlays/<name>
 ```
 
 For dependent Components, use flat, explicit names such as `aws-efa` and

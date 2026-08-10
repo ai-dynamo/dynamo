@@ -3,12 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-- Recipe-local Kustomize sources live in
-  `<deployment>/kustomize/`: `base/` is shared input and never renders directly;
-  `components/` holds building blocks used only by that recipe; public overlays
-  under `overlays/<name>/` render to `deploy-<name>.yaml`; an `overlays/generic/`
-  variant renders when it exists. Shared
-  Components that can be selected by multiple recipes live separately under
+- Recipe-local Kustomize sources live in `<deployment>/kustomize/`: `base/` is
+  shared input and never renders directly; `components/` holds building blocks
+  used only by that recipe; public overlays under `overlays/<name>/` render to
+  `deploy-<name>.yaml`; an `overlays/generic/` variant renders when it exists.
+  Shared Components selected by multiple recipes live under
   `recipes/kustomize/components/`; that directory has no base or overlays and
   never renders by itself. Prefer resource-shaped Kustomize merge patches over
   JSON patches where possible. Bases that patch Dynamo CRDs include the central
@@ -24,14 +23,16 @@ SPDX-License-Identifier: Apache-2.0
   `kustomization.yaml` files document a concrete variant, and `deploy-*.yaml`
   files are the fully materialized result. Users may apply a checked-in manifest
   with `kubectl apply -f`, a checked-in public overlay with `kubectl apply -k`,
-  or an overlay they compose themselves. Only contributors edit source and run
-  `scripts/kustomize-matrix.py unfold <matrix.yaml>` followed by
-  `scripts/kustomize-matrix.py render <matrix.yaml>` to update committed
-  generated artifacts and the central schema; do not hand-edit them.
-  `scripts/kustomize-matrix.py check` validates every matrix and detects artifacts
-  left by moved matrices; use `unfold --clean` and `render --clean` to remove
-  those explicitly. To compose additional Components without a checked-in overlay,
-  use
+  or an overlay they compose themselves. Contributors run all matrix commands
+  from the repository root. `scripts/kustomize-matrix.py unfold <matrix.yaml>`
+  writes every generated public overlay for that matrix; follow it with
+  `scripts/kustomize-matrix.py render <matrix.yaml>` to regenerate every
+  checked-in manifest for that matrix and the central schema. To inspect only
+  one concrete overlay, run `kustomize build <deployment>/kustomize/overlays/<name>`.
+  Do not hand-edit generated artifacts. `scripts/kustomize-matrix.py check`
+  validates every matrix and detects artifacts left by moved matrices; use
+  `unfold --clean` and `render --clean` to remove those explicitly. To compose
+  additional Components without a checked-in overlay, use
   `scripts/kustomize-matrix.py compose <target> [<component-path>...] [<build-options>...]`.
-  The target must be first, Components follow it, and Kustomize build options come
-  last.
+  The target must be first, Components follow it, and Kustomize build options
+  come last.
