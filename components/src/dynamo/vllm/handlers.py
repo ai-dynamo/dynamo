@@ -85,6 +85,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
+from dynamo.vllm.router_hints import enable_router_hint_support
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -118,6 +119,10 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+# Request payload key under extra_args.kv_transfer_params. This intentionally
+# matches the runtime capability string, but it lives in a different namespace.
+_ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -813,6 +818,40 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
+    # Forward only Dynamo's router-generated hint from
+    # request.extra_args.kv_transfer_params into vLLM SamplingParams. Today,
+    # router_hint is the only kv_transfer_params key the Rust preprocessor adds,
+    # so do not pass through any other request-provided connector inputs. Copy
+    # extra_args before mutation because SamplingParams may reuse the
+    # default_sampling_params dict across requests.
+    if isinstance(extra_args, dict):
+        request_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+        if isinstance(request_kv_transfer_params, dict):
+            passthrough_router_hint = request_kv_transfer_params.get(
+                _ROUTER_HINT_EXTRA_ARGS_KEY
+            )
+            if isinstance(passthrough_router_hint, dict):
+                passthrough_extra_args = (
+                    dict(sampling_params.extra_args)
+                    if isinstance(sampling_params.extra_args, dict)
+                    else {}
+                )
+                existing_kv_transfer_params = passthrough_extra_args.get(
+                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+                )
+                passthrough_kv_transfer_params = (
+                    dict(existing_kv_transfer_params)
+                    if isinstance(existing_kv_transfer_params, dict)
+                    else {}
+                )
+                passthrough_kv_transfer_params[
+                    _ROUTER_HINT_EXTRA_ARGS_KEY
+                ] = passthrough_router_hint
+                passthrough_extra_args[
+                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+                ] = passthrough_kv_transfer_params
+                sampling_params.extra_args = passthrough_extra_args
+
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
     # bridge pressure before chunks cross into Dynamo.
@@ -820,6 +859,45 @@ def build_sampling_params(
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
     return sampling_params
+
+
+def _update_kv_transfer_params(
+    sampling_params: SamplingParams,
+    kv_transfer_params: Mapping[str, Any],
+    *,
+    preserve_router_hint: bool = False,
+) -> None:
+    """Set vLLM KV transfer params, optionally carrying Dynamo's router hint.
+
+    ``build_sampling_params`` may have copied ``router_hint`` from the Dynamo
+    request into ``sampling_params.extra_args["kv_transfer_params"]``. The new
+    ``kv_transfer_params`` value comes from vLLM's ``KVTransferConfig``
+    (``engine_client.vllm_config.kv_transfer_config``), via the connector
+    protocol selected in ``make_kv_connector_protocol``.
+
+    Prefill preserves the request hint when replacing the object with fresh
+    protocol params. Decode handoff uses prefill-produced params and should not
+    inherit a stale prefill-side hint.
+    """
+    extra_args = (
+        dict(sampling_params.extra_args)
+        if isinstance(sampling_params.extra_args, dict)
+        else {}
+    )
+    updated_params = dict(kv_transfer_params)
+    updated_params.pop(_ROUTER_HINT_EXTRA_ARGS_KEY, None)
+
+    existing_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+    router_hint = (
+        existing_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
+        if preserve_router_hint and isinstance(existing_params, Mapping)
+        else None
+    )
+    if isinstance(router_hint, Mapping):
+        updated_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
+
+    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = updated_params
+    sampling_params.extra_args = extra_args
 
 
 def build_sampling_params_openai(
@@ -957,6 +1035,13 @@ def _request_reasoning_metadata(
             reasoning_parser_kwargs = extra_args.get("reasoning_parser_kwargs")
 
     return reasoning_ended, reasoning_parser_kwargs
+
+
+def apply_data_parallel_runtime_config(
+    runtime_config: ModelRuntimeConfig, dp_range: tuple[int, int]
+) -> None:
+    runtime_config.data_parallel_start_rank = dp_range[0]
+    runtime_config.data_parallel_size = dp_range[1]
 
 
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
@@ -2071,13 +2156,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         runtime_config = ModelRuntimeConfig()
-        runtime_config.context_length = self.model_max_len
-        publish_vllm_token_budget(runtime_config, self.model_max_len)
-        runtime_config.kv_event_publishing_enabled = getattr(
-            self.config, "use_kv_events", False
-        )
-        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
-        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
         if self.config.disaggregation_mode == DisaggregationMode.PREFILL:
             lora_model_type = ModelType.Prefill
@@ -2093,6 +2171,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set = []
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
+
+        apply_data_parallel_runtime_config(runtime_config, self.dp_range)
+        enable_router_hint_support(
+            runtime_config,
+            self.config.engine_args,
+            lora_worker_type,
+            self.dp_range,
+        )
+        runtime_config.context_length = self.model_max_len
+        publish_vllm_token_budget(runtime_config, self.model_max_len)
+        runtime_config.kv_event_publishing_enabled = getattr(
+            self.config, "use_kv_events", False
+        )
+        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
         await register_model(
@@ -3229,9 +3323,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         if kv_params is not None:
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            _update_kv_transfer_params(sampling_params, kv_params)
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
@@ -3541,11 +3633,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
             self.engine_client.vllm_config
         )
-        if sampling_params.extra_args is None:
-            sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        _update_kv_transfer_params(
+            sampling_params,
+            kv_protocol.prefill_request_kv_transfer_params(),
+            preserve_router_hint=True,
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
