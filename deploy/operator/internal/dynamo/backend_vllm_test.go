@@ -197,14 +197,38 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer: &corev1.Container{
-				Command:       []string{"python3", "-m", "dynamo.vllm"},
-				Args:          []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
-				LivenessProbe: &corev1.Probe{},
-				StartupProbe:  &corev1.Probe{},
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
 				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				VLLMPort, VLLMPort, enableElasticEPFlag,
+			)},
+			expectProbesKept: true,
+		},
+		// vLLM's argparse accepts --data-parallel-backend=ray as an equivalent of
+		// the space-separated form, so the equals spelling must also start a Ray
+		// head (regression guard for isElasticEPRayLaunch/hasArg).
+		{
+			name:              "single node elastic EP gets a ray head with the inline backend flag",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "--data-parallel-backend=ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			},
+			gpuCount: 4,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend=ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept: true,
@@ -288,6 +312,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			if tt.expectProbesKept {
 				t.Log("a leader serves traffic, so its probes must survive the rewrite")
 				g.Expect(tt.initialContainer.LivenessProbe).ToNot(gomega.BeNil())
+				g.Expect(tt.initialContainer.ReadinessProbe).ToNot(gomega.BeNil())
 				g.Expect(tt.initialContainer.StartupProbe).ToNot(gomega.BeNil())
 			}
 		})

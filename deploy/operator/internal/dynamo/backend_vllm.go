@@ -481,18 +481,13 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // that pass --enable-elastic-ep while running the default backend, where it
 // would launch a process nothing ever talks to.
 func isElasticEPRayLaunch(expandedArgs []string) bool {
+	// hasArg matches both the "--data-parallel-backend ray" and
+	// "--data-parallel-backend=ray" spellings. vLLM (argparse) treats them as
+	// equivalent, so the equals form must trigger Ray-head injection too;
+	// otherwise a single-pod deployment written that way silently starts
+	// without a Ray head and followers can never join.
 	return hasFlag(expandedArgs, enableElasticEPFlag) &&
-		hasFlagValue(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay)
-}
-
-// hasFlagValue returns true if flag appears in expandedArgs followed by value.
-func hasFlagValue(expandedArgs []string, flag, value string) bool {
-	for i, arg := range expandedArgs {
-		if arg == flag && i+1 < len(expandedArgs) && expandedArgs[i+1] == value {
-			return true
-		}
-	}
-	return false
+		hasArg(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay)
 }
 
 // hasFlag returns true if flag exists in expandedArgs.
