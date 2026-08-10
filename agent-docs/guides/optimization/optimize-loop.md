@@ -143,7 +143,9 @@ one of:
 - the next candidate;
 - an **ask**: a recorded question whose answer would unblock the highest-value deferred lever family. Asks are
   non-blocking: record the ask, surface it in one line of passing output, and keep working any still-testable
-  family. Deduplicate pending asks, surface only the highest-value few, and lead the next operator-facing response
+  family. Never deliver an ask through a blocking question tool during the loop — a blocking question suspends the
+  turn before any goal hook can evaluate and can hang an unattended run; asks go to the artifact and the loop
+  continues. Deduplicate pending asks, surface only the highest-value few, and lead the next operator-facing response
   with them. Enter `PARKED_ON_ASKS` (a pause, not a stop) only when pending asks are the only remaining work, and
   record how deployed resources are held and when they scale down;
 - a **stop-request**: the search-calibration record in a terminal state, meaning every lever family is `tested`,
@@ -164,6 +166,10 @@ continuations through both configurations and compare teacher-forced per-token l
 tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
 scores, and no unexpected truncation. If no such check is possible, record an ask; report a waived check as
 `correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
+
+When the recommended or baseline configuration has speculative decoding enabled, state in the recommendation that
+its acceptance behavior was measured on synthetic benchmark content and the measured magnitude may not transfer to
+production traffic; acceptance length is passively observable in production telemetry and should be confirmed there.
 
 Recommend the best valid candidate for the target objective, not automatically the most recent iteration. Write the
 final configuration to `EXP_ROOT/final/recommended_config.md`, reproduction commands to
