@@ -23,6 +23,8 @@ const (
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
 	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
+	dataParallelBackendFlag   = "--data-parallel-backend"
+	dataParallelBackendRay    = "ray"
 )
 
 type VLLMBackend struct {
@@ -71,6 +73,11 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
+	} else if role == RoleMain && isElasticEPRayLaunch(getExpandedArgs(container)) {
+		// A single-pod elastic-EP component still needs a Ray head, so that
+		// follower pods created later have a cluster to join. Only the leader
+		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
+		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
 	}
 
 	// Set compilation cache environment variables for VLLM
@@ -410,11 +417,13 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
 // naturally places all --data-parallel-size workers on the leader node.
 //
-// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
+// Leader (or a single-pod RoleMain): ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
 func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
-	case RoleLeader:
+	// RoleMain is a component deployed as a single pod; it heads the Ray
+	// cluster exactly as a multi-node leader does.
+	case RoleLeader, RoleMain:
 		quotedCmd := make([]string, len(container.Command))
 		for i, tok := range container.Command {
 			quotedCmd[i] = shellQuoteForBashC(tok)
@@ -462,6 +471,28 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
+}
+
+// isElasticEPRayLaunch reports whether args ask for the elastic-EP Ray topology.
+//
+// Elastic EP only works on the Ray data-parallel backend: vLLM's Ray executor is
+// what grows and shrinks workers at runtime, and the engine refuses a scale
+// request on any other backend. Requiring both flags keeps a Ray head off pods
+// that pass --enable-elastic-ep while running the default backend, where it
+// would launch a process nothing ever talks to.
+func isElasticEPRayLaunch(expandedArgs []string) bool {
+	return hasFlag(expandedArgs, enableElasticEPFlag) &&
+		hasFlagValue(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay)
+}
+
+// hasFlagValue returns true if flag appears in expandedArgs followed by value.
+func hasFlagValue(expandedArgs []string, flag, value string) bool {
+	for i, arg := range expandedArgs {
+		if arg == flag && i+1 < len(expandedArgs) && expandedArgs[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 // hasFlag returns true if flag exists in expandedArgs.

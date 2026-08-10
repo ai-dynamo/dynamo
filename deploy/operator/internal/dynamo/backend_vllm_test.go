@@ -39,6 +39,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		expectedArgs        []string
 		expectNotModified   bool // If true, container args should not change
 		expectProbesRemoved bool // If true, probes should be nil
+		expectProbesKept    bool // If true, probes should survive untouched
 	}{
 		{
 			name:              "single node does not modify args",
@@ -187,6 +188,69 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectedArgs:        []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed-executor-backend", "mp", "--nnodes", "2", "--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)", "--master-port", commonconsts.VLLMMpMasterPort, "--node-rank", "0"},
 			expectProbesRemoved: true,
 		},
+		// A single-pod elastic-EP component heads a Ray cluster that follower
+		// pods join later, so it needs the leader wiring despite nodeCount 1.
+		{
+			name:              "single node elastic EP gets a ray head",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:       []string{"python3", "-m", "dynamo.vllm"},
+				Args:          []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
+				LivenessProbe: &corev1.Probe{},
+				StartupProbe:  &corev1.Probe{},
+			},
+			gpuCount: 4,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				VLLMPort, VLLMPort, enableElasticEPFlag,
+			)},
+			expectProbesKept: true,
+		},
+		{
+			name:              "single node without elastic EP keeps its plain command",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", "--data-parallel-backend", "ray"},
+			},
+			gpuCount:          4,
+			expectNotModified: true,
+		},
+		// moe_agg.yaml and moe_disagg.yaml pass --enable-elastic-ep on the default
+		// data-parallel backend. A Ray head there would serve nobody and would put
+		// a 300s startup gate in front of an engine that works today.
+		{
+			name:              "single node elastic EP without the ray backend is left alone",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", enableElasticEPFlag},
+			},
+			gpuCount:          2,
+			expectNotModified: true,
+		},
+		{
+			name:              "single node elastic EP on a non-ray backend is left alone",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", "--data-parallel-backend", "mp", enableElasticEPFlag},
+			},
+			gpuCount:          2,
+			expectNotModified: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -219,6 +283,12 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				g.Expect(tt.initialContainer.LivenessProbe).To(gomega.BeNil())
 				g.Expect(tt.initialContainer.ReadinessProbe).To(gomega.BeNil())
 				g.Expect(tt.initialContainer.StartupProbe).To(gomega.BeNil())
+			}
+
+			if tt.expectProbesKept {
+				t.Log("a leader serves traffic, so its probes must survive the rewrite")
+				g.Expect(tt.initialContainer.LivenessProbe).ToNot(gomega.BeNil())
+				g.Expect(tt.initialContainer.StartupProbe).ToNot(gomega.BeNil())
 			}
 		})
 	}
@@ -647,6 +717,22 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 				VLLMPort,
 			)},
 			description: "Same as Grove worker but uses $(LWS_LEADER_ADDRESS) (kubelet-expanded) instead of the Grove-specific DNS address",
+		},
+		{
+			name:              "elastic EP main: takes the leader arm",
+			role:              RoleMain,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
+			},
+			gpuCount:    2,
+			annotations: nil,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				VLLMPort, VLLMPort, enableElasticEPFlag,
+			)},
+			description: "A component deployed as one pod is expanded as RoleMain rather than RoleLeader, so the leader arm must match it or the Ray head is never started",
 		},
 	}
 
