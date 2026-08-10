@@ -236,6 +236,7 @@
 /components/src/dynamo/common/                                               @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_models_dir_flag.py                                               @ai-dynamo/dynamo-runtime-codeowners
 /tests/report_pytest_markers.py                                              @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/workflow/                                             @ai-dynamo/dynamo-runtime-codeowners
 /examples/backends/tritonserver/                                             @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/multimodal_profiles/                                            @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_predownload_models.py                                            @ai-dynamo/dynamo-runtime-codeowners
