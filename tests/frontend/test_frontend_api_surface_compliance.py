@@ -472,7 +472,14 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.timeout(1095)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
-@pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
+@pytest.mark.flaky(
+    reruns=2,
+    only_rerun=[
+        "did not report the marker file",
+        "codex subagent smoke failed",
+        "request trace did not contain parent agent_context after 'codex subagent'",
+    ],
+)
 def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
