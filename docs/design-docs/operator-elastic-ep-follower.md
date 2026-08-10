@@ -108,6 +108,11 @@ form.
   - [Three pieces that do not exist](#three-pieces-that-do-not-exist)
 - [Grove makes the on-demand follower expressible](#grove-makes-the-on-demand-follower-expressible)
   - [What Phase 0 actually found](#what-phase-0-actually-found)
+- [The v1 detour: the non-Grove pathway](#the-v1-detour-the-non-grove-pathway)
+  - [Why the Grove path is blocked, not just inconvenient](#why-the-grove-path-is-blocked-not-just-inconvenient)
+  - [What the non-Grove pathway gives us instead](#what-the-non-grove-pathway-gives-us-instead)
+  - [What this costs, and what it improves](#what-this-costs-and-what-it-improves)
+  - [What changes in the phases](#what-changes-in-the-phases)
 - [Design](#design)
   - [Runtime flow](#runtime-flow)
   - [Generated Kubernetes objects](#generated-kubernetes-objects)
@@ -595,6 +600,108 @@ describes.
 > simply sit `Pending` until it is scaled away, which is harmless; on a cluster with room it will
 > bind GPUs briefly. Either way the operator, not the planner, owns that first scale-down, which is
 > a wrinkle in the "single writer" story worth stating plainly rather than hiding.
+
+## The v1 detour: the non-Grove pathway
+
+> [!NOTE]
+> **Grove remains the destination.** This section describes a deliberate interim: v1 ships on the
+> operator's existing non-Grove pathway because a follower parked at zero is not merely awkward on
+> Grove today, it is fatal. Everything above and below still describes the shape we want once Grove
+> supports zero-replica gang members. Nothing here is a repudiation of that design; it is the same
+> design expressed with different plumbing while we wait.
+
+### Why the Grove path is blocked, not just inconvenient
+
+Phase 0 established that a clique cannot be *declared* at zero. A follow-up experiment established
+something worse: on Grove, a component sitting at zero **blocks the leader from running at all**.
+
+The test deployed the same two-component DynamoGraphDeployment twice, once with
+`nvidia.com/enable-grove: "false"` and once without, each with a leader at one replica and a
+follower at zero, using busybox on CPU-only nodes.
+
+| | Grove pathway | Non-Grove pathway |
+|---|---|---|
+| Follower object | `PodClique` in a `PodCliqueSet` | `Deployment` |
+| Follower at zero replicas | accepted by the renderer | accepted |
+| Scheduler | `kai-scheduler` (gang) | `default-scheduler` |
+| Leader pod | **`SchedulingGated`** | `Running` within seconds |
+| Deployment status | `pending`, `Ready=False … leader: schedule-gated` | `successful` |
+
+Scaling the follower from zero to one released the leader immediately — the same pod, never
+recreated — and the deployment flipped to `Ready=True`. So the gate was caused by the zero-replica
+follower, not by an unrelated scheduling problem. This reproduces
+[grove#676](https://github.com/ai-dynamo/grove/issues/676) ("Dynamo scale to zero of worker takes
+down frontend too"), which was reported against kai-scheduler and is the concrete symptom behind
+the [GREP-0677 direction](#grove-makes-the-on-demand-follower-expressible) discussed above.
+
+For a feature whose entire premise is that the leader serves alone until a follower is needed, a
+gang that refuses to schedule the leader without the follower is disqualifying rather than
+inconvenient.
+
+### What the non-Grove pathway gives us instead
+
+Opting out of Grove is an existing, supported, per-deployment decision, not a cluster-wide one:
+`isGrovePathway` honours the `nvidia.com/enable-grove` annotation, and when it is false the
+operator selects the component program, which renders each component as an ordinary `Deployment`.
+Deployments have supported `replicas: 0` since forever, so the entire born-at-one dance disappears.
+
+The scaling mechanism also turns out to already exist. Setting `scalingAdapter: {}` on a component
+makes the operator create a `DynamoGraphDeploymentScalingAdapter`, a small object carrying a real
+`/scale` subresource (`specReplicasPath: .spec.replicas`) that targets exactly one component of one
+deployment. That is precisely the narrow, single-field, uniformly-drivable knob the
+[Grove design](#grove-makes-the-on-demand-follower-expressible) wanted from `PodClique`, available
+today without new API surface.
+
+Driving a follower through a full `0 → 1 → 0` cycle with `kubectl scale` on that adapter behaved
+exactly as the design requires: the pod appeared, then was removed, and the leader pod's UID was
+unchanged at every step. No operator code was involved — this is shipped behaviour.
+
+### What this costs, and what it improves
+
+The cost is that an elastic EP deployment forgoes Grove for *all* its components, including the
+frontend. In v1 that is close to free: every component in this shape is a single pod, and gang
+scheduling a single pod is a no-op. It becomes material only at
+[Phase 9](#phase-9--tensor-parallelism-wider-than-one-pod), where tensor parallelism wider than one
+node reintroduces genuinely multi-pod components that need all-or-nothing placement. By then either
+Grove supports zero-replica members or that shape stays on the Grove pathway without an on-demand
+follower.
+
+The improvement is larger than the cost, and it lands on the part of the design that was weakest.
+[Phase 7](#phase-7--scale-down-and-accept-the-idle-gpus) previously accepted idle-but-reserved GPUs
+after a scale-down, deferring reclaim, because releasing ranks was easy but removing the pod
+afterwards was not. With a Deployment behind a scaling adapter, removing the pod is one call to the
+same `/scale` endpoint. So v1 can complete the cycle: shrink the engine, confirm the follower is
+empty — safe because vLLM fills the leader first and spills over in order, so shrinking removes
+exactly the follower's ranks — then scale the adapter to zero and let the GPUs return to the
+cluster. GPUs are then held only while actually serving, plus the seconds either side of a
+transition.
+
+That transient window deserves naming, because it is easy to mistake for the warm-standby model
+this design exists to avoid. Attaching a follower is two ordered steps: Kubernetes makes the pod
+exist and it joins Ray, and only then does `scale_elastic_ep` make the engine use it. Between those
+two the follower's GPUs are attached but idle. That is handshake latency, not reservation — the
+GPUs were free moments earlier and are about to serve. It is unavoidable in any design, since a GPU
+must be attached before it can be used, and it is categorically different from parking a pod
+full of idle GPUs indefinitely.
+
+### What changes in the phases
+
+The phases below are written against the Grove shape and remain valid for it. On the non-Grove
+pathway three of them shrink:
+
+- **[Phase 4](#phase-4--render-the-follower-as-a-standalone-clique)** largely evaporates. The follower is an ordinary
+  component declared at `replicas: 0` with `scalingAdapter: {}`; there is no clique to render, no
+  parking step, and no anti-affinity to inject, since node-sized pods cannot share a node anyway.
+  What remains is wiring the follower's container to join the leader's Ray cluster.
+- **[Phase 1](#phase-1--the-api-surface)** narrows to describing the leader/follower relationship
+  and validating the sizing premise. It no longer has to invent a scaling mechanism.
+- **[Phase 7](#phase-7--scale-down-and-accept-the-idle-gpus)** absorbs the deferred reclaim, as
+  described above.
+
+[Phase 2](#phase-2--the-leader-always-runs-a-ray-head),
+[Phase 5](#phase-5--expose-ray-capacity-on-the-leader) and
+[Phase 6](#phase-6--the-reconciler-that-fires-the-scale) are unaffected: they concern the vLLM engine and the Ray
+handshake, which are identical either way.
 
 ## Design
 
