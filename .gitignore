@@ -164,6 +164,10 @@ package-lock.json
 # Compiled static libraries
 *.a
 
+# PageBroker C++ bindings are generated from pagebroker.proto.
+deploy/snapshot/pagebroker/pagebroker.pb.cc
+deploy/snapshot/pagebroker/pagebroker.pb.h
+
 # macOS
 .DS_Store
 **/.DS_Store

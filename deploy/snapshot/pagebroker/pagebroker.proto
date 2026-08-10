@@ -1,0 +1,52 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto2";
+package snapshot.pagebroker;
+option go_package = "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker";
+
+message RestoreRequest
+{
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_DIRECT = 1;
+    MODE_STAGED = 2;
+  }
+  // Required. The existing checkpoint directory to restore.
+  optional string source_path = 1;
+  // Required. The PageBroker restore mode.
+  optional Mode mode = 2;
+}
+message PrepareCheckpointRequest
+{
+  // Required. The checkpoint directory to publish on commit.
+  optional string destination_path = 1;
+}
+message CommitRequest
+{
+  // Required. The transaction returned by PrepareCheckpointRequest.
+  optional string transaction_id = 1;
+}
+message AbortRequest
+{
+  // Required. A checkpoint or staged restore transaction.
+  optional string transaction_id = 1;
+}
+message Request
+{
+  oneof command
+  {
+    RestoreRequest restore = 1;
+    PrepareCheckpointRequest prepare_checkpoint = 2;
+    CommitRequest commit = 3;
+    AbortRequest abort = 4;
+  }
+}
+message Response
+{
+  // Required. False means error contains the failure reason.
+  optional bool ok = 1;
+  optional string transaction_id = 2;
+  optional string directory_path = 3;
+  optional string error = 4;
+}

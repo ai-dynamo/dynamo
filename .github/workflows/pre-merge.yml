@@ -221,6 +221,19 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      with:
+        go-version-file: deploy/snapshot/go.mod
+        cache-dependency-path: deploy/snapshot/go.sum
+    - name: Verify generated PageBroker binding
+      run: |
+        curl --retry 5 --retry-delay 2 --fail --location --silent --show-error \
+          --output "$RUNNER_TEMP/protoc.zip" \
+          https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+        echo "3a4c1e5f2516c639d3079b1586e703fc7bcfa2136d58bda24d1d54f949c315e8  $RUNNER_TEMP/protoc.zip" | sha256sum --check
+        unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+        GOBIN="$RUNNER_TEMP/bin" go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12-0.20260120151049-f2248ac996af
+        PATH="$RUNNER_TEMP/protoc/bin:$RUNNER_TEMP/bin:$PATH" make -C deploy/snapshot/pagebroker verify-go
     - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
     - name: Run snapshot agent checks
       uses: ./.github/actions/check-deploy-component

@@ -17,6 +17,7 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.26.3
+ARG PROTOC_VERSION=21.12
 # Default to a pinned upstream CRIU commit. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -36,10 +37,29 @@ FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG PROTOC_VERSION
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    libprotobuf-dev \
+    pkg-config \
+    unzip \
+    && case "${TARGETARCH}" in \
+        amd64) protoc_arch=x86_64; protoc_sha=3a4c1e5f2516c639d3079b1586e703fc7bcfa2136d58bda24d1d54f949c315e8 ;; \
+        arm64) protoc_arch=aarch_64; protoc_sha=2dd17f75d66a682640b136e31848da9fb2eefe68d55303baf8b32617374f6711 ;; \
+        *) echo "unsupported protoc architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --location --silent --show-error \
+        --output /tmp/protoc.zip \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${protoc_arch}.zip" \
+    && echo "${protoc_sha}  /tmp/protoc.zip" | sha256sum --check \
+    && unzip -q /tmp/protoc.zip -d /usr/local \
+    && rm -f /tmp/protoc.zip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -51,8 +71,11 @@ COPY --from=operator . /operator/
 
 COPY go.mod go.sum ./
 RUN go mod download
+RUN GOBIN=/usr/local/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12-0.20260120151049-f2248ac996af
 
 COPY . .
+
+RUN make -C pagebroker generate
 
 # =============================================================================
 # Stage: Linter - Run golangci-lint
