@@ -987,7 +987,7 @@ navigation:
         slug: release-artifacts
 
       - page: Nightly Releases
-        path: pages/reference/general/nightly-release-info.md
+        path: pages/reference/general/nightly-releases.md
         slug: nightly-releases
 
       - page: Model Early Access Builds
