@@ -120,6 +120,13 @@ typedef CUresult(CUDAAPI* import_fn)(
 typedef CUresult(CUDAAPI* retain_fn)(CUmemGenericAllocationHandle*, void*);
 typedef CUresult(CUDAAPI* properties_fn)(
     CUmemAllocationProp*, CUmemGenericAllocationHandle);
+typedef CUresult(CUDAAPI* device_get_fn)(CUdevice*, int);
+typedef CUresult(CUDAAPI* device_uuid_fn)(CUuuid*, CUdevice);
+
+struct device_identity_api {
+  device_get_fn get_device;
+  device_uuid_fn get_uuid;
+};
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct allocation* allocations;
@@ -184,6 +191,25 @@ real_symbol(const char* name)
     return symbol;
   handle = (void*)atomic_load(&explicit_libcuda_handle);
   return handle == NULL ? NULL : real_dlsym(handle, name);
+}
+
+static int
+resolve_device_identity_api(struct device_identity_api* api)
+{
+  api->get_device = (device_get_fn)real_symbol("cuDeviceGet");
+  api->get_uuid = (device_uuid_fn)real_symbol("cuDeviceGetUuid_v2");
+  if (api->get_uuid == NULL)
+    api->get_uuid = (device_uuid_fn)real_symbol("cuDeviceGetUuid");
+  return api->get_device != NULL && api->get_uuid != NULL ? 0 : -1;
+}
+
+static CUresult
+device_uuid(const struct device_identity_api* api, int ordinal, CUuuid* uuid)
+{
+  CUdevice device;
+  CUresult result = api->get_device(&device, ordinal);
+
+  return result == CUDA_SUCCESS ? api->get_uuid(uuid, device) : result;
 }
 
 static bool
@@ -559,17 +585,14 @@ static int
 query_placement(int client, struct dyn_vmm_header* response)
 {
   typedef CUresult(CUDAAPI * count_fn)(int*);
-  typedef CUresult(CUDAAPI * uuid_fn)(CUuuid*, CUdevice);
   count_fn get_count = (count_fn)real_symbol("cuDeviceGetCount");
-  uuid_fn get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid_v2");
+  struct device_identity_api identity_api;
   struct allocation* allocation;
   struct dyn_vmm_placement* placements;
   int device_count;
   size_t count = 0;
   size_t index;
 
-  if (get_uuid == NULL)
-    get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid");
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
     if (!allocation->detached)
       continue;
@@ -590,7 +613,7 @@ query_placement(int client, struct dyn_vmm_header* response)
     free(placements);
     return 0;
   }
-  if (get_count == NULL || get_uuid == NULL) {
+  if (get_count == NULL || resolve_device_identity_api(&identity_api) != 0) {
     free(placements);
     set_error(response, "cannot query current CUDA GPU placement");
     return send_header(client, response, -1);
@@ -615,10 +638,10 @@ query_placement(int client, struct dyn_vmm_header* response)
     set_error(response, "CUDA device ordinal cannot be represented");
     return send_header(client, response, -1);
   }
-  for (int device = 0; device < device_count; device++) {
+  for (int ordinal = 0; ordinal < device_count; ordinal++) {
     CUuuid current;
 
-    if (get_uuid(&current, device) != CUDA_SUCCESS) {
+    if (device_uuid(&identity_api, ordinal, &current) != CUDA_SUCCESS) {
       free(placements);
       set_error(response, "cannot query UUID for visible CUDA device");
       return send_header(client, response, -1);
@@ -631,7 +654,7 @@ query_placement(int client, struct dyn_vmm_header* response)
         set_error(response, "source CUDA GPU UUID is visible at multiple ordinals");
         return send_header(client, response, -1);
       }
-      placements[index].device_ordinal = (int32_t)device;
+      placements[index].device_ordinal = (int32_t)ordinal;
       memcpy(placements[index].current_gpu_uuid, current.bytes, sizeof(placements[index].current_gpu_uuid));
     }
   }
@@ -837,20 +860,16 @@ allocate_logical_handle(CUmemGenericAllocationHandle* output)
 static int
 record_gpu_identity(struct allocation* allocation)
 {
-  typedef CUresult(CUDAAPI * uuid_fn)(CUuuid*, CUdevice);
-  uuid_fn get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid_v2");
+  struct device_identity_api identity_api;
 
   if (allocation->properties.location.type != CU_MEM_LOCATION_TYPE_DEVICE)
     return -1;
-  if (get_uuid == NULL)
-    get_uuid = (uuid_fn)real_symbol("cuDeviceGetUuid");
   allocation->device_ordinal = allocation->properties.location.id;
   allocation->source_device_ordinal = allocation->device_ordinal;
-  return get_uuid != NULL &&
-          get_uuid(&allocation->gpu_uuid, allocation->device_ordinal) ==
-              CUDA_SUCCESS
-      ? 0
-      : -1;
+  return resolve_device_identity_api(&identity_api) == 0 &&
+                 device_uuid(&identity_api, allocation->device_ordinal, &allocation->gpu_uuid) == CUDA_SUCCESS
+             ? 0
+             : -1;
 }
 
 static struct allocation*

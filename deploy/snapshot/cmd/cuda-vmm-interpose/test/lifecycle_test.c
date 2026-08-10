@@ -28,6 +28,7 @@
 unsigned int fake_cuda_create_count(void);
 CUdevice fake_cuda_create_device(unsigned int);
 void fake_cuda_set_device_count(int);
+void fake_cuda_set_device_handle(int, CUdevice);
 void fake_cuda_set_device_identity(CUdevice, CUdevice);
 unsigned int fake_cuda_import_count(void);
 unsigned int fake_cuda_release_count(void);
@@ -602,6 +603,45 @@ establish_fabric_mapping(CUmemGenericAllocationHandle* logical, struct dyn_vmm_f
           cuMemSetAccess(address, 4096, &access, 1) == CUDA_SUCCESS &&
           cuMemExportToShareableHandle(token, *logical, CU_MEM_HANDLE_TYPE_FABRIC, 0) == CUDA_SUCCESS,
       "cannot establish managed FABRIC mapping");
+}
+
+static void
+test_gpu_identity_capture(void)
+{
+  CUmemGenericAllocationHandle logical;
+  struct dyn_vmm_fabric_token token;
+  struct dyn_vmm_header request = {
+      .magic = DYN_VMM_MAGIC,
+      .version = DYN_VMM_VERSION,
+      .operation = DYN_VMM_INSPECT,
+  };
+  struct dyn_vmm_header response;
+  struct dyn_vmm_record* record;
+  const CUmemAllocationProp* properties;
+  CUdevice device;
+  CUuuid expected;
+  void* payload;
+  int received_fd;
+
+  fake_cuda_set_device_handle(0, 7);
+  fake_cuda_set_device_identity(7, 12);
+  require(
+      cuDeviceGet(&device, 0) == CUDA_SUCCESS && device == 7 && cuDeviceGetUuid_v2(&expected, device) == CUDA_SUCCESS,
+      "fake CUDA did not resolve ordinal 0 through device handle 7");
+  establish_fabric_mapping(&logical, &token, 0x100000);
+  response = exchange(&request, NULL, &payload, &received_fd);
+  require(
+      response.status == 0 && response.count == 1 &&
+          response.payload_size == sizeof(*record) + sizeof(*properties) + sizeof(CUmemAccessDesc) && received_fd < 0 &&
+          payload != NULL,
+      "capture inspect returned invalid metadata");
+  record = payload;
+  properties = (const CUmemAllocationProp*)((const char*)payload + sizeof(*record));
+  require(
+      record->device_ordinal == 0 && properties->location.type == CU_MEM_LOCATION_TYPE_DEVICE &&
+          properties->location.id == 0 && memcmp(record->gpu_uuid, expected.bytes, sizeof(record->gpu_uuid)) == 0,
+      "capture did not resolve the allocation ordinal before saving its GPU UUID");
+  free(payload);
 }
 
 static void
@@ -1338,25 +1378,29 @@ test_fabric_owner_importer_restore(bool fail_import, bool reindex)
     request.version = DYN_VMM_VERSION;
     request.operation = DYN_VMM_QUERY_PLACEMENT;
     fake_cuda_set_device_count(4);
-    fake_cuda_set_device_identity(0, 3);
-    fake_cuda_set_device_identity(1, 1);
-    fake_cuda_set_device_identity(2, 2);
-    fake_cuda_set_device_identity(3, 3);
+    fake_cuda_set_device_handle(0, 7);
+    fake_cuda_set_device_handle(1, 8);
+    fake_cuda_set_device_handle(2, 9);
+    fake_cuda_set_device_handle(3, 10);
+    fake_cuda_set_device_identity(7, 3);
+    fake_cuda_set_device_identity(8, 1);
+    fake_cuda_set_device_identity(9, 2);
+    fake_cuda_set_device_identity(10, 3);
     response = exchange_fd(&request, NULL, &ignored, -1, &received_fd, 0);
     require(
         response.status != 0 && received_fd < 0 && strstr(response.message, "not currently visible") != NULL,
         "placement query accepted an absent source GPU UUID");
     free(ignored);
 
-    fake_cuda_set_device_identity(1, 0);
-    fake_cuda_set_device_identity(3, 0);
+    fake_cuda_set_device_identity(8, 0);
+    fake_cuda_set_device_identity(10, 0);
     response = exchange_fd(&request, NULL, &ignored, -1, &received_fd, 0);
     require(
         response.status != 0 && received_fd < 0 && strstr(response.message, "multiple ordinals") != NULL,
         "placement query accepted an ambiguous source GPU UUID");
     free(ignored);
 
-    fake_cuda_set_device_identity(1, 1);
+    fake_cuda_set_device_identity(8, 1);
     response = exchange(&request, NULL, &ignored, &received_fd);
     placement = ignored;
     require(
@@ -1910,6 +1954,10 @@ main(int argc, char** argv)
   }
   if (argc == 2 && strcmp(argv[1], "owner-importer-success") == 0) {
     test_owner_importer_success();
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "gpu-identity-capture") == 0) {
+    test_gpu_identity_capture();
     return 0;
   }
   if (argc == 2 && strcmp(argv[1], "fabric-owner-importer-success") == 0) {

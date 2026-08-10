@@ -119,6 +119,11 @@ LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
 DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
 DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
 LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" gpu-identity-capture
+
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
   "$build/lifecycle_test" fabric-owner-importer-success
 
 DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
