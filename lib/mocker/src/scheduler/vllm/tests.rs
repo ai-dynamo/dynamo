@@ -1821,9 +1821,13 @@ mod core_behavior {
 mod router_events {
     use super::*;
 
-    #[test]
-    fn test_vllm_pass_visibility_is_pass_start() {
-        let mut core = VllmCore::new_with_kv_capture(router_args(), ROUTER_TEST_WORKER_ID);
+    #[rstest]
+    #[case::vllm(EngineType::Vllm)]
+    #[case::trtllm(EngineType::Trtllm)]
+    fn test_shared_vllm_core_pass_visibility_is_pass_end(#[case] engine_type: EngineType) {
+        let mut args = router_args();
+        args.engine_type = engine_type;
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
@@ -1837,10 +1841,7 @@ mod router_events {
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
 
-        assert_eq!(
-            pass.router_event_visibility,
-            RouterEventVisibility::PassStart
-        );
+        assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
         assert!(!pass.kv_events.is_empty());
         assert!(
             pass.kv_events
@@ -4162,6 +4163,12 @@ mod offload {
         // request, schedules nothing.
         let mut collector = crate::replay::TraceCollector::default();
         let pass1 = core.execute_pass(&mut collector, 0.0);
+        let stall_deadline = core
+            .earliest_offload_deadline()
+            .expect("parked swap-in must expose a stall-advance deadline");
+        assert_eq!(pass1.token_completion_ms, 0.0);
+        assert_eq!(pass1.end_ms, stall_deadline);
+        assert!(pass1.end_ms > pass1.token_completion_ms);
         assert_eq!(
             core.requests_awaiting_swap_in.len(),
             1,

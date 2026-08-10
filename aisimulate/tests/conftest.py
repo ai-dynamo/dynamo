@@ -14,10 +14,10 @@ from pathlib import Path
 # do not install AI Simulate. Only the planner image installs the standalone wheel.
 # Ignore this optional suite before importing its test modules in those images.
 try:
-    _spica_available = find_spec("aisimulate.spica.config") is not None
+    _sweeper_available = find_spec("aisimulate.sweeper.config") is not None
 except ModuleNotFoundError:
-    _spica_available = False
+    _sweeper_available = False
 
 collect_ignore = []
-if not _spica_available:
-    collect_ignore.append(str(Path(__file__).parent / "spica"))
+if not _sweeper_available:
+    collect_ignore.append(str(Path(__file__).parent / "sweeper"))

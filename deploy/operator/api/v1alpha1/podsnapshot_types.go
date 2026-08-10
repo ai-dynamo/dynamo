@@ -54,8 +54,9 @@ type PodSnapshotSpec struct {
 // PodSnapshotSource identifies the workload captured by a PodSnapshot.
 type PodSnapshotSource struct {
 	// PodRef references the pod, in the PodSnapshot's namespace, that is captured.
-	// The operator prepares the pod (control volume, target-container annotation,
-	// checkpoint storage mount) before creating the PodSnapshot.
+	// The operator prepares the pod (control volume, checkpoint storage mount)
+	// before creating the PodSnapshot. The capture target container is carried on
+	// PodRef.Containers, not a pod annotation.
 	// +kubebuilder:validation:Required
 	PodRef PodReference `json:"podRef"`
 }
@@ -71,6 +72,18 @@ type PodReference struct {
 	// pod and not a same-named recreation.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
+
+	// Containers narrows the capture to these containers of the source pod. The
+	// node agent reads this instead of the source pod's target-container
+	// annotation. v1alpha1 supports exactly one container; the cap is lifted when
+	// the runtime supports multi-container capture.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Containers []string `json:"containers"`
 }
 
 // PodSnapshotStatus defines the observed state of PodSnapshot.

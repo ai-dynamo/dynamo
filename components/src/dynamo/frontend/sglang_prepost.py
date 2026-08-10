@@ -99,6 +99,7 @@ _THINKING_BY_DEFAULT = {
     "nemotron_3",
     "interns1",
     "kimi_k2",
+    "kimi_k3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
@@ -108,6 +109,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
+    "kimi-k3": "kimi_k3",
 }
 
 
@@ -127,9 +129,9 @@ def resolve_request_force_reasoning(
     Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
     combined with template_manager.force_reasoning:
 
-      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
-        ``thinking=False`` for ``kimi_k2``) disables it.
+        ``thinking=False`` for Kimi) disables it.
       * MiniMax-M3 defaults to adaptive, but SGLang still enables the
         reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
         explicitly ``"disabled"``.
@@ -158,7 +160,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
-            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"kimi_k2", "kimi_k3"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is not False
 
@@ -594,6 +598,17 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
+    # TODO: this applies a structural-tag constraint for tool_choice="auto"
+    # whenever a tool-call parser is configured, and reads NONE of
+    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
+    # knobs are accepted on the CLI and published into the model card by
+    # sglang/register.py, so an operator setting the mode to "off" still gets a
+    # constraint on this path. prepost.py requires structural_tag_mode == "on"
+    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
+    # requires StructuralTagMode != Off, so at the default mode ("off") the same
+    # request is unconstrained on both of those paths and constrained here.
+    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
+    # scope="always" with no way to narrow it.
     elif tool_call_parser_name:
         tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
@@ -815,6 +830,18 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    # TODO: response_format wins here even when tool_choice is "required" or names
+    # a function, so a request that demanded a tool call can come back with none
+    # -- the tool constraint is dropped and only logged. The other two paths do
+    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
+    # and keeps the tool constraint, and prepost.py does the same after narrowing
+    # its conflict check. response_format is scoped by the OpenAI spec to the
+    # message the model returns to the user, not to tool calls, so the tool
+    # constraint is the one that must survive.
+    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
@@ -931,16 +958,10 @@ class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
     Handles:
-    - Incremental detokenization via sliding-window decode (6-token lookback)
+    - Incremental detokenization across tokenizer-safe boundaries
     - Reasoning content extraction via SGLang ReasoningParser
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
     """
-
-    # Lookback window size for incremental detokenization.  UTF-8 characters
-    # can span up to 4 bytes, each potentially its own token.  A lookback of
-    # 6 covers the worst case (4-token char) plus margin for BPE merges that
-    # cross the old/new boundary.
-    LOOKBACK = 6
 
     def __init__(
         self,
@@ -952,6 +973,7 @@ class SglangStreamingPostProcessor:
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
         eos_token_ids: list[int] | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -974,7 +996,13 @@ class SglangStreamingPostProcessor:
         )
         self._eos_token_ids = set(eos_token_ids or [])
 
-        self._all_token_ids: list[int] = []
+        # Keep a small, known-complete prompt suffix as decode context. Generated
+        # tokens are promoted to context only after they decode without a
+        # trailing replacement character, so the boundary never moves into an
+        # incomplete byte-fallback sequence.
+        self._decode_context_ids = list((prompt_token_ids or [])[-5:])
+        self._pending_decode_ids: list[int] = []
+        self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
         # chunks).  However, the base detector processes at most one event
@@ -1004,43 +1032,40 @@ class SglangStreamingPostProcessor:
             self.history_tool_calls_count,
         )
 
-    def _incremental_decode(self, new_token_ids: list[int]) -> str:
-        """Decode new tokens with lookback window for multi-byte char boundaries.
-
-        Re-decodes a small window of previous tokens alongside new tokens so that
-        multi-byte characters spanning token boundaries are correctly resolved.
-        Only retains the last LOOKBACK tokens to bound memory usage.
-        """
-        prev_count = len(self._all_token_ids)
-        self._all_token_ids.extend(new_token_ids)
-
-        start = max(0, prev_count - self.LOOKBACK)
-
-        # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 16:
-            self._all_token_ids = self._all_token_ids[
-                -(self.LOOKBACK + len(new_token_ids)) :
-            ]
-            prev_count = len(self._all_token_ids) - len(new_token_ids)
-            start = max(0, prev_count - self.LOOKBACK)
-
-        # Decode lookback-only prefix (before new tokens)
-        prefix_tokens = self._all_token_ids[start:prev_count]
-        prefix_text = (
-            self.tokenizer.decode(
-                prefix_tokens, skip_special_tokens=self._skip_special_tokens
-            )
-            if prefix_tokens
-            else ""
+    def _decode_ids(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        return self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=self._skip_special_tokens,
         )
 
-        # Decode lookback + new tokens together
-        window_tokens = self._all_token_ids[start:]
-        window_text = self.tokenizer.decode(
-            window_tokens, skip_special_tokens=self._skip_special_tokens
-        )
+    def _with_initial_role(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_emitted_role:
+            delta["role"] = "assistant"
+            self._has_emitted_role = True
+        return delta
 
-        return window_text[len(prefix_text) :]
+    def _incremental_decode(
+        self, new_token_ids: list[int], *, flush: bool = False
+    ) -> str:
+        """Decode generated tokens without splitting a byte-fallback sequence."""
+        self._pending_decode_ids.extend(new_token_ids)
+        if not self._pending_decode_ids:
+            return ""
+
+        context_text = self._decode_ids(self._decode_context_ids)
+        decoded_text = self._decode_ids(
+            self._decode_context_ids + self._pending_decode_ids
+        )
+        delta_text = decoded_text[len(context_text) :]
+
+        if not flush and (not delta_text or delta_text.endswith("\ufffd")):
+            return ""
+
+        self._decode_context_ids = self._pending_decode_ids
+        self._pending_decode_ids = []
+        return delta_text
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1104,23 +1129,27 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
-        if finish_reason:
+        if finish_reason is not None:
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
 
-        delta_text = self._incremental_decode(token_ids) if token_ids else ""
+        delta_text = (
+            self._incremental_decode(token_ids, flush=finish_reason is not None)
+            if token_ids or finish_reason is not None
+            else ""
+        )
 
         if self._fast_plain_text:
             if delta_text:
                 return {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
+                    "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
             elif finish_reason:
                 return {
                     "index": 0,
-                    "delta": {},
+                    "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
@@ -1163,7 +1192,7 @@ class SglangStreamingPostProcessor:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
-        delta: dict[str, Any] = {"role": "assistant"}
+        delta: dict[str, Any] = {}
         has_content = False
 
         if content_text:
@@ -1337,7 +1366,7 @@ class SglangStreamingPostProcessor:
         if has_content or effective_finish:
             return {
                 "index": 0,
-                "delta": delta if has_content else {},
+                "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
                 "logprobs": None,
             }

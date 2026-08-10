@@ -236,6 +236,14 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
 // Responses API -> Chat Completions conversion
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResponsesConversionError {
+    #[error("{0}")]
+    InvalidArgument(String),
+    #[error("{0}")]
+    NotImplemented(String),
+}
+
 /// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
 /// The responses module re-exports an `ImageDetail` from the upstream async-openai
 /// crate which is distinct from `dynamo_protocols::types::ImageDetail` (chat).
@@ -276,17 +284,32 @@ fn convert_input_content_to_user_content(
                 ));
             }
             InputContent::InputImage(img) => {
-                if img.file_id.is_some() && img.image_url.is_none() {
-                    return Err(anyhow::anyhow!(
-                        "Image input by file_id is not yet supported"
-                    ));
-                }
-                let url_str = img
-                    .image_url
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("input_image requires image_url"))?;
-                let url = url::Url::parse(url_str)
-                    .map_err(|e| anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e))?;
+                let url_str = match (img.file_id.as_deref(), img.image_url.as_deref()) {
+                    (None, None) => {
+                        return Err(ResponsesConversionError::InvalidArgument(
+                            "input_image requires file_id or image_url".to_string(),
+                        )
+                        .into());
+                    }
+                    (Some(file_id), None) if file_id.trim().is_empty() => {
+                        return Err(ResponsesConversionError::InvalidArgument(
+                            "input_image file_id must be non-empty".to_string(),
+                        )
+                        .into());
+                    }
+                    (Some(_), None) => {
+                        return Err(ResponsesConversionError::NotImplemented(
+                            "Image input by file_id is not yet supported".to_string(),
+                        )
+                        .into());
+                    }
+                    (_, Some(url_str)) => url_str,
+                };
+                let url = url::Url::parse(url_str).map_err(|error| {
+                    ResponsesConversionError::InvalidArgument(format!(
+                        "Invalid image URL '{url_str}': {error}"
+                    ))
+                })?;
                 let mut image_url = ImageUrl::from(url.to_string());
                 image_url.detail = Some(convert_image_detail_str(&img.detail));
                 let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
@@ -295,8 +318,41 @@ fn convert_input_content_to_user_content(
                 chat_parts.push(image_part.into());
             }
             // TODO: handle InputVideo / InputAudio when upstream adds them
-            InputContent::InputFile(_) => {
-                return Err(anyhow::anyhow!("File input content is not yet supported"));
+            InputContent::InputFile(file) => {
+                let (source_field, source_value) = match (
+                    file.file_data.as_deref(),
+                    file.file_id.as_deref(),
+                    file.file_url.as_deref(),
+                ) {
+                    (Some(file_data), None, None) => ("file_data", file_data),
+                    (None, Some(file_id), None) => ("file_id", file_id),
+                    (None, None, Some(file_url)) => ("file_url", file_url),
+                    _ => {
+                        return Err(ResponsesConversionError::InvalidArgument(
+                            "input_file requires exactly one of file_data, file_id, or file_url"
+                                .to_string(),
+                        )
+                        .into());
+                    }
+                };
+                if source_value.trim().is_empty() {
+                    return Err(ResponsesConversionError::InvalidArgument(format!(
+                        "input_file {source_field} must be non-empty"
+                    ))
+                    .into());
+                }
+                if source_field == "file_url" {
+                    url::Url::parse(source_value).map_err(|error| {
+                        ResponsesConversionError::InvalidArgument(format!(
+                            "Invalid file URL '{source_value}': {error}"
+                        ))
+                    })?;
+                }
+
+                return Err(ResponsesConversionError::NotImplemented(
+                    "File input content is not yet supported".to_string(),
+                )
+                .into());
             }
         }
     }
@@ -1451,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_input_items_with_image() {
+    fn test_input_items_with_file_id_and_image_url_prefers_url() {
         let req = NvCreateResponse {
             inner: CreateResponse {
                 input: InputParam::Items(vec![InputItem::Item(Item::Message(MessageItem::Input(
@@ -1462,7 +1518,7 @@ mod tests {
                             }),
                             InputContent::InputImage(InputImageContent {
                                 detail: Default::default(), // ImageDetail::Auto
-                                file_id: None,
+                                file_id: Some("file_123".into()),
                                 image_url: Some("https://example.com/cat.jpg".into()),
                             }),
                         ],
