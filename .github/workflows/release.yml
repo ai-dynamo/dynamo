@@ -15,7 +15,7 @@ on:
         required: false
         type: string
       nightly:
-        description: 'Publish as nightly (nightly-dated NGC tags; skips RC and Helm push). Must be run from main.'
+        description: 'Publish as nightly (nightly-dated NGC tags; dated pre-release Helm charts; skips RC). Must be run from main.'
         required: false
         type: boolean
         default: false
@@ -192,12 +192,20 @@ jobs:
             # the bare date+sha (e.g. 20260520-abc1234).
             NGC_VERSION_TAG="${DATE_UTC}-${SHORT_SHA}"
             WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
+            # SemVer pre-release, so a nightly chart always sorts below the
+            # train's rc (-dev < -rc) and GA. The sha keeps same-day re-runs at
+            # a new commit unique on the immutable ChartMuseum registry; its
+            # `g` prefix (git-describe convention) keeps an all-digit sha with
+            # a leading zero from producing an invalid SemVer numeric
+            # identifier that helm would refuse to package.
+            HELM_CHART_VERSION="${BASE_VERSION}-dev.${DATE_UTC}.g${SHORT_SHA}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
-            echo "helm_chart_version=" >> $GITHUB_OUTPUT
+            echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
             echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
             echo "Nightly wheel version: ${WHEEL_VERSION}"
+            echo "Nightly Helm chart version: ${HELM_CHART_VERSION}"
             exit 0
           fi
 
@@ -606,10 +614,135 @@ jobs:
 
           helm repo remove "${REPO_ALIAS}"
 
+      # Nightly analog of the step above: package the platform and snapshot
+      # charts at the dated pre-release version and dual-push them to NGC
+      # staging -- ChartMuseum and OCI. Chart-internal references are rewritten
+      # in the runner workspace only (nightly has no release branch to record a
+      # bump on): image repositories move to the *-nightly repos at this run's
+      # dated tag, i.e. exactly the images the copy step staged above.
+      # Fail-soft per chart: a chart whose optional image build did not stage
+      # tonight is skipped with a warning (mirroring stage_optional), so a
+      # published chart can never reference a missing image; infrastructure
+      # failures (auth, registry down, rewrite mismatch) still fail the step.
+      - name: Package and push nightly Helm charts to NGC
+        id: nightly_helm_push
+        if: env.NIGHTLY == 'true'
+        env:
+          NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
+          # OCI mirror of the same staging namespace, so consumers can
+          # `helm pull oci://...` without a repo add.
+          NGC_HELM_OCI_REPO: oci://nvcr.io/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
+          HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          OPERATOR_STAGED: ${{ steps.copy_images.outputs.operator_staged }}
+          SNAPSHOT_STAGED: ${{ steps.copy_images.outputs.snapshot_staged }}
+        run: |
+          set -euo pipefail
+
+          # Gate each chart on whether its (fail-soft) image actually staged
+          # tonight. platform deploys kubernetes-operator-nightly, snapshot
+          # deploys snapshot-agent-nightly; the other staged flags don't feed
+          # any chart.
+          CHARTS=""
+          SKIPPED_HELM=""
+          if [[ "${OPERATOR_STAGED}" == "true" ]]; then
+            CHARTS="platform"
+          else
+            echo "::warning::Skipping platform chart: kubernetes-operator-nightly:${NGC_VERSION_TAG} was not staged this run"
+            SKIPPED_HELM="platform"
+          fi
+          if [[ "${SNAPSHOT_STAGED}" == "true" ]]; then
+            CHARTS="${CHARTS:+${CHARTS},}snapshot"
+          else
+            echo "::warning::Skipping snapshot chart: snapshot-agent-nightly:${NGC_VERSION_TAG} was not staged this run"
+            SKIPPED_HELM="${SKIPPED_HELM:+${SKIPPED_HELM},}snapshot"
+          fi
+
+          echo "staged_helm=" >> $GITHUB_OUTPUT
+          echo "skipped_helm=${SKIPPED_HELM}" >> $GITHUB_OUTPUT
+          if [[ -z "${CHARTS}" ]]; then
+            echo "No nightly charts to publish: no chart image was staged this run."
+            exit 0
+          fi
+
+          python3 .github/scripts/prepare_nightly_helm.py \
+            --chart-version "${HELM_CHART_VERSION}" \
+            --image-tag "${NGC_VERSION_TAG}" \
+            --charts "${CHARTS}"
+
+          REPO_ALIAS="ngc-staging-dynamo"
+
+          helm plugin install https://github.com/chartmuseum/helm-push || true
+
+          echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
+            --username="${NGC_USERNAME}" \
+            --password-stdin \
+            "${NGC_HELM_REPO}" > /dev/null 2>&1
+
+          # The job's `docker login nvcr.io` writes ~/.docker/config.json,
+          # which helm does not read for OCI pushes -- log the helm registry
+          # client in explicitly.
+          echo "${NGC_TOKEN}" | helm registry login nvcr.io \
+            --username "${NGC_USERNAME}" --password-stdin
+
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
+          helm repo add bitnami https://charts.bitnami.com/bitnami || true
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Nightly Helm Charts" >> $GITHUB_STEP_SUMMARY
+
+          STAGED_HELM=""
+          for TOKEN in ${CHARTS//,/ }; do
+            CHART_DIR="deploy/helm/charts/${TOKEN}"
+            CHART_NAME=$(awk '/^name:/ {print $2}' "${CHART_DIR}/Chart.yaml")
+            pushd "${CHART_DIR}"
+            helm dep build .
+            popd
+
+            echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
+            helm package \
+              --version "${HELM_CHART_VERSION}" \
+              --app-version "${HELM_CHART_VERSION}" \
+              "${CHART_DIR}"
+            CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+
+            # OCI first: OCI tags are mutable (a same-SHA workflow re-run
+            # overwrites the identical bytes harmlessly) while ChartMuseum
+            # 409s on an existing version -- this order keeps the step
+            # re-runnable.
+            echo "Pushing ${CHART_FILE} to NGC OCI registry..."
+            helm push "${CHART_FILE}" "${NGC_HELM_OCI_REPO}"
+
+            # ChartMuseum is immutable; skip when this exact chart version is
+            # already indexed so a same-SHA re-run stays green.
+            SEARCH_OUT=$(helm search repo "${REPO_ALIAS}/${CHART_NAME}" \
+                --version "${HELM_CHART_VERSION}" -o yaml)
+            if grep -qF "version: ${HELM_CHART_VERSION}" <<< "${SEARCH_OUT}"; then
+              echo "::notice::${CHART_FILE} already in the NGC Helm registry; skipping cm-push"
+            else
+              echo "Pushing ${CHART_FILE} to NGC Helm registry..."
+              helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
+            fi
+
+            STAGED_HELM="${STAGED_HELM:+${STAGED_HELM},}${CHART_NAME}:${HELM_CHART_VERSION}"
+            echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to the NGC Helm registry and OCI (\`${CHART_NAME}\` in the staging org)" >> $GITHUB_STEP_SUMMARY
+          done
+          if [[ -n "${SKIPPED_HELM}" ]]; then
+            echo "- Skipped (image not staged this run): \`${SKIPPED_HELM}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "staged_helm=${STAGED_HELM}" >> $GITHUB_OUTPUT
+
+          helm repo remove "${REPO_ALIAS}"
+
       - name: Create release summary
         env:
           NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
           HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
+          NIGHTLY_STAGED_HELM: ${{ steps.nightly_helm_push.outputs.staged_helm }}
+          NIGHTLY_SKIPPED_HELM: ${{ steps.nightly_helm_push.outputs.skipped_helm }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
           OPERATOR_STAGED: ${{ steps.copy_images.outputs.operator_staged }}
@@ -680,6 +813,19 @@ jobs:
             echo "- \`dynamo-planner:nightly\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend:nightly\`${FE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`snapshot-agent:nightly\`${SA_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Helm charts (staged fail-soft, dual-pushed to NGC ChartMuseum + OCI):" >> $GITHUB_STEP_SUMMARY
+            if [[ -n "${NIGHTLY_STAGED_HELM}" ]]; then
+              for ENTRY in ${NIGHTLY_STAGED_HELM//,/ }; do
+                echo "- \`${ENTRY}\`" >> $GITHUB_STEP_SUMMARY
+              done
+            fi
+            if [[ -n "${NIGHTLY_SKIPPED_HELM}" ]]; then
+              echo "- Skipped (image not staged this run): \`${NIGHTLY_SKIPPED_HELM}\`" >> $GITHUB_STEP_SUMMARY
+            fi
+            if [[ -z "${NIGHTLY_STAGED_HELM}${NIGHTLY_SKIPPED_HELM}" ]]; then
+              echo "- None (helm step did not run)" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
           if [[ "${NIGHTLY}" != "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
