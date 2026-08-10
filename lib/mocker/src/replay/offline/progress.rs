@@ -21,6 +21,15 @@ impl ReplayProgress {
         Self { bar }
     }
 
+    /// Interactive sessions have an open-ended request count and are driven
+    /// by another controller, so they must not present a misleading fixed
+    /// progress bar.
+    pub(super) fn disabled() -> Self {
+        Self {
+            bar: ProgressBar::hidden(),
+        }
+    }
+
     pub(super) fn inc_completed(&self) {
         self.bar.inc(1);
     }

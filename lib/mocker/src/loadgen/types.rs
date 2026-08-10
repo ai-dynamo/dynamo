@@ -103,8 +103,16 @@ pub struct TurnTrace {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgenticTurnTrace {
+    /// Stable authored identity used to join replay events and reports back to
+    /// the source workflow. This is intentionally distinct from the internal
+    /// UUID used by the mock engine.
     pub request_id: String,
     pub session_id: String,
+    /// Authored zero-based turn index within `session_id`.
+    pub authored_turn_index: usize,
+    /// Optional caller-selected engine identity. Interactive callers may use
+    /// this for deterministic replay; file loaders leave it unset.
+    pub internal_uuid: Option<Uuid>,
     pub input_length: usize,
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
@@ -196,12 +204,17 @@ impl ReplayRequestHashes {
 #[derive(Debug, Clone)]
 pub struct ReadyTurn {
     pub request_uuid: Uuid,
+    pub logical_request_id: Option<String>,
     pub session_id: String,
     pub turn_index: usize,
+    pub authored_turn_index: usize,
     pub emit_session_metadata: bool,
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
+    /// Reporting metadata only. Replay never mutates KV state from this flag;
+    /// the supplied prompt/hash identity remains the sole KV input.
+    pub prefix_reset: bool,
     pub request: DirectRequest,
 }
 
@@ -319,11 +332,14 @@ impl ReplayRequestPayload {
 #[derive(Debug)]
 pub(crate) struct CompactReadyTurn {
     pub(crate) request_uuid: Uuid,
+    pub(crate) logical_request_id: Option<String>,
     pub(crate) session_id: String,
     pub(crate) turn_index: usize,
+    pub(crate) authored_turn_index: usize,
     pub(crate) replay_key: Option<String>,
     pub(crate) scheduled_ready_at_ms: f64,
     pub(crate) replay_hashes: Option<ReplayRequestHashes>,
+    pub(crate) prefix_reset: bool,
     pub(crate) emit_session_metadata: bool,
     pub(crate) request: ReplayRequestPayload,
 }
@@ -332,12 +348,15 @@ impl CompactReadyTurn {
     pub(crate) fn into_ready_turn(self) -> ReadyTurn {
         ReadyTurn {
             request_uuid: self.request_uuid,
+            logical_request_id: self.logical_request_id,
             session_id: self.session_id,
             turn_index: self.turn_index,
+            authored_turn_index: self.authored_turn_index,
             emit_session_metadata: self.emit_session_metadata,
             replay_key: self.replay_key,
             scheduled_ready_at_ms: self.scheduled_ready_at_ms,
             replay_hashes: self.replay_hashes,
+            prefix_reset: self.prefix_reset,
             request: self.request.into_direct_request(),
         }
     }

@@ -174,10 +174,13 @@ pub use offline::{
     CanonicalReplayRecord, CanonicalReplayRouterMode, CanonicalReplayTopology,
     CanonicalRouterMetadata, CanonicalSemanticFeatures, CanonicalSlaMetadata,
     CanonicalSyntheticSpec, CanonicalWorkloadMetadata, EnginePressureState, KvIngestBoundary,
-    KvIngestBoundaryStats, KvIngestEvidence, LifecycleOperation, OfflineRuntimeEvidence,
-    PressureEvidence, PressureKind, PressureRecord, WorkerLifecycleTransition,
-    WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState, canonical_engine_pool_metadata,
-    canonical_router_metadata, canonical_topology, with_runtime_evidence,
+    KvIngestBoundaryStats, KvIngestEvidence, LifecycleOperation, OfflineReplaySession,
+    OfflineRuntimeEvidence, PressureEvidence, PressureKind, PressureRecord, ReplayAgenticRequest,
+    ReplayAgenticWorkflow, ReplayEvent, ReplayEventData, ReplayPendingPlacement, ReplayRequestSpec,
+    ReplaySessionRouter, ReplaySnapshot, ReplayStepStatus, ReplayWorkerSnapshot,
+    WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState,
+    WorkerTarget, canonical_engine_pool_metadata, canonical_router_metadata, canonical_topology,
+    with_runtime_evidence,
 };
 pub use validate::validate_replay_args_mode;
 

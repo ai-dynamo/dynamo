@@ -395,6 +395,10 @@ fn test_from_agentic_mooncake_preserves_dependencies_and_tool_wait() {
     let trace = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap();
     assert_eq!(trace.turns.len(), 2);
     assert_eq!(trace.turns[0].request_id, "r1");
+    assert_eq!(trace.turns[0].authored_turn_index, 0);
+    assert_eq!(trace.turns[1].authored_turn_index, 1);
+    assert_eq!(trace.turns[0].internal_uuid, None);
+    assert_eq!(trace.turns[1].internal_uuid, None);
     assert!(trace.turns[0].prefix_reset);
     assert_eq!(trace.turns[0].priority, 5);
     assert_eq!(trace.turns[0].strict_priority, 6);
@@ -414,6 +418,28 @@ fn test_from_agentic_mooncake_rejects_unknown_dependency() {
 
     let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
     assert!(err.to_string().contains("unknown request_id"));
+}
+
+#[test]
+fn test_from_agentic_mooncake_rejects_duplicate_dependency() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "root",
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1]
+        }),
+        serde_json::json!({
+            "request_id": "child",
+            "wait_for": ["root", "root"],
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [2]
+        }),
+    ]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    assert!(err.to_string().contains("duplicates dependency root"));
 }
 
 #[test]

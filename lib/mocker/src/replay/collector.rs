@@ -331,6 +331,7 @@ where
 
 #[derive(Debug)]
 struct TraceRequestStats {
+    logical_request_id: Option<String>,
     arrival_time_ms: f64,
     first_admit_ms: Option<f64>,
     terminal_time_ms: Option<f64>,
@@ -356,6 +357,7 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
+    authored_turn_index: Option<usize>,
     detail: Option<Box<PerRequestDetail>>,
 }
 
@@ -538,6 +540,10 @@ pub enum ReplayTerminalStatus {
 /// bypass classification, etc.).
 #[derive(Debug, Clone, Serialize)]
 pub struct PerRequestRecord {
+    /// Authored request identity from an agentic trace. It is independent of
+    /// the internal UUID used by scheduler and KV state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_request_id: Option<String>,
     /// Session identifier from the trace, when present. Mirrors AIPerf's
     /// `conversation_id` field for the same purpose: bucket per-request
     /// records by multi-turn session. Placed first in the serialized output
@@ -546,6 +552,10 @@ pub struct PerRequestRecord {
     pub session_id: Option<String>,
     /// Zero-based turn index within `session_id`, when present.
     pub turn_index: Option<usize>,
+    /// Explicit authored turn index. Kept separate from the legacy
+    /// workload-driver `turn_index` so external joins do not infer identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authored_turn_index: Option<usize>,
     pub uuid: String,
     pub arrival_time_ms: f64,
     pub first_admit_ms: Option<f64>,
@@ -824,6 +834,7 @@ impl TraceCollector {
         self.requests.insert(
             uuid,
             TraceRequestStats {
+                logical_request_id: None,
                 arrival_time_ms,
                 first_admit_ms: None,
                 terminal_time_ms: None,
@@ -836,6 +847,7 @@ impl TraceCollector {
                 decode_worker_idx: None,
                 session_id: None,
                 turn_index: None,
+                authored_turn_index: None,
                 first_admission_reused_input_tokens: 0,
                 detail: self
                     .capture_per_request
@@ -862,6 +874,27 @@ impl TraceCollector {
         {
             stats.session_id = Some(session_id);
             stats.turn_index = Some(turn_index);
+        }
+    }
+
+    /// Attach the immutable authored identity carried by an agentic row.
+    /// Interactive replay enables per-request capture, while ordinary replay
+    /// pays no string-cloning cost when capture is disabled.
+    pub(crate) fn on_authored_identity(
+        &mut self,
+        uuid: Uuid,
+        logical_request_id: String,
+        session_id: String,
+        authored_turn_index: usize,
+    ) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.logical_request_id.get_or_insert(logical_request_id);
+            stats.session_id.get_or_insert(session_id);
+            stats.turn_index.get_or_insert(authored_turn_index);
+            stats.authored_turn_index.get_or_insert(authored_turn_index);
         }
     }
 
@@ -1417,8 +1450,10 @@ impl TraceCollector {
             let first_token_ms = stats.first_token_ms();
             let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
+                logical_request_id: stats.logical_request_id.clone(),
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
+                authored_turn_index: stats.authored_turn_index,
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
                 first_admit_ms: stats.first_admit_ms,
