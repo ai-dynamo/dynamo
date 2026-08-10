@@ -85,6 +85,9 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+# Test-only: captures emitted scoring rows so their required fields can be asserted.
+# Already a workspace dependency built for sibling crates, so this adds no new footprint.
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "policy_queue"
