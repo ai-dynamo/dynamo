@@ -11,6 +11,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     env_or_default,
     nullable_float,
+    parse_bool,
 )
 
 pytestmark = [
@@ -18,6 +19,19 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("TRUE", True), ("false", False), ("FALSE", False)],
+)
+def test_parse_bool(value, expected):
+    assert parse_bool(value) is expected
+
+
+def test_parse_bool_rejects_invalid_value():
+    with pytest.raises(argparse.ArgumentTypeError, match="expected 'true' or 'false'"):
+        parse_bool("yes")
 
 
 class TestEnvOrDefault:

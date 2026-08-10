@@ -11,6 +11,16 @@ from typing import Any, Callable, Optional, TypeVar, Union
 T = TypeVar("T")
 
 
+def parse_bool(value: str) -> bool:
+    """Parse a case-insensitive true or false CLI value."""
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected 'true' or 'false'")
+
+
 def split_served_model_names(served_model_name: Any) -> list[str]:
     """Split a ``--served-model-name`` value into individual names.
 

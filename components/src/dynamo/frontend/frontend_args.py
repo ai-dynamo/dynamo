@@ -24,6 +24,7 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    parse_bool,
 )
 
 from . import __version__
@@ -553,16 +554,18 @@ class FrontendArgGroup(ArgGroup):
             choices=["default", "fastokens", "basetenkenizer"],
         )
 
-        add_negatable_bool_argument(
+        add_argument(
             g,
             flag_name="--tokenizer-fallback",
             env_var="DYN_TOKENIZER_FALLBACK",
             default=True,
             help=(
                 "Fall back to HuggingFace when the selected fastokens or "
-                "basetenkenizer backend cannot load the model tokenizer. Disable "
-                "this option to fail during startup instead."
+                "basetenkenizer backend cannot load the model tokenizer. Set this "
+                "option to false to fail during startup instead."
             ),
+            arg_type=parse_bool,
+            metavar="{true,false}",
         )
 
         add_negatable_bool_argument(
