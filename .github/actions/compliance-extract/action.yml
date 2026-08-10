@@ -41,10 +41,6 @@ inputs:
     description: 'When "true", render with --make-efa so the licenses stage adds native EFA attribution (libfabric / aws-ofi-nccl via native_packages.yaml). MUST match the build job''s make_efa so the rendered Dockerfile (and thus the licenses-stage cache key) is identical — otherwise the extract cache-misses and rebuilds.'
     required: false
     default: 'false'
-  allow_license_policy_failure:
-    description: 'When "true", allow a non-zero license-policy result while retaining its log and marking the generated inventory. MUST match the build job input or the extract invalidates and re-runs the policy-gate layer.'
-    required: false
-    default: 'false'
   artifact_retention_days:
     description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
     required: false
@@ -132,7 +128,6 @@ runs:
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
-        ALLOW_LICENSE_POLICY_FAILURE: ${{ inputs.allow_license_policy_failure }}
       run: |
         mkdir -p /tmp/compliance
         # Reuse the warm cache the build just populated by matching ALL the
@@ -143,8 +138,6 @@ runs:
         #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
         #     pre_runtime COPYs from wheel_builder. We pass the same VALUES so the
         #     cache key lines up and the warm layers cache-hit.
-        #   - ALLOW_LICENSE_POLICY_FAILURE: the policy-gate layer consumes it
-        #     directly, so the extract must match the build job's behavior.
         # The warm cache is best-effort though: the shared buildkit pods GC under
         # concurrent load, so a stage can legitimately re-run here (seen post-merge
         # 2026-07-02). Pass the same IRSA secrets docker-remote-build passes so a
@@ -180,24 +173,12 @@ runs:
             --build-arg USE_SCCACHE=true \
             --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
-            --build-arg ALLOW_LICENSE_POLICY_FAILURE="${ALLOW_LICENSE_POLICY_FAILURE}" \
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \
             $SECRET_ARGS \
             .
-
-    # The licenses stage writes one marker per affected platform directory.
-    # Surface an advisory annotation while keeping this reporting step non-fatal.
-    - name: Report allowed license-policy failures
-      shell: bash
-      run: |
-        MARKERS=$(find /tmp/compliance -type f -name 'LICENSE-POLICY-FAILURE-ALLOWED.txt' -print)
-        if [ -n "${MARKERS}" ]; then
-          echo "::warning::The runtime image contains an explicitly allowed license-policy failure; inspect the uploaded compliance inventory."
-          printf '%s\n' "${MARKERS}"
-        fi
 
     # Name the OSRB CSV + CycloneDX per-arch: osrb-<image>-<arch>-<sha8>.{csv,cdx.json}.
     # The generator writes generic names (osrb-deps.csv / osrb.cdx.json); we add
