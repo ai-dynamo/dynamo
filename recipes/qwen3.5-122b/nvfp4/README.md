@@ -38,16 +38,13 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 ## Prerequisites
 
 1. **Dynamo Platform installed** on the target cluster with DGD CRDs served —
-   see [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
-2. **NGC/nvcr image pull access** — an NGC pull secret named `nvcr-secret`
-   attached to the namespace's default service account (the deploy manifests pull
-   from `nvcr.io/nvidia/ai-dynamo`).
-3. **Hugging Face token** with access to `nvidia/Qwen3.5-122B-A10B-NVFP4`, stored
+   see [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
+2. **Hugging Face token** with access to `nvidia/Qwen3.5-122B-A10B-NVFP4`, stored
    as `hf-token-secret` — used by both the model-download Job and the serving
    workers.
-4. **`model-cache` PVC** (ReadWriteMany) populated with the model, or permission
+3. **`model-cache` PVC** (ReadWriteMany) populated with the model, or permission
    to create and populate it via the manifests in `model-cache/`.
-5. **(disaggregated only)** GPU-local RDMA NICs exposed to pods (e.g. an
+4. **(disaggregated only)** GPU-local RDMA NICs exposed to pods (e.g. an
    `rdma/ib` device plugin) for NIXL KV transfer.
 
 ## Quick Start
@@ -61,20 +58,6 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
   -n ${NAMESPACE}
 ```
-
-> [!NOTE]
-> The deploy manifests pull the runtime image from `nvcr.io/nvidia/ai-dynamo`
-> and do not set `imagePullSecrets`, so the target namespace must already have
-> nvcr/NGC pull access. If the cluster does not inject a default pull secret,
-> create one and attach it to the namespace's default service account:
->
-> ```bash
-> kubectl create secret docker-registry nvcr-secret \
->   --docker-server=nvcr.io --docker-username='$oauthtoken' \
->   --docker-password="<your-NGC-API-key>" -n ${NAMESPACE}
-> kubectl patch serviceaccount default -n ${NAMESPACE} \
->   -p '{"imagePullSecrets":[{"name":"nvcr-secret"}]}'
-> ```
 
 ### 2. Create storage
 
@@ -125,6 +108,12 @@ is system throughput / GPUs. Aggregated runs `replicas: 2`.
 |--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
 | `vllm/agg-b200-agentic/deploy.yaml` | B200 | AGG, 2x TP1 (2 GPU) | agentic | no | 50 | 52.4 | 246 ms | 1173.2 |
 | `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P2D (3 GPU) | agentic | no | 60 | 51.4 | 1353 ms | 916.6 |
+
+**Aggregated is the recommended profile.** Disaggregated is 22% lower per GPU here and is
+provided as a functional reference rather than a throughput recommendation: this workload
+runs at a 90% KV-cache hit rate, so the dedicated prefill worker has little to do while
+still emitting no output tokens. Choose it when prefill and decode must scale
+independently, or for a workload with a lower cache-hit rate.
 
 ## Limitations
 
