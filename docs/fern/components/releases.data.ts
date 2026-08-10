@@ -76,7 +76,7 @@ export const MAIN_TOT: BackendPins = {
   vllm: "0.26.0",
   nixlSglang: "1.3.0",
   nixlTrtllm: "1.3.1",
-  nixlVllm: "1.3.1",
+  nixlVllm: "1.3.2",
 };
 
 const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
