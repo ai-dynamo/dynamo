@@ -27,10 +27,41 @@ use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
 };
+use crate::router_hint::RouterHintRootCandidates;
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
+#[derive(Debug, Clone, Default)]
+pub struct RouterHintExtensions {
+    pub block_hashes: Vec<(usize, ExternalSequenceBlockHash)>,
+    pub owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize>,
+}
+
+impl RouterHintExtensions {
+    fn record_match<'a>(
+        &mut self,
+        pos: usize,
+        child_hash: ExternalSequenceBlockHash,
+        owners: impl IntoIterator<Item = &'a WorkerWithDpRank>,
+    ) {
+        match self
+            .block_hashes
+            .binary_search_by_key(&pos, |(existing_pos, _)| *existing_pos)
+        {
+            Ok(idx) => {
+                if self.block_hashes[idx].1 != child_hash {
+                    return;
+                }
+            }
+            Err(idx) => self.block_hashes.insert(idx, (pos, child_hash)),
+        }
+
+        for owner in owners {
+            self.owner_prefix_blocks.insert(*owner, pos + 1);
+        }
+    }
+}
 type WorkerBlockIndex =
     FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
 
@@ -168,6 +199,8 @@ impl LowerTierContinuation {
 pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
+    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
+    pub router_hint_extensions: Option<RouterHintExtensions>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -396,6 +429,21 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
+        self.query_match_details_with_options(local_hashes, continuations, false)
+    }
+
+    pub fn query_match_details_with_options<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        retain_router_hint_extensions: bool,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        let mut router_hint_extensions =
+            retain_router_hint_extensions.then(RouterHintExtensions::default);
+
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
         // walking from that position. The set of positions is fixed — the walk
@@ -450,6 +498,7 @@ impl LowerTierIndexer {
                     next_breakpoint,
                     &mut overflow,
                     &mut final_states,
+                    router_hint_extensions.as_mut(),
                 );
             }
 
@@ -464,7 +513,10 @@ impl LowerTierIndexer {
 
         // Convert final_states into the result. Workers that never appeared in
         // final_states (e.g. empty sequence) keep their original continuation.
-        let mut results = LowerTierMatchDetails::default();
+        let mut results = LowerTierMatchDetails {
+            router_hint_extensions,
+            ..Default::default()
+        };
         for (worker, continuation) in continuations {
             let (final_pos, final_hash) = final_states
                 .get(worker)
@@ -640,6 +692,7 @@ fn advance_state_to_breakpoint(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
+    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
 ) {
     let mut cur_pos = start_pos;
     let mut cur_hash = start_hash;
@@ -658,6 +711,7 @@ fn advance_state_to_breakpoint(
             next_breakpoint,
             overflow,
             final_states,
+            router_hint_extensions.as_deref_mut(),
         );
         return;
     }
@@ -719,7 +773,11 @@ fn advance_state_to_breakpoint(
             }
         }
 
-        cur_hash = Some(edge.child_hash());
+        let child_hash = edge.child_hash();
+        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+            extensions.record_match(cur_pos, child_hash, active.iter());
+        }
+        cur_hash = Some(child_hash);
         cur_pos += 1;
 
         // If we're down to one worker, switch to the scalar loop for the
@@ -735,6 +793,7 @@ fn advance_state_to_breakpoint(
                 next_breakpoint,
                 overflow,
                 final_states,
+                router_hint_extensions.as_deref_mut(),
             );
             return;
         }
@@ -767,6 +826,7 @@ fn advance_single_worker(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
+    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
 ) {
     while *cur_pos < next_breakpoint {
         let Some(edge) = index.edges.get(&TransitionKey {
@@ -782,7 +842,11 @@ fn advance_single_worker(
             return;
         }
 
-        *cur_hash = Some(edge.child_hash());
+        let child_hash = edge.child_hash();
+        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+            extensions.record_match(*cur_pos, child_hash, std::iter::once(&worker));
+        }
+        *cur_hash = Some(child_hash);
         *cur_pos += 1;
     }
 

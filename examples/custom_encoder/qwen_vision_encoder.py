@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from transformers import AutoTokenizer
 
-from dynamo.vllm.multimodal_utils.vision_encoder_backend import VisionEncoderBackend
+from dynamo.vllm.multimodal_utils.custom_encoder import VisionEncoderBackend
 
 
 class QwenVisionEncoderBackend(VisionEncoderBackend):

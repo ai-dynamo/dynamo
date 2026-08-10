@@ -18,15 +18,21 @@ You can provide multimodal inputs in the following ways:
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Full support for all image models |
 | **Image** | Pre-computed Embeddings (.safetensors) | Yes | Yes | Direct embedding files |
-| **Video** | HTTP/HTTPS URL | No | No | Not implemented |
+| **Video** | HTTP/HTTPS URL | Yes | Yes | Decoded per request; H.264/H.265 on NVDEC, other codecs via the TensorRT-LLM loader |
 | **Audio** | HTTP/HTTPS URL | No | No | Not implemented |
 
 ### Supported URL Formats
 
 | Format | Example | Description |
 |--------|---------|-------------|
-| **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
+| **HTTP/HTTPS** | `https://example.com/image.jpg` | Remote media files |
 | **Pre-computed Embeddings** | `/path/to/embedding.safetensors` | Local embedding files (.safetensors only) |
+
+> [!NOTE]
+> Media URLs are validated against a default-deny policy. `https://` and `data:` sources
+> pass; plain `http://` and hostnames that resolve to private or loopback addresses are
+> refused. To fetch media over the cluster's internal network, set
+> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
 
 ## Deployment Patterns
 
@@ -55,13 +61,13 @@ TensorRT-LLM multimodal KV routing uses the Rust frontend to give the router and
 
 1. The frontend computes an `mm_hash` for each image.
 2. It represents the image identity as hash-derived pad-value tokens in the routing view.
-3. The KV router selects the worker with the highest block overlap.
+3. The KV router credits that overlap in its combined prefill-and-decode cost and selects the lowest-cost eligible worker.
 4. The frontend forwards each hash as `multi_modal_uuids`.
 5. The worker associates the UUID with the matching image-token run in its KV events.
 
-For HTTP inputs, routing identity is based on the full image URL by default. Set `--frontend-decoding` to hash decoded image content when different URLs can refer to identical images.
+For HTTP inputs, routing identity is based on the exact full image URL, including the query string, by default. Set `--frontend-decoding` to hash decoded image content when different URLs can refer to identical images.
 
-Workers must enable KV event publishing and block reuse. The provided launcher configures `--publish-events-and-metrics`, `enable_block_reuse: true`, and a KV-routing frontend:
+Workers must enable KV event publishing and block reuse. The provided launcher configures `--publish-kv-events`, `enable_block_reuse: true`, and a KV-routing frontend:
 
 ```bash
 cd $DYNAMO_HOME
@@ -169,7 +175,7 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 }'
 ```
 
-For a large model like `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, a multi-node setup is required for disaggregated serving (see [Multi-node Deployment](#multi-node-deployment-slurm) below), while aggregated serving can run on a single node. This is because the model with a disaggregated configuration is too large to fit on a single node's GPUs. For instance, running this model in disaggregated mode requires 2 nodes with 8xH200 GPUs or 4 nodes with 4xGB200 GPUs.
+For a large model like `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, a multi-node setup is required for disaggregated serving (see [Disaggregated Serving](#disaggregated-serving)), while aggregated serving can run on a single node. This is because the model with a disaggregated configuration is too large to fit on a single node's GPUs. For instance, running this model in disaggregated mode requires 2 nodes with 8xH200 GPUs or 4 nodes with 4xGB200 GPUs.
 
 ## Full E/P/D Flow (Image URLs)
 
@@ -434,8 +440,11 @@ await register_model(
 
 ## Known Limitations
 
-- **No video support** - No video encoder implementation
 - **No audio support** - No audio encoder implementation
+- **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
+  runtime image ships no software video decoder. This needs a GPU with a video
+  decode engine and a container granted the `video` driver capability — see
+  [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
 - **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibility with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.

@@ -44,9 +44,21 @@ The `KvRouter` provides the following methods:
 
 ### Setup
 
-First, launch your backend engines:
+First, launch at least two backend engines so the router has a meaningful
+selection to make. Each worker needs a unique system port and KV event endpoint:
+
 ```bash
-python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
+export PYTHONHASHSEED=0
+
+DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --block-size 64 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
+
+DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --block-size 64 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 ```
 
 ### Example Script
@@ -59,14 +71,14 @@ from dynamo.llm import KvRouter, KvRouterConfig
 async def main():
     # Get runtime and create endpoint
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "etcd", "nats")
+    runtime = DistributedRuntime(loop, "etcd", "tcp")
     endpoint = runtime.endpoint("dynamo.backend.generate")
 
     # Create KV router
     kv_router_config = KvRouterConfig()
     router = KvRouter(
         endpoint=endpoint,
-        block_size=16,
+        block_size=64,
         kv_router_config=kv_router_config
     )
 
@@ -79,7 +91,7 @@ async def main():
     # Generate with per-request routing override
     stream = await router.generate(
         token_ids=token_ids,
-        model="meta-llama/Llama-2-7b-hf",
+        model="Qwen/Qwen3-0.6B",
         stop_conditions={
             "max_tokens": 20,        # Generate exactly 20 tokens
             "ignore_eos": True,      # Don't stop at EOS token
@@ -180,21 +192,37 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 ### 2. Manual State Management (Advanced)
 Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, _dp_rank, overlap = await router.best_worker(
+worker_id, dp_rank, overlap = await router.best_worker(
     tokens,
     request_id="req-123",
-    update_indexer=True,  # needed for approximate mode (use_kv_events=False)
 )
-response = await client.generate(tokens, request_id="req-123")
-# await anext(response)  # Get first token
-await router.mark_prefill_complete("req-123")  # After first token
-# async for _ in response:  # Continue generating
-#     ...
-await router.free("req-123")  # After completion
+client = await endpoint.client()
+request = {
+    "model": "Qwen/Qwen3-0.6B",
+    "token_ids": tokens,
+    "stop_conditions": {"max_tokens": 20},
+    "sampling_options": {},
+    "routing": {"dp_rank": dp_rank},
+}
+
+stream = await client.direct(request, worker_id)
+try:
+    first = await anext(stream)
+    if first.is_error():
+        raise RuntimeError(f"Worker returned an error: {first.comments()}")
+    print(first.data())
+    await router.mark_prefill_complete("req-123")
+    async for response in stream:
+        if response.is_error():
+            raise RuntimeError(f"Worker returned an error: {response.comments()}")
+        print(response.data())
+finally:
+    await router.free("req-123")
 ```
 - **Best for**: Custom request handling with router state tracking
 - **Requires**: Calling `mark_prefill_complete()` and `free()` at correct lifecycle points
-- **Approximate mode**: Pass `update_indexer=True` when `use_kv_events=False` so the router learns from manual worker selections
+- **Approximate mode**: Pass `update_indexer=True` to `best_worker()` when `use_kv_events=False` so the router learns from manual worker selections
+- **Direct dispatch**: `Client.direct()` targets the returned worker instance; include the returned DP rank in the preprocessed request's `routing` field
 - **Caution**: Incorrect lifecycle management degrades load balancing accuracy
 
 ### 3. Hierarchical Router Probing
@@ -240,12 +268,12 @@ from dynamo.llm import KvRouter, KvRouterConfig
 async def minimize_ttft_routing():
     # Setup router
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "etcd", "nats")
+    runtime = DistributedRuntime(loop, "etcd", "tcp")
     endpoint = runtime.endpoint("dynamo.backend.generate")
 
     router = KvRouter(
         endpoint=endpoint,
-        block_size=16,
+        block_size=64,
         kv_router_config=KvRouterConfig()
     )
 
@@ -264,7 +292,7 @@ async def minimize_ttft_routing():
     # Route directly to the selected worker
     stream = await router.generate(
         token_ids=token_ids,
-        model="meta-llama/Llama-2-7b-hf",
+        model="Qwen/Qwen3-0.6B",
         worker_id=best_worker['worker_id'],  # Force routing to optimal worker
         stop_conditions={"max_tokens": 20}
     )
@@ -306,4 +334,5 @@ For deployments with multiple worker pools, the **Global Router** enables hierar
 
 - **[Router README](overview.md)**: Quick start guide for the KV Router
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and production setup
+- **[Prioritize Premium Requests with Policy Classes](deficit-round-robin.md#prioritize-premium-requests-with-policy-classes)**: Give premium traffic a larger service share while regular traffic continues to progress
 - **[Router Design](router-design.md)**: Architecture details and event transport modes

@@ -6,14 +6,16 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::KvRouterConfig;
+use crate::identity::RoutingPartitionRef;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
+use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig};
+use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerPolicyFactory};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -29,6 +31,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
+    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
 }
 
 impl SelectionServiceBuilder {
@@ -40,6 +43,7 @@ impl SelectionServiceBuilder {
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
+            worker_selection_policy_factory: None,
         }
     }
 
@@ -61,6 +65,21 @@ impl SelectionServiceBuilder {
 
     pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
         self.selection_cache = config;
+        self
+    }
+
+    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
+    where
+        F: for<'a> Fn(
+                &KvRouterConfig,
+                &'static str,
+                RoutingPartitionRef<'a>,
+            ) -> WorkerSelectionPolicy
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.worker_selection_policy_factory = Some(Box::new(factory));
         self
     }
 
@@ -89,6 +108,7 @@ impl SelectionServiceBuilder {
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
+            self.worker_selection_policy_factory,
             self.selection_cache,
             tracking_hash,
         ));
@@ -128,6 +148,7 @@ impl SelectionServiceBuilder {
             core,
             peer_manager,
             replica_runtime,
+            replica_sync_port: self.replica_sync_port,
             cancel_token,
         })
     }
@@ -176,6 +197,7 @@ pub struct SelectionService {
     core: Arc<SelectionCore>,
     peer_manager: Option<PeerManager>,
     replica_runtime: Option<ReplicaSyncRuntime>,
+    replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
 }
 
@@ -195,6 +217,7 @@ impl SelectionService {
             )),
             peer_manager: None,
             replica_runtime: None,
+            replica_sync_port: None,
             cancel_token,
         }
     }
@@ -204,6 +227,19 @@ impl SelectionService {
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         self.core.upsert_worker(req).await
+    }
+
+    /// Whether the configured scheduling policy enables queueing for `model_name`.
+    pub fn queueing_enabled(
+        &self,
+        model_name: &str,
+    ) -> Result<bool, crate::scheduling::RouterPolicyConfigError> {
+        self.core.queueing_enabled(model_name)
+    }
+
+    /// The port this service uses for replica synchronization, if enabled.
+    pub fn replica_sync_port(&self) -> Option<u16> {
+        self.replica_sync_port
     }
 
     pub async fn patch_worker(
@@ -425,6 +461,7 @@ mod tests {
         assert!(failed.is_err());
 
         let service = build_on_port(port).await;
+        assert_eq!(service.replica_sync_port(), Some(port));
         let weak_core = Arc::downgrade(&service.core);
         service.shutdown().await;
         let replacement = build_on_port(port).await;

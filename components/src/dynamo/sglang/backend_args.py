@@ -142,11 +142,25 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--enable-rl",
             env_var="DYN_SGL_ENABLE_RL",
             default=False,
-            help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
+            help="Enable RL metadata upload support.",
+        )
+        add_argument(
+            g,
+            flag_name="--engine-route",
+            env_var="DYN_SGLANG_ENGINE_ROUTES",
+            default=[],
+            dest="engine_routes",
+            action="append",
+            help=(
+                "Expose a trusted SGLang method under /engine/<path>. Use "
+                "'<path>[=<method>][:engine|tm]'; the target defaults to Engine. "
+                "May be repeated. DYN_SGLANG_ENGINE_ROUTES accepts "
+                "whitespace-separated descriptors."
+            ),
         )
 
-        # Topology constraint: rejecting --frontend-decoding combined with an
-        # EPD multimodal role happens in DynamoSGLangConfig.validate() below.
+        # Topology constraints for --frontend-decoding are enforced in
+        # DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
 
         add_argument(
@@ -179,6 +193,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    engine_routes: list[str]
     frontend_decoding: bool = False
     sglang_trace_level: int
 
@@ -213,15 +228,11 @@ class DynamoSGLangConfig(ConfigBase):
 
     def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (
-            self.multimodal_encode_worker
-            or self.multimodal_worker
-            or self.dedicated_mm_encoder
+            self.multimodal_worker or self.dedicated_mm_encoder
         ):
             raise ValueError(
-                "--frontend-decoding is incompatible with the EPD multimodal topology "
-                "(--disaggregation-mode=encode or --dedicated-mm-encoder). "
-                "The encode worker needs URLs to run "
-                "MMEncoder, while --frontend-decoding ships pre-decoded pixels. "
-                "Use --frontend-decoding on a native worker that does not use "
-                "the dedicated encode-worker topology instead."
+                "--frontend-decoding is not supported on internal EPD workers "
+                "(--dedicated-mm-encoder / --multimodal-worker). In an EPD "
+                "deployment, pass the flag only to the frontend-facing worker "
+                "using --disaggregation-mode=encode."
             )

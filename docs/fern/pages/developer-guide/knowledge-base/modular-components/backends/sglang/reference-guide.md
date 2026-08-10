@@ -47,6 +47,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../../../../use-cases/diffusion/workflows/text-to-video.md#sglang) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
 | `--disagg-config-key` | `DYN_SGL_DISAGG_CONFIG_KEY` | `None` | Key to select from disaggregation config (e.g., `prefill`, `decode`) |
+| `--engine-route` | `DYN_SGLANG_ENGINE_ROUTES` | `None` | Expose a startup-allowlisted SGLang Engine or tokenizer-manager method under `/engine/<path>`; repeat the flag or separate environment descriptors with whitespace |
 
 > [!NOTE]
 > `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
@@ -138,6 +139,39 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 | `/engine/control/update_weights_from_distributed` | Update model weights from distributed source |
 | `/engine/control/update_weights_from_ipc` | Update model weights from IPC payload |
 | `/engine/control/update_weight_version` | Update weight version metadata |
+
+### Configurable SGLang Method Routes
+
+Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang methods on a worker's system server without changing Dynamo. Each descriptor uses this grammar:
+
+```text
+<path>[=<method>][:engine|tm]
+```
+
+- `<path>` becomes `/engine/<path>` and can contain `/`-separated segments.
+- `<method>` defaults to `<path>`. Use `server_info=get_server_info` to expose an alias. A path containing `/` therefore needs an explicit method.
+- The target defaults to the `sgl.Engine` instance. Set `:tm` to target its tokenizer manager.
+- Repeat `--engine-route` for multiple routes. Separate multiple `DYN_SGLANG_ENGINE_ROUTES` descriptors with whitespace.
+
+For per-worker generation control with NVIDIA Collective Communications Library (NCCL) weight updates, expose this allowlist:
+
+```bash
+export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info pause_generation:tm flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group continue_generation:tm"
+python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
+```
+
+Call these routes on each worker's system-server address. Send inference requests to the Dynamo frontend and reserve the system server for worker control.
+
+SGLang 0.5.15 exposes `get_internal_state` only on the tokenizer manager, where it returns a list with one state dictionary per data-parallel rank. The Engine `get_server_info` adapter merges the server arguments and scheduler topology into the top-level dictionary expected by control clients, so `/engine/server_info` returns that dictionary directly without a `result` envelope.
+
+The `update_weights_from_distributed:tm` form accepts SGLang's tokenizer-manager request schema, including `weight_version`. The public SGLang Engine wrapper omits that field. This configurable `/engine/update_weights_from_distributed` route is separate from Dynamo's fixed `/engine/control/update_weights_from_distributed` route.
+
+Configured Engine methods receive JSON object keys as keyword arguments. For tokenizer-manager methods with an annotated dataclass or msgspec request, Dynamo constructs the request object from the JSON body and supplies `None` for an HTTP request parameter when the SGLang signature requires one. Async methods are awaited, sync Engine wrappers run outside the server loop, and nested results are converted to JSON. Empty request bodies become `{}`. Configured routes accept the ordinary HTTP methods handled by the Dynamo system server.
+
+Dynamo parses and resolves the complete route list during worker startup. Startup fails for malformed descriptors, unknown targets, duplicate paths, private methods, missing methods, or non-callable attributes. An unconfigured method has no route. Request content cannot select or replace the method captured for a configured path, and failure values such as `{"success": false}` remain failures in the response.
+
+> [!WARNING]
+> Treat each configured descriptor as remote administrative access to that SGLang method. Expose only the required allowlist and restrict network access to the Dynamo system server.
 
 ## See Also
 

@@ -18,8 +18,9 @@ use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdvisorySchedulingResponse, KvSchedulerError, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -48,7 +49,7 @@ impl<P, C, Sel, RF> LocalScheduler<P, C, Sel, RF>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
     RF: OverlapScoresRefresh + 'static,
 {
     fn make_scheduling_request(
@@ -77,6 +78,8 @@ where
             policy_class,
             session_id,
             overlap,
+            router_hint_candidates,
+            retain_router_hint_chain,
             shared_cache_hits,
         } = request;
         let request = SchedulingRequest {
@@ -95,6 +98,8 @@ where
             policy_class,
             session_id,
             overlap,
+            router_hint_candidates,
+            retain_router_hint_chain,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
             resp_tx,
@@ -141,6 +146,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -157,6 +163,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            available_worker_provider,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -176,6 +183,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -191,6 +199,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            available_worker_provider,
         )?);
 
         if monitor_worker_configs {
@@ -317,6 +326,16 @@ where
         self.queue.select_without_admission(request).await
     }
 
+    /// Install the observer for admitted selections that sacrifice KV overlap.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_non_max_overlap_selection_observer(
+        &self,
+        observer: NonMaxOverlapSelectionObserver,
+    ) -> bool {
+        self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -440,6 +459,8 @@ where
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             routing_constraints,
             router_config_override: router_config_override.cloned(),
             lora_name,
@@ -492,6 +513,22 @@ where
             Some(worker) => self.queue.update_worker(worker).await,
             None => self.queue.update().await,
         }
+        Ok(())
+    }
+
+    /// Release a booking only if it still belongs to `worker`.
+    ///
+    /// An ownership mismatch is a harmless no-op, which makes this safe for
+    /// delayed cleanup that captured the worker when it acquired the booking.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        let request_id = request_id.to_string();
+        self.slots
+            .free_if_worker(&request_id, worker, Instant::now())?;
+        self.queue.update_worker(worker).await;
         Ok(())
     }
 
@@ -583,7 +620,7 @@ impl<P, C, Sel> LocalScheduler<P, C, Sel, NoopOverlapScoresRefresh>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new_without_overlap_refresh_with_policy_profile(
@@ -594,6 +631,7 @@ where
         selector: Sel,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -609,6 +647,7 @@ where
             prefill_load_estimator,
             None,
             overloaded_worker_provider,
+            available_worker_provider,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -678,6 +717,7 @@ where
             prefill_load_estimator,
             None,
             overloaded_worker_provider,
+            None,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -844,6 +884,8 @@ mod tests {
             policy_class: None,
             session_id: None,
             overlap: OverlapSignals::default(),
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             shared_cache_hits: None,
         }
     }

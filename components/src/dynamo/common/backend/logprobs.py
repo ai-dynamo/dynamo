@@ -76,7 +76,11 @@ def extract_from_completion_output(
     by position, so emitting a shorter array would misalign every later
     token. Bail on the whole chunk instead.
     """
-    if getattr(output, "logprobs", None) is None:
+    # An empty list here means the client asked for no logprobs -- TRT-LLM leaves
+    # the field at `[]` rather than None. Testing `is None` would miss that case
+    # and run on to the `token_ids` copy below, which grows with the request and
+    # is discarded a few lines later.
+    if not getattr(output, "logprobs", None):
         return None, None
 
     token_ids = list(getattr(output, "token_ids", None) or [])
@@ -154,7 +158,7 @@ def extract_prompt_logprobs_from_completion_output(
     Returns ``None`` if the engine didn't compute prompt logprobs.
     """
     prompt_logprobs = getattr(output, "prompt_logprobs", None)
-    if prompt_logprobs is None:
+    if not prompt_logprobs:
         return None
 
     payload: list[Optional[dict[str, dict[str, Any]]]] = []

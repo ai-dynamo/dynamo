@@ -17,6 +17,28 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v140"></a>
+
+## v1.4.0 (upcoming)
+
+4 entries — 2 behavioral changes, 2 removed.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Audit subsystem migrated into request trace** (`"log_type":"audit"` records and the `"Audit sinks ready"` readiness marker -> records carrying `"schema":"dynamo.request.trace.v1"` and the `"Request trace sinks ready"` marker); payload logging is unified under the request-trace pipeline and the standalone audit module is gone ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390), [#11180](https://github.com/ai-dynamo/dynamo/pull/11180)).
+
+  > **Migrate:** Update log pipelines that match on the `"Audit sinks ready"` marker or the `"log_type":"audit"` field to the new marker and the `"schema":"dynamo.request.trace.v1"` field. The `DYN_AUDIT_*` environment variables are still honored as legacy aliases of their request-trace replacements (for example `DYN_AUDIT_SINKS` -> `DYN_REQUEST_TRACE_SINKS`, `DYN_AUDIT_FORCE_LOGGING` -> `DYN_REQUEST_TRACE_RECORDS=request_payload`); move configuration to the new names.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **HTTP header capture in trace records is an explicit fail-closed allowlist**: request headers appear in `request_payload` records only when named in `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`; when the variable is unset or empty, no headers are captured ([#11386](https://github.com/ai-dynamo/dynamo/pull/11386)).
+
+  > **Migrate:** Set `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` to the comma-separated header names you need recorded. Captured values are unredacted, so avoid allowlisting credential-bearing headers.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the deprecated multimodal worker flags** (`--multimodal-worker` / `--multimodal-encode-worker` -> `--enable-multimodal` with `--disaggregation-mode` / `--dedicated-mm-encoder`) across the vLLM, SGLang, and TensorRT-LLM backends; deprecated in v1.3.0 ([#11887](https://github.com/ai-dynamo/dynamo/pull/11887)).
+
+  > **Migrate:** On vLLM and SGLang, replace the removed flags with `--enable-multimodal` plus the appropriate `--disaggregation-mode` / `--dedicated-mm-encoder` combination. On TensorRT-LLM, use `--modality multimodal`, which remains the supported path.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the deprecated vLLM worker role flags** (`--is-prefill-worker` / `--is-decode-worker` -> `--disaggregation-mode`) ([#12089](https://github.com/ai-dynamo/dynamo/pull/12089)).
+
+  > **Migrate:** Pass `--disaggregation-mode prefill` or `--disaggregation-mode decode` instead of the removed boolean flags.
+
 <a id="v130"></a>
 
 ## v1.3.0 — Jul 20, 2026
