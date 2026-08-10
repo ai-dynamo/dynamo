@@ -97,7 +97,12 @@ notices. Two rules:
 1. **Operators: launch unattended runs inside your harness's goal mode.** Goal mode is an operator action at launch,
    not something these instructions can enable mid-run. On Codex CLI, wrap the run in `/goal` with a token budget. On
    Claude Code (v2.1.139+), wrap it in `/goal`; its completion condition is model-evaluated and may include a bound
-   such as "or stop after N turns" as part of the condition text (a soft limit, not a hard budget). If an unattended
+   such as "or stop after N turns" as part of the condition text (a soft limit, not a hard budget). A validated
+   condition template: "Test every lever family that is testable within the authorized budget. Never stop because a
+   report exists. Parked on pending asks with nothing else testable is a valid pause, not completion. Valid stops: an
+   operator-granted stop-request, the authorized budget exhausted, access lost, or operator interrupt." Always name
+   the budget (GPU-hours, wall-clock, failed-deployment limit) in the condition; a bare "never stop" silently relies
+   on credential expiry as its budget. If an unattended
    run is requested and no goal mode or external loop is in place, say so at the start rather than discovering it at
    the first stall.
 2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
