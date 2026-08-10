@@ -949,7 +949,18 @@ impl HttpService {
         &self.route_docs
     }
 
+    /// Updates runtime availability for model-backed endpoints.
+    ///
+    /// Batch API availability is configured when the service is built and cannot be changed here.
     pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+        if endpoint_type == EndpointType::Batch {
+            tracing::warn!(
+                enable,
+                "batch endpoint availability is fixed when the HTTP service is built; ignoring runtime update"
+            );
+            return;
+        }
+
         self.state.flags.set(&endpoint_type, enable);
         tracing::info!(
             "{} endpoints {}",
@@ -1453,6 +1464,20 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[test]
+    fn batch_endpoint_enablement_is_fixed_at_build_time() {
+        let disabled = HttpService::builder().build().unwrap();
+        disabled.enable_model_endpoint(EndpointType::Batch, true);
+        assert!(!disabled.state.flags.get(&EndpointType::Batch));
+
+        let enabled = HttpService::builder()
+            .enable_batch_endpoints(true)
+            .build()
+            .unwrap();
+        enabled.enable_model_endpoint(EndpointType::Batch, false);
+        assert!(enabled.state.flags.get(&EndpointType::Batch));
     }
 
     #[tokio::test]
