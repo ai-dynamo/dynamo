@@ -601,6 +601,7 @@ mod tests {
         let recovered = state.reconcile(&active, now + Duration::from_millis(2));
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
+        assert_eq!(recovered[0].waited, Duration::from_millis(2));
         assert!(
             state
                 .reconcile(&active, now + Duration::from_millis(3))
@@ -629,6 +630,7 @@ mod tests {
         let recovered = state.reconcile(&active, missing_since + SOURCE_JOIN_GRACE);
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
+        assert_eq!(recovered[0].waited, SOURCE_JOIN_GRACE);
     }
 
     #[test]
