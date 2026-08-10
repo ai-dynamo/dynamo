@@ -10,6 +10,10 @@ import numpy as np
 
 from dynamo.common.http import fetch_bytes
 from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    audio_decoder_missing,
+)
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -145,6 +149,18 @@ class AudioLoader:
             return waveform, sr
         except FileNotFoundError:
             raise
+        except ImportError as exc:
+            # The image ships no audio decoder (PyAV is deliberately omitted).
+            # vLLM's own hint here is "pip install vllm[audio]", which drags in
+            # an unpinned stack; point at the validated bounded install
+            # instead. NVDEC never decodes audio, so there is no hardware
+            # alternative to mention.
+            logger.error("No audio decoder available loading '%s'", audio_url)
+            raise audio_decoder_missing("vllm", cause=str(exc)) from exc
+        except MissingMediaDecoderError:
+            # Deployment configuration, not a bad request: the generic wrap
+            # below would turn it into a ValueError that handlers map to 4xx.
+            raise
         except Exception as exc:
             logger.error("Error loading audio from %s: %s", audio_url, exc)
             raise ValueError(f"Failed to load audio from {audio_url}: {exc}") from exc
@@ -206,6 +222,7 @@ class AudioLoader:
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
         loaded_audio: list[tuple[np.ndarray, float]] = []
         collective_exceptions: list[str] = []
+        decoder_error: MissingMediaDecoderError | None = None
         for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -215,9 +232,17 @@ class AudioLoader:
                 collective_exceptions.append(
                     f"Failed to load audio from {source[:80]}...: {result}\n"
                 )
+                if decoder_error is None and isinstance(
+                    result, MissingMediaDecoderError
+                ):
+                    decoder_error = result
                 continue
             loaded_audio.append(result)
 
+        if decoder_error is not None:
+            # A missing decoder is deployment configuration; folding it into the
+            # joined-string Exception would strip the type the caller needs.
+            raise decoder_error
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))
 
