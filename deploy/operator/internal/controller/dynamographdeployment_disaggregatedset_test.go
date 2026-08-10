@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 )
@@ -114,6 +115,18 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 	require.NoError(t, workloads.Get(t.Context(), client.ObjectKeyFromObject(current), persisted))
 	require.Equal(t, "label", persisted.GetLabels()["example.com/keep"])
 	require.Equal(t, "annotation", persisted.GetAnnotations()["example.com/desired"])
+}
+
+func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {
+	service := &corev1.Service{}
+	setDisaggregatedSetServiceSelector(service, "demo-ds", "prefill", "abc12345")
+
+	require.True(t, isDisaggregatedSetServiceSelector(service))
+	require.Equal(t, map[string]string{
+		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
+		disaggregatedsetv1.RoleLabelKey:     "prefill",
+		disaggregatedsetv1.RevisionLabelKey: "abc12345",
+	}, service.Spec.Selector)
 }
 
 func TestDisaggregatedSetCleanupUsesAPICapabilityWhenSelectionIsDisabled(t *testing.T) {

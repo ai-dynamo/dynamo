@@ -29,6 +29,7 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -147,11 +148,14 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 func TestComponentFallbackPreservesEligibilityConditionOnError(t *testing.T) {
 	reconcileErr := errors.New("worker hash update failed")
 	dgd := newEnvtestDSHappyPathDGD("fallback-error")
-	dgd.Namespace = "default"
+	dgd.Namespace = testNamespace
 	dgd.Generation = 7
 	hashes, err := desiredWorkerHashes(dgd)
 	require.NoError(t, err)
-	dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] = hashes.v1
+	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	require.NotEqual(t, legacyHash, hashes.v2)
+	dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] = legacyHash
 
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -166,7 +170,7 @@ func TestComponentFallbackPreservesEligibilityConditionOnError(t *testing.T) {
 	operatorConfig.Namespace.Restricted = dgd.Namespace
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:      kubeClient,
-		Recorder:    record.NewFakeRecorder(1),
+		Recorder:    record.NewFakeRecorder(10),
 		Config:      operatorConfig,
 		RBACManager: &MockRBACManager{},
 		RuntimeConfig: &commonController.RuntimeConfig{

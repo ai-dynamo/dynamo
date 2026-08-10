@@ -181,6 +181,15 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			Expect(owner.Kind).To(Equal(dynamoGraphDeploymentKind))
 			Expect(owner.UID).To(Equal(current.UID))
 		}
+		typedDS := fetchTypedDisaggregatedSet(ctx, current)
+		activeRevision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
+		for name := range serviceUIDs {
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
+			Expect(service.Spec.Selector).To(HaveKeyWithValue(disaggregatedsetv1.SetNameLabelKey, disaggregatedSetName(current)))
+			Expect(service.Spec.Selector).To(HaveKeyWithValue(disaggregatedsetv1.RevisionLabelKey, activeRevision))
+			Expect([]string{"prefill", "decode"}).To(ContainElement(service.Spec.Selector[disaggregatedsetv1.RoleLabelKey]))
+		}
 
 		modelServiceName := dynamo.GenerateServiceName("shared-smoke-model")
 		modelService := &corev1.Service{}
