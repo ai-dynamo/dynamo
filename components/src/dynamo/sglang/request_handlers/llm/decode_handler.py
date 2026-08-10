@@ -324,7 +324,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
         return _shared_logprobs.build_sglang_logprob_kwargs(
             request.get("output_options", {}) or {},
-            allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+            allow_top_logprobs=True,
         )
 
     @staticmethod

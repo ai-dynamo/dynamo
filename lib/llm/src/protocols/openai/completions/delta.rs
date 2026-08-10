@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
@@ -32,7 +32,15 @@ impl NvCreateCompletionRequest {
             self.inner.logprobs.is_some(),
             self.nvext(),
         );
-        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
+        DeltaGenerator::new(
+            self.inner.model.clone(),
+            options,
+            request_id,
+            self.inner
+                .echo
+                .filter(|echo| *echo)
+                .map(|_| super::prompt_to_string(&self.inner.prompt)),
+        )
     }
 }
 
@@ -45,10 +53,17 @@ pub struct DeltaGenerator {
     usage: dynamo_protocols::types::CompletionUsage,
     options: DeltaGeneratorOptions,
     tracker: Arc<RequestTracker>,
+    echo_text: Option<String>,
+    echoed_choices: HashSet<u32>,
 }
 
 impl DeltaGenerator {
-    pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
+    pub fn new(
+        model: String,
+        options: DeltaGeneratorOptions,
+        request_id: String,
+        echo_text: Option<String>,
+    ) -> Self {
         let (now, usage, tracker) = delta_common::initial_state();
         Self {
             id: format!("cmpl-{request_id}"),
@@ -59,6 +74,8 @@ impl DeltaGenerator {
             usage,
             options,
             tracker,
+            echo_text,
+            echoed_choices: HashSet::new(),
         }
     }
 
@@ -117,10 +134,11 @@ impl DeltaGenerator {
             })
             .collect();
 
+        let text_offset = vec![0; tokens_out.len()];
         Some(dynamo_protocols::types::Logprobs {
             tokens: tokens_out,
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
-            text_offset: vec![],
+            text_offset,
             top_logprobs: top_lps,
         })
     }
@@ -249,7 +267,14 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+        let text = delta.text.clone().map(|text| {
+            if self.echoed_choices.insert(index) {
+                self.echo_text.clone().unwrap_or_default() + &text
+            } else {
+                text
+            }
+        });
+        let mut response = self.create_choice(index, text, finish_reason, logprobs);
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -421,6 +446,21 @@ mod tests {
             })),
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_echo_prefixes_only_the_first_choice_chunk() {
+        let mut request = create_test_request();
+        request.inner.echo = Some(true);
+        let mut generator = request.response_generator("req-echo".to_string());
+        let first = generator
+            .choice_from_postprocessor(final_backend_output())
+            .unwrap();
+        assert_eq!(first.inner.choices[0].text, "testhello");
+        let mut second = final_backend_output();
+        second.text = Some(" world".to_string());
+        let second = generator.choice_from_postprocessor(second).unwrap();
+        assert_eq!(second.inner.choices[0].text, " world");
     }
 
     #[test]

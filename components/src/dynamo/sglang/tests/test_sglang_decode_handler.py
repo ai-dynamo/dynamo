@@ -660,11 +660,12 @@ def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
     assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
 
 
-def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+def test_build_logprob_kwargs_forwards_requested_top_logprob_depth():
+    kwargs = DecodeWorkerHandler._build_logprob_kwargs(
+        {"output_options": {"logprobs": 2}}
+    )
 
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
+    assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
 
 
 def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
