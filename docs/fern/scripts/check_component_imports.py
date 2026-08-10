@@ -38,13 +38,31 @@ directly quoted specifier.
 Being a transcription, it is only correct for one release. DERIVED_FROM_FERN
 records which, and the scan refuses to report a clean tree once
 docs/fern/fern.config.json moves past it — a stale pattern fails closed but
-silently, which is the worst outcome for a gate. To re-derive after a bump:
+silently, which is the worst outcome for a gate.
+
+Re-derive by anchoring on the values, never on the minified symbol names. Fern
+ships a bundled cli.cjs whose identifiers are minifier-assigned and churn on
+essentially every release: the allowlist binding was TZu at 5.80.2 and Vtl at
+5.92.0, and an earlier version of this docstring grepped for names that now
+match nothing at all. A recipe that returns nothing invites bumping
+DERIVED_FROM_FERN without re-deriving, which turns this gate into a silent
+no-op — exactly the failure the paragraph above warns about.
 
     npm pack fern-api@<version> && tar xzf fern-api-<version>.tgz
-    grep -o 'TZu=\\[[^]]*\\]' package/cli.cjs     # the allowlist
-    grep -o 'SGm="[^"]*"' package/cli.cjs        # the pinned rolldown version
+    # the allowlist, found by its contents
+    grep -o '.\\{6\\}=\\["react","react-dom","@mdx-js/react","next"\\]' package/cli.cjs
+    # the scanner regex, found by a distinctive fragment of itself
+    grep -o '[^ ,;=]*=/[^/]*import|export[^/]*/[a-z]*' package/cli.cjs
+    # the file suffixes it walks
+    grep -o '\\\\\\.(js|jsx|ts|tsx)\\$' package/cli.cjs
 
-then update SPECIFIER, ALLOWLIST and DERIVED_FROM_FERN together.
+then reconcile SPECIFIER, ALLOWLIST and SUFFIXES with what those print, and
+move DERIVED_FROM_FERN only once they agree.
+
+Checked against 5.92.0, twelve minor releases past the pin: all three values
+are unchanged. The regex is byte-identical to SPECIFIER below. So a bump is
+normally a verification rather than a rewrite, and the constant should still
+not move until someone has actually run the greps.
 
 If a component ever genuinely needs a third-party dependency, this check has to
 be revisited alongside a package.json and node_modules for the docs project,
@@ -72,15 +90,31 @@ SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 # The fern-api release SPECIFIER and ALLOWLIST were transcribed from.
 DERIVED_FROM_FERN = "5.80.2"
 
-# Verbatim from fern-api's cli.cjs. re.ASCII is not cosmetic: JavaScript's \w is
-# ASCII-only, Python's is Unicode-aware, so without it a Unicode letter sitting
-# directly against `import` is a word character here but not there — Fern would
-# bundle the file and this check would stay silent.
+# Ported from fern-api's cli.cjs. Both character classes below spell out ASCII
+# explicitly instead of using \w under re.ASCII, because that flag is not
+# selective: it narrows \s as well.
+#
+# The two divergences pull in opposite directions and both matter.
+#
+# \w: JavaScript's is ASCII-only, Python's is Unicode-aware. Left wide, a
+# Unicode letter sitting directly against `import` is a word character here but
+# not there, so Fern bundles the file while this check stays silent.
+#
+# \s: JavaScript's is Unicode-aware -- ECMA-262 matches U+00A0, U+2000-200A,
+# U+2028/29, U+3000 and U+FEFF -- while Python's under re.ASCII is only
+# [ \t\n\r\f\v]. Narrowed, an import separated by a non-breaking space matches
+# in Fern and not here, which is the same silent miss in the other direction.
+# NBSP is the likeliest stray character to arrive by copying a rendered
+# example out of components/README.md, so this is a live path, not a theory.
+# Python's \s covers every ECMA-262 whitespace code point except U+FEFF, which
+# JavaScript treats as whitespace and Python does not, so it is added by hand.
+WS = r"[\s﻿]"
 SPECIFIER = re.compile(
-    r"""(?:^|[^\w.])(?:import|export)\s+(?:[\w*\s{},$]*?from\s+)?["']([^"'\n]+)["']"""
-    r"""|import\(\s*["']([^"'\n]+)["']\s*\)"""
-    r"""|require\(\s*["']([^"'\n]+)["']\s*\)""",
-    re.MULTILINE | re.ASCII,
+    rf"""(?:^|[^A-Za-z0-9_.])(?:import|export){WS}+"""
+    rf"""(?:[A-Za-z0-9_*\s﻿{{}},$]*?from{WS}+)?["']([^"'\n]+)["']"""
+    rf"""|import\({WS}*["']([^"'\n]+)["']{WS}*\)"""
+    rf"""|require\({WS}*["']([^"'\n]+)["']{WS}*\)""",
+    re.MULTILINE,
 )
 # Fern resolves these itself and never bundles them.
 ALLOWLIST = {"react", "react-dom", "@mdx-js/react", "next"}
@@ -98,9 +132,15 @@ def is_relative(specifier: str) -> bool:
 
 
 def pinned_fern_version() -> str | None:
-    """The fern-api version this repo actually builds docs with, or None."""
+    """The fern-api version this repo actually builds docs with, or None.
+
+    encoding is pinned rather than left to the locale: Fern always decodes
+    UTF-8, and UnicodeDecodeError subclasses ValueError, so a locale-decoded
+    read would be caught below and misreported as "could not read a version"
+    on a perfectly good file.
+    """
     try:
-        return json.loads(FERN_CONFIG.read_text())["version"]
+        return json.loads(FERN_CONFIG.read_text(encoding="utf-8"))["version"]
     except (OSError, ValueError, KeyError):
         return None
 
@@ -219,11 +259,29 @@ def main() -> int:
     stale = check_derivation()
     if stale:
         return stale
+    # rglob on a missing directory yields nothing and raises nothing, so
+    # without this the scanner reports a clean tree it never opened. Renaming
+    # components/, or repointing docs.yml's experimental.mdx-components, would
+    # otherwise leave this hook green forever while every new third-party
+    # import goes unchecked.
+    if not COMPONENTS.is_dir():
+        print(
+            f"{COMPONENTS.relative_to(REPO_ROOT)} is not a directory. Either the "
+            f"components tree moved and this script needs repointing, or "
+            f"docs.yml's experimental.mdx-components no longer matches it.",
+            file=sys.stderr,
+        )
+        return 1
     failures = 0
+    scanned = 0
     for path in sorted(COMPONENTS.rglob("*")):
         if not path.is_file() or path.suffix not in SUFFIXES:
             continue
-        found = offenders(path.read_text())
+        scanned += 1
+        # Fern decodes UTF-8 regardless of locale. Without this, a non-UTF-8
+        # locale turns the gate's message into a pathlib traceback, and a
+        # latin-1-family locale silently scans mojibake instead.
+        found = offenders(path.read_text(encoding="utf-8"))
         if not found:
             continue
         failures += 1
@@ -240,6 +298,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    # A directory that exists but holds no component sources is the same
+    # silent pass as a missing one: docs.yml still points Fern at it.
+    if not scanned:
+        print(
+            f"no component sources ({', '.join(sorted(SUFFIXES))}) under "
+            f"{COMPONENTS.relative_to(REPO_ROOT)} -- nothing was checked.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"checked {scanned} component source(s): no unbundleable specifiers")
     return 0
 
 

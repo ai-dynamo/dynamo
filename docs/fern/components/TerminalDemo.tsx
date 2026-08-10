@@ -64,7 +64,14 @@ const JS_ELEMENT_ID = "asciinema-player-js";
 type FitMode = "width" | "height" | "both" | false;
 
 export interface TerminalDemoProps {
-  /** Cast source: a same-origin asset path (recommended) or an https URL. */
+  /**
+   * Cast source: a path relative to the page that renders this component
+   * (recommended), or an https URL.
+   *
+   * Relative is not a style preference. Fern rewrites relative asset paths to
+   * the published URL and leaves site-absolute ones untouched, so an absolute
+   * path reaches the browser verbatim and 404s. See components/README.md.
+   */
   src: string;
   /** Start playback at this time (seconds). Default 0. */
   startAt?: number;

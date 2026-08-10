@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
+      fern_components: ${{ steps.changes.outputs.fern_components }}
       operator: ${{ steps.changes.outputs.operator }}
       snapshot: ${{ steps.changes.outputs.snapshot }}
       rust: ${{ steps.changes.outputs.rust }}
@@ -83,6 +84,10 @@ jobs:
       working-directory: docs/fern
       run: fern check
     - name: Parse custom MDX components
+      # Scoped to the narrow fern_components filter rather than the repo-wide
+      # docs one: this step exercises component sources only, and on the docs
+      # filter roughly 95% of its runs have no component change to check.
+      if: needs.changed-files.outputs.fern_components == 'true'
       working-directory: docs/fern
       # `fern check` validates configuration and navigation, never component
       # syntax, so a component that does not compile merges green and only
@@ -106,8 +111,17 @@ jobs:
           exit 1
         fi
         echo "Parsing $COUNT component sources"
+        # Hoisted out of the xargs line: as a word on that command line the
+        # command substitution's exit status is invisible to set -e, so a
+        # failing mktemp expanded to --outdir= and esbuild ran anyway.
+        OUTDIR=$(mktemp -d)
+        # --outbase=. keeps the input tree structure under OUTDIR. Without it
+        # every entry point is keyed by basename alone, so a future Foo.ts plus
+        # Foo.tsx aborts the whole run with esbuild's "Two output files share
+        # the same path" -- a red gate whose message has nothing to do with
+        # component syntax.
         find_components -print0 \
-          | xargs -0 npx --yes esbuild@0.24.0 --outdir="$(mktemp -d)"
+          | xargs -0 npx --yes esbuild@0.24.0 --outbase=. --outdir="$OUTDIR"
 
   docs-website-composition:
     name: Docs Website Composition Check

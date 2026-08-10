@@ -80,11 +80,18 @@ import { BlogStyles } from "@/components/BlogStyles";
 
 Props are documented in the component's own header.
 
+`src` must be a path relative to the page, because that is the only form Fern
+rewrites to the published asset URL. A site-absolute path starting from the
+docs root is rewritten by nothing and reaches the browser verbatim, where it
+404s — the same shape as the regression that blanked the Home hero mark in
+#12373. `scripts/check_asset_paths.py` rejects that form, and this file is now
+inside its scan, so the example below is enforced rather than merely stated.
+
 ```mdx
 import { TerminalDemo } from "@/components/TerminalDemo";
 
 <TerminalDemo
-  src="/dynamo/assets/dynamo-demo.cast"
+  src="../../assets/hero-demo-25.cast"
   startAt={0}
   endAt={18}
   idleTimeLimit={2}
