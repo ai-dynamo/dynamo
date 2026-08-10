@@ -14,7 +14,7 @@ from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
-    is_native_generate_request,
+    native_generate_payload,
     native_generate_stream,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -105,8 +105,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
             }
-        native_request = is_native_generate_request(inner_request)
-        if not native_request:
+        native_payload = native_generate_payload(inner_request)
+        if native_payload is None:
             sampling_params["n"] = 1
             sampling_params["max_new_tokens"] = 1
 
@@ -166,27 +166,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         priority_kwargs = self._priority_kwargs(priority)
-        if native_request:
+        if native_payload is not None:
             input_ids = input_param.get("input_ids")
             if not isinstance(input_ids, list):
                 raise ValueError("native SGLang Generate requires token input")
-            native_input = build_native_generate_request(
-                inner_request,
+            native_request = build_native_generate_request(
+                native_payload,
                 input_ids=input_ids,
                 fallback_rid=trace_id or context.id(),
                 priority=priority_kwargs.get("priority"),
                 sampling_overrides={"n": 1, "max_new_tokens": 1},
-                internal_fields={
-                    "bootstrap_host": bootstrap_host,
-                    "bootstrap_port": bootstrap_port,
-                    "bootstrap_room": bootstrap_room,
-                    "external_trace_header": trace_header,
-                    "routed_dp_rank": dp_rank,
-                    "lora_path": lora_path,
-                },
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
+                bootstrap_room=bootstrap_room,
+                external_trace_header=trace_header,
+                routed_dp_rank=dp_rank,
+                lora_path=lora_path,
             )
-            assert native_input is not None
-            results = native_generate_stream(self.engine, native_input)
+            results = native_generate_stream(self.engine, native_request)
         else:
             results = await self.engine.async_generate(
                 **input_param,

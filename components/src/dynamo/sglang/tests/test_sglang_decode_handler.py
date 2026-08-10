@@ -220,33 +220,24 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
     return handler
 
 
-def _engine_generate_request(native_body):
-    return {
-        "token_ids": [1, 2, 3],
-        "extra_args": {"sglang_tito": native_body},
-    }
-
-
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
-    request = _engine_generate_request(
-        {
-            "rid": "resolved-request",
-            "sampling_params": {
-                "max_new_tokens": 32,
-                "n": 1,
-                "sampling_seed": 17,
-                "custom_params": {"future_engine_control": True},
-            },
-            "return_logprob": True,
-            "return_text_in_logprobs": True,
-            "token_ids_logprob": [11],
-            "return_routed_experts": True,
-            "routed_experts_start_len": 4,
-            "session_id": "session-1",
-            "bootstrap_host": "client.example",
-            "routed_dp_rank": 7,
-        }
-    )
+    request = {
+        "rid": "resolved-request",
+        "sampling_params": {
+            "max_new_tokens": 32,
+            "n": 1,
+            "sampling_seed": 17,
+            "custom_params": {"future_engine_control": True},
+        },
+        "return_logprob": True,
+        "return_text_in_logprobs": True,
+        "token_ids_logprob": [11],
+        "return_routed_experts": True,
+        "routed_experts_start_len": 4,
+        "session_id": "session-1",
+        "bootstrap_host": "client.example",
+        "routed_dp_rank": 7,
+    }
 
     native = build_native_generate_request(
         request,
@@ -254,13 +245,10 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
         fallback_rid="fallback-request",
         priority=9,
         sampling_overrides={"n": 1, "max_new_tokens": 1},
-        internal_fields={
-            "bootstrap_host": "prefill.internal",
-            "routed_dp_rank": 3,
-        },
+        bootstrap_host="prefill.internal",
+        routed_dp_rank=3,
     )
 
-    assert native is not None
     assert native.rid == "resolved-request"
     assert native.input_ids == [7, 8]
     assert native.stream is True
@@ -282,7 +270,7 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
 
 
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():
-    request = _engine_generate_request({"sampling_params": [1, 2]})
+    request = {"sampling_params": [1, 2]}
 
     with pytest.raises(ValueError, match="sampling_params must be an object"):
         build_native_generate_request(
@@ -299,7 +287,7 @@ def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
 
     with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
         build_native_generate_request(
-            _engine_generate_request({"return_logprob": True, "top_logprobs_num": 1}),
+            {"return_logprob": True, "top_logprobs_num": 1},
             input_ids=[1],
             fallback_rid="request",
             priority=None,
@@ -310,13 +298,12 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
     monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
 
     native = build_native_generate_request(
-        _engine_generate_request({"return_logprob": True, "top_logprobs_num": 2}),
+        {"return_logprob": True, "top_logprobs_num": 2},
         input_ids=[1],
         fallback_rid="request",
         priority=None,
     )
 
-    assert native is not None
     assert native.top_logprobs_num == 2
 
 
@@ -721,34 +708,36 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
                     {
                         "index": 0,
                         "output_ids": [101],
+                        "text": "a",
                         "meta_info": {
                             "id": "request-1",
                             "finish_reason": None,
-                            "output_token_logprobs": [(-0.1, 101, "a")],
+                            "output_token_logprobs": [(-0.1, 101, "")],
                         },
+                        "engine_data": {"native_chunk": 1},
                     },
                     {
                         "index": 0,
                         "output_ids": [102],
+                        "text": "c",
                         "meta_info": {
                             "id": "request-1",
                             "finish_reason": None,
-                            "output_token_logprobs": [(-0.3, 102, "c")],
+                            "output_token_logprobs": [(-0.3, 102, "")],
                         },
+                        "engine_data": {"native_chunk": 2},
                     },
                 ]
             ),
             _Context(),
-            include_native_metadata=True,
         )
     )
 
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
-    assert [
-        chunk["engine_data"]["sglang_meta_info"]["output_token_logprobs"]
-        for chunk in chunks
-    ] == [[(-0.1, 101, "a")], [(-0.3, 102, "c")]]
+    assert all("text" not in chunk for chunk in chunks)
+    assert all("tokens" not in chunk for chunk in chunks)
+    assert [chunk["engine_data"]["native_chunk"] for chunk in chunks] == [1, 2]
 
 
 @pytest.mark.asyncio

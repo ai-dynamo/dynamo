@@ -183,6 +183,17 @@ async fn connection_monitor(
     }
 }
 
+fn openai_stream_error(error: SanitizedError) -> String {
+    serde_json::json!({
+        "error": {
+            "message": error.to_string(),
+            "type": error.openai_type_slug(),
+            "code": error.status().as_u16(),
+        }
+    })
+    .to_string()
+}
+
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
 ///
 /// Uses `tokio::select!` to choose between receiving events from the source stream or detecting when
@@ -199,21 +210,58 @@ pub fn monitor_for_disconnects(
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout(
+    monitor_for_disconnects_with_timeout_and_error(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
+        openai_stream_error,
     )
 }
 
+pub(crate) fn monitor_for_disconnects_with_error(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_formatter: fn(SanitizedError) -> String,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_and_error(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        error_formatter,
+    )
+}
+
+#[cfg(test)]
 fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_and_error(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        inactivity_timeout,
+        openai_stream_error,
+    )
+}
+
+fn monitor_for_disconnects_with_timeout_and_error(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
+    error_formatter: fn(SanitizedError) -> String,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -250,19 +298,9 @@ fn monitor_for_disconnects_with_timeout(
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
                             tracing::error!("Streaming error: {err}");
-                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
-                            // so naive `data:`-line parsers see both the error and a
-                            // stream terminator. Body derived from SanitizedError so
-                            // the sanitized message + status live in one place.
-                            let sanitized = SanitizedError::Internal;
-                            let err_json = serde_json::json!({
-                                "error": {
-                                    "message": sanitized.to_string(),
-                                    "type": sanitized.openai_type_slug(),
-                                    "code": sanitized.status().as_u16(),
-                                }
-                            });
-                            yield Event::default().data(err_json.to_string());
+                            // Render the sanitized terminal error in the caller's protocol.
+                            let error = SanitizedError::Internal;
+                            yield Event::default().data(error_formatter(error));
                             yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;

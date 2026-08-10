@@ -24,7 +24,10 @@ use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
-use super::disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects};
+use super::disconnect::{
+    ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
+};
+use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
@@ -68,6 +71,11 @@ struct GenerateError {
 struct GenerateErrorBody {
     message: String,
 }
+fn generate_error(message: String) -> GenerateError {
+    GenerateError {
+        error: GenerateErrorBody { message },
+    }
+}
 
 #[derive(Serialize, Debug)]
 struct ValidationError {
@@ -93,13 +101,10 @@ pub fn router(state: Arc<service_v2::State>, path: Option<String>) -> (Vec<Route
 }
 
 fn error_response(code: StatusCode, message: String) -> Response {
-    (
-        code,
-        Json(GenerateError {
-            error: GenerateErrorBody { message },
-        }),
-    )
-        .into_response()
+    (code, Json(generate_error(message))).into_response()
+}
+fn stream_error(error: SanitizedError) -> String {
+    serde_json::to_string(&generate_error(error.to_string())).expect("serializable error")
 }
 
 fn adapt_openai_error(response: super::openai::ErrorResponse) -> Response {
@@ -405,12 +410,18 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
-    let stream = SglangGenerateStream::from_annotated_stream(stream, request_id).map(|result| {
+    let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
         result
             .map(|value| Event::default().data(value.to_string()))
             .map_err(axum::Error::new)
     });
-    let stream = monitor_for_disconnects(stream, engine_context, inflight_guard, stream_handle);
+    let stream = monitor_for_disconnects_with_error(
+        stream,
+        engine_context,
+        inflight_guard,
+        stream_handle,
+        stream_error,
+    );
     let mut response = Sse::new(stream);
     if let Some(keep_alive) = state.sse_keep_alive() {
         response = response.keep_alive(KeepAlive::default().interval(keep_alive));
@@ -437,5 +448,15 @@ mod tests {
         );
 
         assert_eq!(models, vec!["other".to_string(), "primary".to_string()]);
+    }
+
+    #[test]
+    fn streaming_errors_use_sglang_shape() {
+        let error: serde_json::Value =
+            serde_json::from_str(&stream_error(SanitizedError::Internal)).unwrap();
+        assert_eq!(
+            error,
+            serde_json::json!({"error": {"message": "Internal server error"}})
+        );
     }
 }

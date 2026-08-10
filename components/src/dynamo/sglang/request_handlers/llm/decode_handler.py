@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Mapping, Optional
 
 import sglang as sgl
 from PIL.Image import Image as PILImage
@@ -23,7 +23,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
-    is_native_generate_request,
+    native_generate_payload,
     native_generate_stream,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -347,24 +347,41 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _native_generate_stream(
         self,
         request: Dict[str, Any],
+        native_payload: Mapping[str, Any],
         input_param: Dict[str, Any],
         context: Context,
         priority: int | None,
-        **internal_fields: Any,
-    ) -> Any:
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Build and dispatch one native SGLang request."""
+        raise_if_unextracted_multimodal(request)
         input_ids = input_param.get("input_ids")
         if not isinstance(input_ids, list):
             raise ValueError("native SGLang Generate requires token input")
-        native_input = build_native_generate_request(
-            request,
+
+        bootstrap_info: dict[str, Any] = {}
+        if self.serving_mode == DisaggregationMode.DECODE:
+            bootstrap_info = request.get("bootstrap_info") or {}
+            if not bootstrap_info:
+                raise RuntimeError(
+                    "bootstrap_info is required for disaggregated decode but was not provided"
+                )
+
+        routing = request.get("routing") or {}
+        native_request = build_native_generate_request(
+            native_payload,
             input_ids=input_ids,
             fallback_rid=context.trace_id or context.id(),
-            priority=priority,
-            internal_fields=internal_fields,
+            priority=self._priority_kwargs(priority).get("priority"),
+            bootstrap_host=bootstrap_info.get("bootstrap_host"),
+            bootstrap_port=bootstrap_info.get("bootstrap_port"),
+            bootstrap_room=bootstrap_info.get("bootstrap_room"),
+            external_trace_header=context.trace_headers()
+            if self.enable_trace
+            else None,
+            routed_dp_rank=routing.get("dp_rank"),
+            lora_path=self._resolve_lora(request),
         )
-        if native_input is None:
-            raise ValueError("missing native SGLang Generate request")
-        return native_generate_stream(self.engine, native_input)
+        return native_generate_stream(self.engine, native_request)
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -385,17 +402,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         _raise_if_conditional_disagg_bypass(request)
         trace_id = context.trace_id
         input_param = self._get_input_param(request)
-        native_request = is_native_generate_request(request)
         priority = (request.get("routing") or {}).get("priority")
+        native_payload = native_generate_payload(request)
+        if native_payload is not None:
+            stream = self._native_generate_stream(
+                request,
+                native_payload,
+                input_param,
+                context,
+                priority,
+            )
+            async for output in self._process_token_stream(stream, context):
+                yield output
+            return
+
         priority_kwargs = self._priority_kwargs(priority)
-        if native_request:
-            sampling_params = None
-            logprob_kwargs = {}
-            routed_experts_kwargs = {}
-        else:
-            sampling_params = self._build_sampling_params(request)
-            logprob_kwargs = self._build_logprob_kwargs(request)
-            routed_experts_kwargs = self._routed_experts_kwargs
+        sampling_params = self._build_sampling_params(request)
+        logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
@@ -436,37 +459,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # and the transferred KV lines up.
             decode_mm_kwargs = build_disagg_mm_kwargs(request)
 
-            if native_request:
-                decode = self._native_generate_stream(
-                    request,
-                    input_param,
-                    context,
-                    priority_kwargs.get("priority"),
-                    bootstrap_host=bootstrap_info["bootstrap_host"],
-                    bootstrap_port=bootstrap_info["bootstrap_port"],
-                    bootstrap_room=bootstrap_info["bootstrap_room"],
-                    external_trace_header=trace_header,
-                    routed_dp_rank=dp_rank,
-                    lora_path=lora_path,
-                )
-            else:
-                decode = await self.engine.async_generate(
-                    **input_param,
-                    **decode_mm_kwargs,
-                    sampling_params=sampling_params,
-                    stream=True,
-                    **require_reasoning_kwargs(self.engine, request),
-                    **routed_experts_kwargs,
-                    bootstrap_host=bootstrap_info["bootstrap_host"],
-                    bootstrap_port=bootstrap_info["bootstrap_port"],
-                    bootstrap_room=bootstrap_info["bootstrap_room"],
-                    external_trace_header=trace_header,
-                    rid=trace_id,
-                    data_parallel_rank=dp_rank,
-                    lora_path=lora_path,
-                    **logprob_kwargs,
-                    **priority_kwargs,
-                )
+            decode = await self.engine.async_generate(
+                **input_param,
+                **decode_mm_kwargs,
+                sampling_params=sampling_params,
+                stream=True,
+                **require_reasoning_kwargs(self.engine, request),
+                **self._routed_experts_kwargs,
+                bootstrap_host=bootstrap_info["bootstrap_host"],
+                bootstrap_port=bootstrap_info["bootstrap_port"],
+                bootstrap_room=bootstrap_info["bootstrap_room"],
+                external_trace_header=trace_header,
+                rid=trace_id,
+                data_parallel_rank=dp_rank,
+                lora_path=lora_path,
+                **logprob_kwargs,
+                **priority_kwargs,
+            )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
@@ -474,7 +483,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
-                    include_native_metadata=native_request,
                 ):
                     yield out
             else:
@@ -521,34 +529,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 
-            if native_request:
-                agg = self._native_generate_stream(
-                    request,
-                    input_param,
-                    context,
-                    priority_kwargs.get("priority"),
-                    external_trace_header=trace_header,
-                    routed_dp_rank=dp_rank,
-                    lora_path=lora_path,
-                )
-            else:
-                agg = await self.engine.async_generate(
-                    **input_param,
-                    image_data=image_data,
-                    audio_data=audio_data,
-                    video_data=video_data,
-                    sampling_params=sampling_params,
-                    stream=True,
-                    **require_reasoning_kwargs(self.engine, request),
-                    **routed_experts_kwargs,
-                    **mm_hashes_kwargs,
-                    external_trace_header=trace_header,
-                    rid=trace_id,
-                    data_parallel_rank=dp_rank,
-                    lora_path=lora_path,
-                    **logprob_kwargs,
-                    **priority_kwargs,
-                )
+            agg = await self.engine.async_generate(
+                **input_param,
+                image_data=image_data,
+                audio_data=audio_data,
+                video_data=video_data,
+                sampling_params=sampling_params,
+                stream=True,
+                **require_reasoning_kwargs(self.engine, request),
+                **self._routed_experts_kwargs,
+                **mm_hashes_kwargs,
+                external_trace_header=trace_header,
+                rid=trace_id,
+                data_parallel_rank=dp_rank,
+                lora_path=lora_path,
+                **logprob_kwargs,
+                **priority_kwargs,
+            )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     agg,
@@ -556,7 +553,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
-                    include_native_metadata=native_request,
                 ):
                     yield out
             else:
@@ -571,12 +567,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _process_token_stream(
         self,
-        stream_source: AsyncGenerator[Dict[str, Any], None],
+        stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
-        include_native_metadata: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -633,10 +628,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
-                text = res.get("text")
-                if text is not None:
-                    out["text"] = text
-
                 if metadata_uploader is None:
                     # Extract logprobs for new tokens if available
                     log_probs, top_logprobs = self._extract_logprobs(
@@ -649,9 +640,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                engine_data: dict[str, Any] = {}
-                if metadata_uploader is None and include_native_metadata:
-                    engine_data["sglang_meta_info"] = dict(meta_info)
+                engine_data: dict[str, Any] = dict(res.get("engine_data") or {})
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
