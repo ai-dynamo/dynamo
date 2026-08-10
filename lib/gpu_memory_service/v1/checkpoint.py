@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import socket
@@ -17,7 +16,6 @@ from uuid import uuid4
 from gpu_memory_service.v1.protocol import (
     AbortCheckpointRequest,
     CheckpointControlRequest,
-    CheckpointDomainState,
     CheckpointStateResponse,
     CompleteRestoreRequest,
     ErrorResponse,
@@ -26,7 +24,7 @@ from gpu_memory_service.v1.protocol import (
     receive_message,
     send_message,
 )
-from gpu_memory_service.v1.server import SessionSnapshot
+from gpu_memory_service.v1.server.rpc import SessionSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +36,7 @@ _KV_CACHE_DOMAIN = "kv_cache"
 
 class _CheckpointDomainManager(Protocol):
     @property
-    def identity(self) -> tuple[str, str]:
+    def checkpoint_lifecycle(self) -> GMSCheckpointLifecycle | None:
         ...
 
     def session_snapshot(self) -> SessionSnapshot:
@@ -46,16 +44,6 @@ class _CheckpointDomainManager(Protocol):
 
     def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
         ...
-
-
-def _allocation_digest(allocations: tuple[tuple[str, int], ...]) -> str:
-    digest = hashlib.sha256()
-    for allocation_id, aligned_size in allocations:
-        encoded_id = allocation_id.encode("utf-8")
-        digest.update(len(encoded_id).to_bytes(8, "big"))
-        digest.update(encoded_id)
-        digest.update(aligned_size.to_bytes(8, "big"))
-    return digest.hexdigest()
 
 
 class GMSCheckpointLifecycle:
@@ -67,12 +55,15 @@ class GMSCheckpointLifecycle:
         self._state = _SERVING
         self._generation = 0
         self._token: str | None = None
-        self._domains: tuple[CheckpointDomainState, ...] = ()
         self._last_resolution: tuple[str, str] | None = None
 
     def bind_domains(self, managers: Mapping[str, _CheckpointDomainManager]) -> None:
         if set(managers) != {_WEIGHTS_DOMAIN, _KV_CACHE_DOMAIN}:
             raise ValueError("checkpoint lifecycle requires weights and kv_cache")
+        if any(
+            manager.checkpoint_lifecycle is not self for manager in managers.values()
+        ):
+            raise ValueError("checkpoint domains must share their checkpoint lifecycle")
         with self.condition:
             if self._managers is not None:
                 raise RuntimeError("checkpoint lifecycle domains are already bound")
@@ -97,6 +88,7 @@ class GMSCheckpointLifecycle:
             )
 
     def _prepare(self) -> CheckpointStateResponse:
+        """Atomically require checkpoint-safe domains, then fence admission."""
         if self._state == _CHECKPOINT_READY:
             return self._response()
 
@@ -121,10 +113,6 @@ class GMSCheckpointLifecycle:
 
         self._generation += 1
         self._token = str(uuid4())
-        self._domains = (
-            self._domain_state(_WEIGHTS_DOMAIN, weights, weight_allocations),
-            self._domain_state(_KV_CACHE_DOMAIN, kv_cache, kv_allocations),
-        )
         self._state = _CHECKPOINT_READY
         self._last_resolution = None
         self.condition.notify_all()
@@ -140,14 +128,8 @@ class GMSCheckpointLifecycle:
             raise RuntimeError("checkpoint token is stale or already resolved")
         if token != self._token:
             raise RuntimeError(
-                "checkpoint token does not match the prepared generation"
+                "checkpoint token does not match the prepared checkpoint"
             )
-        if resolution == "complete":
-            self._validate_domain_sessions()
-            if self._current_domains() != self._domains:
-                raise RuntimeError(
-                    "restored GMS domain state does not match the prepared state"
-                )
 
         self._state = _SERVING
         self._token = None
@@ -160,27 +142,6 @@ class GMSCheckpointLifecycle:
         )
         return self._response()
 
-    def _current_domains(self) -> tuple[CheckpointDomainState, ...]:
-        managers = self._require_managers()
-        return tuple(
-            self._domain_state(name, manager, manager.allocation_snapshot())
-            for name, manager in (
-                (_WEIGHTS_DOMAIN, managers[_WEIGHTS_DOMAIN]),
-                (_KV_CACHE_DOMAIN, managers[_KV_CACHE_DOMAIN]),
-            )
-        )
-
-    def _validate_domain_sessions(self) -> None:
-        managers = self._require_managers()
-        weights = managers[_WEIGHTS_DOMAIN].session_snapshot()
-        kv_cache = managers[_KV_CACHE_DOMAIN].session_snapshot()
-        self._require_quiesced(_WEIGHTS_DOMAIN, weights)
-        self._require_quiesced(_KV_CACHE_DOMAIN, kv_cache)
-        if not weights.committed:
-            raise RuntimeError("restored weights are not committed")
-        if kv_cache.committed:
-            raise RuntimeError("restored kv_cache is unexpectedly committed")
-
     @staticmethod
     def _require_quiesced(name: str, sessions: SessionSnapshot) -> None:
         if (
@@ -191,33 +152,13 @@ class GMSCheckpointLifecycle:
         ):
             raise RuntimeError(f"{name} has active or waiting sessions")
 
-    @staticmethod
-    def _domain_state(
-        name: str,
-        manager: _CheckpointDomainManager,
-        allocations: tuple[tuple[str, int], ...],
-    ) -> CheckpointDomainState:
-        server_nonce, gpu_uuid = manager.identity
-        return CheckpointDomainState(
-            name,
-            server_nonce,
-            gpu_uuid,
-            len(allocations),
-            _allocation_digest(allocations),
-        )
-
     def _require_managers(self) -> Mapping[str, _CheckpointDomainManager]:
         if self._managers is None:
             raise RuntimeError("checkpoint lifecycle domains are not bound")
         return self._managers
 
     def _response(self) -> CheckpointStateResponse:
-        return CheckpointStateResponse(
-            self._state,
-            self._generation,
-            self._token,
-            self._domains,
-        )
+        return CheckpointStateResponse(self._state, self._token)
 
 
 class GMSCheckpointClient:

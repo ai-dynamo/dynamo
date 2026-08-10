@@ -90,21 +90,11 @@ class ExportResponse(msgspec.Struct, tag="export_response", forbid_unknown_field
     pass
 
 
-class CheckpointDomainState(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    name: str
-    server_nonce: str
-    gpu_uuid: str
-    allocation_count: int
-    allocation_digest: str
-
-
 class CheckpointStateResponse(
     msgspec.Struct, tag="checkpoint_state_response", forbid_unknown_fields=True
 ):
     state: str
-    generation: int
     token: str | None
-    domains: tuple[CheckpointDomainState, ...]
 
 
 class ErrorResponse(msgspec.Struct, tag="error_response", forbid_unknown_fields=True):

@@ -294,22 +294,34 @@ class GMSServerMemoryManager:
         vmm: VMMDevice,
         device: int,
         *,
-        checkpoint_condition: threading.Condition | None = None,
-        checkpoint_admission_allowed: Callable[[], bool] | None = None,
+        checkpoint_lifecycle: GMSCheckpointLifecycle | None = None,
     ):
         if not gpu_uuid:
             raise ValueError("GPU UUID must not be empty")
         self._identity = (str(uuid4()), gpu_uuid)
         self._allocations = GMSAllocationManager(vmm, device)
+        self._checkpoint_lifecycle = checkpoint_lifecycle
         self._sessions = GMSSessionManager(
             self._allocations.clear,
-            condition=checkpoint_condition,
-            admission_allowed=checkpoint_admission_allowed,
+            condition=(
+                checkpoint_lifecycle.condition
+                if checkpoint_lifecycle is not None
+                else None
+            ),
+            admission_allowed=(
+                checkpoint_lifecycle.admission_allowed
+                if checkpoint_lifecycle is not None
+                else None
+            ),
         )
 
     @property
     def identity(self) -> tuple[str, str]:
         return self._identity
+
+    @property
+    def checkpoint_lifecycle(self) -> GMSCheckpointLifecycle | None:
+        return self._checkpoint_lifecycle
 
     def acquire(
         self,
@@ -468,12 +480,10 @@ class GMSRPCServer(socketserver.ThreadingUnixStreamServer):
         self,
         path: str,
         manager: GMSServerMemoryManager,
-        *,
-        checkpoint_lifecycle: GMSCheckpointLifecycle | None = None,
     ):
         self.path = path
         self.manager = manager
-        self.checkpoint_lifecycle = checkpoint_lifecycle
+        self.checkpoint_lifecycle = manager.checkpoint_lifecycle
         self._prepare_socket_path()
         super().__init__(path, _GMSRequestHandler)
         os.chmod(path, 0o600)

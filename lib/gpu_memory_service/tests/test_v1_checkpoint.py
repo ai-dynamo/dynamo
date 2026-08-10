@@ -12,9 +12,9 @@ from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.v1 import cli
 from gpu_memory_service.v1.checkpoint import GMSCheckpointClient, GMSCheckpointLifecycle
+from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import PrepareCheckpointRequest
-from gpu_memory_service.v1.server import GMSRPCServer, GMSServerMemoryManager
-from gpu_memory_service.v1.session import _GMSClientSession
+from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -32,8 +32,7 @@ class _V1Owner:
                 "GPU-0",
                 FakeVMM(granularity=64),
                 0,
-                checkpoint_condition=self.lifecycle.condition,
-                checkpoint_admission_allowed=self.lifecycle.admission_allowed,
+                checkpoint_lifecycle=self.lifecycle,
             )
             for domain in ("weights", "kv_cache")
         }
@@ -47,7 +46,6 @@ class _V1Owner:
                 GMSRPCServer(
                     self.paths[domain],
                     manager,
-                    checkpoint_lifecycle=self.lifecycle,
                 )
             )
             for domain, manager in self.managers.items()
@@ -103,13 +101,7 @@ def test_prepare_fences_both_domains_and_abort_is_retry_safe(v1_owner) -> None:
 
     prepared = control.prepare()
     assert prepared.state == "checkpoint_ready"
-    assert prepared.generation == 1
     assert prepared.token
-    assert {domain.name for domain in prepared.domains} == {"weights", "kv_cache"}
-    weights = next(domain for domain in prepared.domains if domain.name == "weights")
-    kv_cache = next(domain for domain in prepared.domains if domain.name == "kv_cache")
-    assert weights.allocation_count == 1
-    assert kv_cache.allocation_count == 0
 
     assert control.prepare() == prepared
     for domain, lock_type in (
@@ -131,7 +123,6 @@ def test_prepare_fences_both_domains_and_abort_is_retry_safe(v1_owner) -> None:
         control.complete(prepared.token)
 
     second = control.prepare()
-    assert second.generation == 2
     assert second.token and second.token != prepared.token
     with pytest.raises(RuntimeError, match="does not match"):
         control.abort(prepared.token)
@@ -139,33 +130,12 @@ def test_prepare_fences_both_domains_and_abort_is_retry_safe(v1_owner) -> None:
 
 
 @pytest.mark.timeout(10)
-def test_complete_validates_restored_identity_and_is_retry_safe(
-    v1_owner, monkeypatch
-) -> None:
+def test_complete_is_retry_safe(v1_owner) -> None:
     v1_owner.publish_weights()
     control = v1_owner.control()
     prepared = control.prepare()
     assert prepared.token
 
-    weights = v1_owner.managers["weights"]
-    original_identity = weights._identity
-    monkeypatch.setattr(weights, "_identity", ("different-owner", "GPU-0"))
-    with pytest.raises(RuntimeError, match="domain state does not match"):
-        control.complete(prepared.token)
-    assert control.state() == prepared
-
-    monkeypatch.setattr(weights, "_identity", original_identity)
-    allocation_snapshot = weights.allocation_snapshot
-    monkeypatch.setattr(
-        weights,
-        "allocation_snapshot",
-        lambda: (("different-weight", 64),),
-    )
-    with pytest.raises(RuntimeError, match="domain state does not match"):
-        control.complete(prepared.token)
-    assert control.state() == prepared
-
-    monkeypatch.setattr(weights, "allocation_snapshot", allocation_snapshot)
     completed = control.complete(prepared.token)
     assert completed.state == "serving"
     assert control.complete(prepared.token) == completed
@@ -306,10 +276,10 @@ def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch) -> None:
     servers = []
 
     class _Server:
-        def __init__(self, path, manager, checkpoint_lifecycle):
+        def __init__(self, path, manager):
             self.path = path
             self.manager = manager
-            self.checkpoint_lifecycle = checkpoint_lifecycle
+            self.checkpoint_lifecycle = manager.checkpoint_lifecycle
             servers.append(self)
 
         def __enter__(self):
@@ -337,6 +307,21 @@ def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch) -> None:
     ]
     lifecycle = servers[0].checkpoint_lifecycle
     assert servers[1].checkpoint_lifecycle is lifecycle
-    assert all(
-        server.manager._sessions._condition is lifecycle.condition for server in servers
-    )
+    assert all(server.manager.checkpoint_lifecycle is lifecycle for server in servers)
+
+
+def test_bind_domains_rejects_a_different_lifecycle() -> None:
+    lifecycle = GMSCheckpointLifecycle()
+    other = GMSCheckpointLifecycle()
+    managers = {
+        domain: GMSServerMemoryManager(
+            "GPU-0",
+            FakeVMM(granularity=64),
+            0,
+            checkpoint_lifecycle=other,
+        )
+        for domain in ("weights", "kv_cache")
+    }
+
+    with pytest.raises(ValueError, match="must share their checkpoint lifecycle"):
+        lifecycle.bind_domains(managers)

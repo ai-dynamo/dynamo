@@ -63,8 +63,7 @@ def main(argv: list[str] | None = None) -> None:
                 gpu_uuid,
                 vmm,
                 args.device,
-                checkpoint_condition=checkpoint_lifecycle.condition,
-                checkpoint_admission_allowed=checkpoint_lifecycle.admission_allowed,
+                checkpoint_lifecycle=checkpoint_lifecycle,
             )
             for domain in _DOMAINS
         }
@@ -74,7 +73,6 @@ def main(argv: list[str] | None = None) -> None:
                 GMSRPCServer(
                     get_socket_path(args.device, domain),
                     managers[domain],
-                    checkpoint_lifecycle=checkpoint_lifecycle,
                 )
             )
             for domain in _DOMAINS
