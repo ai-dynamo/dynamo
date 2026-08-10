@@ -24,6 +24,20 @@
 all:
   - '**'
 
+# Fern component sources only. The docs filter matches 458 of the last 1172
+# commits on main, but only 21 of those touched a component source, so a step
+# that only exercises components wastes ~95% of its runs on that filter.
+# pre-merge.yml is listed because a change to the component-parsing step should
+# run the step it changes.
+fern_components:
+  - 'docs/fern/components/**/*.ts'
+  - 'docs/fern/components/**/*.tsx'
+  - 'docs/fern/components/**/*.js'
+  - 'docs/fern/components/**/*.jsx'
+  - 'docs/fern/fern.config.json'
+  - 'docs/fern/scripts/check_component_imports.py'
+  - '.github/workflows/pre-merge.yml'
+
 docs:
   - 'docs/**'
   - 'fern/**'

@@ -70,6 +70,9 @@ outputs:
   docs:
     description: 'Whether docs files changed'
     value: ${{ steps.filter.outputs.docs_any_modified }}
+  fern_components:
+    description: 'Whether Fern component sources changed'
+    value: ${{ steps.filter.outputs.fern_components_any_modified }}
   base_ref:
     description: 'PR target branch (baseRefName) for push-to-pull-request/N events; empty otherwise. Used for OSRB compliance-diff baseline selection.'
     value: ${{ steps.merge-base.outputs.base_ref }}
@@ -148,6 +151,7 @@ runs:
         echo ""
         echo "=== Filter Results ==="
         echo "docs: ${{ steps.filter.outputs.docs_any_modified }}"
+        echo "fern_components: ${{ steps.filter.outputs.fern_components_any_modified }}"
         echo "ci: ${{ steps.filter.outputs.ci_any_modified }}"
         echo "core: ${{ steps.filter.outputs.core_any_modified }}"
         echo "dev_images: ${{ steps.filter.outputs.dev_images_any_modified }}"

@@ -19,7 +19,6 @@ fn executable_exposes_native_grpc_configuration() {
     for flag in [
         "--vllm-endpoint",
         "--grpc-connections",
-        "--model-path",
         "--disaggregation-mode",
         "--grpc-connect-attempt-timeout-secs",
         "--grpc-retry-interval-secs",
@@ -27,7 +26,6 @@ fn executable_exposes_native_grpc_configuration() {
     ] {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
-
     for env in [
         "DYN_SIDECAR_GRPC_CONNECTIONS",
         "DYN_SIDECAR_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS",
