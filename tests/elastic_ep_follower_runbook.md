@@ -395,3 +395,110 @@ kubectl delete dgd ep-cmp-nogrove ep-cmp-grove -n tzulingk-ft-tests
 ```
 
 Deleting the two DynamoGraphDeployments removes their scaling adapters and Deployments as well.
+
+## 2026-08-10 run log and corrections
+
+An execution attempt on `nv-prd-dgxc.teleport.sh-dynamo-aws-dev-01`, namespace `tzulingk-ft-tests`.
+Several assumptions in the sections above no longer hold on this cluster; corrections are recorded
+here so the next person does not rediscover them.
+
+### Environment delta since handoff
+
+- **Capacity is no longer a blocker.** At this run there were **six fully-free GB200 nodes**
+  (`ip-100-64-{141-181,142-90,182-250,190-167,226-152,228-49}`), four GPUs each — ample for the two
+  whole nodes this shape needs. The "Known blockers → capacity" note is stale.
+- The RWX PVC is named **`shared-model-cache`** (not `model-cache` as the demo template hardcodes);
+  point `claimName` and `HF_HOME` at it.
+- `hf-token-secret` still did not exist; created it (a valid `HF_TOKEN`; DeepSeek-V2-Lite is public
+  but `envFromSecret` requires the secret to exist).
+
+### Part A corrections (images)
+
+- **The base image the demo names does not exist.** `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0`
+  returns `no such manifest`. The newest *public* stable tag is **`1.3.1`**; `1.3.0` is what the
+  runbook already names as the public fallback.
+- **CRITICAL — the public runtime has no Ray.** `vllm-runtime:1.3.0` ships **vLLM 0.23.0 with `ray`
+  not installed** (`pip show ray` → not found; no `/opt/dynamo/venv`; vLLM exposes no `elastic`
+  symbols). Elastic EP is impossible on it: `ray start` → `ray: not found`, and a Ray-DP engine
+  cannot launch. The runbook's "an internal tag closer to main is strongly preferred" must be
+  upgraded to a **hard requirement**: use a runtime image that actually bundles Ray + elastic-EP
+  vLLM — i.e. the internal `${IMAGE}` the team substitutes into `moe_elastic_ep_multinode.yaml`
+  (a `dynamoci.azurecr.io/ai-dynamo/dynamo:<sha>-vllm-runtime`-style build), not a public `1.3.x`.
+- **Overlay destination path.** In this image the package lives at
+  `/usr/local/lib/python3.12/dist-packages/dynamo/vllm/handlers.py` (there is **no**
+  `/opt/dynamo/venv`). Always re-derive it per image, as the runbook says.
+- **Prefer a minimal in-place patch over a whole-file overlay.** The scale-floor `handlers.py`
+  (main-era, guard at ~line 1423) and the 1.3.0 file (guard at line 1296) have diverged; overlaying
+  the whole main-era file onto the older package risks incompatibility. Instead, extract the base
+  image's own `handlers.py` and replace only the guard block. The new code's attribute path
+  `self.engine_client.vllm_config.parallel_config.tensor_parallel_size` **is** present in 1.3.0, so
+  the minimal patch is safe.
+- **`REGISTRY` trailing slash.** `make docker-build-operator REGISTRY=$REGISTRY/` double-slashes,
+  because the Makefile's `_prefix` already appends `/`. Pass `REGISTRY=nvcr.io/nvidian/dynamo-dev`
+  with **no** trailing slash.
+- **Operator build context.** The operator `Dockerfile` now COPYs from a `compliance` build context
+  (licenses stage) in addition to `snapshot`; a bare `make docker-build-operator` may fail without
+  `--build-context compliance=../../container/compliance`. (Not exercised this run — see Part B.)
+- Push to `nvcr.io/nvidian/dynamo-dev` **works** and is fast (cross-repo blob-mounts the shared base
+  layers). Part A's "push unproven" caveat is resolved.
+
+### Part B correction (the second operator is safe here — with three settings)
+
+The cluster-wide operator in `dynamo-system` runs in **cluster-wide mode** (its config sets no
+restricted/excluded namespace) and already reconciles this namespace. That looks like it rules out a
+second operator — but Dynamo has a **Lease-based namespace-scope marker**: an operator installed in
+*restricted mode* writes a Lease claiming its namespace, and the cluster-wide operator skips any
+namespace holding a valid claim (confirmed live in the cluster operator's startup logs:
+`Setting up namespace scope marker lease watcher for cluster-wide mode`). So a scoped second operator
+does **not** fight the cluster-wide one, **provided** you set all three:
+
+1. **restricted mode on**, 2. **namespace = `tzulingk-ft-tests`**, 3. **CRD-upgrade OFF**.
+
+The restricted install's webhook is auto-scoped to the namespace by the chart (no cluster-wide
+webhook spillover). The real hazard is #3: the chart defaults to pushing the CRDs bundled in its own
+image, which would overwrite the **shared** cluster CRDs — turn it off. Caveats: this mode is chart-
+labelled "development and testing only" and the implementing code is marked deprecated.
+
+### What was actually run this session
+
+- Confirmed both code branches: `elastic-ep-scale-floor` (`c1f88d771a`, `handlers.py` floor fix) and
+  `elastic-ep-p2-ray-head` (`79bc12ac3d`, `backend_vllm.go` Ray-head for single-pod `RoleMain`).
+- **Operator change proven by unit tests** (worktree of `elastic-ep-p2-ray-head`):
+  `go test ./internal/dynamo/ -run TestVLLMBackend_UpdateContainer` →
+  `single_node_elastic_EP_gets_a_ray_head` **PASS**, plus the negative cases
+  (`single_node_without_elastic_EP_keeps_its_plain_command`, `single_node_does_not_modify_args`).
+- **Worker overlay built + pushed:** `nvcr.io/nvidian/dynamo-dev/tzulingk-dynamo-vllm:elastic-ep-follower`
+  = `vllm-runtime:1.3.0` + the minimal scale-floor patch, arm64 verified, pushed OK.
+- **Approach taken (Option 1 — no second operator this run):** deployed a non-Grove on-demand-follower
+  DGD via the *existing* cluster operator, baking the exact Ray head/join commands the patched
+  operator renders (`injectElasticEPRayLaunchFlags`), leader `RoleMain` + follower parked at
+  `replicas: 0` with `scalingAdapter: {}`. New manifests:
+  `tests/fault_tolerance/deploy/templates/vllm/moe_elastic_ep_follower_ondemand.yaml` and
+  `…_ondemand_svc.yaml` (a headless Service the follower uses to reach the leader's Ray GCS on 6379
+  and `/live` on 9090 — the operator's per-component `<dgd>-leader` Service is ClusterIP:9090 only and
+  cannot carry Ray's multi-port pod-to-pod traffic).
+  - The cluster operator **preserved the baked command verbatim** (verified the rendered leader
+    Deployment args begin with `ray start --head --port=6379 …`), and scheduled the leader on a free
+    GB200 node. The v1alpha1 services-map supports everything needed: `componentType`, `resources`,
+    `envFromSecret`, `extraPodSpec.mainContainer.command/args`, `replicas: 0`, and `scalingAdapter`.
+    Note: a non-semver image tag requires `runtimeVersionOverride` per service or the DGD is rejected.
+- **Blocked here:** the leader CrashLoops on `ray: not found` — solely because the 1.3.0 base has no
+  Ray (above). Everything up to the missing-Ray point is validated; the scale sequence
+  (follower join → dp=2 → dp=1 → detach) and the engine `dp=1` acceptance check are still pending a
+  Ray-capable image.
+
+### Next step to finish
+
+1. Obtain a Ray + elastic-EP-capable runtime image (the internal `${IMAGE}`), rebuild the overlay on
+   it (re-derive the `handlers.py` path), and push.
+2. Then either **(Option 1)** re-point `moe_elastic_ep_follower_ondemand.yaml` at that image and run
+   the scale sequence, **or** **(Option 2, more faithful)** install a scoped operator from
+   `elastic-ep-p2-ray-head` with the three safe settings above and deploy the demo-shaped DGD so the
+   real operator emits the Ray head.
+
+### Artifacts left behind by this run
+
+- DGD `vllm-eep-follow` (+ its `-frontend`/`-leader`/`-follower` Deployments and scaling adapter) and
+  headless Service `vllm-eep-follow-leader-ray` in `tzulingk-ft-tests`. The leader is CrashLooping and
+  **holds 4 GPUs** — delete the DGD (and the headless Service) or re-point it once a Ray image exists.
+- Worker image `…/tzulingk-dynamo-vllm:elastic-ep-follower` in the registry.
