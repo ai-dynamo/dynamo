@@ -2096,6 +2096,15 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| "Unknown error".to_string())
         };
 
+        // Capacity rejection is not a backend fault. Workers report it with their
+        // own status (503), which a client cannot tell from a real outage, so the
+        // error chain wins over the payload code — admission-path and worker-path
+        // rejections then surface identically. See DYN_HTTP_OVERLOAD_STATUS_CODE.
+        let overloaded = event
+            .error
+            .as_ref()
+            .is_some_and(|error| super::metrics::request_was_rejected(error));
+
         // Parse the status-bearing node's own message. The diagnostic string
         // above includes its causes and therefore is not necessarily JSON.
         let status_message = event
@@ -2106,12 +2115,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
             // Preserve explicit HTTP-like statuses (for example 415); Python
             // 4xx exceptions share the Backend(InvalidArgument) category.
-            let code = match error_payload.code {
-                Some(code) => {
-                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            let code = if overloaded {
+                overload_status_code()
+            } else {
+                match error_payload.code {
+                    Some(code) => {
+                        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                    None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
+                    None => StatusCode::INTERNAL_SERVER_ERROR,
                 }
-                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
-                None => StatusCode::INTERNAL_SERVER_ERROR,
             };
             let message = error_payload
                 .message
@@ -2124,6 +2137,10 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 invalid_argument.message().to_string(),
                 StatusCode::BAD_REQUEST,
             ));
+        }
+
+        if overloaded {
+            return Some((error_str, overload_status_code()));
         }
 
         return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
@@ -4907,6 +4924,93 @@ mod tests {
                 "client response must not include the underlying engine message"
             );
         }
+    }
+
+    #[test]
+    fn backend_overload_reports_overload_status_not_worker_status() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        // Production path: a vLLM worker rejects on its own slot limit and puts
+        // 503 in the payload. The chain says ResourceExhausted, so the client
+        // must see the overload status rather than a generic outage.
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message(
+                        r#"{"message":"Worker local total request limit reached (32/32)","code":503}"#,
+                    )
+                    .build(),
+            ),
+        };
+
+        let (message, status) =
+            extract_backend_error_if_present(&event).expect("error event should be extracted");
+        assert_eq!(status, overload_status_code());
+        assert_eq!(status.as_u16(), 529);
+        assert!(message.contains("request limit reached"));
+    }
+
+    #[test]
+    fn backend_non_overload_status_is_still_preserved() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        // The override is scoped to capacity rejections; a genuine backend
+        // failure must keep the status the worker chose.
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Unknown)
+                    .message(r#"{"message":"engine crashed","code":503}"#)
+                    .build(),
+            ),
+        };
+
+        let (_, status) =
+            extract_backend_error_if_present(&event).expect("error event should be extracted");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn python_worker_503_reaches_the_frontend_as_backend_unknown() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        // Exactly what map_python_exception (bindings/python/rust/engine.rs) and
+        // py_err_to_dynamo (backend.rs) build for a Python exception carrying
+        // `.code = 503`: 503 is outside 400..500, so the type is Backend(Unknown)
+        // and the message is the JSON envelope. No cause is attached.
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message(
+                        r#"{"message":"Worker local total request limit reached (32/32)","code":503}"#,
+                    )
+                    .build(),
+            ),
+        };
+
+        // request_was_rejected keys on ErrorType::ResourceExhausted, which this
+        // shape never carries, so the overload override does not engage.
+        assert!(!super::super::metrics::request_was_rejected(
+            event.error.as_ref().expect("error is set")
+        ));
+
+        let (_, status) =
+            extract_backend_error_if_present(&event).expect("error event should be extracted");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
