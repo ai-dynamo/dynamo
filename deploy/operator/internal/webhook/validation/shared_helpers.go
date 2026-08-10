@@ -82,6 +82,10 @@ func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValid
 	return v.runtimeVersionSource == source
 }
 
+func (v *sharedValidation) validatesRequestSourceFor(source runtimeVersionValidationSource) bool {
+	return v.requestSource == source
+}
+
 // runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPath(

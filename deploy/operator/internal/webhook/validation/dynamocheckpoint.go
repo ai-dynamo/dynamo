@@ -15,6 +15,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -30,27 +31,43 @@ func NewDynamoCheckpointValidator() *DynamoCheckpointValidator {
 // dynamoCheckpointValidation carries DynamoCheckpoint-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoCheckpointValidation struct {
-	ctx context.Context
+	ctx               context.Context
+	userInfo          *authenticationv1.UserInfo
+	operatorPrincipal string
 }
 
-// Validate performs stateless validation on checkpoint. ctx and checkpoint must not be nil.
+// Validate performs stateless validation on checkpoint.
+// ctx and checkpoint must not be nil. A nil userInfo rejects identity omission.
 func (v *DynamoCheckpointValidator) Validate(
 	ctx context.Context,
 	checkpoint *nvidiacomv1alpha1.DynamoCheckpoint,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
 ) (admission.Warnings, error) {
-	validation := &dynamoCheckpointValidation{ctx: ctx}
+	validation := &dynamoCheckpointValidation{
+		ctx:               ctx,
+		userInfo:          userInfo,
+		operatorPrincipal: operatorPrincipal,
+	}
 	allErrs := validation.validateDynamoCheckpoint(checkpoint)
 	return nil, invalidDynamoCheckpointError(checkpoint, allErrs)
 }
 
 // ValidateUpdate validates newCheckpoint against oldCheckpoint.
 // ctx, oldCheckpoint, and newCheckpoint must not be nil.
+// A nil userInfo rejects identity omission.
 func (v *DynamoCheckpointValidator) ValidateUpdate(
 	ctx context.Context,
 	oldCheckpoint *nvidiacomv1alpha1.DynamoCheckpoint,
 	newCheckpoint *nvidiacomv1alpha1.DynamoCheckpoint,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
 ) (admission.Warnings, error) {
-	validation := &dynamoCheckpointValidation{ctx: ctx}
+	validation := &dynamoCheckpointValidation{
+		ctx:               ctx,
+		userInfo:          userInfo,
+		operatorPrincipal: operatorPrincipal,
+	}
 	allErrs := validation.validateDynamoCheckpointUpdate(newCheckpoint, oldCheckpoint)
 	return nil, invalidDynamoCheckpointError(newCheckpoint, allErrs)
 }
@@ -65,6 +82,18 @@ func (v *dynamoCheckpointValidation) validateDynamoCheckpoint(
 		allErrs = append(allErrs, field.Forbidden(
 			specPath,
 			"checkpoint functionality is disabled in the operator configuration",
+		))
+	}
+
+	// Only the configured operator may omit identity from an automatic checkpoint.
+	identityOmissionAuthorized := v.operatorPrincipal != "" &&
+		v.userInfo != nil &&
+		v.userInfo.Username == v.operatorPrincipal &&
+		checkpoint.Annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue
+	if checkpoint.Spec.Identity == nil && !identityOmissionAuthorized {
+		allErrs = append(allErrs, field.Required(
+			specPath.Child("identity"),
+			"is required for a standalone checkpoint",
 		))
 	}
 	allErrs = append(allErrs, v.validateDynamoCheckpointSpec(&checkpoint.Spec, specPath)...)

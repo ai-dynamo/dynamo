@@ -146,8 +146,9 @@ spec:
                       rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
                   description: |-
-                    Deprecated: required by v1alpha1 for standalone checkpoints. Auto
-                    checkpoints synthesize it; checkpointRef restores use the referenced CR.
+                    Legacy compatibility: identity is required for manual and legacy standalone
+                    checkpoints. DGD-managed automatic checkpoints omit it and use their
+                    DGD-derived checkpoint ID. This field is deprecated.
                   properties:
                     backendFramework:
                       description: |-
@@ -8381,7 +8382,6 @@ spec:
                     - podTemplateSpec
                   type: object
               required:
-                - identity
                 - job
               type: object
             status:
@@ -8495,7 +8495,7 @@ spec:
           type: object
           x-kubernetes-validations:
             - message: spec.identity is immutable after creation
-              rule: '!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity'
+              rule: has(self.spec.identity) == has(oldSelf.spec.identity) && (!has(self.spec.identity) || self.spec.identity == oldSelf.spec.identity)
       served: true
       storage: true
       subresources:

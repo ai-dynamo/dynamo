@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -38,6 +39,7 @@ func NewDynamoComponentDeploymentValidator() *DynamoComponentDeploymentValidator
 // API values and derived traversal state remain explicit validator arguments.
 type dynamoComponentDeploymentValidation struct {
 	sharedValidation
+	operatorGenerated bool
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoComponentDeployment.
@@ -54,12 +56,23 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validateOperatorGenerated(ctx, dcd, runtimeVersionSource, false)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateOperatorGenerated(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	operatorGenerated bool,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
 			runtimeVersionSource:               runtimeVersionSource,
+			requestSource:                      runtimeVersionSource,
 			allowMissingRuntimeVersionOverride: true,
 		},
+		operatorGenerated: operatorGenerated,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd)
@@ -81,12 +94,24 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validateUpdateOperatorGenerated(ctx, oldDCD, newDCD, runtimeVersionSource, false)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateUpdateOperatorGenerated(
+	ctx context.Context,
+	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	operatorGenerated bool,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
 			runtimeVersionSource:               runtimeVersionSourceDisabled,
+			requestSource:                      runtimeVersionSource,
 			allowMissingRuntimeVersionOverride: true,
 		},
+		operatorGenerated: operatorGenerated,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD)
@@ -118,7 +143,19 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
+	fldPath := field.NewPath("spec")
+	allErrs := v.validateDynamoComponentDeploymentSpec(&dcd.Spec, fldPath)
+	for _, err := range dynamo.ValidateAutomaticFailoverCheckpointTarget(
+		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+		dcd.Spec.BackendFramework,
+		v.operatorGenerated,
+	) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("experimental", "checkpoint"),
+			err.Error(),
+		))
+	}
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.

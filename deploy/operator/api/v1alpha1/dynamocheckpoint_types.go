@@ -43,9 +43,9 @@ const (
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
-// Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-// requires spec.identity; omit DGD-managed identity and use checkpointRef for
-// explicit restores.
+// Deprecated: legacy identity metadata retained for manual and standalone
+// checkpoint compatibility. DGD-managed automatic checkpoints omit it and use
+// their DGD-derived checkpoint ID.
 type DynamoCheckpointIdentity struct {
 	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
 	// Deprecated: legacy spec.identity only.
@@ -138,10 +138,11 @@ type DynamoCheckpointJobConfig struct {
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 type DynamoCheckpointSpec struct {
-	// Deprecated: required by v1alpha1 for standalone checkpoints. Auto
-	// checkpoints synthesize it; checkpointRef restores use the referenced CR.
-	// +kubebuilder:validation:Required
-	Identity DynamoCheckpointIdentity `json:"identity"`
+	// Legacy compatibility: identity is required for manual and legacy standalone
+	// checkpoints. DGD-managed automatic checkpoints omit it and use their
+	// DGD-derived checkpoint ID. This field is deprecated.
+	// +optional
+	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
 	// GPUMemoryService records checkpoint-time GPU Memory Service metadata for
 	// a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
@@ -227,7 +228,7 @@ type DynamoCheckpointStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the checkpoint"
 // +kubebuilder:printcolumn:name="CheckpointID",type="string",JSONPath=".status.checkpointID",description="Artifact ID of the checkpoint"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity",message="spec.identity is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.identity) == has(oldSelf.spec.identity) && (!has(self.spec.identity) || self.spec.identity == oldSelf.spec.identity)",message="spec.identity is immutable after creation"
 
 // DynamoCheckpoint is the Schema for the dynamocheckpoints API
 // It represents a container checkpoint that can be used to restore pods to a warm state

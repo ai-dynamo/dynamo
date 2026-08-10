@@ -157,6 +157,24 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 		return ctrl.Result{}, nil
 	}
+	if compatibilityErr := stderrors.Join(dynamo.ValidateAutomaticFailoverCheckpointTarget(
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		dynamoComponentDeployment.Spec.BackendFramework,
+		dynamo.IsDGDControlled(dynamoComponentDeployment),
+	)...); compatibilityErr != nil {
+		if _, statusErr := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dynamoComponentDeployment.Generation,
+				Reason:             "InvalidCheckpointConfiguration",
+				Message:            compatibilityErr.Error(),
+			},
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// Setup defer to handle errors and update status
 	defer func() {
