@@ -194,7 +194,9 @@ spec:
                   port: 9090
                 periodSeconds: 30
                 timeoutSeconds: 20
-                failureThreshold: 60
+                # 60 min. A cold 118 GB FP8 load measured 28.5 min before CUDA-graph
+                # capture starts, so a 30 min budget kills first boot; disagg uses 60.
+                failureThreshold: 120
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
