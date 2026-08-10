@@ -17,6 +17,6 @@ Each quantized checkpoint is a self-contained recipe folder with its own
 | Variant | Checkpoint | Hardware | Profiles |
 | ------- | ---------- | -------- | -------- |
 | [`fp8/`](fp8/) | [Qwen/Qwen3.5-122B-A10B-FP8](https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8) | H200 | agg (tp2 + MTP, 4x), disagg 1P2D (tp1, 3x) |
-| `nvfp4/` | [nvidia/Qwen3.5-122B-A10B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-122B-A10B-NVFP4) | B200 | agg (tp1, 2x), disagg 1P2D (tp1, 3x) |
+| [`nvfp4/`](nvfp4/) | [nvidia/Qwen3.5-122B-A10B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-122B-A10B-NVFP4) | B200 | agg (tp1, 2x), disagg 1P2D (tp1, 3x) |
 
 Pick the variant that matches your hardware, then follow the README inside it.
