@@ -1254,15 +1254,21 @@ fn expected_topology_taints(card: &serde_json::Value) -> Result<HashSet<String>>
 /// Model cards remain immutable after registration except for worker-managed
 /// `runtime_config.taints`. Reserved topology taints are derived from the
 /// immutable `topology_domains` map and must stay canonical.
+#[derive(Debug)]
+struct ValidatedModelTaintUpdate {
+    existing_taints: HashSet<String>,
+    candidate_taints: HashSet<String>,
+}
+
 fn validate_model_taint_update(
     existing: &DiscoveryInstance,
     candidate: &DiscoveryInstance,
-) -> Result<()> {
+) -> Result<ValidatedModelTaintUpdate> {
     if existing.id() != candidate.id() {
         anyhow::bail!("model update cannot change discovery identity")
     }
 
-    let (existing_card, _) = model_card_without_taints(existing)?;
+    let (existing_card, existing_taints) = model_card_without_taints(existing)?;
     let (candidate_card, candidate_taints) = model_card_without_taints(candidate)?;
     if existing_card != candidate_card {
         anyhow::bail!("model update can only change runtime_config.taints")
@@ -1270,8 +1276,9 @@ fn validate_model_taint_update(
 
     let expected_topology = expected_topology_taints(&candidate_card)?;
     let actual_topology = candidate_taints
-        .into_iter()
+        .iter()
         .filter(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+        .cloned()
         .collect::<HashSet<_>>();
     if actual_topology != expected_topology {
         anyhow::bail!(
@@ -1279,7 +1286,18 @@ fn validate_model_taint_update(
         )
     }
 
-    Ok(())
+    Ok(ValidatedModelTaintUpdate {
+        existing_taints,
+        candidate_taints,
+    })
+}
+
+/// Validate a same-ID model registration replay without replacing authoritative taints.
+pub(crate) fn validate_model_reregistration(
+    existing: &DiscoveryInstance,
+    candidate: &DiscoveryInstance,
+) -> Result<()> {
+    validate_model_taint_update(existing, candidate).map(|_| ())
 }
 
 fn sorted_taints(taints: HashSet<String>) -> Vec<String> {
@@ -1308,9 +1326,10 @@ pub(crate) fn classify_discovery_change(
     if matches!(existing, DiscoveryInstance::Model { .. })
         && matches!(candidate, DiscoveryInstance::Model { .. })
     {
-        validate_model_taint_update(existing, candidate)?;
-        let (_, existing_taints) = model_card_without_taints(existing)?;
-        let (_, candidate_taints) = model_card_without_taints(candidate)?;
+        let ValidatedModelTaintUpdate {
+            existing_taints,
+            candidate_taints,
+        } = validate_model_taint_update(existing, candidate)?;
         if existing_taints == candidate_taints {
             return Ok(None);
         }
@@ -1357,7 +1376,8 @@ pub(crate) fn reconcile_discovery_snapshot(
                 next.insert(id, candidate);
             }
             Ok(None) => {
-                next.insert(id.clone(), known.get(&id).cloned().unwrap_or(candidate));
+                let retained = known.get(&id).cloned().unwrap_or(candidate);
+                next.insert(id, retained);
             }
             Err(error) => {
                 tracing::error!(
@@ -1488,6 +1508,13 @@ pub trait Discovery: Send + Sync {
         id: ModelCardInstanceId,
         taints: HashSet<String>,
     ) -> Result<()> {
+        if id.instance_id != self.instance_id() {
+            anyhow::bail!(
+                "cannot update model taints for worker {}; this discovery client owns worker {}",
+                id.instance_id,
+                self.instance_id()
+            )
+        }
         if id.model_suffix.is_some() {
             anyhow::bail!("model taint updates are supported only for base model cards")
         }

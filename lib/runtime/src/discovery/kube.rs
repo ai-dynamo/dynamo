@@ -45,21 +45,26 @@ async fn update_model_taints_and_persist<F, Fut>(
     persist: F,
 ) -> Result<bool>
 where
-    F: FnOnce(DiscoveryMetadata) -> Fut,
-    Fut: Future<Output = Result<DiscoveryMetadata>>,
+    F: FnOnce(DiscoveryMetadata) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<DiscoveryMetadata>> + Send + 'static,
 {
-    // Serialize metadata mutations through persistence, but leave the shared state untouched
-    // until persistence succeeds. Dropping this future at any await point therefore cannot
-    // leave local metadata ahead of the authoritative Kubernetes object.
-    let mut metadata = metadata.write().await;
-    let mut candidate = metadata.clone();
-    if !candidate.update_model_taints(&id, taints)? {
-        return Ok(false);
-    }
+    let metadata = Arc::clone(metadata);
+    // Once started, persistence and the matching local commit must outlive request cancellation.
+    // Dropping the JoinHandle detaches this task instead of cancelling the remote-commit/local-
+    // state critical section.
+    tokio::spawn(async move {
+        let mut metadata = metadata.write().await;
+        let mut candidate = metadata.clone();
+        let changed = candidate.update_model_taints(&id, taints)?;
 
-    let persisted = persist(candidate).await?;
-    *metadata = persisted;
-    Ok(true)
+        // Persist even a local no-op. This repairs an authoritative CR that may differ after an
+        // earlier commit/ack ambiguity instead of trusting potentially stale local metadata.
+        let persisted = persist(candidate).await?;
+        *metadata = persisted;
+        Ok(changed)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("model taint persistence task failed: {error}"))?
 }
 
 /// Kubernetes-based discovery client
@@ -175,7 +180,7 @@ impl Discovery for KubeDiscoveryClient {
         // Clone state for rollback in case CR persistence fails
         let original_state = metadata.clone();
 
-        match &instance {
+        let registered_instance = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
                     "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
@@ -185,6 +190,7 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.register_endpoint(instance.clone())?;
+                instance.clone()
             }
             DiscoveryInstance::Model {
                 namespace,
@@ -199,7 +205,7 @@ impl Discovery for KubeDiscoveryClient {
                     endpoint,
                     instance_id
                 );
-                metadata.register_model_card(instance.clone())?;
+                metadata.register_model_card(instance.clone())?
             }
             DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
@@ -209,6 +215,7 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
+                instance.clone()
             }
             DiscoveryInstance::EventSource { scope, topic, .. } => {
                 tracing::info!(
@@ -218,8 +225,9 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.register_event_source(instance.clone())?;
+                instance.clone()
             }
-        }
+        };
 
         // Build and apply the CR with the updated metadata
         // This persists the metadata to Kubernetes for other pods to discover
@@ -243,7 +251,7 @@ impl Discovery for KubeDiscoveryClient {
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
-        Ok(instance)
+        Ok(registered_instance)
     }
 
     async fn update_model_taints_internal(
@@ -534,7 +542,6 @@ impl Discovery for KubeDiscoveryClient {
                             }
                         }
 
-                        // Update known values.
                         known = reconciled;
                     }
                     Err(_) => {
@@ -666,7 +673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_model_taint_persistence_does_not_commit_local_state() {
+    async fn model_taint_persistence_completes_after_caller_cancellation() {
         let model = model_with_taint("old");
         let DiscoveryInstanceId::Model(id) = model.id() else {
             unreachable!()
@@ -675,27 +682,95 @@ mod tests {
         initial.register_model_card(model).unwrap();
         let metadata = Arc::new(RwLock::new(initial));
         let task_metadata = metadata.clone();
-        let (persist_started_tx, persist_started_rx) = tokio::sync::oneshot::channel();
+        let remote = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let task_remote = remote.clone();
+        let (remote_committed_tx, remote_committed_rx) = tokio::sync::oneshot::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
 
         let task = tokio::spawn(async move {
             update_model_taints_and_persist(
                 &task_metadata,
                 id,
                 HashSet::from(["new".to_string()]),
-                move |_| async move {
-                    persist_started_tx.send(()).unwrap();
-                    std::future::pending::<Result<DiscoveryMetadata>>().await
+                move |candidate| async move {
+                    *task_remote.write().await = candidate.clone();
+                    remote_committed_tx.send(()).unwrap();
+                    ack_rx.await.unwrap();
+                    Ok(candidate)
                 },
             )
             .await
         });
 
-        persist_started_rx.await.unwrap();
+        remote_committed_rx.await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        ack_tx.send(()).unwrap();
 
-        let stored = metadata.read().await.get_all_model_cards().pop().unwrap();
+        let stored = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let stored = metadata.read().await.get_all_model_cards().pop().unwrap();
+                let DiscoveryInstance::Model { card_json, .. } = &stored else {
+                    unreachable!()
+                };
+                if card_json["runtime_config"]["taints"] == serde_json::json!(["new"]) {
+                    break stored;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached persistence did not commit local metadata");
         let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["new"])
+        );
+        let remote = remote.read().await.get_all_model_cards().pop().unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = remote else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["new"])
+        );
+    }
+
+    #[tokio::test]
+    async fn local_noop_reapplies_authoritative_model_taints() {
+        let local_model = model_with_taint("old");
+        let DiscoveryInstanceId::Model(id) = local_model.id() else {
+            unreachable!()
+        };
+        let mut initial = DiscoveryMetadata::new();
+        initial.register_model_card(local_model).unwrap();
+        let metadata = Arc::new(RwLock::new(initial));
+        let persisted = Arc::new(RwLock::new(None));
+        let task_persisted = persisted.clone();
+
+        let changed = update_model_taints_and_persist(
+            &metadata,
+            id,
+            HashSet::from(["old".to_string()]),
+            move |candidate| async move {
+                *task_persisted.write().await = Some(candidate.clone());
+                Ok(candidate)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!changed);
+        let reapplied = persisted
+            .read()
+            .await
+            .clone()
+            .expect("no-op was not persisted");
+        let DiscoveryInstance::Model { card_json, .. } =
+            reapplied.get_all_model_cards().pop().unwrap()
+        else {
             unreachable!()
         };
         assert_eq!(

@@ -61,6 +61,7 @@ const CLEANUP_RESERVE_S: f64 = 5.0;
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
 
 /// Runtime-system route for replacing this worker's caller-managed model taints.
+const MODEL_TAINT_UPDATE_NAME: &str = "model_taints";
 const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 
 /// Runtime / transport configuration applied to the process before the
@@ -752,6 +753,14 @@ impl Worker {
 
         let registry = endpoint.drt().engine_routes();
         let update_count = updates.len();
+        if updates.iter().any(|name| name == MODEL_TAINT_UPDATE_NAME) {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!(
+                    "engine update '{MODEL_TAINT_UPDATE_NAME}' conflicts with reserved Dynamo route /engine/{MODEL_TAINT_UPDATE_ROUTE}"
+                ),
+            ));
+        }
         for update_name in updates {
             let callback = engine_update_callback(update_name.clone(), self.engine.clone());
             // Namespace update routes under `/engine/update/<name>`.
@@ -3231,6 +3240,31 @@ mod handoff_integration_tests {
             routes.get("load_lora").is_none(),
             "update must not be registered under its bare name"
         );
+    }
+
+    #[tokio::test]
+    async fn engine_update_cannot_replace_model_taint_route() {
+        let endpoint = test_endpoint().await;
+        let (engine, _) = HandoffMockEngine::new(
+            false,
+            Vec::new(),
+            vec!["load_lora".to_string(), "model_taints".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        let error = worker.register_engine_updates(&endpoint).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with reserved Dynamo route")
+        );
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("update/load_lora").is_none(),
+            "validation must happen before any engine update is registered"
+        );
+        assert!(routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none());
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ use super::{
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
     EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
     model_with_updated_taints, reconcile_discovery_snapshot, validate_event_source_reregistration,
+    validate_model_reregistration,
 };
 use crate::storage::kv;
 
@@ -388,6 +389,7 @@ impl Discovery for KVStoreDiscovery {
         let instance = spec.into_instance(self.instance_id());
         let instance_id = instance.instance_id();
         let is_event_source = matches!(&instance, DiscoveryInstance::EventSource { .. });
+        let is_model = matches!(&instance, DiscoveryInstance::Model { .. });
 
         let (bucket_name, key_path) = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
@@ -529,6 +531,17 @@ impl Discovery for KVStoreDiscovery {
             key_path,
             outcome
         );
+
+        if is_model && matches!(outcome, kv::StoreOutcome::Exists(_)) {
+            let existing = bucket.get(&key).await?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model discovery record disappeared during same-ID registration replay"
+                )
+            })?;
+            let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+            validate_model_reregistration(&existing, &instance)?;
+            return Ok(existing);
+        }
 
         Ok(instance)
     }
@@ -1331,6 +1344,19 @@ mod tests {
                 })
             );
         }
+
+        let replayed = client.register(model_spec("first")).await.unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = &replayed else {
+            panic!("expected model instance");
+        };
+        let replayed_taints = card_json["runtime_config"]["taints"].as_array().unwrap();
+        assert!(replayed_taints.contains(&serde_json::json!("third")));
+        assert!(!replayed_taints.contains(&serde_json::json!("first")));
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(50), stream.next())
+                .await
+                .is_err()
+        );
 
         client
             .update_model_taints(id, HashSet::from(["third".to_string()]))

@@ -445,30 +445,19 @@ impl Bucket for Directory {
         let full_path = self.p.join(key.url_safe().as_ref());
         let str_path = full_path.display().to_string();
         let _mutation_lock = self.lock_mutations().await?;
-        let temp_path = self.write_temp_file(&value)?;
 
         let current = match fs::read(&full_path) {
             Ok(current) => current,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                if let Err(remove_error) = fs::remove_file(&temp_path) {
-                    tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove unused FileStore temp file");
-                }
                 return Err(StoreError::MissingKey(key.to_string()));
             }
-            Err(error) => {
-                if let Err(remove_error) = fs::remove_file(&temp_path) {
-                    tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove unused FileStore temp file");
-                }
-                return Err(to_fs_err(error));
-            }
+            Err(error) => return Err(to_fs_err(error)),
         };
         if current.as_slice() != expected.as_ref() {
-            if let Err(remove_error) = fs::remove_file(&temp_path) {
-                tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove unused FileStore temp file");
-            }
             return Err(StoreError::Retry);
         }
 
+        let temp_path = self.write_temp_file(&value)?;
         if let Err(error) = fs::rename(&temp_path, &full_path) {
             if let Err(remove_error) = fs::remove_file(&temp_path) {
                 tracing::warn!(path = %temp_path.display(), %remove_error, "Failed to remove FileStore temp file after replace error");
@@ -605,7 +594,14 @@ impl Bucket for Directory {
                             yield WatchEvent::Put(item);
                         }
                         EventKind::Remove(_) => {
-                            yield WatchEvent::Delete(key);
+                            if should_emit_delete(&item_path) {
+                                yield WatchEvent::Delete(key);
+                            } else {
+                                tracing::debug!(
+                                    item = %item_path.display(),
+                                    "Suppressing stale FileStore remove event for a recreated key"
+                                );
+                            }
                         }
                         _ => {
                             // These happen every time the keep-alive updates last modified time
@@ -717,6 +713,10 @@ fn canonicalize_event_path(path: &Path) -> PathBuf {
     canonical_parent.join(file_name)
 }
 
+fn should_emit_delete(path: &Path) -> bool {
+    !path.exists()
+}
+
 // For anyhow preserve the context
 fn a_to_fs_err(err: anyhow::Error) -> StoreError {
     StoreError::FilesystemError(format!("{err:#}"))
@@ -739,6 +739,16 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreError, StoreOutcome};
+
+    #[test]
+    fn stale_remove_event_for_recreated_file_is_suppressed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("recreated");
+
+        assert!(super::should_emit_delete(&path));
+        fs::write(&path, b"new").unwrap();
+        assert!(!super::should_emit_delete(&path));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn contended_mutation_lock_does_not_block_runtime_worker() {

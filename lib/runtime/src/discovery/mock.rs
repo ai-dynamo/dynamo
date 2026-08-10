@@ -5,6 +5,7 @@ use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, ModelCardInstanceId, model_with_updated_taints,
     reconcile_discovery_snapshot, validate_event_source_reregistration,
+    validate_model_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -201,7 +202,11 @@ impl Discovery for MockDiscovery {
                     validate_event_source_reregistration(existing, &instance)?;
                     return Ok(existing.clone());
                 }
-                DiscoveryInstance::Model { .. } | DiscoveryInstance::EventChannel { .. } => {}
+                DiscoveryInstance::Model { .. } => {
+                    validate_model_reregistration(existing, &instance)?;
+                    return Ok(existing.clone());
+                }
+                DiscoveryInstance::EventChannel { .. } => {}
             }
         }
         instances.push(instance.clone());
@@ -420,6 +425,71 @@ mod tests {
                 .update_model_taints(id, HashSet::new())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn same_id_model_registration_preserves_updated_taints_without_duplicates() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let spec = DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {"taints": ["initial"]}
+            }),
+            model_suffix: None,
+        };
+        let original = client.register(spec.clone()).await.unwrap();
+        let DiscoveryInstanceId::Model(id) = original.id() else {
+            unreachable!()
+        };
+        client
+            .update_model_taints(id, HashSet::from(["updated".to_string()]))
+            .await
+            .unwrap();
+
+        let replayed = client.register(spec).await.unwrap();
+        let models = client
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(models, vec![replayed.clone()]);
+        let DiscoveryInstance::Model { card_json, .. } = replayed else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["updated"])
+        );
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_rejects_foreign_worker_id() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let foreign_id = ModelCardInstanceId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 8,
+            model_suffix: None,
+        };
+
+        let error = client
+            .update_model_taints(foreign_id, HashSet::new())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("this discovery client owns worker 7")
         );
     }
 

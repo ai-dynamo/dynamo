@@ -141,8 +141,8 @@ impl Bucket for MemoryBucketRef {
             }
             Entry::Occupied(mut entry) => {
                 let (rev, _v) = entry.get();
-                if *rev == revision {
-                    StoreOutcome::Exists(revision)
+                if revision == 0 || *rev == revision {
+                    StoreOutcome::Exists(*rev)
                 } else {
                     entry.insert((revision, value.clone()));
                     let _ = self.inner.change_sender.send(MemoryEvent::Put {
@@ -294,7 +294,9 @@ impl Bucket for MemoryBucketRef {
 #[cfg(test)]
 mod tests {
     use super::MEMORY_EVENT_BUFFER_CAPACITY;
-    use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _, StoreError, WatchEvent};
+    use crate::storage::kv::{
+        Bucket as _, Key, MemoryStore, Store as _, StoreError, StoreOutcome, WatchEvent,
+    };
     use futures::StreamExt;
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -331,6 +333,33 @@ mod tests {
         delete.await.unwrap().unwrap();
         assert!(update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_))));
         assert_eq!(bucket.get(&key).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn revision_zero_replay_preserves_cas_update() {
+        let store = MemoryStore::new();
+        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
+        let key = Key::new("model".to_string());
+
+        assert_eq!(
+            bucket.insert(&key, "initial".into(), 0).await.unwrap(),
+            StoreOutcome::Created(0)
+        );
+        assert_eq!(
+            bucket
+                .compare_and_replace(&key, "initial".into(), "updated".into())
+                .await
+                .unwrap(),
+            StoreOutcome::Created(1)
+        );
+        assert_eq!(
+            bucket.insert(&key, "initial".into(), 0).await.unwrap(),
+            StoreOutcome::Exists(1)
+        );
+        assert_eq!(
+            bucket.get(&key).await.unwrap().unwrap().as_ref(),
+            b"updated"
+        );
     }
 
     #[tokio::test]
