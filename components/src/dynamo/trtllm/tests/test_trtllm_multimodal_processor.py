@@ -237,8 +237,10 @@ async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None
             ep_disaggregated_params=None,
         )
 
-    # A client-visible 400, not a 500: the input is unsupported, not broken server.
-    assert excinfo.value.status == 400
+    # Contract change with the actionable-error work: a missing DECODER is
+    # deployment configuration, not a bad request, so this is now a 500 (the
+    # ImportError wrap classifies it), not the generic 400.
+    assert excinfo.value.status == 500
     message = str(excinfo.value)
     # Ours: the prefix and the offending URL, so the client knows which input failed.
     assert "Failed to load video" in message
@@ -246,5 +248,98 @@ async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None
     # The upstream reason is preserved verbatim rather than swallowed. Asserted as
     # "whatever the cause said survives", not as specific vendor wording.
     assert str(upstream_error) in message
+    # And the actionable guidance is present alongside it.
+    assert "install_media_decoders trtllm" in message
 
     nvdec.assert_not_called()  # VP9 must never take the hardware path
+
+
+@pytest.mark.asyncio
+async def test_video_error_never_echoes_an_inline_media_payload(
+    monkeypatch,
+) -> None:
+    """A data: video URL carries the whole payload inline, so it must never be
+    echoed back in the error.
+
+    Measured on the real TRT-LLM image before this bound existed: a 250 KB
+    inline video produced a 683,213-character message -- the payload twice
+    (once from our text, once from HttpStatusError's own format string), about
+    1500x the 457 characters of actionable guidance -- returned to the client
+    and written to every log sink that recorded the failure.
+    """
+    import base64
+
+    payload = base64.b64encode(b"\x00" * (64 * 1024)).decode()
+    url = f"data:video/mp4;base64,{payload}"
+
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(
+        mmp,
+        "async_load_video",
+        AsyncMock(side_effect=ImportError("OpenCV (cv2) is required")),
+    )
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await processor.process_openai_request(
+            {
+                "multi_modal_data": {"video_url": [{"Url": url}]},
+                "token_ids": [1],
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    message = str(exc_info.value)
+    assert payload not in message
+    assert payload not in str(exc_info.value.url)
+    # Still identifies the source by type and size, and stays actionable.
+    assert "data:video/mp4" in message
+    assert "payload elided" in message
+    assert "install_media_decoders trtllm" in message
+    assert len(message) < 2_000, f"error message is unbounded: {len(message)} chars"
+
+
+@pytest.mark.asyncio
+async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
+    """cv2 absent: the vendor loader's ImportError must surface as guidance
+    naming the bounded spec and installer, not a bare module error."""
+    from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    fetch = AsyncMock(return_value=b"video bytes")
+    load_video = AsyncMock(
+        side_effect=ImportError("OpenCV (cv2) is required for video decoding")
+    )
+    monkeypatch.setattr(mmp, "fetch_bytes", fetch, raising=False)
+    monkeypatch.setattr(mmp, "async_load_video", load_video)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await processor.process_openai_request(
+            {
+                "multi_modal_data": {
+                    "video_url": [{"Url": "http://169.254.169.254/x.mp4"}]
+                },
+                "token_ids": [1],
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    # A missing decoder is a deployment gap: 500, never the generic 400.
+    assert exc_info.value.status == 500
+    msg = str(exc_info.value)
+    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "install_media_decoders trtllm" in msg
+    # The vendor loader's own text survives as the cause.
+    assert "OpenCV (cv2) is required for video decoding" in msg
