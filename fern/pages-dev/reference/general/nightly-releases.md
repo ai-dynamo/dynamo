@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Nightly Release Info
+title: Nightly Releases
 subtitle: Nightly container images, Python wheels, install patterns, and current backend versions.
 ---
 

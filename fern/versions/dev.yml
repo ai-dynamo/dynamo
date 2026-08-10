@@ -926,15 +926,6 @@ navigation:
       - page: Compatibility
         path: ../pages-dev/reference/general/compatibility.mdx
         slug: compatibility
-      - page: Examples
-        path: ../pages-dev/reference/general/examples.md
-        slug: examples
-      - page: Release Artifacts
-        path: ../pages-dev/reference/general/release-artifacts.mdx
-        slug: release-artifacts
-      - page: Nightly Release Info
-        path: ../pages-dev/reference/general/nightly-release-info.md
-        slug: nightly-release-info
       - section: Releases
         slug: releases
         path: ../pages-dev/reference/general/releases/release-history.mdx
@@ -956,21 +947,87 @@ navigation:
             path: ../pages-dev/reference/general/releases/known-issues.mdx
           - page: Deprecations
             path: ../pages-dev/reference/general/releases/deprecations.mdx
-      - page: Model Early Access Builds
-        path: ../pages-dev/reference/general/model-early-access-builds.mdx
-        slug: model-early-access-builds
-      - page: Glossary
-        path: ../pages-dev/reference/general/glossary.md
-        slug: glossary
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
         path: ../pages-dev/reference/general/releases-machine-readable.mdx
         slug: releases-data
         hidden: true
+      - page: Release Artifacts
+        path: ../pages-dev/reference/general/release-artifacts.mdx
+        slug: release-artifacts
+      - page: Nightly Releases
+        path: ../pages-dev/reference/general/nightly-releases.md
+        slug: nightly-releases
+      - page: Model Early Access Builds
+        path: ../pages-dev/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
+      - page: Examples
+        path: ../pages-dev/reference/general/examples.md
+        slug: examples
+      # ==================== API Reference ====================
+      # docs/fern/scripts/gen_python_api.py generates the Python landing page
+      # and one deterministic MDX per curated module. Each per-module page is a
+      # visible sibling of the Python landing, so opening the section exposes
+      # every published module. Python and Kubernetes both collapse: leaving
+      # Python open stood eleven 'dynamo.*' rows beside a one-line Kubernetes
+      # section, which read as an oversight once the two became peers.
+      #
+      # Python API and Rust API sit at the top level as siblings of Kubernetes
+      # API, so the three language surfaces read as peers. Their slugs stay
+      # nested under 'api/' even though the nav no longer is: Fern derives URLs
+      # from the nav, and every published /reference/api/... URL -- including
+      # the twenty anchored redirects in docs.yml that carry the retired
+      # NIXL Connect class pages -- would otherwise move.
+      - page: API Reference
+        path: ../pages-dev/reference/api/README.mdx
+        slug: api
+      - section: Python API
+        icon: fa-brands fa-python
+        path: ../pages-dev/reference/api/python/README.mdx
+        slug: api/python
+        collapsed: true
+        contents:
+          - page: dynamo._core
+            path: ../pages-dev/reference/api/python/_core.mdx
+            slug: _core
+          - page: dynamo.runtime
+            path: ../pages-dev/reference/api/python/runtime.mdx
+            slug: runtime
+          - page: dynamo.llm
+            path: ../pages-dev/reference/api/python/llm.mdx
+            slug: llm
+          - page: dynamo.frontend
+            path: ../pages-dev/reference/api/python/frontend.mdx
+            slug: frontend
+          - page: dynamo.common
+            path: ../pages-dev/reference/api/python/common.mdx
+            slug: common
+          - page: dynamo.health_check
+            path: ../pages-dev/reference/api/python/health_check.mdx
+            slug: health_check
+          - page: dynamo.logits_processing
+            path: ../pages-dev/reference/api/python/logits_processing.mdx
+            slug: logits_processing
+          - page: dynamo.planner
+            path: ../pages-dev/reference/api/python/planner.mdx
+            slug: planner
+          - page: dynamo.router
+            path: ../pages-dev/reference/api/python/router.mdx
+            slug: router
+          - page: dynamo.mocker
+            path: ../pages-dev/reference/api/python/mocker.mdx
+            slug: mocker
+          - page: dynamo.nixl_connect
+            path: ../pages-dev/reference/api/python/nixl_connect.mdx
+            slug: nixl_connect
+      - page: Rust API
+        icon: fa-brands fa-rust
+        path: ../pages-dev/reference/api/rust/README.mdx
+        slug: api/rust
       - section: Kubernetes API
         icon: fa-brands fa-kubernetes
-        slug: kubernetes-api
+        slug: api/kubernetes
         collapsed: true
         contents:
           - page: DynamoGraphDeployment
@@ -1063,26 +1120,9 @@ navigation:
         contents:
           - page: Overview
             path: ../pages-dev/reference/nixl-connect/overview.mdx
-          - page: Connector
-            path: ../pages-dev/reference/nixl-connect/connector.mdx
-          - page: Device
-            path: ../pages-dev/reference/nixl-connect/device.mdx
-          - page: Device Kind
-            path: ../pages-dev/reference/nixl-connect/device-kind.mdx
-          - page: Descriptor
-            path: ../pages-dev/reference/nixl-connect/descriptor.mdx
-          - page: Read Operation
-            path: ../pages-dev/reference/nixl-connect/read-operation.mdx
-          - page: Write Operation
-            path: ../pages-dev/reference/nixl-connect/write-operation.mdx
-          - page: Readable Operation
-            path: ../pages-dev/reference/nixl-connect/readable-operation.mdx
-          - page: Writable Operation
-            path: ../pages-dev/reference/nixl-connect/writable-operation.mdx
-          - page: Operation Status
-            path: ../pages-dev/reference/nixl-connect/operation-status.mdx
-          - page: RDMA Metadata
-            path: ../pages-dev/reference/nixl-connect/rdma-metadata.mdx
+      - page: Glossary
+        path: ../pages-dev/reference/general/glossary.md
+        slug: glossary
   - tab: blog
     layout:
       - page: Latest

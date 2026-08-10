@@ -3912,9 +3912,9 @@ Worker components receive the following probe configurations:
 - **Timeout**: 5 seconds
 - **Failure Threshold**: 720 (allows up to 2 hours for startup: 10s × 720 = 7200s)
 
-:::{note}
+<Note>
 For larger models (typically >70B parameters) or slower storage systems, you may need to increase the `failureThreshold` to allow more time for model loading. Calculate the required threshold based on your expected startup time: `failureThreshold = (expected_startup_seconds / period)`. Override the startup probe in your component specification if the default 2-hour window is insufficient.
-:::
+</Note>
 
 ### Multinode Deployment Probe Modifications
 
