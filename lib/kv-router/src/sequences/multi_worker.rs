@@ -814,6 +814,39 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
+    /// Release `request_id`'s booking only if it is still on `worker`.
+    ///
+    /// This is safe for delayed cleanup that captured a worker when it acquired
+    /// the booking. An ownership mismatch or already-freed request is a no-op.
+    pub(crate) fn free_if_worker(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
+        let lora_name = self.request_index.lora_for(request_id);
+        match self.mutate_request_worker_prompt_state_local(
+            worker,
+            request_id,
+            decay_now,
+            |seqs, rid, decay_now| seqs.free(rid, decay_now),
+            false,
+        ) {
+            Ok(()) | Err(SequenceError::RequestNotFound { .. }) => {}
+            Err(err) => return Err(err),
+        }
+        self.request_index
+            .remove_request_if_worker(request_id, worker);
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: ActiveSequenceEventData::Free,
+            router_id: self.router_id,
+            lora_name,
+        });
+        Ok(())
+    }
+
     /// Mark prefill as completed for a request.
     ///
     /// Note: Calling this multiple times for the same request is allowed and will be a no-op
@@ -1891,6 +1924,71 @@ mod tests {
             Some(0)
         );
         assert_eq!(active_request_count(&sequences, worker), 1);
+    }
+
+    #[tokio::test]
+    async fn same_id_conflicts_across_workers() {
+        let sequences = make_multi_sequences();
+        let decay_now = Instant::now();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+
+        let req = |worker| SequenceRequest {
+            request_id: "req-1".to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+
+        sequences.add_request(req(worker_a), decay_now).unwrap();
+        let err = sequences
+            .add_request(req(worker_b), decay_now)
+            .expect_err("a request ID already booked on another worker must conflict");
+        assert!(
+            matches!(err, SequenceError::DuplicateRequest { .. }),
+            "expected DuplicateRequest, got {err:?}"
+        );
+        assert_eq!(active_request_count(&sequences, worker_a), 1);
+        assert_eq!(active_request_count(&sequences, worker_b), 0);
+        assert_eq!(
+            sequences.request_worker(&"req-1".to_string()),
+            Some(worker_a)
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_targeted_cleanup_ignores_a_different_owner() {
+        let sequences = make_multi_sequences();
+        let decay_now = Instant::now();
+        let booked_worker = WorkerWithDpRank::new(2, 0);
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker: booked_worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        sequences
+            .free_if_worker(&"req-1".to_string(), WorkerWithDpRank::new(1, 0), decay_now)
+            .unwrap();
+
+        assert_eq!(active_request_count(&sequences, booked_worker), 1);
+        assert_eq!(
+            sequences.request_worker(&"req-1".to_string()),
+            Some(booked_worker)
+        );
     }
 
     #[test]

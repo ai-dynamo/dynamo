@@ -80,6 +80,21 @@ impl Indexer {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
 
+    pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
+        matches!(
+            self,
+            Self::KvIndexer {
+                approx: None,
+                primary_records_routing_decisions: false,
+                ..
+            } | Self::Concurrent {
+                approx: None,
+                primary_records_routing_decisions: false,
+                ..
+            }
+        )
+    }
+
     pub async fn new(
         component: &Component,
         kv_router_config: &KvRouterConfig,
@@ -97,7 +112,6 @@ impl Indexer {
                  do not combine a primary approximate indexer with a side approximate indexer"
             );
         }
-
         if kv_router_config.use_remote_indexer {
             let model_name = model_name
                 .ok_or_else(|| {
@@ -473,6 +487,14 @@ mod tests {
         assert!(make_test_indexer().supports_overlap_refresh());
         assert!(make_test_concurrent_indexer().supports_overlap_refresh());
         assert!(!Indexer::None.supports_overlap_refresh());
+    }
+
+    #[test]
+    fn router_hint_chain_retention_requires_event_driven_primary() {
+        assert!(make_test_indexer().supports_router_hint_chain_retention());
+        assert!(make_test_concurrent_indexer().supports_router_hint_chain_retention());
+        assert!(!make_test_concurrent_approx_indexer().supports_router_hint_chain_retention());
+        assert!(!Indexer::None.supports_router_hint_chain_retention());
     }
 
     async fn flush_indexer(indexer: &Indexer) {
