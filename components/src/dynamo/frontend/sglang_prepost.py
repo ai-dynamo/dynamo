@@ -1125,9 +1125,7 @@ class SglangStreamingPostProcessor:
                     break
 
             clean_prefix = (
-                self.tokenizer.decode(
-                    context[:clean_end], skip_special_tokens=False
-                )
+                self.tokenizer.decode(context[:clean_end], skip_special_tokens=False)
                 if clean_end
                 else ""
             )

@@ -2927,9 +2927,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             None,
             list("한".encode("utf-8")),
         ]
-        assert [
-            entry["top_logprobs"][0]["token"] for entry in logprob_content
-        ] == ["", "", "한"]
+        assert [entry["top_logprobs"][0]["token"] for entry in logprob_content] == [
+            "",
+            "",
+            "한",
+        ]
 
     def test_logprobs_regular_token_is_unchanged(self):
         """Ordinary tokens keep their decoded text and UTF-8 bytes."""
