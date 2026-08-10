@@ -474,7 +474,17 @@ def interaction_tables(data: dict) -> str:
                 if cell is None:
                     row.append(None)
                     continue
-                text = INTERACTION_GLYPH[cell["status"]]
+                # Raised as TSParseError like every other parse failure in
+                # this module: a bare KeyError is caught by main() and shown
+                # as "KeyError('preview')", which names neither the map nor
+                # the fix. Matches feature_cell above.
+                status = cell["status"]
+                if status not in INTERACTION_GLYPH:
+                    raise TSParseError(
+                        f"unknown interaction status {status!r} for "
+                        f"{matrix['backend']}; add it to INTERACTION_GLYPH"
+                    )
+                text = INTERACTION_GLYPH[status]
                 note = cell.get("note")
                 if note:
                     source = cell.get("source")
@@ -685,31 +695,6 @@ def released_versions(data: dict) -> set[str]:
         for rel in data["RELEASES"]
         if rel.get("kind") in SUPPORT_MATRIX_KINDS
     }
-
-
-def minor_line(version: str) -> str:
-    """'1.2.1' -> '1.2.x' -- the caption a matrix table is grouped under."""
-    parts = version.split(".")
-    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
-        raise TSParseError(
-            f"CUDA_HISTORY version {version!r} is not MAJOR.MINOR... -- the "
-            "support matrix cannot group it by minor line"
-        )
-    return f"{parts[0]}.{parts[1]}.x"
-
-
-def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
-    """Minor line -> its versions, keyed in CUDA_HISTORY order (newest first).
-
-    Insertion order carries the sort: CUDA_HISTORY is maintained newest-first,
-    so the first time a minor line is seen fixes its position, and dicts
-    preserve that. No separate version sort to drift out of step with it.
-    """
-    groups: dict[str, set[str]] = {}
-    for row in data["CUDA_HISTORY"]:
-        if row["version"] in versions:
-            groups.setdefault(minor_line(row["version"]), set()).add(row["version"])
-    return groups
 
 
 def parse_driver_floor(min_driver: str) -> int:
@@ -1078,7 +1063,13 @@ def platform_payload(data: dict) -> dict:
     for key in ("os", "csp"):
         for row in plat.get(key, []):
             if "scope" in row and "status" not in row:
-                row["status"] = "Supported"
+                scope = row["scope"]
+                if scope not in SCOPE_STATUS:
+                    raise TSParseError(
+                        f"unknown platform scope {scope!r}; add it to "
+                        f"SCOPE_STATUS with the status it should publish"
+                    )
+                row["status"] = SCOPE_STATUS[scope]
     return plat
 
 
@@ -1247,6 +1238,16 @@ PAGES: dict[str, tuple[Block, ...]] = {
     "releases/release-history.mdx": (
         Block("release-stats", render_release_stats, False, False),
     ),
+}
+
+# Scope to the support claim published in releases.json. Explicit rather than
+# defaulting to "Supported": the rows have not always carried it -- the CentOS
+# Stream row this PR removes was "Experimental" -- so a blanket default would
+# publish a support claim for the next preview or restricted scope added here.
+# Unmapped fails closed, like feature_cell and the interaction glyphs.
+SCOPE_STATUS: dict[str, str] = {
+    "Containers and wheels": "Supported",
+    "Wheels only": "Supported",
 }
 
 # Standalone machine-readable outputs (path -> builder returning full text).

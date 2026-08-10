@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]  # docs/fern
@@ -137,20 +138,29 @@ def _interaction_backends(source: str) -> list[str]:
 
 
 INTERACTIONS_HEADING = r"[Ff]eature interactions by backend"
+RELEASES_HEADING = r"\*\*CUDA toolkit and minimum driver per Dynamo release\*\*"
+RELEASES_END = r"\n\*\*"
 
 
 def _interaction_features(source: str) -> set[str]:
     """Row labels in the pairwise matrices.
 
-    INTERACTION_FEATURES also carries status literals ("yes", "wip"); those
-    start lowercase and are not row labels, so they are dropped.
+    Bounded on the array literal, not on the next ``export const``. Two other
+    exports sit between INTERACTION_FEATURES and the next const -- a type and
+    an interface -- so splitting on ``export const`` swallowed both and
+    admitted the backend names from ``backend: "SGLang" | "TensorRT-LLM" |
+    "vLLM"``. That inflated the denominator in the "missing N of M row labels"
+    message, and inconsistently: the uppercase filter kept SGLang and
+    TensorRT-LLM but dropped vLLM.
     """
     try:
         blk = source[source.index("export const INTERACTION_FEATURES") :]
     except ValueError:
         return set()
-    blk = blk.split("\nexport const ", 1)[0]
-    return {n for n in re.findall(r'"([^"]+)"', blk) if n[:1].isupper()}
+    end = blk.find("]")
+    if end == -1:
+        return set()
+    return set(re.findall(r'"([^"]+)"', blk[:end]))
 
 
 def _interactions_segment(blob: str) -> str:
@@ -162,6 +172,24 @@ def _interactions_segment(blob: str) -> str:
     """
     m = re.search(INTERACTIONS_HEADING, blob)
     return blob[m.start() :] if m else ""
+
+
+def _releases_segment(blob: str) -> str:
+    """The release-table section of the twin, or empty if absent.
+
+    Scoped for the same reason as the interactions section, and it matters
+    more here. The backend-pins table in the same twin lists bare engine and
+    NIXL versions, so an unscoped search finds "1.3.2" there and counts the
+    release row as covered. Measured on this page, deleting every release row
+    still scored 40% rather than 0%, which is above no floor but well above
+    the zero the check should have reported.
+    """
+    m = re.search(RELEASES_HEADING, blob)
+    if not m:
+        return ""
+    rest = blob[m.end() :]
+    nxt = re.search(RELEASES_END, rest)
+    return rest[: nxt.start()] if nxt else rest
 
 
 def _named(source: str, const: str, field: str = "name") -> set[str]:
@@ -264,13 +292,20 @@ def check(path: Path, expected: dict[str, object], source: str = "") -> list[str
 
         if not spec:
             continue
+        # Releases are searched only inside their own section, for the same
+        # reason as the interactions rows above: bare version strings appear
+        # in the backend-pins table too, so an unscoped search scores a twin
+        # whose release rows were all deleted.
+        haystack = (
+            _releases_segment(blob) if component == "ReleaseSupportMatrix" else blob
+        )
         # Word-boundary, so "1.3.0rc19" does not satisfy "1.3.0". A twin of
         # release candidates would otherwise score full marks while carrying
         # no released row at all.
         missing = sorted(
             i
             for i in spec
-            if not re.search(rf"(?<![\w.]){re.escape(i)}(?![\w.])", blob, re.I)
+            if not re.search(rf"(?<![\w.]){re.escape(i)}(?![\w.])", haystack, re.I)
         )
         covered = 1 - len(missing) / len(spec)
         floor = THRESHOLD.get(component, DEFAULT_THRESHOLD)
@@ -298,7 +333,19 @@ def _selftest() -> int:
         "FeatureHeatmap": {"alpha", "bravo", "charlie", "delta", "echo"},
     }
     twin = "<llms-only>{}</llms-only>"
-    full = twin.format("1.3.0 1.3.1 1.2.0 1.2.1 1.1.0")
+
+    def rel(versions: str) -> str:
+        """A release twin shaped like the real one.
+
+        The release search is scoped to this heading, so a fixture without it
+        models a page the check would score at zero -- which is the point, but
+        it has to be stated deliberately rather than by omission.
+        """
+        return twin.format(
+            "**CUDA toolkit and minimum driver per Dynamo release**\n" + versions
+        )
+
+    full = rel("1.3.0 1.3.1 1.2.0 1.2.1 1.1.0")
     cases: list[tuple[str, str, bool]] = [
         ("no component", "Prose mentioning 1.3.0.", True),
         ("component, no twin", "<ReleaseSupportMatrix />", False),
@@ -308,12 +355,25 @@ def _selftest() -> int:
         # and at a fractional threshold that change passes.
         (
             "one release missing fails",
-            "<ReleaseSupportMatrix />\n" + twin.format("1.3.0 1.3.1 1.2.0 1.2.1"),
+            "<ReleaseSupportMatrix />\n" + rel("1.3.0 1.3.1 1.2.0 1.2.1"),
             False,
         ),
         (
             "twin well below",
-            "<ReleaseSupportMatrix />\n" + twin.format("1.3.0"),
+            "<ReleaseSupportMatrix />\n" + rel("1.3.0"),
+            False,
+        ),
+        # The release search is scoped to its own heading. Versions appear in
+        # the backend-pins table too, so an unscoped search scored a twin whose
+        # release rows had all been deleted -- measured at 40%, not 0%.
+        (
+            "versions outside the release section do not count",
+            "<ReleaseSupportMatrix />\n"
+            + twin.format(
+                "NIXL 1.3.0 UCX 1.3.1 engine 1.2.0 pin 1.2.1 base 1.1.0\n"
+                "**CUDA toolkit and minimum driver per Dynamo release**\n"
+                "(rows deleted)"
+            ),
             False,
         ),
         # Features keep headroom, since the twin names them in prose too.
@@ -366,15 +426,18 @@ def _selftest() -> int:
             False,
         ),
     ]
-    tmp = Path("/tmp/_agent_twin_case.mdx")
+    # A private temp dir, not a fixed /tmp path: two concurrent runs on a
+    # shared runner would otherwise write the same file, and a redirected or
+    # read-only TMPDIR fails the hook outright.
     passed = 0
-    for name, body, expect_ok in cases:
-        tmp.write_text(body, encoding="utf-8")
-        if (not check(tmp, exp)) == expect_ok:
-            passed += 1
-        else:
-            print(f"  FAIL {name}: expected {'pass' if expect_ok else 'fail'}")
-    tmp.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "_agent_twin_case.mdx"
+        for name, body, expect_ok in cases:
+            tmp.write_text(body, encoding="utf-8")
+            if (not check(tmp, exp)) == expect_ok:
+                passed += 1
+            else:
+                print(f"  FAIL {name}: expected {'pass' if expect_ok else 'fail'}")
     print(f"\n{passed}/{len(cases)} passed")
     return 0 if passed == len(cases) else 1
 

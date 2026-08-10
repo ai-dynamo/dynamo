@@ -31,6 +31,7 @@ this applies the same rule to the components that hold CSS directly.
 Usage: python3 check_style_components.py [files...]
 With no arguments, checks every docs/fern/components/*Styles.tsx.
 """
+
 from __future__ import annotations
 
 import re
@@ -68,7 +69,15 @@ def check(path: Path) -> list[str]:
 
 def main() -> int:
     args = [Path(a) for a in sys.argv[1:]]
-    targets = args or sorted((ROOT / "components").glob("*Styles.tsx"))
+    # The *Styles.tsx convention plus the two components that hold CSS under
+    # another name. Not every component: this check forbids interpolation,
+    # which holds for a pure CSS literal and not for ordinary TSX.
+    targets = args or sorted(
+        p
+        for p in (ROOT / "components").glob("*.tsx")
+        if p.stem.endswith("Styles")
+        or p.stem in {"ReleaseSupportMatrix", "FeatureInteractions"}
+    )
     targets = [t for t in targets if t.suffix == ".tsx" and t.exists()]
 
     problems: list[str] = []
