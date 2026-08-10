@@ -9,9 +9,9 @@ mod policy;
 
 pub use default::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
 pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerInputView, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 
 use default::{pick_default_worker, selection_weights};
@@ -318,7 +318,10 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         WorkerSelectionPolicyStateRef::Default(_) => {
             WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
         }
-        WorkerSelectionPolicyStateRef::Custom(state) => RefCell::borrow(state).worker_inputs,
+        WorkerSelectionPolicyStateRef::Custom(state) => {
+            let state = RefCell::borrow(state);
+            state.filter_inputs | state.scorer_picker_inputs
+        }
     };
     let input =
         WorkerSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
@@ -332,7 +335,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
-            collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
+            let has_eligible_worker =
+                collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
             let CustomWorkerSelectionState {
                 picker,
                 picker_inputs,
@@ -343,6 +347,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 ..
             } = &mut *state;
             if candidates.is_empty() {
+                if has_eligible_worker {
+                    return Err(KvSchedulerError::AllEligibleWorkersFiltered);
+                }
                 None
             } else {
                 debug_assert!(

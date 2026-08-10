@@ -73,6 +73,9 @@ pub enum KvSchedulerError {
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,
 
+    #[error("all eligible workers were rejected by policy filters")]
+    AllEligibleWorkersFiltered,
+
     #[error("pinned worker {worker_id} is overloaded")]
     PinnedWorkerOverloaded { worker_id: WorkerId },
 

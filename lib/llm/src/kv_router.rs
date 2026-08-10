@@ -229,21 +229,31 @@ pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. Both remain HTTP 529 to the client.
-    let error_type = match error {
-        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => ErrorType::WorkerOverloaded,
-        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => ErrorType::ResourceExhausted,
+    // would just bounce the request around. A filter rejection is unavailable,
+    // not overload, and becomes HTTP 503.
+    let (error_type, overloaded) = match error {
+        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
+            (ErrorType::WorkerOverloaded, true)
+        }
+        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
+            (ErrorType::ResourceExhausted, true)
+        }
+        scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
 
     let message = error.to_string();
-    let cause = PipelineError::ServiceOverloaded(message.clone());
-    DynamoError::builder()
+    let error = DynamoError::builder()
         .error_type(error_type)
-        .message(message)
-        .cause(cause)
-        .build()
-        .into()
+        .message(message.clone());
+    if overloaded {
+        error
+            .cause(PipelineError::ServiceOverloaded(message))
+            .build()
+            .into()
+    } else {
+        error.build().into()
+    }
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {
@@ -1655,6 +1665,16 @@ mod tests {
 
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    #[test]
+    fn all_filtered_workers_map_to_unavailable() {
+        let error = map_scheduler_error(KvSchedulerError::AllEligibleWorkersFiltered);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("filtered workers should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+    }
 
     #[test]
     fn keyed_tracking_requires_nonempty_model_name() {
