@@ -17,11 +17,20 @@ use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
     WorkerWithDpRank,
 };
+use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+
+/// Supplies the authoritative set of workers currently available for selection.
+///
+/// This is an inclusion set, unlike [`OverloadedWorkerProvider`]'s exclusion
+/// set. `None` means no hard-availability source is attached; `Some` is
+/// authoritative, so an empty set rejects every candidate.
+pub type WorkerAvailabilityProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
@@ -98,6 +107,8 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub target_cached_prefix_blocks: u32,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
 }
 
@@ -239,6 +250,8 @@ pub struct ScheduleRequest {
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
     pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
@@ -268,6 +281,8 @@ pub struct SchedulingRequest {
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
@@ -440,6 +455,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             shared_cache_hits: None,
             worker_loads,
             resp_tx: None,

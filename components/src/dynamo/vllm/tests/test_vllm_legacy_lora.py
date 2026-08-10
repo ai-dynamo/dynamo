@@ -13,7 +13,10 @@ import pytest
 
 pytest.importorskip("vllm.lora.request")
 
-from dynamo.common.constants import DisaggregationMode  # noqa: E402
+from dynamo.common.constants import (  # noqa: E402
+    ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    DisaggregationMode,
+)
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import handlers as handlers_mod  # noqa: E402
@@ -58,6 +61,7 @@ def _make_prefill_handler():
     from dynamo.vllm.lora_state import LoRAState
 
     handler.engine_args = handler.config.engine_args
+    handler.dp_range = (0, 1)
     handler._served_model_name = "llama2-7b"
     handler._served_model_aliases = ("llama2-7b-alias",)
     handler._lora_state = LoRAState()
@@ -109,6 +113,53 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     # The adapter card must carry the engine-actual main-attention block size,
     # not engine_args.block_size (16) — see #11866.
     assert kwargs["kv_cache_block_size"] == 1056
+
+
+@pytest.mark.asyncio
+async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
+    # LoRA registration builds a fresh ModelRuntimeConfig for the adapter card.
+    # This checks that a parent worker owning global DP ranks 4 and 5 publishes
+    # the same range on the LoRA card, with router-hint endpoints keyed as
+    # {"4": "tcp://...:23280", "5": "tcp://...:23281"}.
+    handler = _make_prefill_handler()
+    handler.dp_range = (4, 2)
+    handler.config.engine_args.kv_transfer_config = SimpleNamespace(
+        kv_connector_extra_config={
+            "secondary_tiers": [
+                {
+                    "type": "custom",
+                    "router_capabilities": ["router_hint"],
+                    "control_advertise_host": "worker-a",
+                    "control_port": "23280",
+                }
+            ]
+        }
+    )
+    manager = SimpleNamespace(
+        download_lora=AsyncMock(
+            return_value={"status": "success", "local_path": "/cache/adapter"}
+        )
+    )
+    register = AsyncMock()
+    monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(handlers_mod, "register_model", register)
+
+    results = [
+        result
+        async for result in handler.load_lora(
+            {"lora_name": "adapterA", "source": {"uri": "file:///adapter"}}
+        )
+    ]
+
+    assert results[-1]["status"] == "success"
+    runtime_config = register.await_args.kwargs["runtime_config"]
+    assert runtime_config.data_parallel_start_rank == 4
+    assert runtime_config.data_parallel_size == 2
+    assert json.loads(
+        runtime_config.runtime_data[ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY]
+    ) == {"4": "tcp://worker-a:23280", "5": "tcp://worker-a:23281"}
 
 
 @pytest.mark.asyncio

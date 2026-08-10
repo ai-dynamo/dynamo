@@ -528,6 +528,8 @@ impl SelectionCore {
                     None,
                     Some(overlap_refresh),
                     None,
+                    // Standalone selection has no router Client snapshot.
+                    None,
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),
@@ -794,6 +796,8 @@ impl SelectionCore {
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             router_config_override,
             lora_name: prompt.lora_name,
             priority_jump,
