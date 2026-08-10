@@ -220,12 +220,4 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     date: "Apr 28, 2025",
     iso: "2025-04-28",
   },
-  {
-    title: "Kitsune: Enabling Dataflow Execution on GPUs",
-    url: "https://arxiv.org/abs/2502.18403",
-    org: "NVIDIA",
-    venue: "arXiv",
-    date: "Feb 25, 2025",
-    iso: "2025-02-25",
-  },
 ];
