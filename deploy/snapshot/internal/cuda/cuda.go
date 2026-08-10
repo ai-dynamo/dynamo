@@ -319,24 +319,29 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	return strings.Join(pairs, ","), nil
 }
 
-// LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
+// CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
+// then persists the launch-job state needed to restore them.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
+func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lock(ctx, pid, log); err != nil {
+		if err := lock(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := checkpoint(ctx, pid, log); err != nil {
+		if err := checkpoint(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
+	}
+	if err := refreshJobFileArtifact(jobFile, checkpointDir); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 	timings.TotalDuration = time.Since(start)
 
@@ -344,21 +349,21 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, jobFile string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
+		if err := restoreProcess(ctx, pid, deviceMap, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := unlock(ctx, pid, log); err != nil {
+		if err := unlock(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
-			state, stateErr := getState(ctx, pid)
+			state, stateErr := getState(ctx, pid, jobFile)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
+	defaultCUDAHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
 
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
@@ -22,24 +22,30 @@ const (
 	actionUnlock     = "unlock"
 )
 
-func lock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionLock, "", log)
+var cudaCheckpointHelperBinary = defaultCUDAHelperBinary
+
+func lock(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
+	return runAction(ctx, pid, actionLock, "", jobFile, log)
 }
 
-func checkpoint(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionCheckpoint, "", log)
+func checkpoint(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
+	return runAction(ctx, pid, actionCheckpoint, "", jobFile, log)
 }
 
-func restoreProcess(ctx context.Context, pid int, deviceMap string, log logr.Logger) error {
-	return runAction(ctx, pid, actionRestore, deviceMap, log)
+func restoreProcess(ctx context.Context, pid int, deviceMap, jobFile string, log logr.Logger) error {
+	return runAction(ctx, pid, actionRestore, deviceMap, jobFile, log)
 }
 
-func unlock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionUnlock, "", log)
+func unlock(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
+	return runAction(ctx, pid, actionUnlock, "", jobFile, log)
 }
 
-func getState(ctx context.Context, pid int) (string, error) {
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-state", "--pid", strconv.Itoa(pid))
+func getState(ctx context.Context, pid int, jobFile string) (string, error) {
+	args := []string{"--get-state", "--pid", strconv.Itoa(pid)}
+	if jobFile != "" {
+		args = append(args, "--job-file", jobFile)
+	}
+	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
@@ -51,10 +57,13 @@ func getState(ctx context.Context, pid int) (string, error) {
 	return state, nil
 }
 
-func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.Logger) error {
+func runAction(ctx context.Context, pid int, action, deviceMap, jobFile string, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
+	}
+	if jobFile != "" {
+		args = append(args, "--job-file", jobFile)
 	}
 	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
 	details := snapshotruntime.ProcessDetails{

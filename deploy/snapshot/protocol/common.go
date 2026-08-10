@@ -45,6 +45,8 @@ const (
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
 	CheckpointVolumeName                = "checkpoint-storage"
+	CUDAJobFileName                     = "cuda-checkpoint-job"
+	CUDAJobFilePath                     = SnapshotControlMountPath + "/" + CUDAJobFileName
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
 	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"

@@ -131,6 +131,16 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 	return nil
 }
 
+func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, original []string) {
+	t.Helper()
+	assert.Equal(t, []string{"cuda-checkpoint"}, container.Command)
+	require.GreaterOrEqual(t, len(container.Args), 6)
+	assert.Equal(t, []string{"--launch-job", "/bin/sh", "-c"}, container.Args[:3])
+	assert.Equal(t, "dynamo-cuda-checkpoint", container.Args[4])
+	assert.Equal(t, snapshotprotocol.CUDAJobFilePath, container.Args[5])
+	assert.Equal(t, original, container.Args[6:])
+}
+
 func findCheckpointContainer(containers []corev1.Container, name string) *corev1.Container {
 	for i := range containers {
 		if containers[i].Name == name {
@@ -257,8 +267,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+	requireStableLaunchJobWrapper(t, &job.Spec.Template.Spec.Containers[0], []string{"python3", "-m", "dynamo.vllm"})
 }
 
 func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
@@ -289,8 +298,7 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	require.NoError(t, err)
 
 	main := &job.Spec.Template.Spec.Containers[0]
-	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+	requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm"})
 	require.NotNil(t, main.ReadinessProbe)
 	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-snapshot"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
@@ -421,8 +429,7 @@ func TestBuildCheckpointJobDRAResourceClaimsForCudaCheckpoint(t *testing.T) {
 
 			main := &job.Spec.Template.Spec.Containers[0]
 			if tt.wantWrap {
-				assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
-				assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+				requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm"})
 			} else {
 				assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, main.Command)
 				assert.Empty(t, main.Args)
