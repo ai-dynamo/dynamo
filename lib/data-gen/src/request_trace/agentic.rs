@@ -533,7 +533,6 @@ mod tests {
         entry.agent_context = Some(AgentContextFields {
             session_id: session_id.to_string(),
             parent_session_id: parent_session_id.map(str::to_string),
-            input_trigger: None,
         });
         entry
     }

@@ -107,7 +107,8 @@ pub struct AgentContext {
 
     /// Causal trigger that produced the request, derived from inbound request content.
     #[builder(default, setter(strip_option))]
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // TODO: Make required after the two-release compatibility window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_trigger: Option<InputTrigger>,
 }
 
@@ -739,6 +740,12 @@ mod tests {
         fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
             Some(&self.unsupported_fields)
         }
+    }
+
+    #[test]
+    fn agent_context_accepts_missing_input_trigger() {
+        let context: AgentContext = serde_json::from_str(r#"{"session_id":"root"}"#).unwrap();
+        assert_eq!(context.input_trigger, None);
     }
 
     #[test]
