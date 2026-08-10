@@ -1,17 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from scripts import kustomize_matrix
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
+MODULE_PATH = REPO_ROOT / "scripts/kustomize_matrix.py"
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+def load_matrix_module():
+    spec = importlib.util.spec_from_file_location("kustomize_matrix", MODULE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+kustomize_matrix = load_matrix_module()
 
 
 def write_kustomization(path: Path, content: str) -> None:
