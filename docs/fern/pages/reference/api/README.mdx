@@ -35,32 +35,15 @@ and deep-links to the exact file and line on `main`.
   custom-resource surface. Trimmed per-CRD references (DGD, DGDR, DCD) live
   as siblings under the same section so every deep link resolves.
 
-## How It Stays Current
-
-The `docs/fern/scripts/gen_python_api.py` script parses the Dynamo Python
-source with [griffe][griffe] — no import, no build, no runtime dependency on
-backend containers. From one parse it writes:
-
-- the [Python API landing page](python/README.mdx) at
-  `docs/fern/pages/reference/api/python/README.mdx`, a card index of every
-  curated module.
-- `docs/fern/pages/reference/api/python/<module>.mdx` — one page per curated
-  module, with an anchored accordion per symbol carrying its import
-  statement, signature, and public methods.
-
-Every page is plain MDX built from Fern's own components, so the whole
-surface is indexed for search and Fern derives the Markdown and `llms.txt`
-twins from it directly.
-
-Run the generator locally after editing the Python source or the module list:
-
-```bash
-python3 docs/fern/scripts/gen_python_api.py            # write / refresh
-python3 docs/fern/scripts/gen_python_api.py --check    # drift check (exit 1 if stale)
-```
-
-`--check` is what CI runs against every commit to catch stale generated
-content before it ships.
+<Note>
+**These pages are generated.** Every page here carries a `do not edit` marker:
+`gen_python_api.py` and `gen_rust_api.py` read docstrings through
+[griffe][griffe], and `gen_kubernetes_api.py` reads the operator Go types. To
+change a page, edit the source and rerun its generator in
+`docs/fern/scripts/`. The `Generated API References` pre-merge job runs each
+with `--check` — scoped to the branch's own changes on a pull request, strict
+on `main`.
+</Note>
 
 [griffe]: https://mkdocstrings.github.io/griffe/
 [crates]: https://crates.io/search?q=ai-dynamo

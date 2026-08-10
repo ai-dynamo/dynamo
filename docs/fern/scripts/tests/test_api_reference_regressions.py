@@ -139,18 +139,20 @@ def _iter_sections(node: Any) -> Iterator[dict[str, Any]]:
             yield from _iter_sections(value)
 
 
-def test_python_api_section_is_expanded_by_default() -> None:
-    """The Python API section must open on screen.
+def test_api_sections_collapse_consistently() -> None:
+    """Python API and Kubernetes API must agree on collapse state.
 
-    Fern collapses a section unless told otherwise, so an API reference that
-    ships as a docs default should still surface its Python module pages the
-    moment a reader lands on the tab.
+    Python API shipped expanded while Kubernetes API collapsed, which read as
+    an accident rather than a decision once the two became peers: eleven
+    ``dynamo.*`` entries stood open beside a Kubernetes section folded to one
+    line. Both collapse now, so the four API entries occupy four rows and the
+    reader opens the surface they came for.
     """
-    python_section = _python_api_section()
-    assert python_section.get("collapsed") is False, (
-        "Python API must set 'collapsed: false' so the module pages surface "
-        "as sidebar entries"
-    )
+    for section in (_python_api_section(), _kubernetes_api_section()):
+        assert section.get("collapsed") is True, (
+            f"{section.get('section')} must set 'collapsed: true' so the API "
+            "entries present consistently in the sidebar"
+        )
 
 
 def test_machine_readable_releases_page_stays_hidden() -> None:
