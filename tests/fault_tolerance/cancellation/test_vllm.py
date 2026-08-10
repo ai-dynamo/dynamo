@@ -248,7 +248,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(
     660
 )  # worker startup can take up to 600s; allow headroom for test body
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
 def test_request_cancellation_vllm_aggregated(
