@@ -12,10 +12,10 @@ use dynamo_data_gen::request_trace::{
     load::{RequestTraceMode, load_request_trace_records},
     mooncake::lower_mooncake_rows,
 };
-use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRow};
+use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRoutingConstraints, MooncakeRow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, RoutingConstraints, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
 };
 use dynamo_tokens::compute_hash_v2;
 use rand::rngs::StdRng;
@@ -32,6 +32,17 @@ use super::types::{
 };
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
+
+fn replay_routing_constraints(
+    constraints: Option<MooncakeRoutingConstraints>,
+) -> RoutingConstraints {
+    constraints.map_or_else(RoutingConstraints::default, |constraints| {
+        RoutingConstraints {
+            required_taints: constraints.required_taints,
+            preferred_taints: constraints.preferred_taints,
+        }
+    })
+}
 
 #[derive(Debug, Deserialize)]
 struct RawAppliedComputeAgenticRecord {
@@ -340,6 +351,7 @@ impl MooncakeTraceBuilder {
         let priority = raw.priority.unwrap_or(0);
         let strict_priority = raw.strict_priority.unwrap_or(0);
         let policy_class = raw.policy_class.clone();
+        let routing_constraints = replay_routing_constraints(raw.routing_constraints);
 
         let session_index = *self
             .session_indices
@@ -422,6 +434,7 @@ impl MooncakeTraceBuilder {
             priority,
             strict_priority,
             policy_class,
+            routing_constraints,
         });
         if let Some(timestamp_ms) = timestamp_ms {
             self.last_timestamps[session_index] = Some(timestamp_ms);
@@ -1245,6 +1258,7 @@ impl AgenticTraceBuilder {
                 line_idx,
             )
         });
+        let routing_constraints = replay_routing_constraints(raw.routing_constraints);
         self.turns.push(AgenticTurnTrace {
             replay_key,
             request_id: raw.request_id,
@@ -1260,6 +1274,7 @@ impl AgenticTraceBuilder {
             priority: raw.priority.unwrap_or(0),
             strict_priority: raw.strict_priority.unwrap_or(0),
             policy_class: raw.policy_class,
+            routing_constraints,
             wait_for: raw.wait_for,
             prefix_reset: raw.prefix_reset.unwrap_or(false),
         });

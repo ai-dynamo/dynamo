@@ -112,20 +112,29 @@ impl<Events: EngineEventBatch> AggregatedPlacement<Events, ()>
     }
 }
 
-pub(in crate::replay) type RoundRobinAggRuntime =
-    AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
+pub(in crate::replay) type RoundRobinAggRuntime = AggRuntimeImpl<
+    AggregatedRoundRobinPlacement<()>,
+    NoEngineEvents,
+    NoReplayMetadata,
+    AdmissionQueue<NoReplayMetadata>,
+>;
 
-pub(in crate::replay) struct AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
-where
+pub(in crate::replay) struct AggRuntimeImpl<
+    PlacementPolicyImpl,
+    Observation,
+    Metadata,
+    Admission = AdmissionQueue<Metadata>,
+> where
     Observation: ReplayEngineObservation,
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
+    Admission: CoreAdmissionSource<Request = ReplayRequestPayload, Metadata = Metadata>,
 {
     now_ms: f64,
     dp_size: u32,
     next_event_seq: u64,
     next_scaling_tick_ordinal: u64,
-    admission: AdmissionQueue<Metadata>,
+    admission: Admission,
     requests: FxHashMap<Uuid, AggRequestState>,
     engine: EngineComponent<Observation>,
     collector: TraceCollector,
@@ -152,7 +161,14 @@ where
     stepped: bool,
 }
 
-impl AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata> {
+impl
+    AggRuntimeImpl<
+        AggregatedRoundRobinPlacement<()>,
+        NoEngineEvents,
+        NoReplayMetadata,
+        AdmissionQueue<NoReplayMetadata>,
+    >
+{
     pub(in crate::replay) fn new_round_robin(
         args: &MockEngineArgs,
         pending: VecDeque<DirectRequest>,
@@ -182,16 +198,17 @@ impl AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayM
     }
 }
 
-impl<PlacementPolicyImpl, Observation, Metadata>
-    AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+impl<PlacementPolicyImpl, Observation, Metadata, Admission>
+    AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata, Admission>
 where
     Observation: ReplayEngineObservation,
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
+    Admission: CoreAdmissionSource<Request = ReplayRequestPayload, Metadata = Metadata>,
 {
     pub(in crate::replay::offline) fn new_composed(
         args: &MockEngineArgs,
-        admission: AdmissionQueue<Metadata>,
+        admission: Admission,
         num_workers: usize,
         create_placement: impl FnOnce(
             &MockEngineArgs,
@@ -199,6 +216,12 @@ where
         ) -> anyhow::Result<PlacementPolicyImpl>,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
+        anyhow::ensure!(
+            args.worker_max_num_seqs.is_empty() || args.worker_max_num_seqs.len() == num_workers,
+            "worker_max_num_seqs must be empty or contain exactly one entry per replay worker: got {} for {} workers",
+            args.worker_max_num_seqs.len(),
+            num_workers,
+        );
         let progress = ReplayProgress::new(
             CoreAdmissionSource::total_requests(&admission),
             "offline replay",
@@ -424,9 +447,9 @@ where
         let input_length = request.input_length();
         let output_length = request.metadata().max_output_tokens;
         request.metadata_mut().uuid = Some(uuid);
-        if matches!(self.admission.mode(), ReplayMode::Concurrency { .. }) {
-            request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
-        }
+        // The source is authoritative for logical arrival time. This also removes
+        // the runtime's dependency on the concrete AdmissionQueue replay mode.
+        request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
         self.collector
             .on_arrival(uuid, arrival_time_ms, input_length, output_length);
@@ -521,7 +544,7 @@ where
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
         let next = choose_next_timestamp(
-            CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
+            CoreAdmissionSource::next_internal_event_ms(&mut self.admission),
             next_event_ms,
         );
         #[cfg(feature = "kvbm-offload")]
@@ -728,9 +751,8 @@ where
     fn release_ready_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
         let cluster_in_flight = self.cluster_in_flight();
-        for ready in self
-            .admission
-            .drain_ready_compact(self.now_ms, cluster_in_flight)?
+        for ready in
+            CoreAdmissionSource::drain_ready(&mut self.admission, self.now_ms, cluster_in_flight)?
         {
             let ReadyArrival {
                 request,
@@ -1361,7 +1383,205 @@ mod tests {
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
     use rstest::rstest;
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::rc::Rc;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum TwoTurnSourceEvent {
+        Submitted { turn_index: usize, at_ms: f64 },
+        WaitingForCompletion { turn_index: usize, at_ms: f64 },
+        Terminal { turn_index: usize, at_ms: f64 },
+        TimerArmed { turn_index: usize, at_ms: f64 },
+    }
+
+    struct TwoTurnWorkSource {
+        driver: WorkloadDriver,
+        events: Rc<RefCell<Vec<TwoTurnSourceEvent>>>,
+        in_flight_turns: HashMap<Uuid, usize>,
+    }
+
+    impl TwoTurnWorkSource {
+        fn new(events: Rc<RefCell<Vec<TwoTurnSourceEvent>>>) -> Self {
+            let trace = Trace {
+                block_size: 64,
+                sessions: vec![SessionTrace {
+                    session_id: "two-turn-session".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 64,
+                            max_output_tokens: 2,
+                            hash_ids: vec![11],
+                            delay_after_previous_ms: 0.0,
+                            ..Default::default()
+                        },
+                        TurnTrace {
+                            input_length: 64,
+                            max_output_tokens: 2,
+                            hash_ids: vec![12],
+                            delay_after_previous_ms: 10.0,
+                            ..Default::default()
+                        },
+                    ],
+                }],
+            };
+            let driver = WorkloadDriver::new_concurrency(trace, 64, 1)
+                .unwrap()
+                .with_deterministic_request_ids(1);
+            Self {
+                driver,
+                events,
+                in_flight_turns: HashMap::new(),
+            }
+        }
+    }
+
+    impl CoreAdmissionSource for TwoTurnWorkSource {
+        type Request = ReplayRequestPayload;
+        type Metadata = ();
+
+        fn next_internal_event_ms(&mut self) -> Option<f64> {
+            self.driver.next_ready_time_ms()
+        }
+
+        fn drain_ready(
+            &mut self,
+            now_ms: f64,
+            _cluster_in_flight: usize,
+        ) -> anyhow::Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+            Ok(self
+                .driver
+                .pop_ready_compact(now_ms, usize::MAX)
+                .into_iter()
+                .map(|ready| {
+                    self.in_flight_turns
+                        .insert(ready.request_uuid, ready.turn_index);
+                    self.events
+                        .borrow_mut()
+                        .push(TwoTurnSourceEvent::Submitted {
+                            turn_index: ready.turn_index,
+                            at_ms: now_ms,
+                        });
+                    if self.driver.next_ready_time_ms().is_none() {
+                        self.events
+                            .borrow_mut()
+                            .push(TwoTurnSourceEvent::WaitingForCompletion {
+                                turn_index: ready.turn_index,
+                                at_ms: now_ms,
+                            });
+                    }
+                    ReadyArrival {
+                        request: ready.request,
+                        arrival_time_ms: now_ms,
+                        metadata: (),
+                        session_id: Some(ready.session_id),
+                        turn_index: Some(ready.turn_index),
+                    }
+                })
+                .collect())
+        }
+
+        fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> anyhow::Result<()> {
+            self.driver.on_output_token(request_id, token_id)
+        }
+
+        fn on_terminal(
+            &mut self,
+            request_id: Uuid,
+            now_ms: f64,
+            rejected: bool,
+        ) -> anyhow::Result<()> {
+            let turn_index = self
+                .in_flight_turns
+                .remove(&request_id)
+                .expect("terminal request must belong to a submitted turn");
+            self.events.borrow_mut().push(TwoTurnSourceEvent::Terminal {
+                turn_index,
+                at_ms: now_ms,
+            });
+            self.driver.on_terminal(request_id, now_ms, rejected)?;
+            if let Some(at_ms) = self.driver.next_ready_time_ms() {
+                self.events
+                    .borrow_mut()
+                    .push(TwoTurnSourceEvent::TimerArmed {
+                        turn_index: turn_index + 1,
+                        at_ms,
+                    });
+            }
+            Ok(())
+        }
+
+        fn is_drained(&self) -> bool {
+            self.driver.is_drained()
+        }
+
+        fn total_requests(&self) -> usize {
+            self.driver.total_turns()
+        }
+    }
+
+    #[test]
+    fn generic_work_source_waits_for_terminal_before_arming_second_turn() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let source = TwoTurnWorkSource::new(Rc::clone(&events));
+        let args = fast_router_args();
+        let runtime = AggRuntimeImpl::<
+            AggregatedRoundRobinPlacement<()>,
+            NoEngineEvents,
+            (),
+            TwoTurnWorkSource,
+        >::new_composed(&args, source, 1, |args, topology| {
+            Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology))
+        })
+        .unwrap();
+
+        let (collector, _) = runtime.run().unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 2);
+
+        let events = events.borrow();
+        println!("two-turn generic work-source event log:");
+        for event in events.iter() {
+            match event {
+                TwoTurnSourceEvent::Submitted { turn_index, at_ms } => {
+                    println!("  {at_ms:>9.3} ms  submit turn {turn_index}");
+                }
+                TwoTurnSourceEvent::WaitingForCompletion { turn_index, at_ms } => {
+                    println!(
+                        "  {at_ms:>9.3} ms  no source timer; wait for turn {turn_index} completion"
+                    );
+                }
+                TwoTurnSourceEvent::Terminal { turn_index, at_ms } => {
+                    println!("  {at_ms:>9.3} ms  terminal turn {turn_index}");
+                }
+                TwoTurnSourceEvent::TimerArmed { turn_index, at_ms } => {
+                    println!("  {at_ms:>9.3} ms  arm turn {turn_index} delay timer");
+                }
+            }
+        }
+
+        let first_terminal_ms = events
+            .iter()
+            .find_map(|event| match event {
+                TwoTurnSourceEvent::Terminal {
+                    turn_index: 0,
+                    at_ms,
+                } => Some(*at_ms),
+                _ => None,
+            })
+            .unwrap();
+        let second_submit_ms = events
+            .iter()
+            .find_map(|event| match event {
+                TwoTurnSourceEvent::Submitted {
+                    turn_index: 1,
+                    at_ms,
+                } => Some(*at_ms),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(second_submit_ms, first_terminal_ms + 10.0);
+    }
 
     struct CaptureOncePolicy {
         at_ms: f64,

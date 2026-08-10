@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynamo_kv_router::protocols::RoutingConstraints;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rustc_hash::FxHashMap;
@@ -12,7 +13,7 @@ use uuid::Uuid;
 
 use super::trace::validate_synthesizable_prompt;
 use super::types::{
-    AgenticTrace, CompactReadyTurn, ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, Trace,
+    AgenticTrace, ReadyReplayTurn, ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, Trace,
 };
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
@@ -128,6 +129,7 @@ struct TurnRuntime {
     priority: i32,
     strict_priority: u32,
     policy_class: Option<String>,
+    routing_constraints: RoutingConstraints,
     #[cfg(any(test, feature = "replay-bench"))]
     deterministic_request_id: Option<Uuid>,
 }
@@ -467,6 +469,7 @@ impl WorkloadDriver {
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
                     policy_class: turn.policy_class,
+                    routing_constraints: turn.routing_constraints,
                     #[cfg(feature = "replay-bench")]
                     deterministic_request_id: crate::replay::canonical_replay_active()
                         .then(|| Uuid::from_u128(session_index as u128 + 1)),
@@ -577,6 +580,7 @@ impl WorkloadDriver {
                             priority: turn.priority,
                             strict_priority: turn.strict_priority,
                             policy_class: turn.policy_class,
+                            routing_constraints: turn.routing_constraints,
                             #[cfg(feature = "replay-bench")]
                             deterministic_request_id,
                             #[cfg(all(test, not(feature = "replay-bench")))]
@@ -687,13 +691,14 @@ impl WorkloadDriver {
     }
 
     pub fn pop_ready(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyTurn> {
-        self.pop_ready_compact(now_ms, limit)
+        self.pop_ready_replay(now_ms, limit)
             .into_iter()
-            .map(CompactReadyTurn::into_ready_turn)
+            .map(ReadyReplayTurn::into_ready_turn)
             .collect()
     }
 
-    pub(crate) fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<CompactReadyTurn> {
+    /// Pop ready turns without materializing compact Mooncake prompts.
+    pub fn pop_ready_replay(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyReplayTurn> {
         let effective_limit = self.policy.dispatch_limit(limit, self.in_flight.len());
         if effective_limit == 0 {
             return Vec::new();
@@ -752,6 +757,7 @@ impl WorkloadDriver {
                         input_length,
                         hash_ids,
                         self.trace_block_size,
+                        turn.routing_constraints.clone(),
                     );
                     // The router needs engine-block hashes at arrival, but it
                     // does not need to retain the expanded prompt. Materialize
@@ -776,17 +782,20 @@ impl WorkloadDriver {
                     let replay_hashes = self.include_replay_hashes.then(|| {
                         ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
                     });
-                    let request = ReplayRequestPayload::materialized(DirectRequest {
-                        tokens: request_tokens,
-                        max_output_tokens: turn.max_output_tokens,
-                        output_token_ids: turn.output_token_ids.clone(),
-                        uuid: Some(request_uuid),
-                        dp_rank: 0,
-                        arrival_timestamp_ms,
-                        priority: turn.priority,
-                        strict_priority: turn.strict_priority,
-                        policy_class: turn.policy_class.clone(),
-                    });
+                    let request = ReplayRequestPayload::materialized_with_constraints(
+                        DirectRequest {
+                            tokens: request_tokens,
+                            max_output_tokens: turn.max_output_tokens,
+                            output_token_ids: turn.output_token_ids.clone(),
+                            uuid: Some(request_uuid),
+                            dp_rank: 0,
+                            arrival_timestamp_ms,
+                            priority: turn.priority,
+                            strict_priority: turn.strict_priority,
+                            policy_class: turn.policy_class.clone(),
+                        },
+                        turn.routing_constraints.clone(),
+                    );
                     (request, replay_hashes)
                 }
             };
@@ -800,7 +809,7 @@ impl WorkloadDriver {
                     emitted_output_tokens: 0,
                 },
             );
-            emitted.push(CompactReadyTurn {
+            emitted.push(ReadyReplayTurn {
                 request_uuid,
                 session_id: session.session_id.clone(),
                 turn_index,
@@ -812,6 +821,10 @@ impl WorkloadDriver {
             });
         }
         emitted
+    }
+
+    pub(crate) fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyReplayTurn> {
+        self.pop_ready_replay(now_ms, limit)
     }
 
     pub fn on_output_token(&mut self, request_uuid: Uuid, token_id: u32) -> Result<()> {
@@ -1566,6 +1579,7 @@ mod tests {
                         priority: 3,
                         strict_priority: 4,
                         policy_class: None,
+                        routing_constraints: Default::default(),
                     },
                     TurnTrace {
                         input_length: 3,
@@ -1577,6 +1591,7 @@ mod tests {
                         priority: -2,
                         strict_priority: 7,
                         policy_class: None,
+                        routing_constraints: Default::default(),
                     },
                 ],
             }],

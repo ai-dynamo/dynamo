@@ -28,7 +28,12 @@ pub(crate) trait AdmissionSource {
     type Request;
     type Metadata;
 
-    fn next_ready_time_ms(&mut self) -> Option<f64>;
+    /// Return the next source-owned event time.
+    ///
+    /// This does not predict engine completions. A source waiting on an in-flight
+    /// request returns `None`; `on_terminal` may then arm a new timer after the
+    /// completion arrives.
+    fn next_internal_event_ms(&mut self) -> Option<f64>;
     fn drain_ready(
         &mut self,
         now_ms: f64,

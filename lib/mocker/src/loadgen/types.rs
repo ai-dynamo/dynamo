@@ -3,8 +3,8 @@
 
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, WorkerId, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+    BlockHashOptions, ExternalSequenceBlockHash, RoutingConstraints, WorkerId,
+    compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_tokens::SequenceHash;
 use uuid::Uuid;
@@ -99,6 +99,7 @@ pub struct TurnTrace {
     pub priority: i32,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
+    pub routing_constraints: RoutingConstraints,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -115,6 +116,7 @@ pub struct AgenticTurnTrace {
     pub priority: i32,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
+    pub routing_constraints: RoutingConstraints,
     pub wait_for: Vec<String>,
     pub prefix_reset: bool,
 }
@@ -203,6 +205,7 @@ pub struct ReadyTurn {
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
     pub request: DirectRequest,
+    pub routing_constraints: RoutingConstraints,
 }
 
 /// A request whose prompt may still be represented by one hash id per trace
@@ -210,19 +213,33 @@ pub struct ReadyTurn {
 /// prefill router queues the request and materializes tokens only when a
 /// worker admits it.
 #[derive(Debug)]
-pub(crate) enum ReplayRequestPayload {
-    Materialized(DirectRequest),
+pub enum ReplayRequestPayload {
+    Materialized {
+        request: DirectRequest,
+        routing_constraints: RoutingConstraints,
+    },
     Deferred {
         request_metadata: DirectRequest,
         input_length: usize,
         hash_ids: Vec<u32>,
         trace_block_size: usize,
+        routing_constraints: RoutingConstraints,
     },
 }
 
 impl ReplayRequestPayload {
     pub(crate) fn materialized(request: DirectRequest) -> Self {
-        Self::Materialized(request)
+        Self::materialized_with_constraints(request, RoutingConstraints::default())
+    }
+
+    pub(crate) fn materialized_with_constraints(
+        request: DirectRequest,
+        routing_constraints: RoutingConstraints,
+    ) -> Self {
+        Self::Materialized {
+            request,
+            routing_constraints,
+        }
     }
 
     pub(super) fn deferred(
@@ -230,6 +247,7 @@ impl ReplayRequestPayload {
         input_length: usize,
         hash_ids: Vec<u32>,
         trace_block_size: usize,
+        routing_constraints: RoutingConstraints,
     ) -> Self {
         debug_assert!(request_metadata.tokens.is_empty());
         Self::Deferred {
@@ -237,19 +255,33 @@ impl ReplayRequestPayload {
             input_length,
             hash_ids,
             trace_block_size,
+            routing_constraints,
+        }
+    }
+
+    pub(crate) fn routing_constraints(&self) -> &RoutingConstraints {
+        match self {
+            Self::Materialized {
+                routing_constraints,
+                ..
+            }
+            | Self::Deferred {
+                routing_constraints,
+                ..
+            } => routing_constraints,
         }
     }
 
     pub(crate) fn input_length(&self) -> usize {
         match self {
-            Self::Materialized(request) => request.tokens.len(),
+            Self::Materialized { request, .. } => request.tokens.len(),
             Self::Deferred { input_length, .. } => *input_length,
         }
     }
 
     pub(crate) fn metadata(&self) -> &DirectRequest {
         match self {
-            Self::Materialized(request) => request,
+            Self::Materialized { request, .. } => request,
             Self::Deferred {
                 request_metadata, ..
             } => request_metadata,
@@ -258,7 +290,7 @@ impl ReplayRequestPayload {
 
     pub(crate) fn metadata_mut(&mut self) -> &mut DirectRequest {
         match self {
-            Self::Materialized(request) => request,
+            Self::Materialized { request, .. } => request,
             Self::Deferred {
                 request_metadata, ..
             } => request_metadata,
@@ -267,21 +299,21 @@ impl ReplayRequestPayload {
 
     pub(crate) fn materialized_tokens(&self) -> Option<&[u32]> {
         match self {
-            Self::Materialized(request) => Some(&request.tokens),
+            Self::Materialized { request, .. } => Some(&request.tokens),
             Self::Deferred { .. } => None,
         }
     }
 
     pub(crate) fn materialized_request(&self) -> Option<&DirectRequest> {
         match self {
-            Self::Materialized(request) => Some(request),
+            Self::Materialized { request, .. } => Some(request),
             Self::Deferred { .. } => None,
         }
     }
 
     pub(crate) fn prompt_tokens(&self) -> Vec<u32> {
         match self {
-            Self::Materialized(request) => request.tokens.clone(),
+            Self::Materialized { request, .. } => request.tokens.clone(),
             Self::Deferred {
                 input_length,
                 hash_ids,
@@ -293,12 +325,13 @@ impl ReplayRequestPayload {
 
     pub(crate) fn into_direct_request(self) -> DirectRequest {
         match self {
-            Self::Materialized(request) => request,
+            Self::Materialized { request, .. } => request,
             Self::Deferred {
                 mut request_metadata,
                 input_length,
                 hash_ids,
                 trace_block_size,
+                ..
             } => {
                 request_metadata.tokens =
                     synthesize_validated_trace_tokens(input_length, &hash_ids, trace_block_size);
@@ -309,27 +342,32 @@ impl ReplayRequestPayload {
 
     pub(crate) fn materialize(&mut self) -> Option<&DirectRequest> {
         if matches!(self, Self::Deferred { .. }) {
-            let payload = std::mem::replace(self, Self::Materialized(DirectRequest::default()));
-            *self = Self::Materialized(payload.into_direct_request());
+            let constraints = self.routing_constraints().clone();
+            let payload = std::mem::replace(
+                self,
+                Self::materialized_with_constraints(DirectRequest::default(), constraints.clone()),
+            );
+            *self = Self::materialized_with_constraints(payload.into_direct_request(), constraints);
         }
         self.materialized_request()
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct CompactReadyTurn {
-    pub(crate) request_uuid: Uuid,
-    pub(crate) session_id: String,
-    pub(crate) turn_index: usize,
-    pub(crate) replay_key: Option<String>,
-    pub(crate) scheduled_ready_at_ms: f64,
-    pub(crate) replay_hashes: Option<ReplayRequestHashes>,
-    pub(crate) emit_session_metadata: bool,
-    pub(crate) request: ReplayRequestPayload,
+pub struct ReadyReplayTurn {
+    pub request_uuid: Uuid,
+    pub session_id: String,
+    pub turn_index: usize,
+    pub replay_key: Option<String>,
+    pub scheduled_ready_at_ms: f64,
+    pub replay_hashes: Option<ReplayRequestHashes>,
+    pub emit_session_metadata: bool,
+    pub request: ReplayRequestPayload,
 }
 
-impl CompactReadyTurn {
+impl ReadyReplayTurn {
     pub(crate) fn into_ready_turn(self) -> ReadyTurn {
+        let routing_constraints = self.request.routing_constraints().clone();
         ReadyTurn {
             request_uuid: self.request_uuid,
             session_id: self.session_id,
@@ -339,6 +377,7 @@ impl CompactReadyTurn {
             scheduled_ready_at_ms: self.scheduled_ready_at_ms,
             replay_hashes: self.replay_hashes,
             request: self.request.into_direct_request(),
+            routing_constraints,
         }
     }
 }

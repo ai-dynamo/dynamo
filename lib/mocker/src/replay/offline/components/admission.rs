@@ -76,7 +76,7 @@ enum AdmissionSource {
     Workload(WorkloadDriver),
 }
 
-pub(in crate::replay::offline) struct AdmissionQueue<Metadata = KvReplayMetadata> {
+pub(in crate::replay) struct AdmissionQueue<Metadata = KvReplayMetadata> {
     source: AdmissionSource,
     mode: ReplayMode,
     metadata: PhantomData<Metadata>,
@@ -103,10 +103,6 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
             mode,
             metadata: PhantomData,
         }
-    }
-
-    pub(in crate::replay::offline) fn mode(&self) -> ReplayMode {
-        self.mode
     }
 
     pub(in crate::replay::offline) fn next_ready_time_ms(&mut self) -> Option<f64> {
@@ -260,7 +256,7 @@ impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<M
     type Request = ReplayRequestPayload;
     type Metadata = Metadata;
 
-    fn next_ready_time_ms(&mut self) -> Option<f64> {
+    fn next_internal_event_ms(&mut self) -> Option<f64> {
         AdmissionQueue::next_ready_time_ms(self)
     }
 
