@@ -110,8 +110,6 @@ repos:
       name: Check component CSS template literals
       entry: python3 docs/fern/scripts/check_style_components.py
       language: system
-      # Components that keep CSS outside a *Styles.tsx file need naming here to
-      # be covered — see the script's docstring. None do today.
       files: ^docs/fern/(components/.*Styles\.tsx|scripts/check_style_components\.py)$
     - id: check-published-styles-selftest
       name: Self-test the published-styles regex helpers

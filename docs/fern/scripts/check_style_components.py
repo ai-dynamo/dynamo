@@ -29,14 +29,14 @@ sync_site_css.py already applies this rule to main.css before mirroring it;
 this applies the same rule to the components that hold CSS directly.
 
 Usage: python3 check_style_components.py [files...]
-With no arguments, checks every docs/fern/components/*Styles.tsx plus the
-components named in EXTRA_TARGETS.
+With no arguments, checks every docs/fern/components/*Styles.tsx.
 
-Coverage is opt-in rather than every components/*.tsx because roughly twenty
-components hold a CSS literal and three of them (ModelEABuildCards, TagLookup,
-TerminalDemo) interpolate into it deliberately, which this check reads as a
-defect. Widening it properly needs a way to mark those as intentional; until
-then a component keeping its CSS outside a *Styles.tsx file has to be listed.
+Coverage stops at *Styles.tsx rather than every components/*.tsx because
+roughly twenty components hold a CSS literal and three of them
+(ModelEABuildCards, TagLookup, TerminalDemo) interpolate into it deliberately,
+which this check reads as a defect. Widening it properly needs a way to mark
+those as intentional. Until then, a component with its own CSS should keep it
+in a *Styles.tsx file, as PublicationsStyles.tsx does.
 """
 from __future__ import annotations
 
@@ -73,19 +73,9 @@ def check(path: Path) -> list[str]:
     return problems
 
 
-# Components that hold a CSS literal without being named *Styles.tsx. Keep in
-# step with the `files:` pattern of the check-style-components pre-commit hook.
-# Empty today: the publication card CSS moved into PublicationsStyles.tsx, which
-# the *Styles.tsx glob already covers.
-EXTRA_TARGETS = ()
-
-
 def main() -> int:
     args = [Path(a) for a in sys.argv[1:]]
-    default = sorted((ROOT / "components").glob("*Styles.tsx")) + [
-        ROOT / "components" / name for name in EXTRA_TARGETS
-    ]
-    targets = args or default
+    targets = args or sorted((ROOT / "components").glob("*Styles.tsx"))
     targets = [t for t in targets if t.suffix == ".tsx" and t.exists()]
 
     problems: list[str] = []
