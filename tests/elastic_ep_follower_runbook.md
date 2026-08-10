@@ -125,6 +125,20 @@ MNNVL is available between any pair. Grove `v0.1.0-alpha.11`, kai-scheduler, and
 are all installed cluster-wide. The namespace already has a large RWX `shared-model-cache` PVC and
 an `nvcr-imagepullsecret`.
 
+> [!IMPORTANT]
+> **Cross-node NVLink needs a `ComputeDomain` — MNNVL is not automatic, despite the shared clique.**
+> As soon as `scale_elastic_ep` places a data-parallel rank on a *follower* pod, the leader↔follower
+> expert-/data-parallel NCCL traffic must flow over multi-node NVLink — and on GB200 that fabric
+> exists between two pods only if they share an NVIDIA **`ComputeDomain`** (IMEX, provisioned by the
+> `nvidia-dra-driver-gpu` DRA driver that is already installed here). Without one the scale-up aborts
+> at `ncclCommInitRank` ("unhandled system error"), which is exactly what this run hit. Declare a
+> top-level `ComputeDomain` and add a matching `resourceClaims` entry to **both** the leader and the
+> follower, as every GB200 vLLM recipe does — e.g.
+> [`recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml`](../recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml).
+> An **on-demand** follower, scaled up separately rather than gang-created with the leader, can join
+> the leader's ComputeDomain: with the default feature gate nothing gates membership on peers or on a
+> declared size. The run log below has the reasoning and the one caveat about NVLink cliques.
+
 All images must be **arm64**. An Apple Silicon machine builds them natively.
 
 Before starting, confirm the Teleport session is live (`tsh status`), Docker is running, and the
@@ -415,10 +429,11 @@ find another GB200 cluster, or fall back to a reduced shape with tensor-parallel
 GPUs per pod, which still exercises the mechanism but no longer matches the one-pod-per-node premise
 and cannot exercise the `dp=1` case.
 
-Two smaller ones are worth knowing. No verification has been done that a non-Grove pod can join a
-ComputeDomain, so if MNNVL turns out to be needed across the leader and follower, that is untested
-ground. And the internal registries could not be reached from the handoff machine, so Part A's push
-step is unproven end to end.
+Two smaller ones are worth knowing. A ComputeDomain is definitely needed across the leader and
+follower, and the CRD semantics say a separately created pod can join one — but that is reasoned from
+the API rather than observed, and the confirming experiment is in the run log. And the internal
+registries could not be reached from the handoff machine, so Part A's push step is unproven end to
+end.
 
 ## Leftovers to clean up
 
@@ -539,3 +554,100 @@ labelled "development and testing only" and the implementing code is marked depr
   headless Service `vllm-eep-follow-leader-ray` in `tzulingk-ft-tests`. The leader is CrashLooping and
   **holds 4 GPUs** — delete the DGD (and the headless Service) or re-point it once a Ray image exists.
 - Worker image `…/tzulingk-dynamo-vllm:elastic-ep-follower` in the registry.
+
+### Update — Ray reinstalled, dp=2 served on real GPUs, cross-node NCCL + capacity
+
+The "ray: not found" block above was resolved and the engine actually served. New findings, in order:
+
+- **Ray was intentionally stripped from the runtime image.** `vllm-runtime:1.3.0` ships vLLM 0.23.0
+  with no `ray` at all. Reinstall it in the overlay, **as root** so the `ray` console script lands in
+  `/usr/local/bin` (on PATH) rather than `/home/dynamo/.local/bin` (the default user is `dynamo`, uid
+  1000, and can't write `/usr/local/bin`). `pip install "ray[default]"` resolves `ray==2.56.1` cleanly
+  against the pinned torch/vLLM. New image tag: `…/tzulingk-dynamo-vllm:elastic-ep-follower-ray`.
+- **The DP-master-IP fix is `VLLM_DP_MASTER_IP`, and nothing else works.** vLLM sets
+  `parallel_config.data_parallel_master_ip` directly from `envs.VLLM_DP_MASTER_IP`
+  (`vllm/config/parallel.py:830`), which **defaults to `127.0.0.1`** (`envs.py:1307`). This overrides
+  the ray-backend `get_ip()` derivation, so neither `--data-parallel-address` (dynamo.vllm doesn't
+  forward it) nor `VLLM_HOST_IP` has any effect — the engine aborts at `create_dp_placement_groups`
+  with *"The DP master node (ip: 127.0.0.1) is missing or dead"* because Ray registers the node under
+  the pod IP. Bind `VLLM_DP_MASTER_IP` to the pod IP via the downward API (`status.podIP`). This is
+  exactly the binding [#12943](https://github.com/ai-dynamo/dynamo/pull/12943) adds to the leader arm;
+  the current cluster operator does not have it, so the DGD must set it until #12943 merges.
+- **dp=2 served, on real GPUs.** Reduced footprint to fit fragmented capacity (tp=1, leader 2 GPUs =
+  dp=2 baseline on one node, 1-GPU followers on others) via
+  `tests/fault_tolerance/deploy/templates/vllm/moe_elastic_ep_scale_1pod_test.yaml`. With the fix the
+  leader came up **restart=0, Ready**, `ray status` showed **1 node / 2.0-of-2.0 GPU**, and inference
+  returned `2+2=` → `4`. Scaling the follower up attached both idle GPUs: `ray status` then showed
+  **3 nodes / 2.0-of-4.0 GPU** — the "GPUs visible but idle" state the design predicts.
+- **Cross-node scale-up needs a shared ComputeDomain (MNNVL) — this is the real requirement, not a
+  detail.** `scale_elastic_ep 2→3` failed at `ncclCommInitRank`: *"unhandled system error"* while
+  building the new rank on a follower node. On GB200 NVL72 the expert-/data-parallel NCCL traffic
+  between the leader and a follower must flow over **multi-node NVLink (MNNVL)**, and MNNVL between
+  pods only exists if they share an NVIDIA **`ComputeDomain`** (IMEX), provisioned by the DRA driver
+  (`nvidia-dra-driver-gpu`, already installed on this cluster). Without a shared ComputeDomain the
+  follower's node cannot reach the leader over NVLink and NCCL init aborts. Every GB200 vLLM recipe in
+  this repo carries one — see
+  [`recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml`](fault_tolerance/../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml):
+  a top-level `ComputeDomain` object (`apiVersion: resource.nvidia.com/v1beta1`, `spec.numNodes: 0`,
+  a `channel.resourceClaimTemplate`), plus on each worker `resources.claims: [{name:
+  compute-domain-channel}]` and `extraPodSpec.resourceClaims: [{name: compute-domain-channel,
+  resourceClaimTemplateName: <cd>-channel}]`.
+  - **Can an on-demand follower join the leader's ComputeDomain? Yes — nothing gates it.** This was
+    the feature's key open question, since the recipes only ever gang-create pods that share one
+    `resourceClaimTemplate` at admission. The CRD's own documentation for `numNodes` settles it:
+
+    > With `featureGates.IMEXDaemonsWithDNSNames=true` (the default) […] a `numNodes` value greater
+    > than zero in particular **does not gate the startup of IMEX daemons**: individual IMEX daemons
+    > are started immediately without waiting for its peers, and **any workload pod gets released
+    > right after its local IMEX daemon has started**. […] The `numNodes` parameter is deprecated and
+    > will be removed in the next API version.
+
+    In that mode `numNodes` only drives status reporting. There is no admission-time membership set,
+    no fixed size, and no waiting for peers, so a pod created at any later time that references the
+    same `ResourceClaimTemplate` starts its own IMEX daemon and is released. Each pod generates its
+    own claim from the template, so there is no single shared object for followers to contend over.
+
+    The gang behaviour the recipes rely on is the **legacy** mode, `IMEXDaemonsWithDNSNames=false`,
+    where pods are held in `ContainerCreating` until `numNodes` daemons arrive and where the docs warn
+    that pods beyond `numNodes` "may lead to unexpected behavior". That mode would indeed have broken
+    the on-demand design. It is not in effect: the driver sets only
+    `FEATURE_GATES=CrashOnNVLinkFabricErrors=true`, so the DNS-names gate takes its default of true.
+    Confirm this on any new cluster before assuming the answer carries over.
+
+    Live state is consistent: `tzulingk-compute-domain` reports two `Ready` nodes sharing one clique,
+    with the leader and follower pods each holding a claim from `tzulingk-compute-domain-channel`.
+    That confirms the mechanism but **not** late joining — those pods started one second apart, so
+    they came up together. To prove late joining, scale the follower Deployment from 1 to 2 and watch
+    `status.nodes` reach 3; that needs one free GPU and disturbs nothing already running. Prefer it to
+    a 1→0→1 cycle, which would kill a live pod.
+
+  - **Clique placement is a real hazard, just not on this cluster.** A separately scaled follower
+    could in principle land on a node in a different NVLink partition, joining the ComputeDomain
+    nominally while having no NVLink path to the leader — gang scheduling would prevent that, a plain
+    Deployment would not. Here every GPU node carries the same `nvidia.com/gpu.clique` value, so there
+    is one partition and any node the follower lands on is in it. On a multi-clique cluster the
+    follower needs a node affinity matching the leader's clique.
+
+  - **Still unquantified:** the maximum number of IMEX channels per domain under
+    `allocationMode: Single`, which would cap how many followers can attach. Low risk, but it bounds
+    any claim about the scaling ceiling.
+  - **TCP-over-eth0 is only a degraded fallback** for pairs with no working MNNVL:
+    `NCCL_IB_DISABLE=1`, `NCCL_NET=Socket`, `NCCL_SOCKET_IFNAME=eth0` (as in
+    `bare_multinode_elastic_ep.yaml`, an AKS/A100 setup). It trades the NVLink fabric for the pod
+    network and is not the intended GB200 path. A failed scale leaves the engine dead, so re-verifying
+    (either way) needs a clean start.
+- **Then capacity collapsed.** `dynamo-aws-dev-01`'s three 4-GPU nodes went `Ready=Unknown` (down) and
+  contention took the rest, leaving ~1 free GPU cluster-wide — so the NCCL-fixed scale-up could not be
+  re-verified here. The only other Teleport-reachable GPU clusters (`dynamo-aws-dev-02`, `dynamo-aks-dev`)
+  are **amd64**, which would need an amd64 rebuild of the overlay image.
+- **Engine constraints worth carrying forward.** `--enable-elastic-ep` requires `--enable-eplb`, which
+  requires `tp*dp > 1` at startup — so with **tp=1 the leader cannot start at dp=1** (it must start
+  dp≥2); the design's "solo leader at dp=1" needs **tp≥2** (then dp=1 is legal, which is the scale-floor
+  fix's whole point). The scale endpoint is `POST http://localhost:9090/engine/control/scale_elastic_ep`
+  on the leader, driven with `kubectl exec` (Teleport/AKS kills `kubectl port-forward` after one
+  connection).
+
+**Net:** both code changes plus the essential `VLLM_DP_MASTER_IP` binding are validated against a real
+vLLM engine at dp=2 (leader serves, followers join Ray). The remaining step — `scale_elastic_ep`
+2→3→4 activating the follower GPUs — is coded (NCCL-over-TCP added) but unverified, blocked only by
+this cluster's capacity, not by the design.
