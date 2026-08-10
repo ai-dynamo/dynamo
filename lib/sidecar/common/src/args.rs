@@ -43,7 +43,7 @@ pub struct GrpcTransportArgs {
     )]
     pub grpc_retry_interval_secs: u64,
 
-    /// Maximum total duration for sidecar gRPC startup.
+    /// Maximum duration for each sidecar gRPC startup phase.
     #[arg(
         long = "grpc-startup-deadline-secs",
         env = "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",

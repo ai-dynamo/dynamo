@@ -75,6 +75,14 @@ impl PreparedRequest {
             ))
             .into());
         }
+        if let Some(rank) = request.data_parallel_rank
+            && rank != DP_RANK
+        {
+            return Err(Status::invalid_argument(format!(
+                "data_parallel_rank {rank} is not served; expected {DP_RANK}"
+            ))
+            .into());
+        }
         let mut prompt_tokens = match request.prompt.take() {
             Some(pb::generate_request::Prompt::TokenIds(tokens)) => tokens.ids,
             Some(pb::generate_request::Prompt::Text(_)) => {
@@ -291,6 +299,7 @@ impl PreparedRequest {
                 finish_reason: pb::finish_info::FinishReason::Length as i32,
                 stop_reason: None,
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
+                ec_transfer_params: None,
             }),
         }
     }
