@@ -281,9 +281,9 @@ See [DynamoCheckpointStatus](#dynamocheckpointstatus).
 </Accordion>
 
 <Accordion id="dynamocheckpointidentity" title="DynamoCheckpointIdentity">
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: legacy identity metadata retained for manual and standalone
+checkpoint compatibility. DGD-managed automatic checkpoints omit it and use
+their DGD-derived checkpoint ID.
 
 
 **Kind:** `type`
@@ -394,10 +394,10 @@ DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 **Kind:** `type`
 **Appears in:** [DynamoCheckpoint](#dynamocheckpoint)
 
-<ParamField path="identity" type="DynamoCheckpointIdentity" required={true}>
-Deprecated: required by v1alpha1 for standalone checkpoints. Auto checkpoints synthesize it; checkpointRef restores use the referenced CR.
+<ParamField path="identity" type="DynamoCheckpointIdentity">
+Legacy compatibility: identity is required for manual and legacy standalone checkpoints. DGD-managed automatic checkpoints omit it and use their DGD-derived checkpoint ID. This field is deprecated.
 See [DynamoCheckpointIdentity](#dynamocheckpointidentity).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">
@@ -660,7 +660,7 @@ See [GPUMemoryServiceSpec](#gpumemoryservicespec).
 </ParamField>
 
 <ParamField path="failover" type="FailoverSpec">
-Failover configures GMS (GPU Memory Service) failover for this service. For intraPod mode: the main container is cloned into two engine containers (active + standby). For interPod mode: the operator creates a dedicated GMS weight server pod and multiple engine pods per rank that share GPUs via DRA resource claims.
+Failover configures GMS (GPU Memory Service) failover for this service. For intraPod mode: the main container is cloned into one active and one or two standby engine containers. For interPod mode: the operator creates a dedicated GMS weight server pod and multiple engine pods per rank that share GPUs via DRA resource claims.
 See [FailoverSpec](#failoverspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -821,7 +821,7 @@ See [GPUMemoryServiceSpec](#gpumemoryservicespec).
 </ParamField>
 
 <ParamField path="failover" type="FailoverSpec">
-Failover configures GMS (GPU Memory Service) failover for this service. For intraPod mode: the main container is cloned into two engine containers (active + standby). For interPod mode: the operator creates a dedicated GMS weight server pod and multiple engine pods per rank that share GPUs via DRA resource claims.
+Failover configures GMS (GPU Memory Service) failover for this service. For intraPod mode: the main container is cloned into one active and one or two standby engine containers. For interPod mode: the operator creates a dedicated GMS weight server pod and multiple engine pods per rank that share GPUs via DRA resource claims.
 See [FailoverSpec](#failoverspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -1390,7 +1390,7 @@ See [Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1
 <Accordion id="failoverspec" title="FailoverSpec">
 FailoverSpec configures active-passive failover for a worker component.
 For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
-into engine containers (active + standby) within the same pod.
+into one active and one or two standby engine containers within the same pod.
 For interPod mode: the operator creates a dedicated GMS weight server pod and
 multiple engine pods per rank that share GPUs via DRA resource claims.
 
@@ -1409,7 +1409,7 @@ See [GPUMemoryServiceMode](#gpumemoryservicemode).
 </ParamField>
 
 <ParamField path="numShadows" type="integer" default="1">
-NumShadows is the number of shadow (standby) engine pods per rank. Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows). NumShadows is only meaningful for mode=interPod; intraPod uses a fixed 1 primary + 1 shadow sidecar layout and any value other than 1 is rejected at admission time.
+NumShadows is the number of shadow (standby) engines per rank. In intraPod mode, one or two shadows are supported. In interPod mode, each rank has one primary plus NumShadows shadow engine pods.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3568,11 +3568,12 @@ See [ComponentCheckpointConfig](#componentcheckpointconfig).
 
 <Accordion id="v1beta1-failoverspec" title="FailoverSpec">
 FailoverSpec configures active-passive failover for a worker component.
-The main container is cloned into two engine containers (active + standby)
-sharing GPUs via DRA, and the standby acquires the flock when the active
-engine fails. Failover requires that gpuMemoryService is also set, and that
-failover.mode matches gpuMemoryService.mode. Also requires the
-`nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+In IntraPod mode, the main container is cloned into one active and one or
+two standby engine containers sharing GPUs via DRA. Standbys acquire the
+flock after the active engine fails. Failover requires that gpuMemoryService
+is also set, and that failover.mode matches gpuMemoryService.mode. Also
+requires the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on
+the DGD.
 See ExperimentalSpec for the stability caveat.
 
 
@@ -3586,8 +3587,8 @@ See [GPUMemoryServiceMode](#v1beta1-gpumemoryservicemode).
 </ParamField>
 
 <ParamField path="numShadows" type="integer" default="1">
-numShadows is the number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow.
-**Validation:** Maximum: 1  Minimum: 1  Optional: \&#123;\&#125;
+numShadows is the number of shadow (standby) engines per rank. IntraPod mode supports one or two shadows. In InterPod mode, each rank has one primary plus numShadows shadow engine pods.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
