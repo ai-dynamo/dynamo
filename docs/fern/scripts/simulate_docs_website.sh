@@ -78,6 +78,10 @@ assert() { # assert <label> <ok|FAIL>
 GEN_SEL='.navigation[] | select(.tab == "reference") | .layout[] | select([.. | select(has("path")) | .path] | all_c(test("/reference/general/")))'
 
 echo "=== SYNC JOB (replayed) ==="
+# Materialise the build-time-synced DEP bodies before the rsync, exactly as the
+# Fern Docs workflow does. pages/proposals/_generated/ is gitignored, so without
+# this the Proposals nav entries have no target and `fern check` errors.
+"$PY" "$SRC/scripts/sync_deps.py" || true
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"
@@ -101,6 +105,12 @@ if [ -d "$SRC/pages/blog/_assets" ]; then
 fi
 [ -f "$SRC/main.css" ] && cp "$SRC/main.css" "$WT/fern/main.css" || true
 [ -f "$SRC/custom.js" ] && cp "$SRC/custom.js" "$WT/fern/custom.js" || true
+# Mirror js/ the same way the Fern Docs workflow does: docs.yml is copied from
+# source, so every local `js:` path (e.g. ./js/dep-pr-comments.js) must exist in
+# the simulated tree or `fern check` fails with "Path ... does not exist".
+if [ -d "$SRC/js" ]; then
+  rm -rf "$WT/fern/js"; cp -r "$SRC/js" "$WT/fern/js"
+fi
 
 if [ -d "$SRC/translations" ]; then
   for d in "$WT"/fern/translations/*/pages-dev; do

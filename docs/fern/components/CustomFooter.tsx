@@ -1294,6 +1294,46 @@ a.fern-card:hover{
   --dynamo-community-soft: #f3f4f3;
   --dynamo-community-titlebar-text: #555755;
 }
+
+/* ========== DEP Proposals sidebar status pills ==========
+ * Right-aligned lifecycle pill injected at runtime into each
+ * #fern-sidebar a.fern-sidebar-link that points at /proposals/<slug>
+ * by docs/fern/js/dep-status-pills.js. The pill VOCABULARY (5 variants) and
+ * COLORS are cloned verbatim from DepMetadata.tsx's DEP_META_CSS
+ * .dep-meta-pill--* block so the sidebar pill and the on-page card pill
+ * always agree for a given DEP. If you change one, change the other.
+ *
+ * NOTE: no backticks anywhere in this file — scripts/sync_site_css.py
+ * mirrors it verbatim into the SITE_CSS template literal in
+ * components/CustomFooter.tsx, and a backtick would terminate it. */
+.dep-status-pill {
+    /* margin-left:auto pushes the pill to the right end of the sidebar
+     * link's flex container (see .fern-sidebar-link above, which is
+     * display:flex; gap:0.75rem in Fern's own sidebar CSS). */
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .02em;
+    line-height: 1.4;
+    white-space: nowrap;
+    /* Sidebar links are small; keep the pill compact so it never wraps
+     * the DEP title. flex-shrink:0 guards against long titles crowding
+     * the pill out. */
+    flex-shrink: 0;
+}
+.dep-status-pill--draft{background:rgba(224,168,0,.18);color:#8a6100;}
+.dark .dep-status-pill--draft,html[data-theme=dark] .dep-status-pill--draft{color:#ffcf5a;}
+.dep-status-pill--proposed{background:rgba(91,141,239,.18);color:#2f5fd0;}
+.dark .dep-status-pill--proposed,html[data-theme=dark] .dep-status-pill--proposed{color:#8fb0ff;}
+.dep-status-pill--accepted{background:rgba(118,185,0,.20);color:#4c7a00;}
+.dark .dep-status-pill--accepted,html[data-theme=dark] .dep-status-pill--accepted{color:var(--nv-color-green,#76b900);}
+.dep-status-pill--rejected{background:rgba(220,72,72,.16);color:#b23636;}
+.dark .dep-status-pill--rejected,html[data-theme=dark] .dep-status-pill--rejected{color:#ff8a8a;}
+.dep-status-pill--muted{background:rgba(127,127,127,.16);color:var(--pst-color-text-muted,#6b6b6b);}
 `;
 // sync-site-css:end
 

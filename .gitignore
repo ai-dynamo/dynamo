@@ -177,3 +177,12 @@ fern/components/install-selector-data.ts
 
 # Local git worktrees
 .worktrees/
+
+# DEP preview probe artifacts (headless browser screenshots + captured HTML)
+.dep-preview/
+
+# Build-time-synced DEP bodies (see docs/fern/scripts/sync_deps.py). The dynamo
+# repo is a rendering surface for Dynamo Enhancement Proposals — the DEP bodies
+# themselves live in ai-dynamo/enhancements. This directory is regenerated on
+# every Fern docs build; nothing in it may be committed.
+docs/fern/pages/proposals/_generated/

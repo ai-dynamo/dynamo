@@ -118,6 +118,16 @@ jobs:
           path: source-checkout
           fetch-depth: 1
 
+      - name: Sync external DEP bodies
+        # Regenerates docs/fern/pages/proposals/_generated/*.mdx from the DEP
+        # manifest at docs/fern/scripts/deps.json (source of truth:
+        # ai-dynamo/enhancements). Runs BEFORE the rsync below so the synced
+        # pages appear under source-checkout/docs/fern/pages/proposals/
+        # _generated/ and flow into docs-checkout/fern/pages-dev/proposals/
+        # _generated/ verbatim. The generated dir is gitignored — nothing from
+        # it is ever committed.
+        run: python3 source-checkout/docs/fern/scripts/sync_deps.py --root source-checkout
+
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -268,6 +278,16 @@ jobs:
                 cp -r "$lang_dir/pages" "docs-checkout/fern/translations/$lang/pages-dev"
               fi
             done
+          fi
+
+          # Sync js/ directory (custom client scripts referenced by docs.yml
+          # `js:`). docs.yml is copied from source below, so any local `js:`
+          # path (e.g. ./js/dep-pr-comments.js) must exist on docs-website too
+          # or `fern generate` fails validation ("Path ... does not exist").
+          if [ -d source-checkout/docs/fern/js ]; then
+            echo "Syncing js/ to docs-website branch..."
+            rm -rf docs-checkout/fern/js
+            cp -r source-checkout/docs/fern/js docs-checkout/fern/js
           fi
 
       - name: Transform paths in dev.yml for docs-website layout
@@ -557,6 +577,21 @@ jobs:
           ref: ${{ steps.version.outputs.tag }}
           path: source-checkout
           fetch-depth: 1
+
+      - name: Sync external DEP bodies at tag
+        # Freezes the DEP body into the versioned snapshot: sync runs against
+        # the tagged docs/ (using the tag's manifest), then rsync copies the
+        # generated files into fern/pages-<TAG>/. If the manifest's ref drifts
+        # upstream after the tag, this snapshot remains pinned.
+        #
+        # Guarded: tags cut before the Proposals tab landed have no sync script,
+        # and a versioned republish of such a tag must not fail on its absence.
+        run: |
+          if [ -f source-checkout/docs/fern/scripts/sync_deps.py ]; then
+            python3 source-checkout/docs/fern/scripts/sync_deps.py --root source-checkout
+          else
+            echo "No docs/fern/scripts/sync_deps.py at this tag; skipping DEP sync."
+          fi
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
