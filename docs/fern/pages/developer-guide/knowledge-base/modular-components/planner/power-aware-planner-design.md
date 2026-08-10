@@ -359,20 +359,30 @@ enforcement test or validate a facility-level power ceiling.
 
 ### Close the Enforcement Feedback Gap
 
-Expose the effective applied cap, cap generation, actuator success, and data freshness to the
-admission controller. Use effective caps for worst-case admission. Treat measured draw as an
-optimization signal with explicit headroom, not as proof that a later workload spike will fit.
+Have the Power Agent publish enforcement status for each physical GPU, keyed by GPU UUID. Include DGD,
+component, and Pod identity; requested and effective caps; cap generation; actuator backend; apply
+outcome; and observation time. Feed fresh status into the Planner's final power-budget boundary and
+use effective caps for worst-case admission. Treat measured draw as an optimization signal with
+explicit headroom, not as proof that a later workload spike will fit.
 
 ### Make Cap Updates Transactional
 
 Define a versioned handoff before allowing cap retargeting:
 
 - the DGD declares cap intent and a generation;
-- workers report the generation and effective cap they enforce;
-- the Planner admits scale-up only when every relevant replica reports the expected generation; and
+- Power Agents report the generation and effective cap for each managed physical GPU;
+- the Planner admits scale-up only after every relevant managed GPU reports the expected generation; and
 - incomplete or stale generations fail closed.
 
 This removes the static delete-and-recreate lifecycle without restoring Planner-owned Pod patching.
+
+### Define Shared-GPU and Dynamic Allocation Semantics
+
+Define physical GPU ownership before supporting multiple Pods per GPU, Multi-Instance GPU (MIG), or
+DRA-backed allocation. Choose admission-time exclusivity or an explicit arbitration policy for
+matching caps, conflicting caps, and unannotated co-tenants. Map resource claims and partitioned GPUs
+to the physical device that owns the cap. Account for existing Pods from their observed assignments
+and effective caps, while pricing future replicas from DGD intent.
 
 ### Define Over-Budget Reconciliation
 
@@ -400,15 +410,28 @@ cannot satisfy the two budgets under different interpretations.
 
 ### Add Decision-Level Telemetry
 
-Add bounded counters for clamp and hold reasons, gauges for target and peak watts, cached cap
-generation and age, and effective-cap health. Use this evidence before enabling automated remediation
-or adaptive control.
+Build on the existing Power Agent metrics for applied limits, actuator failures, safe-default use, cap
+clamping, multi-Pod placement, and Kubernetes LIST failures. Add bounded Planner counters for clamp and
+hold reasons, gauges for target and peak watts, cached cap generation and age, and effective-cap
+health. Use GPU UUIDs for enforcement identity, define freshness and alert thresholds, and retire
+stale identity series after device re-enumeration. Use this evidence before enabling automated
+remediation or adaptive control.
 
-### Optimize Power Agent API Load Separately
+### Qualify Enforcement on Real Hardware
 
-Use a watch or informer-backed Pod cache to reduce the Power Agent's Kubernetes API load. This
-optimization does not close the Planner's effective-cap or reconciliation gaps and can proceed
-independently.
+Run a gated GPU qualification path for both NVML and DCGM. Verify annotation propagation, cap
+clamping, and restoration with an independent hardware read across supported GPU SKUs, drivers, and
+DCGM versions. Cover DCGM reconnect and device re-enumeration, Power Agent restart and shutdown,
+orphan recovery, safe-default selection, and shared-GPU conflicts.
+
+### Scale Kubernetes Observation and Failure Recovery
+
+Replace the Power Agent's periodic per-node Pod LIST and the Planner's per-tick DGD and Pod reads with
+watch or informer-backed caches. Define relist, freshness, backoff, and resynchronization behavior,
+and keep Planner Kubernetes I/O off the asynchronous event loop. Decide whether transient Planner
+read failures trigger bounded retries or a fail-closed scale-up hold instead of terminating the run
+loop. This work improves control-plane scale and availability but does not close the effective-cap or
+reconciliation gaps.
 
 ## Code Reference Map
 
