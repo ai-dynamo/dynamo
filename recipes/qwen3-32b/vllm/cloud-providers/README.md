@@ -42,7 +42,7 @@ Neither path requires regeneration.
 | Rendered manifest | Provider fabric | Overlay |
 |-------------------|-----------------|---------|
 | `deploy-aks-ib.yaml` | Azure AKS InfiniBand | `kustomize/overlays/aks-ib/` |
-| `deploy-aws-efa-p16d16.yaml` | AWS EFA + libfabric, 16 EFA per worker | `kustomize/overlays/aws-efa-p16d16/` |
+| `deploy-aws-p5.48xlarge.yaml` | AWS EFA + libfabric on `p5.48xlarge`, 16 EFA per worker | `kustomize/overlays/aws-p5.48xlarge/` |
 | `deploy-gke-roce.yaml` | GKE RoCE | `kustomize/overlays/gke-roce/` |
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |

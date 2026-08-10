@@ -7,7 +7,7 @@ matrix:
     - name: aks-ib
       components:
         - ../../../kustomize/components/aks-ib
-    - name: aws-efa-p16d16
+    - name: aws-p5.48xlarge
       components:
         - ../../../kustomize/components/aws-efa-p16d16
         - ../../../kustomize/components/vllm-disagg/aws-efa

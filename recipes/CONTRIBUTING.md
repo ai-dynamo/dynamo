@@ -31,7 +31,7 @@ and easy to review:
 <deployment>/
 ├── .kustomize-matrix.yaml
 ├── deploy-generic.yaml
-├── deploy-aws-efa-p8d16.yaml
+├── deploy-aws-p5.48xlarge.yaml
 ├── deploy-gcp-roce.yaml
 ├── perf.yaml
 └── kustomize/
@@ -43,7 +43,7 @@ and easy to review:
     └── overlays/
         ├── generic/
         │   └── kustomization.yaml
-        ├── aws-efa-p8d16/
+        ├── aws-p5.48xlarge/
         │   └── kustomization.yaml
         ├── gcp-roce/
         │   └── kustomization.yaml
@@ -124,9 +124,9 @@ source: kustomize/base
 nameTemplate: "${variant}"
 matrix:
   variant:
-    - name: aws-efa-p8d16
+    - name: aws-p5.48xlarge
       components:
-        - ../../../kustomize/components/aws-efa-p8d16
+        - ../../../kustomize/components/aws-efa-p16d16
 ```
 
 Regenerate derived artifacts in order: `unfold` writes the checked-in Level-2

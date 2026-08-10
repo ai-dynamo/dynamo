@@ -6,9 +6,9 @@ matrix:
   variant:
     - name: generic
       components: []
-    - name: aws-efa-p8d16
+    - name: aws-p6-b200.48xlarge
       components:
-        - ../../../../kustomize/components/aws-efa-p8d16
+        - ../../../../kustomize/components/aws-efa-p8d8
     - name: gcp-roce
       components:
         - ../../../../kustomize/components/disagg-workers/gke-roce

@@ -44,7 +44,7 @@ kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 # OR: kubectl apply -f trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}   # H100/H200
 
 # For Blackwell disaggregated, choose the provider-specific manifest matching your cluster interconnect:
-# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-aws-efa-p8d16.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/blackwell/deploy-nscale-ib.yaml -n ${NAMESPACE}
 ```
@@ -73,7 +73,7 @@ Comments inside literal block scalars already render in place.
 | Rendered manifest | Provider fabric | Patch source |
 |-------------------|-----------------|--------------|
 | `trtllm/disagg/blackwell/deploy-generic.yaml` | Provider-neutral baseline | `trtllm/disagg/blackwell/kustomize/overlays/generic/` |
-| `trtllm/disagg/blackwell/deploy-aws-efa-p8d16.yaml` | AWS EFA, 8 EFA prefill and 16 decode | `recipes/kustomize/components/aws-efa-p8d16/` |
+| `trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml` | AWS EFA on `p6-b200.48xlarge`, 8 EFA per worker | `recipes/kustomize/components/aws-efa-p8d8/` |
 | `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `recipes/kustomize/components/disagg-workers/gke-roce/` |
 | `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `recipes/kustomize/components/disagg-workers/nscale-ib/` |
 

@@ -11,4 +11,4 @@ sortOptions:
 resources:
   - "../../base"
 components:
-  - "../../../../../../../kustomize/components/aws-efa-p8d16"
+  - "../../../../../../../kustomize/components/aws-efa-p8d8"

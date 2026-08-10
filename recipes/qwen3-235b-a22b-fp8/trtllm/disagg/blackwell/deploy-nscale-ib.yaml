@@ -123,7 +123,7 @@ spec:
             value: /mnt/model-cache
           - name: ENGINE_ARGS
             value: /engine_configs/decode.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           securityContext:
             capabilities:
               add:
@@ -193,7 +193,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
         tolerations: []
       replicas: 1
     # Provider Components target backend-neutral worker service keys.
@@ -244,7 +244,7 @@ spec:
             value: /mnt/model-cache
           - name: ENGINE_ARGS
             value: /engine_configs/prefill.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           securityContext:
             capabilities:
               add:
