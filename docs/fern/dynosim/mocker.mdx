@@ -74,7 +74,7 @@ kubectl wait -n "$NAMESPACE" \
 ```
 
 The checked-in
-[aggregated Mocker example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/v1beta1/agg.yaml)
+[aggregated Mocker example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/agg.yaml)
 contains the complete deployment manifest.
 
 </Step>
@@ -103,7 +103,7 @@ request through the deployment.
 </Step>
 <Step title="Simulate disaggregated serving" id="simulate-disaggregated-serving">
 Start from the checked-in
-[disaggregated Mocker example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/v1beta1/disagg.yaml).
+[disaggregated Mocker example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/disagg.yaml).
 It defines separate prefill and decode components. The prefill worker uses:
 
 ```yaml
