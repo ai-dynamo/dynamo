@@ -16,6 +16,36 @@ SPDX-License-Identifier: Apache-2.0
 > [§4.1](#41-you-may-not-have-the-data-you-need-unless-you-configured-for-it) is held out of
 > this copy; see Open items.
 
+## Contents
+
+- [0. (most important) Archive Your Runs](#0-most-important-archive-your-runs)
+- [1. Running the benchmark](#1-running-the-benchmark)
+  - [1.1 Accuracy is a gate](#11-accuracy-is-a-gate)
+- [2. Targets and constraints](#2-targets-and-constraints)
+  - [2.1 The target is a curve](#21-the-target-is-a-curve)
+  - [2.2 Restrictions](#22-restrictions)
+  - [2.3 Utilization is an iterative loop](#23-utilization-is-an-iterative-loop)
+  - [2.4 Definition of good](#24-definition-of-good)
+- [3. Collecting data](#3-collecting-data)
+  - [3.1 Three sources](#31-three-sources)
+    - [3.1.1 Supplementary tools available today](#311-supplementary-tools-available-today)
+  - [3.2 What each source can and cannot tell you](#32-what-each-source-can-and-cannot-tell-you)
+  - [3.3 What eBPF actually costs](#33-what-ebpf-actually-costs)
+  - [3.4 How early you must decide](#34-how-early-you-must-decide)
+- [4. Cautions when Collecting Data](#4-cautions-when-collecting-data)
+  - [4.1 You may not have the data you need unless you configured for it](#41-you-may-not-have-the-data-you-need-unless-you-configured-for-it)
+  - [4.2 Instrumentation may skew results](#42-instrumentation-may-skew-results)
+  - [4.3 You may not know what data you need](#43-you-may-not-know-what-data-you-need)
+- [5. (important) Analysis](#5-important-analysis)
+  - [5.1 What exists against each rung](#51-what-exists-against-each-rung)
+- [Appendix A — Tables](#appendix-a--tables)
+  - [Table A.1 — Supplementary capture tools](#table-a1--supplementary-capture-tools)
+  - [Table A.2 — What each data source preserves and destroys](#table-a2--what-each-data-source-preserves-and-destroys)
+  - [Table A.3 — How early instrumentation must be decided](#table-a3--how-early-instrumentation-must-be-decided)
+  - [Table A.4 — Programmatic analysis — what exists](#table-a4--programmatic-analysis--what-exists)
+  - [Table A.5 — Procedural analysis — what exists](#table-a5--procedural-analysis--what-exists)
+- [Open items](#open-items)
+
 ## 0. (most important) Archive Your Runs
 
 Keeping an organized human-readable records of your runs is important for your own tracking and for others to validate your statement. i.e. "do you have run with / without certain configuration", "Some metrics are not being accounted for in your analysis, can you check back and see if they are relevant" etc.
@@ -180,6 +210,8 @@ Analysis covers visualization and the implications of different data sources. Th
 3. **Agent-runnable** — an agent selects tools, collects data, and identifies the bottleneck.
 
 An agent cannot run a procedure that has not been written down, and a procedure cannot be written until collection and transformation are deterministic.
+
+[TODO] initial procedural analysis driven by learning and primary objectives
 
 ### 5.1 What exists against each rung
 
