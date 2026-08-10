@@ -86,6 +86,7 @@ from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .decoder_runtime import VllmDecoderRuntime
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -2637,6 +2638,36 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             logger.debug(formatted_message)
 
+
+class DecodeWorkerHandler(BaseWorkerHandler):
+    def __init__(
+        self,
+        runtime,
+        config: Config,
+        decoder_runtime: VllmDecoderRuntime,
+        enable_multimodal: bool = False,
+        generate_endpoint=None,
+        use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
+    ):
+        self.decoder_runtime = decoder_runtime
+        super().__init__(
+            runtime,
+            config,
+            decoder_runtime.engine,
+            decoder_runtime.default_sampling_params,
+            model_max_len=decoder_runtime.model_config.max_model_len,
+            model_config=decoder_runtime.model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
+        )
+
     async def generate_tokens(
         self,
         prompt,
@@ -2649,99 +2680,57 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
     ):
+        """Generate canonical token chunks through the shared decoder runtime."""
+
         try:
-            # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
                 "Starting token generation for request {request_id}{lora_info}",
                 request_id,
                 lora_request,
             )
-            gen = self._generate_with_lora_admission_lock(
-                lora_request,
-                lambda admitted_lora_request: self.engine_client.generate(
-                    prompt,
-                    sampling_params,
-                    request_id,
-                    lora_request=admitted_lora_request,
-                    data_parallel_rank=data_parallel_rank,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    **_engine_generate_reasoning_kwargs(
-                        self.engine_client,
-                        reasoning_ended,
-                        reasoning_parser_kwargs,
-                    ),
+            engine_options = {
+                "data_parallel_rank": data_parallel_rank,
+                "trace_headers": trace_headers,
+                "priority": priority,
+                **_engine_generate_reasoning_kwargs(
+                    self.engine_client,
+                    reasoning_ended,
+                    reasoning_parser_kwargs,
                 ),
-            )
-
-            output_adapter = _VllmDecodeOutputAdapter(
+            }
+            async for chunk in self.decoder_runtime.decode(
+                prompt,
                 sampling_params,
-                tokenizer=getattr(self.engine_client, "tokenizer", None),
+                request_id,
+                engine_options=engine_options,
+                lora_request=lora_request,
+                admission=self._generate_with_lora_admission_lock,
                 extract_logprobs=self._extract_logprobs,
-            )
-            async for res in gen:
-                if not res.outputs:
-                    self._log_with_lora_context(
-                        "Request {request_id}{lora_info} returned no outputs",
-                        request_id,
-                        lora_request,
-                    )
-                    for chunk in output_adapter.convert(res):
-                        yield chunk
-                    break
-                for chunk in output_adapter.convert(res):
-                    finish_reason = chunk.get("finish_reason")
-                    if finish_reason:
-                        output_index = int(chunk.get("index") or 0)
+            ):
+                finish_reason = chunk.get("finish_reason")
+                if finish_reason:
+                    if str(finish_reason).startswith("error"):
+                        self._log_with_lora_context(
+                            "Request {request_id}{lora_info} returned no outputs",
+                            request_id,
+                            lora_request,
+                        )
+                    else:
+                        usage = chunk.get("completion_usage") or {}
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
                             "{output_tokens} output tokens, finish_reason={finish_reason}",
                             request_id,
                             lora_request,
-                            output_tokens=output_adapter.completion_tokens(
-                                output_index
-                            ),
+                            output_tokens=usage.get("completion_tokens", 0),
                             finish_reason=finish_reason,
                         )
-                    yield chunk
-
+                yield chunk
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
-
-
-class DecodeWorkerHandler(BaseWorkerHandler):
-    def __init__(
-        self,
-        runtime,
-        config: Config,
-        engine,
-        default_sampling_params,
-        model_max_len: int | None = None,
-        model_config: ModelConfig | None = None,
-        enable_multimodal: bool = False,
-        generate_endpoint=None,
-        use_vllm_tokenizer: bool = False,
-        shutdown_event: asyncio.Event | None = None,
-        enable_frontend_decoding: bool = False,
-        encode_worker_client: Client | None = None,
-    ):
-        super().__init__(
-            runtime,
-            config,
-            engine,
-            default_sampling_params,
-            model_max_len=model_max_len,
-            model_config=model_config,
-            enable_multimodal=enable_multimodal,
-            generate_endpoint=generate_endpoint,
-            use_vllm_tokenizer=use_vllm_tokenizer,
-            shutdown_event=shutdown_event,
-            enable_frontend_decoding=enable_frontend_decoding,
-            encode_worker_client=encode_worker_client,
-        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
@@ -2949,12 +2938,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         _apply_nvext_cache_salt(request, prompt)
 
-        # Build sampling params from request
-        sampling_params = build_sampling_params(
+        # Build sampling params through the shared decoder implementation.
+        sampling_params = self.decoder_runtime.prepare_sampling_params(
             request,
-            self.default_sampling_params,
-            self.model_max_len,
             enable_rl=self.config.enable_rl,
+            prompt=prompt,
         )
 
         if kv_params is not None:

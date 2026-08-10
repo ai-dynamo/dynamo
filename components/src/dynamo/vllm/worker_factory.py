@@ -34,6 +34,7 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .decoder_runtime import VllmDecoderRuntime
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -543,8 +544,7 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 @dataclass
 class _DecodeWorkerLifecycle:
-    engine_client: Optional[AsyncLLM] = None
-    vllm_config: Optional[VllmConfig] = None
+    decoder_runtime: VllmDecoderRuntime | None = None
     handler: Optional[BaseWorkerHandler] = None
     shutdown_event: asyncio.Event | None = None
 
@@ -575,8 +575,8 @@ class _DecodeWorkerLifecycle:
             if self.handler is not None:
                 self.handler.cleanup()
         finally:
-            if self.engine_client is not None and self.vllm_config is not None:
-                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
+            if self.decoder_runtime is not None:
+                self.decoder_runtime.shutdown()
 
 
 class WorkerFactory:
@@ -1155,8 +1155,12 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
-        lifecycle.engine_client = engine_client
-        lifecycle.vllm_config = vllm_config
+        decoder_runtime = VllmDecoderRuntime(
+            engine=engine_client,
+            vllm_config=vllm_config,
+            default_sampling_params=default_sampling_params,
+        )
+        lifecycle.decoder_runtime = decoder_runtime
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -1178,10 +1182,7 @@ class WorkerFactory:
         handler = DecodeWorkerHandler(
             runtime,
             config,
-            engine_client,
-            default_sampling_params,
-            getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
-            model_config=getattr(vllm_config, "model_config", None),
+            decoder_runtime,
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
             use_vllm_tokenizer=config.use_vllm_tokenizer,

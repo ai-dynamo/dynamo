@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
+from dynamo.vllm.decoder_runtime import VllmDecoderRuntime
+from dynamo.vllm.handlers import DecodeWorkerHandler, build_sampling_params
 
 pytestmark = [
     pytest.mark.unit,
@@ -73,8 +74,16 @@ def _handler_with_responses(responses):
 
     handler = SimpleNamespace()
     handler.engine_client = _FakeEngineClient(responses)
+    handler.decoder_runtime = VllmDecoderRuntime(
+        engine=handler.engine_client,
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(max_model_len=128),
+            shutdown_timeout=1.0,
+        ),
+        default_sampling_params={},
+    )
     handler.runtime = SimpleNamespace(shutdown=lambda: None)
-    handler._extract_logprobs = BaseWorkerHandler._extract_logprobs
+    handler._extract_logprobs = DecodeWorkerHandler._extract_logprobs
     handler._log_with_lora_context = _ignore_log
     # These delta-streaming tests exercise base-model requests only. Model the
     # no-LoRA branch without constructing the full legacy worker handler.
@@ -87,7 +96,7 @@ def _handler_with_responses(responses):
 async def _collect_handler_chunks(responses):
     handler = _handler_with_responses(responses)
     chunks = []
-    async for chunk in BaseWorkerHandler.generate_tokens(
+    async for chunk in DecodeWorkerHandler.generate_tokens(
         handler,
         prompt=None,
         sampling_params=SamplingParams(),
