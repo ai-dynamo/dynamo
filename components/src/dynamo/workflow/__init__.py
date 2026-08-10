@@ -10,6 +10,14 @@ from dynamo.workflow.builder import (
     WorkflowBuilder,
 )
 from dynamo.workflow.ir import StageIR, WorkflowIR
+from dynamo.workflow.runtime import (
+    ExecutionPlan,
+    LocalBinding,
+    StageContext,
+    StageRunner,
+    WorkflowExecutionError,
+    compile_workflow,
+)
 from dynamo.workflow.types import (
     StageContract,
     ValueRef,
@@ -22,10 +30,16 @@ __all__ = [
     "StageDefinition",
     "StageHandle",
     "StageIR",
+    "StageContext",
+    "StageRunner",
     "ValueRef",
     "ValueSpec",
     "Workflow",
     "WorkflowBuilder",
     "WorkflowIR",
+    "WorkflowExecutionError",
     "WorkflowValidationError",
+    "ExecutionPlan",
+    "LocalBinding",
+    "compile_workflow",
 ]
