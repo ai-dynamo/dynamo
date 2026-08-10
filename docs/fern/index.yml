@@ -1118,10 +1118,17 @@ navigation:
 
   - tab: blog
     layout:
-      - page: Latest
+      - page: External publications
+        path: pages/blog/external-publications.mdx
+        slug: external-publications
+
+      # "Latest" is no longer its own sidebar entry. The page it pointed at is
+      # this section's overview instead, so the page is not orphaned and every
+      # URL is unchanged: the section keeps `slug: digest`, so the overview
+      # stays at /dynamo/dev/digest and each article at
+      # /dynamo/dev/digest/<slug>.
+      - section: Dynamo blogs
         path: pages/blog/latest.mdx
-        slug: digest
-      - section: "2026"
         slug: digest
         collapsed: open-by-default
         contents:
