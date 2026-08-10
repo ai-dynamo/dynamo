@@ -316,15 +316,26 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 		return ReconcileResult{}, err
 	}
 
-	selectedServiceNames, err := r.reconcileDisaggregatedSetSideResources(ctx, dgd, dcds, selection)
+	targetReady, dsReason, dsStatuses, err := r.checkDisaggregatedSetReadiness(ctx, syncedDS, selection)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
-	dsReady, dsReason, dsStatuses, err := r.checkDisaggregatedSetReadiness(ctx, syncedDS, selection)
+	dsReady := targetReady && !dsModified && !checkpointGated
+	targetRevision, err := disaggregatedSetTargetRevision(syncedDS)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
-	dsReady = dsReady && !dsModified && !checkpointGated
+	selectedServiceNames, err := r.reconcileDisaggregatedSetSideResources(
+		ctx,
+		dgd,
+		dcds,
+		selection,
+		targetRevision,
+		dsReady,
+	)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 
 	syncedDSResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedDS,
@@ -537,6 +548,31 @@ func (r *disaggregatedSetWorkloadsReconciler) generateDisaggregatedSet(
 	return ds, nil
 }
 
+func disaggregatedSetTargetRevision(ds *unstructured.Unstructured) (string, error) {
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(ds.Object, typedDS); err != nil {
+		return "", fmt.Errorf("failed to decode DisaggregatedSet for target revision: %w", err)
+	}
+	return disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles), nil
+}
+
+func setDisaggregatedSetServiceSelector(service *corev1.Service, setName, roleName, revision string) {
+	service.Spec.Selector = map[string]string{
+		disaggregatedsetv1.SetNameLabelKey:  setName,
+		disaggregatedsetv1.RoleLabelKey:     roleName,
+		disaggregatedsetv1.RevisionLabelKey: revision,
+	}
+}
+
+func isDisaggregatedSetServiceSelector(service *corev1.Service) bool {
+	if service == nil {
+		return false
+	}
+	return service.Spec.Selector[disaggregatedsetv1.SetNameLabelKey] != "" &&
+		service.Spec.Selector[disaggregatedsetv1.RoleLabelKey] != "" &&
+		service.Spec.Selector[disaggregatedsetv1.RevisionLabelKey] != ""
+}
+
 // buildDisaggregatedSetRole reuses the shared DCD workload renderer.
 func (r *disaggregatedSetWorkloadsReconciler) buildDisaggregatedSetRole(
 	ctx context.Context,
@@ -578,6 +614,8 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResou
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	selection disaggregatedSetSelection,
+	targetRevision string,
+	targetReady bool,
 ) (map[string]struct{}, error) {
 	desiredServiceNames := map[string]struct{}{}
 	if err := dynamo.ReconcileModelServicesForComponents(ctx, r, dgd, selectedComponentsByName(dgd, selection), dgd.Namespace); err != nil {
@@ -592,8 +630,25 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResou
 		if dcd == nil {
 			return nil, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
+		serviceKey := types.NamespacedName{Name: dynamo.NormalizeKubeResourceName(dcd.Name), Namespace: dcd.Namespace}
+		existingService := &corev1.Service{}
+		existingServiceErr := r.Get(ctx, serviceKey, existingService)
+		if existingServiceErr != nil && !apierrors.IsNotFound(existingServiceErr) {
+			return nil, fmt.Errorf("failed to get existing DisaggregatedSet component service for %q: %w", componentName, existingServiceErr)
+		}
 		_, syncedService, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.Service, bool, error) {
-			return r.renderer.generateService(ctx, dcd)
+			service, deleted, err := r.renderer.generateService(ctx, dcd)
+			if err != nil || deleted || targetRevision == "" {
+				return service, deleted, err
+			}
+			if targetReady {
+				setDisaggregatedSetServiceSelector(service, disaggregatedSetName(dgd), selection.componentToRole[componentName], targetRevision)
+			} else if existingServiceErr == nil && isDisaggregatedSetServiceSelector(existingService) {
+				service.Spec.Selector = maps.Clone(existingService.Spec.Selector)
+			} else {
+				setDisaggregatedSetServiceSelector(service, disaggregatedSetName(dgd), selection.componentToRole[componentName], targetRevision)
+			}
+			return service, false, nil
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to reconcile DisaggregatedSet component service for %q: %w", componentName, err)
@@ -1241,11 +1296,10 @@ func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	}); err != nil {
 		return false, "", nil, fmt.Errorf("failed to list DisaggregatedSet child LeaderWorkerSets: %w", err)
 	}
-	typedDS := &disaggregatedsetv1.DisaggregatedSet{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(ds.Object, typedDS); err != nil {
-		return false, "", nil, fmt.Errorf("failed to decode DisaggregatedSet for child readiness: %w", err)
+	targetRevision, err := disaggregatedSetTargetRevision(ds)
+	if err != nil {
+		return false, "", nil, err
 	}
-	targetRevision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
 	targetByRole := make(map[string]*leaderworkersetv1.LeaderWorkerSet)
 	childrenByRole := make(map[string][]*leaderworkersetv1.LeaderWorkerSet)
 	for i := range children.Items {

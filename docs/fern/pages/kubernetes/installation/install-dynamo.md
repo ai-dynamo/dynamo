@@ -222,10 +222,10 @@ helm repo update
 helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
 ```
 
-2. Install LWS (>= v0.7.0) with Volcano gang scheduling enabled:
+2. Install LWS with Volcano gang scheduling enabled. Use LWS `v0.9.0` or newer when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer:
 
 ```bash
-export LWS_VERSION=0.8.0
+export LWS_VERSION=0.9.0
 helm install lws oci://registry.k8s.io/lws/charts/lws \
   --version=$LWS_VERSION \
   --namespace lws-system \

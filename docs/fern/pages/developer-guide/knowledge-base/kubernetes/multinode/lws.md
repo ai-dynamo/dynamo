@@ -12,8 +12,8 @@ Use LWS when you want a simpler multinode orchestrator than Grove, or when your 
 ## Prerequisites
 
 - Kubernetes cluster with GPU nodes.
-- LWS version `0.7.0` or newer.
-- Volcano installed for gang scheduling.
+- LWS version `0.7.0` or newer for the standard DCD pathway.
+- Volcano installed for gang scheduling on the standard DCD pathway.
 - Dynamo Kubernetes Platform installed.
 
 The installation guide includes the exact Helm commands for [LWS and Volcano](../../../../kubernetes/installation/install-dynamo.md#lws--volcano).
@@ -50,9 +50,11 @@ spec:
 
 ## DisaggregatedSet Path
 
-Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1`, then add `nvidia.com/enable-disaggregatedset: "true"` to the DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
+Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.9.0`), then add `nvidia.com/enable-disaggregatedset: "true"` to the DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
 
-Dynamo falls back to the standard DCD pathway when the DS request cannot be honored. Multinode components on that fallback require LWS and Volcano.
+Dynamo falls back to the standard DCD pathway when the DS request cannot be honored, including when a selected worker uses `scalingAdapter`. The fallback requires LWS and Volcano, and Dynamo keeps the existing DS until the fallback workers are ready.
+
+DS supports two to ten eligible multinode worker roles. All selected roles must use either zero replicas or positive replicas. Dynamo's component discovery Services select one DS revision at a time; during a rollout they continue serving the active revision until the target revision is ready.
 
 ## Multinode Spec
 
