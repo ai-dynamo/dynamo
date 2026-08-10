@@ -11,8 +11,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::protocols::codec::create_message_stream;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_llm::protocols::{Annotated, codec::create_message_stream};
 use dynamo_runtime::CancellationToken;
 use futures::StreamExt;
 use serde::Serialize;
@@ -44,7 +44,7 @@ pub struct HarnessService {
 
 impl HarnessService {
     pub async fn start(scripts: impl IntoIterator<Item = Script>) -> Self {
-        let engine = Arc::new(ScriptedChatEngine::new(scripts));
+        let engine = Arc::new(ScriptedChatEngine::new(scripts.into_iter().map(Ok)));
         Self::start_with_engine(engine).await
     }
 
@@ -53,7 +53,7 @@ impl HarnessService {
         (Self::start_with_engine(Arc::new(engine)).await, gate)
     }
 
-    async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+    pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -144,7 +144,9 @@ pub async fn load_sse_fixture(path: impl AsRef<Path>) -> Result<Script> {
         })?;
         match message.data.as_deref() {
             Some("[DONE]") => break,
-            Some(_) => chunks.push(message.decode_data::<NvCreateChatCompletionStreamResponse>()?),
+            Some(_) => chunks.push(Annotated::from_data(
+                message.decode_data::<NvCreateChatCompletionStreamResponse>()?,
+            )),
             None => {
                 return Err(anyhow!(
                     "fixture {} contains an SSE event without data",

@@ -3,10 +3,19 @@
 
 //! HTTP regressions for validation performed by protocol adapters.
 
-use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
-use dynamo_runtime::config::environment_names::llm::{
-    DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-    DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+use std::sync::Arc;
+
+use dynamo_llm::{
+    discovery::UNKNOWN_METRIC_MODEL,
+    http::service::metrics::{Endpoint, ErrorType, RequestType, Status},
+    protocols::{Annotated, openai::chat_completions::NvCreateChatCompletionStreamResponse},
+};
+use dynamo_runtime::{
+    config::environment_names::llm::{
+        DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+    },
+    error::{DynamoError, ErrorType as DynamoErrorType},
 };
 use serde_json::{Value, json};
 use serial_test::serial;
@@ -21,6 +30,7 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{HarnessService, MODEL, load_agent_fixture};
+use scripted_chat_engine::{Script, ScriptedChatEngine};
 
 const BASE_ENV: [(&str, Option<&str>); 3] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
@@ -89,8 +99,36 @@ async fn assert_anthropic_error(
     );
 }
 
+async fn assert_anthropic_status(
+    response: reqwest::Response,
+    status: reqwest::StatusCode,
+    error_type: &str,
+    message: &str,
+) {
+    assert_eq!(response.status(), status);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], error_type);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|actual| actual.contains(message)),
+        "unexpected Anthropic error body: {body}"
+    );
+}
+
 fn assert_error_metrics(
     svc: &HarnessService,
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+    expected: &[(ErrorType, u64)],
+) {
+    assert_error_metrics_for_model(svc, MODEL, endpoint, request_type, expected);
+}
+
+fn assert_error_metrics_for_model(
+    svc: &HarnessService,
+    model: &str,
     endpoint: &Endpoint,
     request_type: &RequestType,
     expected: &[(ErrorType, u64)],
@@ -98,7 +136,7 @@ fn assert_error_metrics(
     for (error_type, expected) in expected {
         assert_eq!(
             svc.metrics.get_request_counter(
-                MODEL,
+                model,
                 endpoint,
                 request_type,
                 &Status::Error,
@@ -154,6 +192,31 @@ fn tool_name_requests(name: &str) -> [(&'static str, Value, bool); 3] {
             false,
         ),
     ]
+}
+
+fn dynamo_error(error_type: DynamoErrorType, message: &str) -> anyhow::Error {
+    anyhow::Error::new(
+        DynamoError::builder()
+            .error_type(error_type)
+            .message(message)
+            .build(),
+    )
+}
+
+fn backend_error_script(status: reqwest::StatusCode, message: &str) -> Script {
+    vec![Annotated::<NvCreateChatCompletionStreamResponse> {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: Some(vec![
+            json!({
+                "message": message,
+                "code": status.as_u16(),
+            })
+            .to_string(),
+        ]),
+        error: None,
+    }]
 }
 
 #[tokio::test]
@@ -292,6 +355,203 @@ async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
         }
 
         assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_backend_error_events_record_status_classification() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let overload_status = reqwest::StatusCode::from_u16(529).unwrap();
+        let cancelled_status = reqwest::StatusCode::from_u16(499).unwrap();
+        let engine = Arc::new(ScriptedChatEngine::new(
+            [
+                backend_error_script(cancelled_status, "backend cancellation context"),
+                backend_error_script(reqwest::StatusCode::SERVICE_UNAVAILABLE, "worker offline"),
+                backend_error_script(reqwest::StatusCode::TOO_MANY_REQUESTS, "rate limited"),
+                backend_error_script(overload_status, "pool overloaded"),
+                backend_error_script(reqwest::StatusCode::NOT_FOUND, "missing backend model"),
+                backend_error_script(reqwest::StatusCode::BAD_REQUEST, "bad backend request"),
+                backend_error_script(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "backend panic"),
+            ]
+            .into_iter()
+            .map(Ok),
+        ));
+        let svc = HarnessService::start_with_engine(engine).await;
+
+        for (status, error_type, message) in [
+            (cancelled_status, "request_cancelled", "Request cancelled"),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                "Internal server error",
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "Too Many Requests",
+            ),
+            (overload_status, "overloaded_error", "Internal server error"),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                "not_found_error",
+                "Not Found",
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "Bad Request",
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Internal server error",
+            ),
+        ] {
+            let response = post_json(
+                &svc,
+                "/v1/messages",
+                json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "stream": false,
+                    "messages": [{"role": "user", "content": "ping"}]
+                }),
+            )
+            .await;
+            assert_anthropic_status(response, status, error_type, message).await;
+        }
+
+        assert_error_metrics(
+            &svc,
+            &Endpoint::AnthropicMessages,
+            &RequestType::Unary,
+            &[
+                (ErrorType::Cancelled, 1),
+                (ErrorType::Unavailable, 1),
+                (ErrorType::Overload, 2),
+                (ErrorType::NotFound, 1),
+                (ErrorType::Validation, 1),
+                (ErrorType::Internal, 1),
+            ],
+        );
+
+        assert_eq!(svc.engine.take_requests().await.len(), 7);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_handler_errors_record_classification_with_response() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let mut failures = Vec::new();
+        for _ in 0..2 {
+            failures.extend([
+                dynamo_error(DynamoErrorType::ResourceExhausted, "too busy"),
+                dynamo_error(DynamoErrorType::Unavailable, "no worker"),
+                dynamo_error(DynamoErrorType::Cancelled, "client went away"),
+                dynamo_error(DynamoErrorType::InvalidArgument, "bad backend input"),
+                anyhow::anyhow!("generation failed"),
+            ]);
+        }
+        let engine = Arc::new(ScriptedChatEngine::new(
+            failures.into_iter().map(Err::<Script, _>),
+        ));
+        let svc = HarnessService::start_with_engine(engine).await;
+
+        for (stream, request_type) in [(false, RequestType::Unary), (true, RequestType::Stream)] {
+            for (status, error_type, message) in [
+                (
+                    reqwest::StatusCode::from_u16(529).unwrap(),
+                    "overloaded_error",
+                    "Service temporarily overloaded",
+                ),
+                (
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    "overloaded_error",
+                    "Service temporarily unavailable",
+                ),
+                (
+                    reqwest::StatusCode::from_u16(499).unwrap(),
+                    "request_cancelled",
+                    "Request cancelled",
+                ),
+                (
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "bad backend input",
+                ),
+                (
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    "api_error",
+                    "Internal server error",
+                ),
+            ] {
+                let response = post_json(
+                    &svc,
+                    "/v1/messages",
+                    json!({
+                        "model": MODEL,
+                        "max_tokens": 16,
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "ping"}]
+                    }),
+                )
+                .await;
+                assert_anthropic_status(response, status, error_type, message).await;
+            }
+
+            let response = post_json(
+                &svc,
+                "/v1/messages",
+                json!({
+                    "model": "missing-model",
+                    "max_tokens": 16,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "ping"}]
+                }),
+            )
+            .await;
+            assert_anthropic_status(
+                response,
+                reqwest::StatusCode::NOT_FOUND,
+                "not_found_error",
+                "Model 'missing-model' not found",
+            )
+            .await;
+
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[
+                    (ErrorType::Overload, 1),
+                    (ErrorType::Unavailable, 1),
+                    (ErrorType::Cancelled, 1),
+                    (ErrorType::Validation, 1),
+                    (ErrorType::Internal, 1),
+                ],
+            );
+            assert_error_metrics_for_model(
+                &svc,
+                UNKNOWN_METRIC_MODEL,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[(ErrorType::NotFound, 1)],
+            );
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[(ErrorType::NotFound, 0)],
+            );
+        }
+
+        assert_eq!(svc.engine.take_requests().await.len(), 10);
         svc.shutdown().await;
     })
     .await;
