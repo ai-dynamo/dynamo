@@ -211,13 +211,6 @@ where
     lifecycle: AtomicU8,
 }
 
-fn prepare_prefill_request(request: &PreprocessedRequest) -> PreprocessedRequest {
-    let mut prefill_request = request.clone();
-    prefill_request.sampling_options.n = Some(1);
-    prefill_request.stop_conditions.max_tokens = Some(1);
-    prefill_request
-}
-
 struct PrefillBinding<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -374,10 +367,9 @@ where
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
-        // Prepare a single-sequence, single-token prefill request after opaque
-        // engine-native sampling parameters have been projected into the
-        // canonical request.
-        let prefill_req = prepare_prefill_request(&req);
+        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
 
         // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
@@ -810,20 +802,6 @@ mod tests {
             }))
             .build()
             .unwrap()
-    }
-
-    #[test]
-    fn prefill_request_clamps_multi_output_after_projection() {
-        let mut request = request_with_constraints(None);
-        request.sampling_options.n = Some(4);
-        request.stop_conditions.max_tokens = Some(32);
-
-        let prefill_request = prepare_prefill_request(&request);
-
-        assert_eq!(prefill_request.sampling_options.n, Some(1));
-        assert_eq!(prefill_request.stop_conditions.max_tokens, Some(1));
-        assert_eq!(request.sampling_options.n, Some(4));
-        assert_eq!(request.stop_conditions.max_tokens, Some(32));
     }
 
     #[test]
