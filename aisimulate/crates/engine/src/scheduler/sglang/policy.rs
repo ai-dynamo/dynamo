@@ -22,6 +22,9 @@ pub(super) fn apply_schedule_policy(
     match config.schedule_policy {
         SchedulePolicy::Fifo => {}
         SchedulePolicy::Lpm => {
+            if !config.enable_prefix_caching {
+                return;
+            }
             if waiting.len() > LPM_FALLBACK_THRESHOLD {
                 return;
             }

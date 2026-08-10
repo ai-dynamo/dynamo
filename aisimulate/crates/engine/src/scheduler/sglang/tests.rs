@@ -1573,6 +1573,49 @@ mod forward_pass_metrics {
     }
 
     #[test]
+    fn disabled_prefix_caching_does_not_reuse_or_retain_completed_prefixes() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(16)
+            .block_size(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        let tokens = (0..8).collect::<Vec<_>>();
+        let mut collector = crate::trace::TraceCollector::default();
+
+        for request_id in [91_001_u128, 91_002_u128] {
+            core.receive(DirectRequest {
+                tokens: tokens.clone(),
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(request_id)),
+                ..Default::default()
+            });
+            let pass = core.execute_pass(&mut collector, 0.0);
+
+            assert_eq!(pass.completed_requests, 1);
+            assert_eq!(pass.mocker_metrics.sglang_cache_hit_tokens, 0);
+            assert_eq!(pass.mocker_metrics.sglang_cache_total_tokens, 8);
+            assert_eq!(pass.fpm.unwrap().num_prefill_requests, 1);
+            assert!(core.is_empty());
+            assert_eq!(
+                core.kv_manager.cache().available_tokens(),
+                core.kv_manager.cache().total_tokens(),
+                "a completed request must not leave reusable radix pages behind"
+            );
+        }
+    }
+
+    #[test]
     fn fully_cached_zero_output_request_is_not_forward_pass_work() {
         let mut core = SglangCore::new(fpm_args());
         let tokens = (0..8).collect::<Vec<_>>();

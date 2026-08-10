@@ -446,10 +446,6 @@ impl EngineConfig {
                 "emit_kv_token_ids=true is not supported for backend=sglang"
             );
             ensure!(
-                self.enable_prefix_caching,
-                "enable_prefix_caching=false is not supported for backend=sglang"
-            );
-            ensure!(
                 self.enable_chunked_prefill,
                 "enable_chunked_prefill=false is not supported for backend=sglang"
             );
@@ -628,10 +624,19 @@ mod tests {
     }
 
     #[test]
-    fn sglang_rejects_unsupported_generic_controls_at_validation_and_factory_boundaries() {
+    fn sglang_supports_disabled_prefix_caching() {
+        let config = EngineConfig {
+            enable_prefix_caching: false,
+            ..EngineConfig::for_backend(Backend::Sglang)
+        };
+        config.validate().unwrap();
+        crate::EngineFactory::new(config).unwrap();
+    }
+
+    #[test]
+    fn sglang_rejects_remaining_unsupported_controls_at_validation_and_factory_boundaries() {
         let cases = [
             ("emit_kv_token_ids", true, true, true),
-            ("enable_prefix_caching", false, false, true),
             ("enable_chunked_prefill", false, true, false),
         ];
 

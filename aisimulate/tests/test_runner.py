@@ -129,6 +129,32 @@ def test_runner_lowers_canonical_spec_and_returns_replay_report():
     assert report.metadata == {}
 
 
+def test_runner_lowers_sglang_with_prefix_caching_disabled():
+    runtime = RecordingRuntime()
+    engine_args = _engine_args()
+    engine_args.update(
+        {
+            "engine_type": "sglang",
+            "aic_backend": "sglang",
+            "block_size": 1,
+            "enable_prefix_caching": False,
+        }
+    )
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="sglang",
+        backend_version="test",
+        agg_engine_args=engine_args,
+        num_workers=1,
+    )
+
+    EngineReplayRunnerFactory(runtime=runtime).create(0).run(
+        _spec(deployment=deployment)
+    )
+
+    assert runtime.execution_spec["engine"]["rank"]["enable_prefix_caching"] is False
+
+
 def test_runner_captures_requested_raw_and_per_request_report():
     runtime = RecordingRuntime()
     runner = EngineReplayRunnerFactory(runtime=runtime).create(worker_id=7)
