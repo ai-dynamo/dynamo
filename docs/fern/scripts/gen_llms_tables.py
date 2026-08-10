@@ -1056,8 +1056,11 @@ def platform_payload(data: dict) -> dict:
     is right for the page, but releases.json is a published asset with a stable
     schema: dropping a key breaks anything already reading
     ``platform.os[].status``. So the JSON carries both — ``scope`` as the
-    precise field, ``status`` re-emitted with the value those rows always
-    carried. ``status`` is deprecated; read ``scope``.
+    precise field, ``status`` derived from it through SCOPE_STATUS. Deriving
+    rather than defaulting is deliberate: the rows have not all carried
+    "Supported" (the CentOS Stream row was "Experimental"), so an unmapped
+    scope fails closed instead of publishing a support claim. ``status`` is
+    deprecated; read ``scope``.
     """
     plat = {k: copy.deepcopy(v) for k, v in data["PLATFORM"].items()}
     for key in ("os", "csp"):

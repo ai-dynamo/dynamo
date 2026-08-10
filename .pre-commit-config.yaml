@@ -153,7 +153,7 @@ repos:
       # run. Without it, editing releases.data.ts and forgetting to
       # regenerate leaves releases.json and every generated span stale,
       # with nothing else in the repo checking.
-      files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx|assets/releases\.json)$
+      files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx|assets/releases(-atom\.xml|\.json))$
       pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)

@@ -50,6 +50,11 @@ def check(path: Path) -> list[str]:
     if not matches:
         return problems
 
+    # Guarded like check_agent_twins does: pre-commit passes repo-relative
+    # paths, so an unguarded relative_to raises ValueError before the message
+    # prints -- on the one run that matters, the author gets a pathlib
+    # traceback instead of the diagnostic this check exists to produce.
+    rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
     for match in matches:
         name, body = match.group(1), match.group(2)
         start_line = text[: match.start(2)].count("\n") + 1
@@ -60,7 +65,7 @@ def check(path: Path) -> list[str]:
             line = start_line + body[:index].count("\n")
             snippet = body.splitlines()[body[:index].count("\n")].strip()[:72]
             problems.append(
-                f"{path.relative_to(REPO)}:{line}: {label} inside {name}\n"
+                f"{rel}:{line}: {label} inside {name}\n"
                 f"      {snippet}\n"
                 f"      A {label} ends the template literal and breaks the build."
             )
