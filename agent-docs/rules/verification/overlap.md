@@ -5,7 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Overlap
 
-Classify an absolute performance change of `0.5%` or less as noise and report it without automatically repeating the
+Classify an absolute performance change at or below the measured noise floor of the active benchmark series (see
+`comparison-uncertainty.md`) as noise and report it without automatically repeating the
 benchmark. A clear, substantial gain or loss may support a conclusion from one valid, isolated, plausible run; identify
 it as single-run evidence.
 

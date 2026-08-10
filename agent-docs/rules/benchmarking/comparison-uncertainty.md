@@ -5,16 +5,32 @@ SPDX-License-Identifier: Apache-2.0
 
 # Comparison Uncertainty
 
-Default to one measured AIPerf run per candidate. Configure each measured run to finish in 30 minutes or less. GPU
-benchmarking is expensive, so do not collect repetitions only to produce confidence intervals.
+Default to one measured AIPerf run per candidate. Configure each measured run to finish in 30 minutes or less
+unless the operator authorizes longer windows; record any such authorization in the benchmark plan. GPU benchmarking
+is expensive, so do not collect repetitions only to produce confidence intervals.
 
 ## Default Decision Policy
 
 - **Current result**: the configuration being evaluated.
 - **Reference result**: the valid baseline or prior configuration used for comparison.
 - Compare the same metric, statistic, unit, workload phase, and benchmark-series identity.
-- Classify an absolute performance change of `0.5%` or less as noise. Report it without automatically repeating the
-  benchmark.
+- Establish the noise floor of each benchmark series empirically before adopting or retiring any candidate on a
+  small delta: run a pilot repetition (n=3) of one configuration at the decision point, compute the run-to-run
+  spread, and derive the minimum detectable effect. Treat any default percentage as a placeholder, never as a
+  measured floor; uncontrolled state such as prefix-cache carryover can put the real floor an order of magnitude
+  higher.
+- Screening and categorical outcomes (OOM, error storms, wide-margin SLO results) remain valid at n=1.
+- For adopt-or-retire decisions inside the noise band, use paired repetitions with controlled or deliberately
+  randomized warmup and cache state (for example concurrent arms on separate nodes, or AB/BA ordering), analyze the
+  paired differences rather than comparing two means, and add repetitions sequentially up to a declared maximum while
+  the interval overlaps the decision boundary.
+- Give the selected finalist a fresh confirmatory repetition after selection: adaptive search across many candidates
+  inflates the best observed result.
+- Keep practical significance separate from detectability: state the smallest delta that matters for the engagement
+  and do not claim gains below it regardless of statistical separation.
+- Record neighbour occupancy (what else runs on the node) with every measurement and compare only like with like. A
+  fleet or full-node projection from idle-neighbour measurements is invalid until confirmed by one co-located
+  measurement with load generation verified unsaturated.
 - A clear, substantial improvement or regression may support a conclusion from one valid, isolated, plausible run.
   State that the comparison is single-run evidence.
 - Repeat a valid benchmark only when the existing evidence cannot support a consequential decision, another run is

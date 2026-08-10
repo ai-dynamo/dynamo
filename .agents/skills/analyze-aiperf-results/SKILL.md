@@ -105,7 +105,8 @@ Cross-series results may provide context but never a gain, loss, or Pareto calcu
    history table.
 6. Calculate signed percent change as `(current - prior) / prior * 100`. Also state whether the value is higher or
    lower and whether that direction is an improvement or regression.
-7. Classify an absolute performance change of `0.5%` or less as noise and report it without recommending a repeat
+7. Classify an absolute performance change at or below the measured noise floor of the active benchmark series (see
+   `comparison-uncertainty.md`) as noise and report it without recommending a repeat
    solely because the delta is small.
 8. Analyze one valid run by default. A clear, substantial, plausible gain or loss may support a conclusion without a
    repeat; state that it is single-run evidence.
