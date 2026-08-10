@@ -96,6 +96,10 @@ python -m dynamo.frontend \
     --router-policy-config examples/router/policy-class-queues.yaml
 ```
 
+For a minimal two-class walkthrough showing how one request class can receive
+a larger service share without starving another, see
+[Prioritize Premium Requests with Policy Classes](deficit-round-robin.md#prioritize-premium-requests-with-policy-classes).
+
 The previous missing-ISL global admission cap is removed. Cache-derived bucket
 selection now resolves directly to an ordinary policy class, and that class
 owns the queue threshold, ordering, DRR weight, counters, and limits. There is

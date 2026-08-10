@@ -148,7 +148,7 @@ impl LiveBoundaryCore for SglangCore {
         &mut self,
         _scheduler_start: &Instant,
     ) -> anyhow::Result<LivePassExecution> {
-        let pass = self.try_execute_pass_internal(None, 0.0)?;
+        let pass = self.try_execute_pass_internal(0.0)?;
         let duration = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
         Ok(LivePassExecution { pass, duration })
     }

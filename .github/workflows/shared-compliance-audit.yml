@@ -58,7 +58,7 @@ jobs:
     # registry re-pull and no ECR / aws CLI / IRSA needed. The plain shipped tag
     # (no -test) so the fs we scan is exactly what ships.
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}
       env:
         # The image's 'dynamo' user is uid 1000 but the ARC runner executes the
         # pod as uid 1001; override HOME/USER so actions/checkout and
