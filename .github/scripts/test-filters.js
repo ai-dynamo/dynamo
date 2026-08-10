@@ -94,16 +94,16 @@ const testCases = [
     desc: 'vllm component triggers only vllm'
   },
 
-  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
+  // Sidecar Rust files should trigger Rust checks without unrelated E2E
   {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    file: 'lib/sidecar/vllm/build.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+    desc: 'vllm sidecar build script triggers Rust checks without backend E2E'
   },
   {
     file: 'lib/sidecar/sglang/src/lib.rs',

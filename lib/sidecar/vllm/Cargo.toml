@@ -39,7 +39,9 @@ tonic = { workspace = true }
 tonic-health = { workspace = true }
 
 [build-dependencies]
+sha2 = "0.10"
 tonic-build = { workspace = true }
+ureq = "2.12"
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }

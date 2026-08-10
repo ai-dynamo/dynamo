@@ -42,6 +42,8 @@ Start a vLLM build with the split Inference and Control services. Data-parallel 
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
 ```
 
+The sidecar build downloads `inference.proto` and `control.proto` from the pinned [`vllm-project/vllm`](https://buf.build/vllm-project/vllm/docs/nightly) BSR commit `7726adbdafb34bda85e25c8fc5e192f4` and verifies their SHA-256 checksums before generating Rust bindings. For offline builds, set `DYNAMO_VLLM_PROTO_DIR` to a directory containing those exact files.
+
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a
 secure proxy.
@@ -101,7 +103,7 @@ disaggregated prefill/decode with NIXL KV transfer.
 There is no published vLLM sidecar image yet, so you build and push your own from
 `Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
+The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the pinned BSR protocol.
 
 ### Prerequisites
 
