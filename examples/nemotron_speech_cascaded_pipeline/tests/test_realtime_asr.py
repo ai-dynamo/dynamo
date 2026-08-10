@@ -19,12 +19,17 @@ import base64
 from types import SimpleNamespace
 
 import pytest
-from nemotron_speech.realtime_asr import (
+
+pytest.importorskip(
+    "riva.client", reason="NVIDIA Riva client is an example-only dependency"
+)
+
+from nemotron_speech.realtime_asr import (  # noqa: E402
     OPENAI_PCM_SAMPLE_RATE,
     PCM16_BYTES_PER_SAMPLE,
     SpeechNimRealtimeTranscriptionHandler,
 )
-from riva.client import AudioEncoding
+from riva.client import AudioEncoding  # noqa: E402
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 

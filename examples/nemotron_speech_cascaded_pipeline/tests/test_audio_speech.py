@@ -20,11 +20,18 @@ from types import SimpleNamespace
 
 import grpc
 import pytest
-from nemotron_speech.audio_speech import SpeechNimAudioSpeechBackend
-from nemotron_speech.riva_client import wait_for_service_ready
-from riva.client import AudioEncoding
 
-from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+pytest.importorskip(
+    "riva.client", reason="NVIDIA Riva client is an example-only dependency"
+)
+
+from nemotron_speech.audio_speech import SpeechNimAudioSpeechBackend  # noqa: E402
+from nemotron_speech.riva_client import wait_for_service_ready  # noqa: E402
+from riva.client import AudioEncoding  # noqa: E402
+
+from dynamo.common.protocols.audio_protocol import (  # noqa: E402
+    NvCreateAudioSpeechRequest,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
