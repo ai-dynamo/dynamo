@@ -406,8 +406,9 @@ where
                     migration_event = Some(MigrationEvent::new(
                         frontend_service::migration_type::NEW_REQUEST,
                     ));
-                    self.metrics.inc_migration_new_request(&self.model_name);
                 }
+                // Preserve the existing per-attempt metric contract.
+                self.metrics.inc_migration_new_request(&self.model_name);
                 continue;
             }
             break;
@@ -1360,7 +1361,7 @@ mod tests {
             assert!(error.to_string().contains("no responders"));
         }
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 4);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
         assert_eq!(
             metrics.get_migration_success_count(
@@ -1443,7 +1444,7 @@ mod tests {
         let err = error_response.err().expect("expected error response");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
         assert_eq!(
             metrics.get_migration_success_count(
