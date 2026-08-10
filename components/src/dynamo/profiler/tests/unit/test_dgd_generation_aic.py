@@ -310,7 +310,7 @@ class TestInjectMockerAicArgs:
         assert out[out.index("--aic-attention-dp-size") + 1] == "8"
         # trtllm is not a mocker engine_type; leave --engine-type alone.
         assert "--engine-type" not in out
-        assert "--aic-backend-version" not in out
+        assert out[out.index("--aic-backend-version") + 1] == "1.3.0rc10"
 
     def test_matches_engine_type_for_vllm(self):
         spec = self._spec("vllm")
