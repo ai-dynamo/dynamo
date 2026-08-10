@@ -41,6 +41,7 @@ import (
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -88,6 +89,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 			Generation: 7,
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "prefill",
@@ -99,9 +101,24 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 				},
 				{
 					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm"},
+							Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+								corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							}},
+						}},
+					}},
 					Experimental: &v1beta1.ExperimentalSpec{
-						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
-						Failover:   &v1beta1.FailoverSpec{},
+						Checkpoint: &v1beta1.ComponentCheckpointConfig{
+							Enabled:       true,
+							CheckpointRef: ptr.To("foreign-checkpoint"),
+						},
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+						Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod, NumShadows: 1},
 					},
 				},
 			},
@@ -138,8 +155,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	require.Equal(t,
 		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+			"component \"decode\": Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint: checkpointRef must be omitted so the DGD owns the automatic checkpoint",
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)

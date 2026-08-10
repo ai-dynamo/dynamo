@@ -1709,11 +1709,15 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	// Clone main container into two engine containers (active + standby) for failover.
+	// Clone the main container into active and standby engine containers for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
 	if IsIntraPodFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+		engineCount := len(IntraPodFailoverEngineContainerNames(component))
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework, engineCount); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+		if GetCheckpoint(component) != nil {
+			configureCheckpointFailoverEngines(&podSpec, component)
 		}
 	}
 

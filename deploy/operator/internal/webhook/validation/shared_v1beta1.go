@@ -37,10 +37,12 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx                                context.Context
-	mgr                                ctrl.Manager
-	warnings                           admission.Warnings
-	runtimeVersionSource               runtimeVersionValidationSource
+	ctx                  context.Context
+	mgr                  ctrl.Manager
+	warnings             admission.Warnings
+	runtimeVersionSource runtimeVersionValidationSource
+	// requestSource selects source-version semantics after admission conversion.
+	requestSource                      runtimeVersionValidationSource
 	allowMissingRuntimeVersionOverride bool
 }
 
@@ -319,6 +321,16 @@ func (v *sharedValidation) validateFailoverSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	failoverMode := effectiveGMSMode(failover.Mode)
+	if v.validatesRequestSourceFor(runtimeVersionSourceV1Beta1) &&
+		failoverMode == nvidiacomv1beta1.GMSModeIntraPod &&
+		failover.NumShadows != 0 &&
+		(failover.NumShadows < 1 || failover.NumShadows > 2) {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("numShadows"),
+			failover.NumShadows,
+			fmt.Sprintf("is invalid for mode=%q: supported values are 1 and 2", nvidiacomv1beta1.GMSModeIntraPod),
+		))
+	}
 	if gms == nil {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
