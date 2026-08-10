@@ -2959,6 +2959,85 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             }
         ]
 
+    def _run_logprob_stream(self, items):
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=FakeRoutedEngine(items=items),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-logprobs", {"model": "test-model"}, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        return asyncio.run(collect())
+
+    def test_missing_chunk_logprobs_do_not_drop_adjacent_logprobs(self):
+        """A missing-logprob chunk is isolated from adjacent valid chunks."""
+        chunks = self._run_logprob_stream(
+            [
+                {"token_ids": [ord("A")], "log_probs": [-0.1]},
+                {"token_ids": [ord("B")], "log_probs": [-0.2]},
+                {"token_ids": [ord("C")]},
+                {
+                    "token_ids": [ord("D")],
+                    "log_probs": [-0.4],
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+
+        choices = [chunk["choices"][0] for chunk in chunks]
+        assert [choice["delta"]["content"] for choice in choices] == [
+            "A",
+            "B",
+            "C",
+            "D",
+        ]
+        assert [
+            choice["logprobs"]["content"][0]["logprob"]
+            if choice["logprobs"] is not None
+            else None
+            for choice in choices
+        ] == [-0.1, -0.2, None, -0.4]
+        assert choices[-1]["finish_reason"] == "stop"
+
+    def test_consistent_chunk_logprobs_keep_normal_batching(self):
+        """Consistent logprob chunks retain the configured stream interval."""
+        chunks = self._run_logprob_stream(
+            [
+                {"token_ids": [ord("A")], "log_probs": [-0.1]},
+                {"token_ids": [ord("B")], "log_probs": [-0.2]},
+                {"token_ids": [ord("C")], "log_probs": [-0.3]},
+                {
+                    "token_ids": [ord("D")],
+                    "log_probs": [-0.4],
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+
+        choices = [chunk["choices"][0] for chunk in chunks]
+        assert [choice["delta"]["content"] for choice in choices] == ["A", "BCD"]
+        assert [entry["logprob"] for entry in choices[1]["logprobs"]["content"]] == [
+            -0.2,
+            -0.3,
+            -0.4,
+        ]
+
     def test_byte_fallback_sequence_longer_than_six_tokens(
         self, byte_fallback_tokenizer
     ):
