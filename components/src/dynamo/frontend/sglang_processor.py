@@ -655,7 +655,7 @@ class SglangProcessor:
 
                 chunk_token_count = len(pending_token_ids)
                 usage_for_metrics = pending_usage
-                mapped_response = {
+                mapped_response: dict[str, Any] = {
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
                 }
