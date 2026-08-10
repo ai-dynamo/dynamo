@@ -592,6 +592,7 @@ mod tests {
                 content: Some(vec![dynamo_protocols::types::ChatCompletionTokenLogprob {
                     token: token.clone(),
                     logprob: lp,
+                    token_id: None,
                     bytes: token_to_utf8_bytes(&token),
                     top_logprobs: vec![],
                 }]),

@@ -310,18 +310,21 @@ class TestInjectMockerAicArgs:
         assert out[out.index("--aic-attention-dp-size") + 1] == "8"
         # trtllm is not a mocker engine_type; leave --engine-type alone.
         assert "--engine-type" not in out
+        assert out[out.index("--aic-backend-version") + 1] == "1.3.0rc10"
 
     def test_matches_engine_type_for_vllm(self):
         spec = self._spec("vllm")
         out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
         assert out[out.index("--engine-type") + 1] == "vllm"
         assert out[out.index("--aic-backend") + 1] == "vllm"
+        assert out[out.index("--aic-backend-version") + 1] == "0.14.0"
 
     def test_matches_engine_type_for_sglang(self):
         spec = self._spec("sglang")
         out = _inject_mocker_aic_args([], spec, spec.decode_pick)
         assert out[out.index("--engine-type") + 1] == "sglang"
         assert out[out.index("--aic-backend") + 1] == "sglang"
+        assert out[out.index("--aic-backend-version") + 1] == "0.5.6.post2"
 
 
 class TestBuildPlannerConfigEmbedsAicSpec:

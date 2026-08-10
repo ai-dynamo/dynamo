@@ -7,6 +7,7 @@
 #   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's DynamoCheckpoint suite
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
+#   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
@@ -196,13 +197,22 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
-  - 'tests/utils/managed_deployment.py'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
   - '!deploy/utils/convert_api_version.py'
   - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+dgdr:
+  - '.github/workflows/shared-dgdr-deploy-test.yml'
+  - 'tests/conftest.py'
+  - 'tests/deploy/conftest.py'
+  - 'tests/deploy/dgdr_utils.py'
+  - 'tests/deploy/test_dgdr.py'
+  - 'tests/deploy/test_dgdr_h100.py'
+  - 'tests/deploy/test_dgdr_utils.py'
+  - 'tests/deploy/dgd_utils.py'
 
 planner:
   - 'container/templates/planner.Dockerfile'
