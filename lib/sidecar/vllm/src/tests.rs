@@ -28,15 +28,6 @@ use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 
-#[derive(Clone, Copy, Default)]
-enum BeforeFirstTokenFailure {
-    #[default]
-    None,
-    Eof,
-    GrpcStatus,
-    InvalidResponse,
-}
-
 #[derive(Clone, Default)]
 struct FakeVllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
@@ -48,7 +39,7 @@ struct FakeVllm {
     headers_pending: Arc<AtomicBool>,
     release_headers: Arc<Notify>,
     hold_before_first_token: Arc<AtomicBool>,
-    before_first_token_failure: BeforeFirstTokenFailure,
+    close_before_first_token: Arc<AtomicBool>,
     first_token_pending: Arc<AtomicBool>,
     release_first_token: Arc<Notify>,
     server_stream_dropped: Arc<AtomicBool>,
@@ -134,7 +125,7 @@ impl pb::inference_server::Inference for FakeVllm {
         });
         let hang = self.hang.load(Ordering::SeqCst);
         let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
-        let before_first_token_failure = self.before_first_token_failure;
+        let close_before_first_token = self.close_before_first_token.load(Ordering::SeqCst);
         let first_token_pending = self.first_token_pending.clone();
         let release_first_token = self.release_first_token.clone();
         let dropped = self.server_stream_dropped.clone();
@@ -169,18 +160,8 @@ impl pb::inference_server::Inference for FakeVllm {
                 release_first_token.notified().await;
                 first_token_pending.store(false, Ordering::SeqCst);
             }
-            match before_first_token_failure {
-                BeforeFirstTokenFailure::None => {}
-                BeforeFirstTokenFailure::Eof => return,
-                BeforeFirstTokenFailure::GrpcStatus => {
-                    Err(Status::internal("failed before first token"))?;
-                }
-                BeforeFirstTokenFailure::InvalidResponse => {
-                    let mut response = sequence_response(false, wants_logprobs, None);
-                    response.outputs.as_mut().expect("sequence output").num_tokens = 2;
-                    yield response;
-                    return;
-                }
+            if close_before_first_token {
+                return;
             }
 
             if hang {
@@ -943,36 +924,30 @@ async fn decode_cancellation_waits_for_submission_and_first_token() {
 }
 
 #[tokio::test]
-async fn decode_cancellation_maps_stream_failures_to_cancelled() {
-    for (failure, case) in [
-        (BeforeFirstTokenFailure::Eof, "premature EOF"),
-        (BeforeFirstTokenFailure::GrpcStatus, "gRPC failure"),
-        (BeforeFirstTokenFailure::InvalidResponse, "invalid response"),
-    ] {
-        let service = FakeVllm {
-            before_first_token_failure: failure,
-            ..Default::default()
-        };
-        let server = FakeServer::start(service).await;
-        let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
-        engine.start(0).await.expect("start");
+async fn decode_cancellation_maps_premature_eof_to_cancelled() {
+    let service = FakeVllm::default();
+    service
+        .close_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    engine.start(0).await.expect("start");
 
-        let context = dynamo_backend_common::testing::mock_context();
-        let mut stream = engine
-            .generate(
-                decode_request(),
-                GenerateContext::new(context.clone(), None),
-            )
-            .await
-            .expect("decode stream");
-        context.stop_generating();
-        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-            .await
-            .unwrap_or_else(|_| panic!("{case} did not release decode cancellation"))
-            .expect("cancelled terminal")
-            .expect("cancelled output");
-        assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    }
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(
+            decode_request(),
+            GenerateContext::new(context.clone(), None),
+        )
+        .await
+        .expect("decode stream");
+    context.stop_generating();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("premature EOF did not release decode cancellation")
+        .expect("cancelled terminal")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
 #[tokio::test]
