@@ -59,14 +59,11 @@ tabs:
 navigation:
   - tab: home
     layout:
+      # Sole entry: the landing page sets `layout: page`, which drops the
+      # sidebar. The Slack and Community Calendar links that used to sit here
+      # are the two community cards in the hero, so they were duplicated.
       - page: Welcome
         path: pages/home/index.mdx
-      - link: Join Slack
-        href: http://ai-dynamo.org/slack
-        target: _blank
-      - link: Community Calendar
-        href: https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20
-        target: _blank
 
   # ==================== Kubernetes Guide ====================
   - tab: kubernetes-guide

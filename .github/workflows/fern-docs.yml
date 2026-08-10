@@ -50,9 +50,9 @@ on:
     tags:
       # Match only clean semver tags: vX.Y.Z
       - 'v[0-9]+.[0-9]+.[0-9]+'
-  schedule:
-    # Refresh the Home page from the public Google Calendar.
-    - cron: '0 */6 * * *'
+  # The Home page calendar refresh used to run here on a six-hour `schedule:`.
+  # It now lives in community-events-refresh.yml, which commits the regenerated
+  # events to main — and that push comes back through the `push:` trigger above.
   workflow_dispatch:
     inputs:
       tag:
@@ -74,7 +74,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     # Skip for tag pushes - version release doesn't need changed-files check
-    if: github.ref_type != 'tag' && github.event_name != 'schedule'
+    if: github.ref_type != 'tag'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
     steps:
@@ -99,7 +99,7 @@ jobs:
     if: |
       always() &&
       github.ref_type != 'tag' &&
-      (github.event_name == 'schedule' || needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -131,15 +131,9 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Fetch community events from Google Calendar
-        run: |
-          # Install the pinned generator deps from the committed lockfile rather than
-          # a floating `npm install` — reproducible and offline-cache-friendly.
-          npm ci --prefix source-checkout/.github/scripts/events
-          # generate-events.js lives at .github/scripts/ and `require('node-ical')`s,
-          # so point Node at the events node_modules (npm --prefix installs there).
-          NODE_PATH=source-checkout/.github/scripts/events/node_modules \
-            node source-checkout/.github/scripts/generate-events.js
+      # Community events are no longer fetched here. events.generated.ts is
+      # committed to main by community-events-refresh.yml and syncs below with
+      # the rest of components/, so this job publishes exactly what main holds.
 
       - name: Sync dev content from main
         run: |
