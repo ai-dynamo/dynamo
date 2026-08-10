@@ -92,6 +92,10 @@ runs/<EXP_ID>/
 - `knowledge-consult.md`: required consultation result for `proposed`, `no-proposal`, and `blocked` outcomes.
 - `deploy-draft.yaml`: candidate DGD created only for a materialized proposal; it remains here until challenger
   approval assigns it to the next deployment iteration.
+- `asks.jsonl` (under `EXP_ROOT/analysis/`): append-only operator-ask record with the question, blocked lever
+  family, expected upside, status (`pending` or `answered`), and the answer once received. Deduplicate before
+  appending. A stop-request is not a separate file: it is the terminal search-calibration record in
+  `knowledge-consult.md` plus its challenger validation.
 
 ## Deployment Directories
 

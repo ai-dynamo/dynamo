@@ -136,8 +136,24 @@ Keep every previous manifest, consultation, review, and benchmark artifact uncha
 After deployment, choose the benchmark based on the approved performance question. It may reuse an applicable series
 or create a new one. Never claim a direct gain across series.
 
-Stop when the user constraints are met, no useful optimization ideas remain, the user-specified budget is exhausted,
-or the generator returns `no-proposal`.
+The loop is always in exactly one state: `ACTIVE`, `PARKED_ON_ASKS`, `STOP_REQUESTED`, `STOP_GRANTED`, or
+`BUDGET_STOP`. A `no-proposal` consultation never ends the engagement; it obligates the generator to produce exactly
+one of:
+
+- the next candidate;
+- an **ask**: a recorded question whose answer would unblock the highest-value deferred lever family. Asks are
+  non-blocking: record the ask, surface it in one line of passing output, and keep working any still-testable
+  family. Deduplicate pending asks, surface only the highest-value few, and lead the next operator-facing response
+  with them. Enter `PARKED_ON_ASKS` (a pause, not a stop) only when pending asks are the only remaining work, and
+  record how deployed resources are held and when they scale down;
+- a **stop-request**: the search-calibration record in a terminal state, meaning every lever family is `tested`,
+  `asked` and answered, `ruled-out`, or `deferred`. A `ruled-out` row must cite a measurement, a sourced hard
+  constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
+  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. Hand the
+  stop-request to `hypothesis-challenger` for evidence-class validation.
+
+Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), the authorized budget is exhausted
+(`BUDGET_STOP`), or access is lost and cannot be restored. Never stop because a report exists.
 
 ## 7. Finalize
 

@@ -64,8 +64,12 @@ Do not:
 - exact `<DEPLOY_ROOT>/next-candidate/deploy-draft.yaml` path
 - prior deployment, benchmark, hypothesis, and challenger-review history
 
-Review only a materialized proposal. For a `no-proposal` or `blocked` consultation, return without creating a candidate
-review.
+Review a materialized proposal or a stop-request. For a `no-proposal` or `blocked` consultation that carries no
+stop-request, return without creating a candidate review. For a stop-request, validate completeness and evidence
+class: every lever family carries a terminal disposition, and every `ruled-out` row cites a measurement, a sourced
+hard constraint, a confirmed incompatibility, or an explicit operator decision. Append the verdict to
+`challenger-reviews.jsonl` as for any review, and state in it that this is procedural validation, not independent
+adversarial assurance.
 
 Before reviewing, require every input path to exist under the assigned `EXP_ROOT`, recompute the user-workload,
 source, consultation, and draft hashes, and verify that the source benchmark artifacts identify the same active
