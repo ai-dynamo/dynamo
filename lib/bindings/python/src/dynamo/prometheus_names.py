@@ -147,6 +147,8 @@ class frontend_service:
     MODEL_MIGRATION_SUCCESS_TOTAL = "model_migration_success_total"
     # Total number of request migrations that did not recover
     MODEL_MIGRATION_FAILURE_TOTAL = "model_migration_failure_total"
+
+    MODEL_MIGRATION_DURATION_SECONDS = "model_migration_duration_seconds"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
     MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
@@ -192,6 +194,8 @@ class frontend_service:
     LORA_OVERFLOW_COUNT = "lora_overflow_count"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
+
+    MIGRATION_OUTCOME_LABEL = "outcome"
     # Label name for tokenizer operation
     OPERATION_LABEL = "operation"
 

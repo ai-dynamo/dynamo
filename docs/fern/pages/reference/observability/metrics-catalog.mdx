@@ -135,6 +135,10 @@ Counters for [request migration](../../kubernetes/fault-tolerance/request-migrat
   Total migration events that ended without recovery. Labeled by `model` and [`migration_type`](metric-labels.mdx#metric-specific-labels).
 </ParamField>
 
+<ParamField path="dynamo_frontend_model_migration_duration_seconds" type="histogram">
+  Time from detecting a migratable worker failure until the replacement response stream is established or migration ends without recovery. Labeled by `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels), and [`outcome`](metric-labels.mdx#metric-specific-labels). It excludes work completed before the failure and generation after the replacement stream is established.
+</ParamField>
+
 <ParamField path="dynamo_frontend_model_migration_max_seq_len_exceeded_total" type="counter">
   Total times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. Labeled by `model`.
 </ParamField>

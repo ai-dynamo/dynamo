@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
@@ -235,6 +236,20 @@ where
     }
 }
 
+struct MigrationEvent {
+    migration_type: &'static str,
+    started_at: Instant,
+}
+
+impl MigrationEvent {
+    fn new(migration_type: &'static str) -> Self {
+        Self {
+            migration_type,
+            started_at: Instant::now(),
+        }
+    }
+}
+
 struct RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
@@ -335,10 +350,9 @@ where
                 {
                     tracing::warn!(error = %err, "Stream disconnected, recreating stream");
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
-                    if let Err(err) = self
-                        .new_stream(Some(frontend_service::migration_type::ONGOING_REQUEST))
-                        .await
-                    {
+                    let migration_event =
+                        MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+                    if let Err(err) = self.new_stream(Some(migration_event)).await {
                         tracing::warn!(error = ?err, "Cannot recreate stream");
                     } else {
                         continue;
@@ -351,7 +365,7 @@ where
         }
     }
 
-    async fn new_stream(&mut self, mut migration_type: Option<&'static str>) -> Result<()> {
+    async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
         let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
         while self.retries_left > 0 {
             self.retries_left -= 1;
@@ -373,10 +387,7 @@ where
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
-                if let Some(migration_type) = migration_type {
-                    self.metrics
-                        .inc_migration_failure(&self.model_name, migration_type);
-                }
+                self.record_migration_failure(migration_event.as_ref());
                 return Err(DynamoError::builder()
                     .error_type(ErrorType::Cancelled)
                     .message(format!(
@@ -391,8 +402,10 @@ where
                 && is_migratable_for_request(&self.request, err.as_ref())
             {
                 tracing::warn!(error = %err, "Creating new stream, retrying");
-                if migration_type.is_none() {
-                    migration_type = Some(frontend_service::migration_type::NEW_REQUEST);
+                if migration_event.is_none() {
+                    migration_event = Some(MigrationEvent::new(
+                        frontend_service::migration_type::NEW_REQUEST,
+                    ));
                     self.metrics.inc_migration_new_request(&self.model_name);
                 }
                 continue;
@@ -401,27 +414,44 @@ where
         }
         match response_stream {
             Some(Ok(next_stream)) => {
-                if let Some(migration_type) = migration_type {
-                    self.metrics
-                        .inc_migration_success(&self.model_name, migration_type);
-                }
+                self.record_migration_success(migration_event.as_ref());
                 self.next_stream = Some(next_stream);
                 Ok(())
             }
             Some(Err(err)) => {
-                if let Some(migration_type) = migration_type {
-                    self.metrics
-                        .inc_migration_failure(&self.model_name, migration_type);
-                }
+                self.record_migration_failure(migration_event.as_ref());
                 Err(err) // should propagate original error if any
             }
             None => {
-                if let Some(migration_type) = migration_type {
-                    self.metrics
-                        .inc_migration_failure(&self.model_name, migration_type);
-                }
+                self.record_migration_failure(migration_event.as_ref());
                 Err(Error::msg("Migration limit exhausted"))
             }
+        }
+    }
+
+    fn record_migration_success(&self, migration_event: Option<&MigrationEvent>) {
+        if let Some(event) = migration_event {
+            self.metrics
+                .inc_migration_success(&self.model_name, event.migration_type);
+            self.metrics.observe_migration_duration(
+                &self.model_name,
+                event.migration_type,
+                frontend_service::migration_outcome::SUCCESS,
+                event.started_at.elapsed(),
+            );
+        }
+    }
+
+    fn record_migration_failure(&self, migration_event: Option<&MigrationEvent>) {
+        if let Some(event) = migration_event {
+            self.metrics
+                .inc_migration_failure(&self.model_name, event.migration_type);
+            self.metrics.observe_migration_duration(
+                &self.model_name,
+                event.migration_type,
+                frontend_service::migration_outcome::FAILURE,
+                event.started_at.elapsed(),
+            );
         }
     }
 
@@ -491,6 +521,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     const TEST_MODEL: &str = "test-model";
+
+    fn migration_duration_count(metrics: &Metrics, migration_type: &str, outcome: &str) -> u64 {
+        metrics.get_migration_duration_sample_count(TEST_MODEL, migration_type, outcome)
+    }
 
     // a stalled/frozen worker's stream-inactivity timeout surfaces as
     // ErrorType::ResponseTimeout (push_router fault detection). It must be
@@ -1198,6 +1232,14 @@ mod tests {
             ),
             0
         );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            1
+        );
     }
 
     /// Test case 3: Ongoing request migration
@@ -1269,6 +1311,14 @@ mod tests {
             ),
             0
         );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            1
+        );
     }
 
     /// Test case 4: New request migration - indefinite failure
@@ -1323,6 +1373,14 @@ mod tests {
             metrics.get_migration_failure_count(
                 TEST_MODEL,
                 frontend_service::migration_type::NEW_REQUEST,
+            ),
+            1
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
             ),
             1
         );
@@ -1401,6 +1459,14 @@ mod tests {
             ),
             1
         );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            1
+        );
     }
 
     /// Test case 6: Ongoing request migration - indefinite failure with stream errors
@@ -1473,6 +1539,22 @@ mod tests {
             metrics.get_migration_failure_count(
                 TEST_MODEL,
                 frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            1
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            3
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
             ),
             1
         );

@@ -136,6 +136,11 @@ title: 请求迁移
   - 标签：
     - `model`：正在服务的模型名称
     - `migration_type`：迁移事件类型
+- `dynamo_frontend_model_migration_duration_seconds`：从识别可迁移故障到替代响应流建立或迁移终止的耗时直方图
+  - 标签：
+    - `model`：正在服务的模型名称
+    - `migration_type`：迁移事件类型
+    - `outcome`：可以是 `success`（已恢复）或 `failure`（未恢复）
 - `dynamo_frontend_model_migration_max_seq_len_exceeded_total`：跟踪因为序列长度超过已配置的 `--migration-max-seq-len` 而禁用迁移的次数的计数器
   - 标签：
     - `model`：正在服务的模型名称
@@ -146,6 +151,7 @@ dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qw
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
 dynamo_frontend_model_migration_success_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 2
 dynamo_frontend_model_migration_failure_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
+dynamo_frontend_model_migration_duration_seconds_count{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B",outcome="success"} 2
 dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2
 ```
 

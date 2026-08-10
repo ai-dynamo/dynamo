@@ -281,6 +281,9 @@ pub mod frontend_service {
     /// Total number of request migrations that did not recover
     pub const MODEL_MIGRATION_FAILURE_TOTAL: &str = "model_migration_failure_total";
 
+    /// Time from detecting a migratable failure until recovery or terminal failure
+    pub const MODEL_MIGRATION_DURATION_SECONDS: &str = "model_migration_duration_seconds";
+
     /// Total number of times migration was disabled because the sequence length
     /// exceeded the configured max_seq_len limit
     pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
@@ -345,6 +348,9 @@ pub mod frontend_service {
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
+    /// Label name for the outcome of a migration
+    pub const MIGRATION_OUTCOME_LABEL: &str = "outcome";
+
     /// Label name for tokenizer operation
     pub const OPERATION_LABEL: &str = "operation";
 
@@ -364,6 +370,15 @@ pub mod frontend_service {
 
         /// Migration during ongoing request (stream disconnected)
         pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
+
+    /// Migration outcome label values
+    pub mod migration_outcome {
+        /// Migration recovered on another worker
+        pub const SUCCESS: &str = "success";
+
+        /// Migration ended without recovery
+        pub const FAILURE: &str = "failure";
     }
 
     /// Status label values

@@ -420,6 +420,7 @@ pub struct Metrics {
     model_migration_total: IntCounterVec,
     model_migration_success_total: IntCounterVec,
     model_migration_failure_total: IntCounterVec,
+    model_migration_duration_seconds: HistogramVec,
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
@@ -992,6 +993,22 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_DURATION_SECONDS),
+                "Time from detecting a migratable failure until recovery or terminal failure",
+            )
+            .buckets(vec![
+                0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0, 60.0,
+            ]),
+            &[
+                "model",
+                frontend_service::MIGRATION_TYPE_LABEL,
+                frontend_service::MIGRATION_OUTCOME_LABEL,
+            ],
+        )
+        .unwrap();
+
         let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
@@ -1048,6 +1065,7 @@ impl Metrics {
             model_migration_total,
             model_migration_success_total,
             model_migration_failure_total,
+            model_migration_duration_seconds,
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
@@ -1210,6 +1228,7 @@ impl Metrics {
         registry.register(Box::new(self.model_migration_total.clone()))?;
         registry.register(Box::new(self.model_migration_success_total.clone()))?;
         registry.register(Box::new(self.model_migration_failure_total.clone()))?;
+        registry.register(Box::new(self.model_migration_duration_seconds.clone()))?;
         registry.register(Box::new(
             self.model_migration_max_seq_len_exceeded_total.clone(),
         ))?;
@@ -1324,6 +1343,31 @@ impl Metrics {
         self.model_migration_failure_total
             .with_label_values(&[model, migration_type])
             .get()
+    }
+
+    /// Observe the elapsed time for a completed migration event.
+    pub fn observe_migration_duration(
+        &self,
+        model: &str,
+        migration_type: &str,
+        outcome: &str,
+        duration: Duration,
+    ) {
+        self.model_migration_duration_seconds
+            .with_label_values(&[model, migration_type, outcome])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Get the number of observed migration durations for the given dimensions.
+    pub fn get_migration_duration_sample_count(
+        &self,
+        model: &str,
+        migration_type: &str,
+        outcome: &str,
+    ) -> u64 {
+        self.model_migration_duration_seconds
+            .with_label_values(&[model, migration_type, outcome])
+            .get_sample_count()
     }
 
     /// Increment the counter for migrations disabled by max_seq_len being exceeded
