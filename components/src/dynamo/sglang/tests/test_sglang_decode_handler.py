@@ -403,11 +403,14 @@ def test_nvext_token_data_skips_validation_when_model_bound_is_unavailable():
     assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
 
 
-def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id():
+@pytest.mark.parametrize("invalid_token_id", [True, -1])
+def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id(
+    invalid_token_id,
+):
     handler = _new_token_input_handler()
     handler._max_input_token_id = None
     request = {
-        "token_ids": [True],
+        "token_ids": [invalid_token_id],
         "extra_args": {"nvext": {"token_in": True}},
     }
 
@@ -431,7 +434,7 @@ def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
     assert error.value.code == 400
 
 
-@pytest.mark.parametrize("invalid_token_id", [151936, 2**32 - 1])
+@pytest.mark.parametrize("invalid_token_id", [-1, 151936, 2**32 - 1])
 def test_openai_prompt_token_array_rejects_out_of_vocabulary_token_id(
     invalid_token_id,
 ):
@@ -475,7 +478,7 @@ def test_unmarked_multimodal_placeholder_token_is_accepted():
     assert handler._get_input_param(request) == {"input_ids": [1, 32000]}
 
 
-def test_sglang_tokenizer_text_input_skips_token_validation():
+def test_sglang_tokenizer_rendered_chat_prompt_skips_token_validation():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
     handler._max_input_token_id = 151935
     handler.input_param_manager = SimpleNamespace(

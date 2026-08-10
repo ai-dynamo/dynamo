@@ -1007,10 +1007,11 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     400,
                     f"token input[{index}] must be an integer token ID",
                 )
-            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
-            if (
-                max_input_token_id is not None and token_id > max_input_token_id
-            ) and token_id not in allowed_oov_ids:
+            if token_id < 0 or (
+                max_input_token_id is not None
+                and token_id > max_input_token_id
+                and token_id not in allowed_oov_ids
+            ):
                 raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 
     def _validate_input_token_ids(
@@ -1018,15 +1019,12 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request: Dict[str, Any],
         request_input: Any,
     ) -> None:
-        """Reject out-of-vocabulary IDs on any client-supplied token input.
+        """Reject out-of-vocabulary IDs in resolved token lists.
 
-        Token IDs reach the engine unchanged both through ``nvext.token_data``
-        and through the OpenAI ``prompt`` token-array forms of
-        ``/v1/completions``, which the frontend forwards without tokenizing.
-        Neither carries a marker distinguishing it from frontend-tokenized
-        input, so every resolved token list is validated. Text handed to
-        SGLang's own tokenizer cannot carry an out-of-vocabulary ID and is
-        skipped.
+        Client-supplied token arrays and locally encoded ``prompt``/``text``
+        inputs resolve to lists and are validated. Rendered chat prompts remain
+        strings for SGLang to tokenize and cannot contain client-supplied token
+        IDs, so they are skipped.
         """
         if self.use_sglang_tokenizer and isinstance(request_input, str):
             return
