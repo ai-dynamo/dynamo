@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Generated file. For repository contributors, do not edit this checked-in copy.
-# Regenerate every rendered variant of this matrix (from the repository root):
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 #   scripts/kustomize-matrix.py render recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
 #   kustomize build recipes/qwen3-32b/vllm/cloud-providers/kustomize/overlays/nscale-ib

@@ -282,7 +282,8 @@ def test_render_uses_leaf_component_and_preserves_source_comments(
     rendered = (recipe / "deploy-aws-efa-p8d16.yaml").read_text(encoding="utf-8")
     assert (
         "# Generated file. For repository contributors, do not edit this checked-in copy.\n"
-        "# Regenerate every rendered variant of this matrix (from the repository root):\n"
+        "# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):\n"
+        f"#   scripts/kustomize-matrix.py unfold {matrix}\n"
         f"#   scripts/kustomize-matrix.py render {matrix}\n"
         "# Inspect only this Kustomize overlay (from the repository root):\n"
         f"#   kustomize build {recipe / 'kustomize/overlays/aws-efa-p8d16'}\n"

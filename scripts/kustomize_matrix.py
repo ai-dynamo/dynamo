@@ -626,7 +626,8 @@ def rendered_header(config: MatrixConfig, overlay_dir: Path) -> str:
     return "\n".join(
         [
             "# Generated file. For repository contributors, do not edit this checked-in copy.",
-            "# Regenerate every rendered variant of this matrix (from the repository root):",
+            "# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):",
+            f"#   scripts/kustomize-matrix.py unfold {config.command_path}",
             f"{GENERATED_MANIFEST_PREFIX}{config.command_path}",
             "# Inspect only this Kustomize overlay (from the repository root):",
             f"#   kustomize build {display_path(overlay_dir)}",
