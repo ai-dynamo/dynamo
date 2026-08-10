@@ -13,7 +13,7 @@ use crate::{
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
-        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn,
+        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
@@ -45,6 +45,10 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::ConnectionTimeout,
         ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
+        // A stream that ends mid-generation means this worker dropped the
+        // request. Quarantine it, or a migration retry can reselect the same
+        // worker before discovery removal catches up.
+        ErrorType::Backend(BackendError::StreamIncomplete),
     ];
     match_error_chain(err, INHIBITED, &[])
 }
@@ -149,9 +153,10 @@ where
     /// Number of round robin requests handled. Used to decide which server is next.
     round_robin_counter: Arc<AtomicU64>,
 
-    /// The next step in the chain. PushRouter (this object) picks an instances,
-    /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
-    addressed: Arc<AddressedPushRouter>,
+    /// The final hop: after selecting an instance, `PushRouter` hands it to this
+    /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
+    /// A trait object so an alternate transport can swap it out.
+    addressed: Arc<dyn StreamingDispatch<T, U>>,
 
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
@@ -320,11 +325,14 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
 /// a migratable `Disconnected` error. Uses raw `list_and_watch` events
 /// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
 /// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
-fn spawn_instance_removal_watcher(
+fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
-    addressed: Arc<AddressedPushRouter>,
+    dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) {
+) where
+    T: Data + Serialize + 'static,
+    U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
+{
     use crate::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
@@ -388,23 +396,12 @@ fn spawn_instance_removal_watcher(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    let n = addressed.cancel_instance_streams(eid).await;
-                                    if n > 0 {
-                                        tracing::warn!(
-                                            namespace = %eid.namespace,
-                                            component = %eid.component,
-                                            endpoint = %eid.endpoint,
-                                            instance_id = eid.instance_id,
-                                            cancelled = n,
-                                            "Cancelled pending response streams for removed \
-                                             instance (discovery-driven cleanup)"
-                                        );
-                                    }
+                                    dispatch.on_instance_removed(eid).await;
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                addressed.clear_instance_tombstone(&eid).await;
+                                dispatch.on_instance_added(&eid).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -558,7 +555,8 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -619,7 +617,8 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -649,6 +648,49 @@ where
         };
 
         Ok(router)
+    }
+
+    /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
+    /// as the final hop. Fault detection is on, so the dispatch's `ErrorType`
+    /// mapping drives report-down / overload / migration as usual.
+    ///
+    /// Wires frontend-local occupancy only — no `WorkerLoadMonitor` and no
+    /// multimodal cache indexer, so `RouterMode::DeviceAwareWeighted` is
+    /// non-functional; a caller needing those must extend it.
+    pub async fn from_client_with_dispatch(
+        client: Client,
+        router_mode: RouterMode,
+        dispatch: Arc<dyn StreamingDispatch<T, U>>,
+    ) -> anyhow::Result<Self> {
+        let occupancy_state = if matches!(
+            router_mode,
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
+        ) {
+            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            dispatch.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
+        Ok(PushRouter {
+            client,
+            addressed: dispatch,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            fault_detection_enabled: true,
+            response_timeout: response_inactivity_timeout(),
+            occupancy_state,
+            multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
+            _phantom: PhantomData,
+        })
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
@@ -1398,7 +1440,7 @@ where
             "Selected worker is overloaded, please retry later".into(),
         );
         Err(DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
+            .error_type(ErrorType::WorkerOverloaded)
             .message("Selected worker is overloaded, please retry later")
             .cause(cause)
             .build()
@@ -1503,8 +1545,7 @@ where
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::ResourceExhausted], &[])
-                    {
+                    } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
                         // Backpressure: worker said "my queue is full,
                         // retry later". Mark overloaded so this FE skips it on
                         // the next selection; the next ActiveLoad event from the
@@ -1891,6 +1932,35 @@ mod tests {
         assert_eq!(state.load(7), 0);
         drop(stream);
         assert_eq!(state.load(7), 0, "drop must not release twice after EOF");
+    }
+
+    /// A mid-generation stream end means the worker dropped the request, so it
+    /// must quarantine — otherwise a migration retry can reselect the same
+    /// worker before discovery removal catches up.
+    ///
+    /// This pins `is_inhibited` against the migration layer's migratable set:
+    /// a worker fault that is migratable must also inhibit, or migration
+    /// bounces off the same dead worker.
+    #[test]
+    fn stream_incomplete_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::StreamIncomplete))
+            .message("stream ended before generation completed")
+            .build();
+        assert!(
+            is_inhibited(&err),
+            "StreamIncomplete must inhibit; it is migratable, so leaving it out \
+             lets a retry reselect the failed worker"
+        );
+
+        let cancelled = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client went away")
+            .build();
+        assert!(
+            !is_inhibited(&cancelled),
+            "client cancellation is not a worker fault"
+        );
     }
 
     #[test]
@@ -2310,9 +2380,12 @@ mod tests {
             .await
             .unwrap_err();
 
+        // A *selected* worker being overloaded is single-worker overload, distinct
+        // from pool-wide exhaustion: migration may retry elsewhere. Previously
+        // both collapsed to ResourceExhausted, which blocked that retry.
         assert!(match_error_chain(
             error.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
         assert!(
@@ -2897,5 +2970,153 @@ mod tests {
         .unwrap();
 
         assert!(!map.contains_key(&endpoint_id));
+    }
+
+    /// A `StreamingDispatch` that records what the router hands the seam, so the
+    /// test can assert a *caller-supplied* dispatch (not just the default
+    /// `AddressedPushRouter`) receives the selected address/instance and the
+    /// discovery lifecycle events.
+    #[derive(Default)]
+    struct RecordingDispatch {
+        unary: std::sync::Mutex<Vec<(u64, String, Option<u64>)>>,
+        bidi: std::sync::Mutex<Vec<(String, u64)>>,
+        added: std::sync::Mutex<Vec<u64>>,
+        removed: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl RecordingDispatch {
+        fn canned_stream() -> ManyOut<TestResponse> {
+            let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+            ResponseStream::new(
+                Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
+                ctx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingDispatch<u64, TestResponse> for RecordingDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<u64>>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            let (addressed, _ctx) = request.transfer(());
+            let (payload, address, instance) = addressed.into_parts();
+            self.unary
+                .lock()
+                .unwrap()
+                .push((payload, address, instance.map(|i| i.id())));
+            Ok(Self::canned_stream())
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            instance: Instance,
+            address: String,
+            _input: ManyIn<u64>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            self.bidi.lock().unwrap().push((address, instance.id()));
+            Ok(Self::canned_stream())
+        }
+
+        async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+            self.removed.lock().unwrap().push(id.instance_id);
+        }
+
+        async fn on_instance_added(&self, id: &EndpointInstanceId) {
+            self.added.lock().unwrap().push(id.instance_id);
+        }
+    }
+
+    /// The transport seam must deliver to a caller-supplied `StreamingDispatch`:
+    /// unary and bidirectional requests arrive with the selected address and
+    /// instance, and discovery removal/re-addition reach its lifecycle hooks.
+    #[tokio::test]
+    async fn from_client_with_dispatch_delivers_requests_and_lifecycle() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_dispatch_seam".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Unary hop reaches the supplied dispatch with the selected worker.
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let unary = dispatch.unary.lock().unwrap();
+            assert_eq!(unary.len(), 1, "one unary dispatch expected");
+            let (payload, address, dispatched) = &unary[0];
+            assert_eq!(*payload, 42);
+            assert_eq!(*dispatched, Some(instance_id));
+            assert!(!address.is_empty(), "selected transport address expected");
+        }
+
+        // Bidirectional hop reaches the supplied dispatch with the same worker.
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+                1u64, 2u64,
+            ]))));
+        let mut stream = router.generate(input).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let bidi = dispatch.bidi.lock().unwrap();
+            assert_eq!(bidi.len(), 1, "one bidirectional dispatch expected");
+            assert_eq!(bidi[0].1, instance_id);
+            assert!(!bidi[0].0.is_empty());
+        }
+
+        // Gate on the initial-snapshot add before mutating discovery: this both
+        // asserts on_instance_added is delivered and guarantees the watcher is
+        // subscribed, so the removal broadcast can't race ahead of it.
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added (initial snapshot) not delivered to the supplied dispatch"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_removed not delivered to the supplied dispatch"
+        );
+
+        // A fresh add after re-registration must also reach the hook.
+        let adds_before = dispatch.added.lock().unwrap().len();
+        endpoint.register_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
+            "on_instance_added (re-registration) not delivered to the supplied dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Poll a predicate until it holds or a short deadline elapses; discovery
+    /// events reach the watcher's spawned task asynchronously.
+    async fn poll_until(mut pred: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if pred() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        pred()
     }
 }

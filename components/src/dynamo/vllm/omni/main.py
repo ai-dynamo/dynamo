@@ -55,7 +55,7 @@ def _register_lora_engine_routes(runtime, handler) -> None:
         ) -> dict:
             return await first_endpoint_response(endpoint_handler, body)
 
-        # Register under update/<name> prefix per unified worker convention
+        # Register under the update/<name> engine-management route prefix
         # to match system status server's call_lora_endpoint lookup
         runtime.register_engine_route(f"update/{route_name}", _engine_route)
 

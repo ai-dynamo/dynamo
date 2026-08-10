@@ -11,7 +11,7 @@ This guide covers metrics, tracing, and visualization for SGLang deployments run
 
 When running SGLang through Dynamo, SGLang engine metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both SGLang engine metrics (prefixed with `sglang:`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
 
-**For the complete and authoritative list of all SGLang metrics**, always refer to the [official SGLang Production Metrics documentation](https://docs.sglang.io/references/production_metrics.html).
+**For the complete and authoritative list of all SGLang metrics**, always refer to the [official SGLang Production Metrics documentation](https://docs.sglang.io/docs/references/production_metrics).
 
 For Dynamo runtime metrics, see the [Metrics Catalog](../../../../../reference/observability/metrics-catalog.mdx).
 
@@ -80,7 +80,7 @@ sglang:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 75
 sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 ```
 
-**Note:** The specific metrics shown above are examples and may vary depending on your SGLang version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.sglang.io/references/production_metrics.html) for the current list.
+**Note:** The specific metrics shown above are examples and may vary depending on your SGLang version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.sglang.io/docs/references/production_metrics) for the current list.
 
 ### Metric Categories
 
@@ -91,7 +91,7 @@ SGLang provides metrics in the following categories (all prefixed with `sglang:`
 - **Latency metrics** - Request and token latency measurements
 - **Disaggregation metrics** - Metrics specific to disaggregated deployments (when enabled)
 
-**Note:** Specific metrics are subject to change between SGLang versions. Always refer to the [official documentation](https://docs.sglang.io/references/production_metrics.html) or inspect the `/metrics` endpoint for your SGLang version.
+**Note:** Specific metrics are subject to change between SGLang versions. Always refer to the [official documentation](https://docs.sglang.io/docs/references/production_metrics) or inspect the `/metrics` endpoint for your SGLang version.
 
 ### Available Metrics
 
@@ -102,7 +102,7 @@ The official SGLang documentation includes complete metric definitions with:
 - Setup guide for Prometheus + Grafana monitoring
 - Troubleshooting tips and configuration examples
 
-For the complete and authoritative list of all SGLang metrics, see the [official SGLang Production Metrics documentation](https://docs.sglang.io/references/production_metrics.html).
+For the complete and authoritative list of all SGLang metrics, see the [official SGLang Production Metrics documentation](https://docs.sglang.io/docs/references/production_metrics).
 
 ### Implementation Details
 
@@ -185,7 +185,7 @@ In disaggregated serving, queued request metrics read from the correct engine-sp
 
 | Engine | Queue Source |
 |--------|-------------|
-| Unified (non-disagg) | `waiting_queue` |
+| Aggregated (non-disagg) | `waiting_queue` |
 | Prefill | `disagg_prefill_bootstrap_queue` |
 | Decode | `disagg_decode_prealloc_queue` + `disagg_decode_transfer_queue` |
 
@@ -248,7 +248,8 @@ Key implementation files:
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging (required for tracing) | `false` | `true` |
+| `DYN_LOGGING_CONSOLE_FORMAT` | Console output format (`readable` or `jsonl`) | `readable` | `readable` |
+| `DYN_LOGGING_JSONL` | Legacy JSONL and local trace-context fallback | `false` | `true` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
 | `OTEL_SERVICE_NAME` | Service name shown in Grafana Tempo | `dynamo` | `dynamo-worker-decode` |
@@ -304,7 +305,7 @@ cd examples/backends/sglang/launch
 Or manually for an aggregated deployment:
 
 ```bash
-export DYN_LOGGING_JSONL=true
+export DYN_LOGGING_CONSOLE_FORMAT=readable
 export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 
@@ -486,7 +487,7 @@ This is useful for automated benchmarking pipelines where you want to capture me
 ## Related Documentation
 
 ### SGLang Metrics
-- [Official SGLang Production Metrics](https://docs.sglang.io/references/production_metrics.html)
+- [Official SGLang Production Metrics](https://docs.sglang.io/docs/references/production_metrics)
 - [SGLang GitHub - Metrics Collector](https://github.com/sgl-project/sglang/blob/v0.5.9/python/sglang/srt/metrics/collector.py)
 
 ### Dynamo Observability

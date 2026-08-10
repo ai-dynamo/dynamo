@@ -10925,8 +10925,7 @@ spec:
                         DGD/DCD services apply this to service pods. Auto-created checkpoints
                         apply checkpoint job clients before creating the DynamoCheckpoint; manual
                         DynamoCheckpoint users must provide an already-prepared pod template.
-                        In each rendered pod, only matching container names are wired; absent
-                        names are ignored.
+                        Every name must match a user-declared container in the enclosing pod spec.
                       items:
                         maxLength: 63
                         minLength: 1
@@ -11700,7 +11699,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: true
+      storage: false
       subresources:
         status: {}
     - additionalPrinterColumns:
@@ -11721,9 +11720,8 @@ spec:
           description: |-
             DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-            v1beta1 is a served version: the API server accepts reads and writes
-            against it, and transparently converts to/from v1alpha1 (still the
-            storage version until a later MR flips it). Conversion goes through the
+            v1beta1 is the storage version. The API server transparently converts
+            to and from the served v1alpha1 version through
             operator's conversion webhook; see api/v1alpha1/*_conversion.go.
           properties:
             apiVersion:
@@ -12138,8 +12136,8 @@ spec:
                           description: |-
                             extraClientContainers lists additional user-declared containers that should
                             be wired as GMS clients in service pods. Checkpoint Job clients are declared
-                            under checkpoint.job.gmsClientContainers. In each rendered pod, only
-                            matching container names are wired; absent names are ignored.
+                            under checkpoint.job.gmsClientContainers. Every name must match a container
+                            in the enclosing component's podTemplate.spec.containers.
                           items:
                             maxLength: 63
                             minLength: 1
@@ -12187,6 +12185,23 @@ spec:
                           rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''InterPod'''
                         - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
                           rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
+                    grove:
+                      description: grove groups Grove-specific rendering options.
+                      properties:
+                        forceScalingGroup:
+                          description: |-
+                            forceScalingGroup opts a single-node component into rendering as a
+                            PodCliqueScalingGroup with one single-pod PodClique per replica.
+                            Scaling changes the scaling-group replica count. The first
+                            `minAvailable` replicas join the deployment's base PodGang together
+                            with its other base workloads; each replica beyond `minAvailable`
+                            gets its own PodGang, gang-scheduled separately from the rest of the
+                            deployment. `false` or omitted means automatic selection (multi-node
+                            and inter-pod GMS components use a scaling group, other single-node
+                            components a standalone PodClique), not "force PodClique".
+                            Immutable after creation.
+                          type: boolean
+                      type: object
                   type: object
                 frontendSidecar:
                   description: |-
@@ -12209,8 +12224,10 @@ spec:
                   type: boolean
                 minAvailable:
                   description: |-
-                    minAvailable maps to Grove PodClique minAvailable for single-node and
-                    Grove PodCliqueScalingGroup minAvailable for multi-node components.
+                    minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
+                    components rendered as a scaling group (multi-node, inter-pod GMS, or
+                    `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove
+                    PodClique minAvailable for all other single-node components.
                     This field determines 1) the minimum number of replicas guaranteed to be
                     gang-scheduled, and 2) when violating minAvailable replicas triggers gang
                     termination.
@@ -20629,7 +20646,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: false
+      storage: true
       subresources:
         status: {}
   conversion:

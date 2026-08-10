@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -27,18 +26,6 @@ import (
 type Name string
 
 const (
-	// GMSSnapshot enables the temporary GMS + Snapshot integration.
-	//
-	// Owner: @galletas1712
-	// Experimental since: v1.2.0
-	// Beta since: N/A
-	// GA since: N/A
-	// Configuration: DYN_OPERATOR_ALLOW_GMS_SNAPSHOT=1
-	// Auto-detection: N/A
-	// Requires: N/A
-	// Default: false
-	GMSSnapshot Name = "gmsSnapshot"
-
 	// Checkpoint enables checkpoint creation and restore.
 	//
 	// Owner: @galletas1712
@@ -139,7 +126,6 @@ const (
 )
 
 var allNames = [...]Name{
-	GMSSnapshot,
 	Checkpoint,
 	Grove,
 	LWS,
@@ -150,9 +136,6 @@ var allNames = [...]Name{
 	GPUDiscovery,
 }
 
-// GMSSnapshotEnvVar enables the temporary internal GMS + Snapshot feature gate when set to "1".
-const GMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
-
 // Gate reports whether operator features are enabled.
 type Gate interface {
 	Enabled(Name) bool
@@ -160,7 +143,6 @@ type Gate interface {
 
 // Gates is the complete set of operator feature gates.
 type Gates struct {
-	GMSSnapshot      bool `json:"gmsSnapshot"`
 	Checkpoint       bool `json:"checkpoint"`
 	Grove            bool `json:"grove"`
 	LWS              bool `json:"lws"`
@@ -178,15 +160,9 @@ func Defaults() Gates {
 	}
 }
 
-func fromEnvironment() Gates {
-	gates := Defaults()
-	gates.GMSSnapshot = os.Getenv(GMSSnapshotEnvVar) == "1"
-	return gates
-}
-
 // New detects cluster capabilities and resolves them with operator configuration.
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
-	gates := fromEnvironment()
+	gates := Defaults()
 	gates.Checkpoint = config.Checkpoint.Enabled
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 

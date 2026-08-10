@@ -26,6 +26,13 @@ use crate::common::protocols::{
 };
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::RadixRequestLease;
+#[cfg(feature = "replay-bench")]
+use crate::replay::offline::PressureKind;
+use crate::replay::offline::evidence::{
+    with_engine_evidence_context, with_engine_evidence_timestamp,
+};
+use crate::replay::offline::{WorkerPool, with_runtime_evidence};
+use crate::replay::{ReplayCaptureOptions, ReplayDeterminism};
 use crate::scheduler::test_utils::{
     CapturingFpmSink, RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
@@ -169,7 +176,7 @@ fn zero_output_request_completes_after_prefill() {
     let mut core = SglangCore::new(test_args(32, 4, 16));
     let uuid = core.receive(direct_request(vec![1, 2, 3, 4], 0));
 
-    let pass = core.execute_pass_internal(None, 0.0);
+    let pass = core.execute_pass_internal(0.0);
 
     assert!(core.is_empty());
     assert_eq!(pass.completed_requests, 1);
@@ -293,9 +300,41 @@ fn fresh_prefill_tracks_cache_owned_prefix_pages() {
     buffer.drain();
 
     let mut running = vec![req, blocker];
-    let retracted = decode::check_decode_mem(&mut running, &mut kv_manager, &config);
+    let (retracted, _evidence) = with_runtime_evidence(
+        ReplayCaptureOptions {
+            capture_canonical_evidence: true,
+            determinism: ReplayDeterminism::CanonicalV1,
+            ..Default::default()
+        },
+        || {
+            with_engine_evidence_context(7.5, WorkerPool::Decode, 11, 2, || {
+                with_engine_evidence_timestamp(12.5, || {
+                    decode::check_decode_mem(&mut running, &mut kv_manager, &config)
+                })
+            })
+        },
+    );
     assert_eq!(retracted.len(), 1);
     assert_eq!(retracted[0].uuid, Uuid::from_u128(90_002));
+    #[cfg(feature = "replay-bench")]
+    {
+        let pressure = _evidence.pressure.unwrap();
+        assert_eq!(pressure.vllm_preemptions_total, 0);
+        assert_eq!(pressure.sglang_retractions_total, 1);
+        let record = &pressure.records[0];
+        assert_eq!(record.pressure_ordinal, 0);
+        assert_eq!(record.at_ms, 12.5);
+        assert_eq!(record.pool, WorkerPool::Decode);
+        assert_eq!(record.worker_id, 11);
+        assert_eq!(record.dp_rank, 2);
+        assert_eq!(record.kind, PressureKind::SglangRetraction);
+        assert_eq!(record.request_uuid, Uuid::from_u128(90_002).to_string());
+        assert_eq!(record.state_before.running_requests, 2);
+        assert_eq!(record.state_after.running_requests, 1);
+        assert!(record.state_after.active_blocks <= record.state_before.active_blocks);
+        assert!(record.logical_available_blocks_before.is_some());
+        assert!(record.required_blocks_before.is_some());
+    }
     assert_eq!(removed_event_count(&buffer.drain()), 0);
     assert_eq!(kv_manager.cache().page_pool.available(), 0);
     assert_eq!(kv_manager.cache_mut().match_prefix(&prompt).0, prompt.len());
@@ -1501,7 +1540,7 @@ mod core_behavior {
             ..Default::default()
         });
 
-        let pass = core.execute_pass_internal(None, 0.0);
+        let pass = core.execute_pass_internal(0.0);
         assert_eq!(pass.completed_requests, 0);
         assert_eq!(pass.mocker_metrics.active_decode_blocks, 2);
     }
@@ -1544,6 +1583,8 @@ mod core_behavior {
         let mut collector = crate::replay::TraceCollector::default();
         let first = core.execute_pass(&mut collector, 0.0);
         assert_eq!(first.output_signals.len(), 9);
+        assert_eq!(first.accept_length_output_tokens, 9);
+        assert_eq!(first.accept_length_decode_forwards, 3);
         let second = core.execute_pass(&mut collector, first.end_ms);
         let ordered = second
             .output_signals
@@ -1569,6 +1610,8 @@ mod core_behavior {
         assert_eq!(core.running[1].uuid, longer);
         assert_eq!(core.running[1].output_len(), 6);
         assert_eq!(second.fpm.unwrap().num_decode_requests, 3);
+        assert_eq!(second.accept_length_output_tokens, 8);
+        assert_eq!(second.accept_length_decode_forwards, 3);
 
         let third = core.execute_pass(&mut collector, second.end_ms);
         assert_eq!(
@@ -1579,6 +1622,8 @@ mod core_behavior {
                 .collect::<Vec<_>>(),
             vec![long, long, longer, longer],
         );
+        assert_eq!(third.accept_length_output_tokens, 4);
+        assert_eq!(third.accept_length_decode_forwards, 2);
     }
 
     #[test]
@@ -1586,7 +1631,7 @@ mod core_behavior {
         let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 4), ROUTER_TEST_WORKER_ID);
         core.receive(direct_request(vec![1, 2, 3, 4], 1));
 
-        let pass = core.execute_pass_internal(None, 0.0);
+        let pass = core.execute_pass_internal(0.0);
 
         assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
         assert!(!pass.kv_events.is_empty());
@@ -1709,16 +1754,16 @@ mod router_events {
         let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 4), ROUTER_TEST_WORKER_ID);
         core.receive(direct_request(vec![1, 2, 3, 4, 5, 6], 2));
 
-        let pass1 = core.execute_pass_internal(None, 0.0);
+        let pass1 = core.execute_pass_internal(0.0);
         let mut prompt_hashes = stored_hashes(&pass1.kv_events);
         assert_eq!(prompt_hashes.len(), 1);
         harness.apply_events(pass1.kv_events).await;
 
-        let pass2 = core.execute_pass_internal(None, pass1.end_ms);
+        let pass2 = core.execute_pass_internal(pass1.end_ms);
         prompt_hashes.extend(nth_stored_hashes(&pass2.kv_events, 0));
         harness.apply_events(pass2.kv_events).await;
 
-        let pass3 = core.execute_pass_internal(None, pass2.end_ms);
+        let pass3 = core.execute_pass_internal(pass2.end_ms);
         prompt_hashes.extend(nth_stored_hashes(&pass3.kv_events, 0));
         harness.apply_events(pass3.kv_events).await;
 
@@ -1734,13 +1779,13 @@ mod router_events {
         let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 16), ROUTER_TEST_WORKER_ID);
         core.receive(direct_request(vec![7, 8, 9, 10], 5));
 
-        let pass1 = core.execute_pass_internal(None, 0.0);
+        let pass1 = core.execute_pass_internal(0.0);
         let mut full_hashes = stored_hashes(&pass1.kv_events);
         harness.apply_events(pass1.kv_events).await;
 
         let mut now_ms = pass1.end_ms;
         for _ in 0..3 {
-            let pass = core.execute_pass_internal(None, now_ms);
+            let pass = core.execute_pass_internal(now_ms);
             now_ms = pass.end_ms;
             full_hashes.extend(stored_hashes(&pass.kv_events));
             harness.apply_events(pass.kv_events).await;
@@ -1783,7 +1828,7 @@ mod router_events {
         let mut now_ms = 0.0;
         let mut hashes = Vec::new();
         while !core.is_empty() {
-            let pass = core.execute_pass_internal(None, now_ms);
+            let pass = core.execute_pass_internal(now_ms);
             now_ms = pass.end_ms;
             hashes.extend(stored_hashes(&pass.kv_events));
         }
@@ -1840,16 +1885,16 @@ mod router_events {
         let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 16), ROUTER_TEST_WORKER_ID);
         core.receive(direct_request(vec![11, 12, 13, 14], 3));
 
-        let pass1 = core.execute_pass_internal(None, 0.0);
+        let pass1 = core.execute_pass_internal(0.0);
         let prompt_hashes = nth_stored_hashes(&pass1.kv_events, 0);
         let mut full_hashes = stored_hashes(&pass1.kv_events);
         harness.apply_events(pass1.kv_events).await;
 
-        let pass2 = core.execute_pass_internal(None, pass1.end_ms);
+        let pass2 = core.execute_pass_internal(pass1.end_ms);
         full_hashes.extend(stored_hashes(&pass2.kv_events));
         harness.apply_events(pass2.kv_events).await;
 
-        let pass3 = core.execute_pass_internal(None, pass2.end_ms);
+        let pass3 = core.execute_pass_internal(pass2.end_ms);
         assert_eq!(removed_event_count(&pass3.kv_events), 0);
         full_hashes.extend(stored_hashes(&pass3.kv_events));
         harness.apply_events(pass3.kv_events).await;
@@ -2294,7 +2339,7 @@ mod forward_pass_metrics {
         // Submit and fully drain a request first so the core isn't empty
         // (empty core blocks in receive_requests in live mode, but
         // execute_pass_internal works fine on an empty core).
-        let pass = core.execute_hidden_pass(0.0);
+        let pass = core.execute_pass_internal(0.0);
         let fpm = pass.fpm.expect("FPM should be present even for empty pass");
 
         assert_eq!(fpm.num_prefill_requests, 0);
@@ -2551,7 +2596,7 @@ mod forward_pass_metrics {
         // just verify we always get Some(fpm).
         if !saw_queued_decode {
             // Verify the requests completed or are still running with valid FPM
-            let pass = core.execute_hidden_pass(10.0);
+            let pass = core.execute_pass_internal(10.0);
             assert!(pass.fpm.is_some(), "FPM should always be present");
         }
     }
