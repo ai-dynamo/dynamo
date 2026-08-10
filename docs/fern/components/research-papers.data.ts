@@ -61,6 +61,14 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     iso: "2026-06-11",
   },
   {
+    title: "Adaptive Parallelism for LLM Inference with Model Irrelevant Profiler",
+    url: "https://ieeexplore.ieee.org/document/11581475",
+    org: "Lenovo",
+    venue: "Frontiers of Computer Science",
+    date: "May 9, 2026",
+    iso: "2026-05-09",
+  },
+  {
     title: "A Case for a Simulation-Driven Exploration of Distributed GenAI Platforms",
     url: "https://dl.acm.org/doi/10.1145/3805621.3807623",
     org: "IBM Research",
@@ -133,6 +141,14 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     iso: "2026-01-01",
   },
   {
+    title: "Optimizing GPU Workloads on Kubernetes: An Integrated Approach Using NVIDIA Dynamo, run:ai (KAI), and Amazon EKS",
+    url: "https://ieeexplore.ieee.org/document/11609238",
+    org: "Amazon",
+    venue: "IEEE Access",
+    date: "2026",
+    iso: "2026-01-01",
+  },
+  {
     title: "TraCT: Disaggregated LLM Serving with CXL Shared Memory KV Cache at Rack-Scale",
     url: "https://arxiv.org/abs/2512.18194",
     org: "SK Hynix",
@@ -187,6 +203,14 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     venue: "arXiv",
     date: "Aug 22, 2025",
     iso: "2025-08-22",
+  },
+  {
+    title: "Toward Disaggregated and Heterogenous AI Systems",
+    url: "https://ieeexplore.ieee.org/document/11072015",
+    org: "",
+    venue: "IEEE Micro",
+    date: "May 2025",
+    iso: "2025-05-01",
   },
   {
     title: "semi-PD: Towards Efficient LLM Serving via Phase-Wise Disaggregated Computation and Unified Storage",
