@@ -41,10 +41,10 @@ _SUBPROCESS_TIMEOUT_S = 90
 
 # The scenario needs no services: an in-memory store and a TCP request plane keep
 # DistributedRuntime self-contained. But `nats_enabled` in distributed.rs is true
-# if NATS_SERVER is merely *set*, and DYN_REQUEST_PLANE can flip the plane to NATS
+# if NATS_SERVER is merely *set*, and DYN_EVENT_PLANE can flip the plane to NATS
 # -- so an ambient value from the CI container makes the child connect eagerly and
 # die on a dead port. Build the child env explicitly instead of inheriting it.
-_UNSET_IN_CHILD = ("NATS_SERVER", "DYN_REQUEST_PLANE")
+_UNSET_IN_CHILD = ("NATS_SERVER", "DYN_EVENT_PLANE")
 
 
 def _child_env() -> dict:
@@ -101,9 +101,10 @@ _SCENARIO = textwrap.dedent(
     # returning, and pytest-timeout firing are all downstream of it, so asserting
     # them separately would only re-prove the line above.
 
-    # A constructor failure would also free the main thread; report it rather than
-    # letting it pass as a successful run.
+    # Any constructor completion would also free the main thread; neither an error
+    # nor a successful return proves that the blocking path stayed GIL-free.
     assert not router_error, f"router constructor raised: {router_error!r}"
+    assert t.is_alive(), "router constructor returned before a worker registered"
 
     print("OK")
     """
