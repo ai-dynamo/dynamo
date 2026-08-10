@@ -30,11 +30,13 @@ import argparse
 import sys
 from pathlib import Path
 
+import api_freshness
 from kubernetes_api_discovery import KubernetesReference, parse_reference
 from kubernetes_api_rendering import render_mdx
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 
 def _source_path(fern_root: Path) -> Path:
@@ -66,8 +68,15 @@ def _rendered_outputs(
     return {_mdx_shell_path(fern_root): render_mdx(reference)}
 
 
-def _apply_outputs(outputs: dict[Path, str], *, check: bool) -> int:
-    """Write outputs (or diff them in ``--check`` mode) and report drift."""
+def _apply_outputs(
+    outputs: dict[Path, str], *, check: bool, blame_branch: bool = True
+) -> int:
+    """Write outputs (or diff them in ``--check`` mode) and report drift.
+
+    ``blame_branch`` is False when ``--since`` showed this branch touched
+    nothing feeding the generator; see api_freshness for why that is not a
+    failure.
+    """
     stale: list[str] = []
     for path, new_text in outputs.items():
         old_text = path.read_text(encoding="utf-8") if path.is_file() else None
@@ -82,6 +91,14 @@ def _apply_outputs(outputs: dict[Path, str], *, check: bool) -> int:
         path.write_text(new_text, encoding="utf-8")
         print(f"{path.name}: wrote {len(new_text.encode('utf-8'))} bytes")
     if check and stale:
+        if not blame_branch:
+            print(
+                f"{len(stale)} output(s) stale, but this branch changed neither "
+                f"the upstream CRD markdown nor a generator script. The drift "
+                f"came from main. Not failing.",
+                file=sys.stderr,
+            )
+            return 0
         print(
             f"check failed: {len(stale)} output(s) stale -- run gen_kubernetes_api.py",
             file=sys.stderr,
@@ -104,10 +121,32 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_FERN_ROOT,
         help="docs/fern root (override for hermetic tests; defaults to sibling)",
     )
+    parser.add_argument(
+        "--since",
+        metavar="REF",
+        help=(
+            "with --check, only fail when this branch changed something feeding "
+            "the generator; drift inherited from REF is reported, not failed"
+        ),
+    )
     args = parser.parse_args(argv)
     reference = _load_reference(args.fern_root)
     outputs = _rendered_outputs(args.fern_root, reference)
-    return _apply_outputs(outputs, check=args.check)
+    blame_branch = True
+    if args.check and args.since:
+        blame_branch = api_freshness.blames_branch(
+            args.since,
+            repo_root=REPO_ROOT,
+            sources=(
+                _source_path(args.fern_root)
+                .resolve()
+                .relative_to(REPO_ROOT)
+                .as_posix(),
+            ),
+            outputs=outputs,
+            script_dir=SCRIPT_DIR,
+        )
+    return _apply_outputs(outputs, check=args.check, blame_branch=blame_branch)
 
 
 if __name__ == "__main__":

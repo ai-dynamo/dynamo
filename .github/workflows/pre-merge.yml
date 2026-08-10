@@ -100,12 +100,41 @@ jobs:
           docs/fern/scripts/tests/test_gen_python_api.py \
           docs/fern/scripts/tests/test_gen_rust_api.py \
           docs/fern/scripts/tests/test_gen_kubernetes_api.py \
-          docs/fern/scripts/tests/test_api_reference_regressions.py
+          docs/fern/scripts/tests/test_api_reference_regressions.py \
+          docs/fern/scripts/tests/test_api_freshness.py
     - name: Check generated API reference freshness
+      # On a PR, --since scopes the gate to what the branch itself changed.
+      # These references generate from source outside docs/, so a global
+      # freshness check fails on any commit that touches a documented symbol,
+      # including commits the branch never made -- four merges to main across
+      # 24 Python files was enough to redden three pages on a branch that
+      # touched none of them. That is not a failure the branch can fix, and a
+      # required check nobody can act on teaches people to re-run rather than
+      # read it.
+      #
+      # On push to main there is no base to scope against and none is wanted:
+      # main is where global freshness must hold, so the flag is omitted and
+      # the strict gate applies.
+      #
+      # The base commit is fetched explicitly because this job checks out
+      # shallow. Without it the range cannot resolve, and the helper fails
+      # closed to the strict gate -- safe, but the flag would do nothing.
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
-        python3 docs/fern/scripts/gen_python_api.py --check
-        python3 docs/fern/scripts/gen_rust_api.py --check
-        python3 docs/fern/scripts/gen_kubernetes_api.py --check
+        set -euo pipefail
+        SINCE=()
+        if [ -n "${BASE_SHA:-}" ]; then
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+          if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            SINCE=(--since "$BASE_SHA")
+          else
+            echo "::notice::base $BASE_SHA unavailable; using the strict gate"
+          fi
+        fi
+        python3 docs/fern/scripts/gen_python_api.py --check "${SINCE[@]}"
+        python3 docs/fern/scripts/gen_rust_api.py --check "${SINCE[@]}"
+        python3 docs/fern/scripts/gen_kubernetes_api.py --check "${SINCE[@]}"
 
   # Safe Fern docs checks run in pre-merge with read-only permissions.
   fern-check:

@@ -33,11 +33,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from api_discovery import Module, discover_all_modules
+import api_freshness
+from api_discovery import SEARCH_PATH_PARTS, Module, discover_all_modules
 from api_rendering import render_landing_page, render_module_page
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 
 def _module_page_path(fern_root: Path, module: Module) -> Path:
@@ -58,8 +60,15 @@ def _rendered_outputs(fern_root: Path, modules: list[Module]) -> dict[Path, str]
     return outputs
 
 
-def _apply_outputs(outputs: dict[Path, str], *, check: bool) -> int:
-    """Write outputs (or diff them in ``--check`` mode) and report drift."""
+def _apply_outputs(
+    outputs: dict[Path, str], *, check: bool, blame_branch: bool = True
+) -> int:
+    """Write outputs (or diff them in ``--check`` mode) and report drift.
+
+    ``blame_branch`` is False when ``--since`` showed this branch touched
+    nothing feeding the generator, which means main moved underneath it. The
+    drift is still printed; it just does not fail a check the branch cannot fix.
+    """
     stale: list[str] = []
     for path, new_text in outputs.items():
         old_text = path.read_text(encoding="utf-8") if path.is_file() else None
@@ -74,6 +83,15 @@ def _apply_outputs(outputs: dict[Path, str], *, check: bool) -> int:
             path.write_text(new_text, encoding="utf-8")
             print(f"{path.name}: wrote {len(new_text.encode('utf-8'))} bytes")
     if check and stale:
+        if not blame_branch:
+            print(
+                f"{len(stale)} output(s) stale, but this branch changed no API "
+                f"source, generated page, or generator script. The drift came "
+                f"from main and regenerating here would only hold until the "
+                f"next unrelated merge. Not failing.",
+                file=sys.stderr,
+            )
+            return 0
         print(
             f"check failed: {len(stale)} output(s) stale -- run gen_python_api.py",
             file=sys.stderr,
@@ -116,10 +134,27 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_FERN_ROOT,
         help="docs/fern root (override for hermetic tests; defaults to sibling)",
     )
+    parser.add_argument(
+        "--since",
+        metavar="REF",
+        help=(
+            "with --check, only fail when this branch changed something feeding "
+            "the generator; drift inherited from REF is reported, not failed"
+        ),
+    )
     args = parser.parse_args(argv)
     modules = discover_all_modules()
     outputs = _rendered_outputs(args.fern_root, modules)
-    output_status = _apply_outputs(outputs, check=args.check)
+    blame_branch = True
+    if args.check and args.since:
+        blame_branch = api_freshness.blames_branch(
+            args.since,
+            repo_root=REPO_ROOT,
+            sources=tuple("/".join(parts) for parts in SEARCH_PATH_PARTS),
+            outputs=outputs,
+            script_dir=SCRIPT_DIR,
+        )
+    output_status = _apply_outputs(outputs, check=args.check, blame_branch=blame_branch)
     orphan_status = _apply_orphans(
         _orphaned_module_pages(args.fern_root, outputs),
         check=args.check,
