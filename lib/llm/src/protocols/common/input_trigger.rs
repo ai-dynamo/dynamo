@@ -80,13 +80,11 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                         InputTrigger::Unknown
                     }
                 }
-                InputItem::EasyMessage(easy) => {
-                    if easy.role == ResponseRole::User {
-                        InputTrigger::UserMessage
-                    } else {
-                        InputTrigger::Unknown
-                    }
-                }
+                InputItem::EasyMessage(easy) => match easy.role {
+                    ResponseRole::User => InputTrigger::UserMessage,
+                    ResponseRole::Assistant => InputTrigger::Continuation,
+                    _ => InputTrigger::Unknown,
+                },
                 _ => InputTrigger::Unknown,
             }
         }
@@ -135,6 +133,7 @@ mod tests {
     use crate::protocols::openai::{
         chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
     };
+    use dynamo_protocols::types::responses::{CreateResponse, EasyInputContent, EasyInputMessage};
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestToolMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
@@ -186,5 +185,38 @@ mod tests {
     fn chat_unknown_empty_messages() {
         let req = chat_request_with_messages(vec![]);
         assert_eq!(classify_chat_request(&req), InputTrigger::Unknown);
+    }
+
+    fn response_request_with_easy_messages(role: ResponseRole) -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
+                    role,
+                    content: EasyInputContent::Text("hi".into()),
+                    ..Default::default()
+                })]),
+                model: Some("test".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn responses_easy_message_user() {
+        let req = response_request_with_easy_messages(ResponseRole::User);
+        assert_eq!(classify_response_request(&req), InputTrigger::UserMessage);
+    }
+
+    #[test]
+    fn responses_easy_message_assistant() {
+        let req = response_request_with_easy_messages(ResponseRole::Assistant);
+        assert_eq!(classify_response_request(&req), InputTrigger::Continuation);
+    }
+
+    #[test]
+    fn responses_easy_message_system() {
+        let req = response_request_with_easy_messages(ResponseRole::System);
+        assert_eq!(classify_response_request(&req), InputTrigger::Unknown);
     }
 }
