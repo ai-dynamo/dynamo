@@ -949,6 +949,52 @@ navigation:
 
   - tab: reference
     layout:
+      - page: Compatibility
+        path: pages/reference/general/compatibility.mdx
+        slug: compatibility
+      - page: Examples
+        path: pages/reference/general/examples.md
+        slug: examples
+      - page: Release Artifacts
+        path: pages/reference/general/release-artifacts.mdx
+        slug: release-artifacts
+      - page: Nightly Release Info
+        path: pages/reference/general/nightly-release-info.md
+        slug: nightly-release-info
+      - section: Releases
+        slug: releases
+        path: pages/reference/general/releases/release-history.mdx
+        collapsed: true
+        contents:
+          - page: Dynamo v1.3.0
+            path: pages/reference/general/releases/dynamo-v1-3-0.mdx
+            slug: v1-3-0
+          - page: Dynamo v1.2.0
+            path: pages/reference/general/releases/dynamo-v1-2-0.mdx
+            slug: v1-2-0
+          - page: Dynamo v1.1.0
+            path: pages/reference/general/releases/dynamo-v1-1-0.mdx
+            slug: v1-1-0
+          - page: Dynamo v1.0.0
+            path: pages/reference/general/releases/dynamo-v1-0-0.mdx
+            slug: v1-0-0
+          - page: Known Issues
+            path: pages/reference/general/releases/known-issues.mdx
+          - page: Deprecations
+            path: pages/reference/general/releases/deprecations.mdx
+      - page: Model Early Access Builds
+        path: pages/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
+      - page: Glossary
+        path: pages/reference/general/glossary.md
+        slug: glossary
+      # Machine-readable mirror of releases.data.ts for agents; reachable
+      # by URL and llms indexes, not the sidebar.
+      - page: Releases (machine-readable)
+        path: pages/reference/general/releases-machine-readable.mdx
+        slug: releases-data
+        hidden: true
+
       # ==================== API Reference ====================
       # docs/fern/scripts/gen_python_api.py generates the Python landing page
       # and one deterministic MDX per curated module. Each per-module page is a
@@ -1030,52 +1076,6 @@ navigation:
             contents:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
-
-      - page: Compatibility
-        path: pages/reference/general/compatibility.mdx
-        slug: compatibility
-      - page: Examples
-        path: pages/reference/general/examples.md
-        slug: examples
-      - page: Release Artifacts
-        path: pages/reference/general/release-artifacts.mdx
-        slug: release-artifacts
-      - page: Nightly Release Info
-        path: pages/reference/general/nightly-release-info.md
-        slug: nightly-release-info
-      - section: Releases
-        slug: releases
-        path: pages/reference/general/releases/release-history.mdx
-        collapsed: true
-        contents:
-          - page: Dynamo v1.3.0
-            path: pages/reference/general/releases/dynamo-v1-3-0.mdx
-            slug: v1-3-0
-          - page: Dynamo v1.2.0
-            path: pages/reference/general/releases/dynamo-v1-2-0.mdx
-            slug: v1-2-0
-          - page: Dynamo v1.1.0
-            path: pages/reference/general/releases/dynamo-v1-1-0.mdx
-            slug: v1-1-0
-          - page: Dynamo v1.0.0
-            path: pages/reference/general/releases/dynamo-v1-0-0.mdx
-            slug: v1-0-0
-          - page: Known Issues
-            path: pages/reference/general/releases/known-issues.mdx
-          - page: Deprecations
-            path: pages/reference/general/releases/deprecations.mdx
-      - page: Model Early Access Builds
-        path: pages/reference/general/model-early-access-builds.mdx
-        slug: model-early-access-builds
-      - page: Glossary
-        path: pages/reference/general/glossary.md
-        slug: glossary
-      # Machine-readable mirror of releases.data.ts for agents; reachable
-      # by URL and llms indexes, not the sidebar.
-      - page: Releases (machine-readable)
-        path: pages/reference/general/releases-machine-readable.mdx
-        slug: releases-data
-        hidden: true
 
       - section: Components
         icon: sliders
