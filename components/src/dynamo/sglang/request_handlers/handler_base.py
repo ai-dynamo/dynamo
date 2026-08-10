@@ -880,11 +880,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         )
 
     def _require_elastic_ep_backend(self) -> Optional[dict]:
-        """Return an error dict if elastic EP is not enabled, else ``None``.
-
-        Shared by ``scale_elastic_ep`` and ``is_scaling_elastic_ep``: both are
-        no-ops unless the worker was launched with ``--elastic-ep-backend``.
-        """
+        """Return an error dict if elastic EP is not enabled, else ``None``."""
         if self.engine.tokenizer_manager.server_args.elastic_ep_backend is None:
             return {
                 "status": "error",
