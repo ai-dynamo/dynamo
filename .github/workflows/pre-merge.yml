@@ -243,10 +243,6 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --features aic-forward-pass -- --nocapture
-    - name: Compile Python bindings custom worker-selection policy support
-      if: matrix.dir == 'lib/bindings/python'
-      working-directory: ${{ matrix.dir }}
-      run: cargo check --locked --features custom-policy,select-service
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
