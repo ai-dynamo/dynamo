@@ -190,12 +190,121 @@ half-patched image.
 
 ## Part B — install a scoped test operator
 
-Do **not** upgrade the cluster-wide operator in `dynamo-system`; other people's deployments depend
-on it. Install a second operator watching only `tzulingk-ft-tests`, using the operator image from
-Part A, and confirm it is namespace-scoped before creating any DynamoGraphDeployment — two operators
-reconciling the same object will fight.
+The change under test lives inside the operator binary. It is the operator that writes each
+container's command line, so the only way to see `ray start --head` appear on a solo elastic-EP
+leader is for the operator doing the writing to be running the Part A image.
 
-Verify the scoped operator is running and the cluster-wide one is untouched, then continue.
+That leaves two ways to get a patched operator in front of the DynamoGraphDeployment, and only one
+is acceptable. Upgrading the cluster-wide operator in `dynamo-system` would put an unreviewed build
+in front of every team on this cluster. Instead, install a **second** operator scoped to
+`tzulingk-ft-tests`.
+
+### Why a second operator does not fight the first one
+
+The cluster-wide operator watches every namespace by default — confirmed on
+`dynamo-aws-dev-01`, whose operator config sets no restricted namespace. Left alone, two operators
+would both reconcile the same DGD and undo each other's work.
+
+Dynamo has a built-in handoff for this. An operator installed in restricted mode writes an
+*ownership Lease* into its namespace: a small object meaning "this namespace is mine, and the claim
+expires at time T". The cluster-wide operator runs a lease watcher and skips any namespace holding a
+valid claim ([`cmd/main.go:385-393`](../deploy/operator/cmd/main.go); the restricted side publishes
+the claim at [`cmd/main.go:337-350`](../deploy/operator/cmd/main.go)).
+
+```mermaid
+flowchart LR
+    CW["Cluster-wide operator<br/>(dynamo-system)"]
+    ALL["All other namespaces"]
+    LEASE["Ownership Lease<br/>in tzulingk-ft-tests"]
+    SC["Scoped operator<br/>(Part A image)"]
+    DGD["Your DynamoGraphDeployment"]
+
+    CW -->|reconciles| ALL
+    SC -->|publishes and renews| LEASE
+    LEASE -.->|lease watcher sees the claim,<br/>namespace is excluded| CW
+    SC -->|sole reconciler| DGD
+
+    classDef cw fill:#dbeafe,stroke:#60a5fa,color:#1e3a5f
+    classDef sc fill:#dcfce7,stroke:#4ade80,color:#14532d
+    classDef obj fill:#fef9c3,stroke:#facc15,color:#713f12
+    class CW,ALL cw
+    class SC sc
+    class LEASE,DGD obj
+```
+
+This mechanism is live on the target cluster — the deployed v1.3.0 operator logs
+`Namespace scope marker lease watcher started and cache synced` at startup. Confirm it yourself
+before installing anything:
+
+```bash
+kubectl -n dynamo-system logs deploy/dynamo-platform-dynamo-operator-controller-manager \
+  | grep -i 'lease watcher'
+```
+
+If that line is absent, stop: the handoff will not happen and the two operators really will fight.
+
+> [!WARNING]
+> Both the restricted mode and the lease mechanism are labelled development-and-testing-only, and
+> the implementing package is marked deprecated. Fine for a scratch namespace; do not build on it.
+
+### The three values that make the install safe
+
+| Value | Set to | Why |
+|---|---|---|
+| `dynamo-operator.namespaceRestriction.enabled` | `true` | Scopes reconciliation to one namespace and publishes the ownership Lease. |
+| `dynamo-operator.namespaceRestriction.targetNamespace` | `tzulingk-ft-tests` | The namespace being claimed. Defaults to the release namespace. |
+| `dynamo-operator.upgradeCRD` | **`false`** | **The one that matters.** Defaults to `true`, which makes the install push CRDs from its own image over the cluster's shared ones. |
+
+The third is the only genuine hazard in this procedure. CRDs are cluster-scoped and shared by
+everyone, so a restricted install must reuse the ones the cluster-wide operator manages rather than
+replace them ([`values.yaml:67-71`](../deploy/helm/charts/platform/values.yaml)).
+
+Reusing them is safe here because the cluster's CRDs are already new enough: the
+`DynamoGraphDeployment` schema on `dynamo-aws-dev-01` carries `scalingAdapter`, and the
+`dynamographdeploymentscalingadapters.nvidia.com` CRD exists. Nothing Part C needs is missing.
+
+Admission webhooks need no special handling. The chart registers namespace-scoped admission for a
+restricted install rather than the global admission it registers for a cluster-wide one, so other
+teams' DGDs are never routed through this operator
+([`values.yaml:241`](../deploy/helm/charts/platform/values.yaml)).
+
+### Install
+
+```bash
+helm upgrade --install dynamo-ep-test deploy/helm/charts/platform \
+  --namespace tzulingk-ft-tests \
+  --set dynamo-operator.namespaceRestriction.enabled=true \
+  --set dynamo-operator.namespaceRestriction.targetNamespace=tzulingk-ft-tests \
+  --set dynamo-operator.upgradeCRD=false \
+  --set dynamo-operator.controllerManager.manager.image.repository=$REGISTRY/tzulingk-dynamo-operator \
+  --set dynamo-operator.controllerManager.manager.image.tag=$TAG
+```
+
+The chart also bundles etcd and NATS. If the namespace already has them, add
+`--set global.etcd.install=false --set global.nats.install=false` and point the operator at the
+existing instances with `dynamo-operator.etcdAddr` / `dynamo-operator.natsAddr`, rather than
+installing a second copy of each.
+
+### Verify before creating any DynamoGraphDeployment
+
+Check three things, in order, and stop at the first failure:
+
+1. The scoped operator logs `Restricted namespace configured, launching in restricted mode` with
+   `tzulingk-ft-tests`.
+2. The ownership Lease exists: `kubectl -n tzulingk-ft-tests get lease`.
+3. The cluster-wide operator is untouched — same pod age and same image as before you started, and
+   its CRDs unchanged.
+
+### If you would rather not install an operator at all
+
+The operator change is a pure text transformation, and its correctness is already pinned by Go unit
+tests. What genuinely needs GPUs is the engine behaviour: whether a lone vLLM leader with a Ray head
+serves at all, and whether a pod joining later plus a `scale_elastic_ep` call works.
+
+None of that needs the operator. Render the leader command from the patched Go code, put it in an
+ordinary Deployment by hand, and run Part C's checks against that — no DGD, no operator, no shared
+state touched. The cost is that nothing proves the operator emits that command in a live cluster,
+which then rests on unit tests alone.
 
 ## Part C — run the test
 
