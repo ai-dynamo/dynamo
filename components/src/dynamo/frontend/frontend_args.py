@@ -89,6 +89,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
+    tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
 
@@ -550,6 +551,18 @@ class FrontendArgGroup(ArgGroup):
                 "Has no effect on TikToken models."
             ),
             choices=["default", "fastokens", "basetenkenizer"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tokenizer-fallback",
+            env_var="DYN_TOKENIZER_FALLBACK",
+            default=True,
+            help=(
+                "Fall back to HuggingFace when the selected fastokens or "
+                "basetenkenizer backend cannot load the model tokenizer. Disable "
+                "this option to fail during startup instead."
+            ),
         )
 
         add_negatable_bool_argument(

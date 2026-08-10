@@ -66,6 +66,8 @@ Stay on the default backend if:
 
     You can also set the same option with the `--tokenizer fastokens` frontend flag. The flag takes precedence when both settings are present.
 
+    To require `fastokens`, set `DYN_TOKENIZER_FALLBACK=false` or add `--no-tokenizer-fallback`. The frontend then reports an error during model initialization when `fastokens` cannot load the tokenizer instead of using HuggingFace.
+
     To return to the default HuggingFace tokenizer backend, set `DYN_TOKENIZER=default` or omit it. Changing the value requires the Frontend pod to be replaced, which `kubectl apply` does automatically.
 
     No client changes are required. Request payloads, OpenAI-compatible API behavior, and streamed responses remain the same.
@@ -86,7 +88,7 @@ Stay on the default backend if:
     Failed to load fastokens, falling back to HuggingFace
     ```
 
-    The fallback keeps the deployment healthy, but the model does not receive the `fastokens` speedup.
+    The default fallback keeps the deployment healthy, but the model does not receive the `fastokens` speedup. With tokenizer fallback disabled, the same loading failure stops model initialization.
   </Step>
 
   <Step title="Measure Your Workload">
@@ -115,7 +117,7 @@ Stay on the default backend if:
   - **Encoding**: `fastokens` converts prompt text to token IDs.
   - **Decoding**: HuggingFace `tokenizers` converts generated token IDs back to text.
 
-  Both backends load from the same `tokenizer.json`, so supported tokenizers should produce the same token IDs as the default HuggingFace path. If `fastokens` cannot load the tokenizer file, Dynamo logs a warning and falls back to the default backend instead of dropping requests.
+  Both backends load from the same `tokenizer.json`, so supported tokenizers should produce the same token IDs as the default HuggingFace path. If `fastokens` cannot load the tokenizer file, Dynamo logs a warning and falls back to the default backend. Set `--no-tokenizer-fallback` to make this loading failure stop model initialization.
 
   ```mermaid
   flowchart TD
@@ -135,7 +137,7 @@ Stay on the default backend if:
 | Tokenizer format | Behavior with `--tokenizer fastokens` |
 |---|---|
 | BPE `tokenizer.json` | Dynamo tries to encode with `fastokens` and decode with HuggingFace. |
-| BPE `tokenizer.json` with unsupported components | Dynamo logs a warning and falls back to HuggingFace. |
+| BPE `tokenizer.json` with unsupported components | Dynamo logs a warning and falls back to HuggingFace by default. With tokenizer fallback disabled, model initialization fails. |
 | TikToken `.model` or `.tiktoken` | Unchanged. Dynamo uses the existing TikToken backend. |
 
 `fastokens` targets BPE tokenizer pipelines. It is focused on inference and does not support every HuggingFace `tokenizers` feature; additional encoding outputs and some normalizers or pre-tokenizers are not available.
@@ -152,7 +154,7 @@ For any new model, validate on representative prompts before rolling out broadly
   </Accordion>
 
   <Accordion title="Why did fastokens fall back to HuggingFace?">
-    The model's tokenizer file uses a feature that `fastokens` does not support, or it is not a BPE `tokenizer.json` path. Dynamo has already fallen back to HuggingFace and should keep serving traffic. Check the tokenizer format, compare it against the [tested models list](https://github.com/crusoecloud/fastokens#tested-models), and use `--tokenizer default` to avoid the warning.
+    The model's tokenizer file uses a feature that `fastokens` does not support, or it is not a BPE `tokenizer.json` path. Dynamo has already fallen back to HuggingFace and should keep serving traffic. Check the tokenizer format, compare it against the [tested models list](https://github.com/crusoecloud/fastokens#tested-models), and use `--tokenizer default` to avoid the warning. For a deployment that requires `fastokens`, use `--no-tokenizer-fallback` so an unsupported tokenizer fails during model initialization.
   </Accordion>
 
   <Accordion title="Why do the logs show an unrecognized DYN_TOKENIZER value?">

@@ -32,6 +32,7 @@ use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
     bytes.extend_from_slice(b"dynamo/model-card/indexer-identity/v1");
@@ -60,6 +61,12 @@ fn append_framed_identity_value(bytes: &mut Vec<u8>, value: &[u8]) {
 
 fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
+}
+
+fn is_tokenizer_fallback_enabled(value: Option<&str>) -> bool {
+    value
+        .and_then(dynamo_runtime::config::parse_bool_opt)
+        .unwrap_or(true)
 }
 
 fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
@@ -1197,6 +1204,8 @@ impl ModelDeploymentCard {
     /// Tokenizer backend controls:
     /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
     /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
+    /// - `DYN_TOKENIZER_FALLBACK=0` — fail if the selected alternate backend cannot load
+    ///   instead of falling back to HuggingFace (fallback is enabled by default)
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
@@ -1207,6 +1216,8 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
+        let is_fallback_enabled =
+            is_tokenizer_fallback_enabled(std::env::var(ENV_TOKENIZER_FALLBACK).ok().as_deref());
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
@@ -1297,6 +1308,11 @@ impl ModelDeploymentCard {
                                     Arc::new(fast)
                                 }
                                 Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load fastokens tokenizer backend and fallback is disabled",
+                                        );
+                                    }
                                     tracing::warn!(
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
@@ -1305,6 +1321,12 @@ impl ModelDeploymentCard {
                                 }
                             }
                         } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load fastokens tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
                             tracing::warn!(
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
@@ -1320,6 +1342,11 @@ impl ModelDeploymentCard {
                                     Arc::new(baseten)
                                 }
                                 Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load basetenkenizer tokenizer backend and fallback is disabled",
+                                        );
+                                    }
                                     tracing::warn!(
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
@@ -1328,6 +1355,12 @@ impl ModelDeploymentCard {
                                 }
                             }
                         } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load basetenkenizer tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
                             tracing::warn!(
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
