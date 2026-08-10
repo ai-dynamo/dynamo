@@ -233,7 +233,7 @@ normalization downstream.
 Also supports the NIXL decoded variant for frontend-decoded audio
 transferred via RDMA.
 
-[`components/src/dynamo/common/multimodal/audio_loader.py#L70`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L70)
+[`components/src/dynamo/common/multimodal/audio_loader.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L74)
 
 **Public methods**
 
@@ -245,7 +245,7 @@ __init__(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L84)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L88)
 
 <h4 id="api-dynamo-common-multimodal-audio-loader-audioloader-load-audio">load_audio</h4>
 
@@ -258,7 +258,7 @@ Load audio from a URL and return a (waveform, sample_rate) tuple.
 Supports http(s), data: URIs, file:// paths, and bare filesystem paths.
 Audio is loaded at the native sample rate — no resampling is performed.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L136)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L140)
 
 <h4 id="api-dynamo-common-multimodal-audio-loader-audioloader-load-audio-batch">load_audio_batch</h4>
 
@@ -277,7 +277,7 @@ Supports two paths:
 
 - `List[tuple[np.ndarray, float]]` — List of (waveform, sample_rate) tuples.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L180)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L192)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-baseengine" title="BaseEngine (class)">
@@ -2025,7 +2025,7 @@ from dynamo.common.multimodal import VideoLoader
 VideoLoader(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None
 ```
 
-[`components/src/dynamo/common/multimodal/video_loader.py#L85`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L85)
+[`components/src/dynamo/common/multimodal/video_loader.py#L89`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L89)
 
 **Public methods**
 
@@ -2037,7 +2037,7 @@ __init__(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enabl
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L88)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L92)
 
 <h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video">load_video</h4>
 
@@ -2057,7 +2057,7 @@ load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray,
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L226)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L232)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">

@@ -638,7 +638,7 @@ export const ARTIFACTS: Artifact[] = [
     group: "component",
     name: "snapshot-agent",
     description: "Fast GPU worker recovery via CRIU",
-    meta: "AMD64/ARM64",
+    meta: "AMD64",
     href: `${NGC_C}/snapshot-agent/tags`,
     badge: "Preview",
     tags: [{ label: "1.3.1", clipboard: "nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.3.1" }],
