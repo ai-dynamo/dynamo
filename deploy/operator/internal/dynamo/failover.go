@@ -18,8 +18,10 @@
 package dynamo
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -30,6 +32,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
@@ -387,9 +390,9 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 // ──────────────────────────────────────────────────────────────────────────────
 // Intra-pod GMS failover (Mode: intraPod)
 //
-// The main container is cloned into two engine containers (active + standby)
-// within the same pod. GPU access is shared via DRA and a GMS sidecar
-// injects weights via the shared emptyDir volume.
+// The main container is cloned into active and standby engine containers within
+// the same pod. GPU access is shared via DRA and a GMS sidecar injects weights
+// via the shared emptyDir volume.
 // ──────────────────────────────────────────────────────────────────────────────
 
 // intraPodFailoverLockFile is the lock file path used by engine containers to
@@ -397,8 +400,305 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 var intraPodFailoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failover.lock")
 
 const (
-	failoverEngineCount = 2
+	failoverEngineCount                    = 2
+	vllmModuleName                         = "dynamo.vllm"
+	vllmLoadFormatFlag                     = "--load-format"
+	vllmWorkerClassFlag                    = "--worker-cls"
+	gmsV0VLLMWorkerClass                   = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+	gmsV0VLLMWorkerClassAlt                = "gpu_memory_service.integrations.vllm.worker:GMSWorker"
+	gmsV1VLLMWorkerClass                   = "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint"
 )
+
+// IsDGDControlled reports whether a DCD has an exact DynamoGraphDeployment
+// controller reference. Admission separately verifies the request principal.
+func IsDGDControlled(dcd *v1beta1.DynamoComponentDeployment) bool {
+	if dcd == nil {
+		return false
+	}
+	owner := metav1.GetControllerOf(dcd)
+	return owner != nil &&
+		owner.APIVersion == v1beta1.GroupVersion.String() &&
+		owner.Kind == "DynamoGraphDeployment" &&
+		owner.Name != "" &&
+		owner.UID != ""
+}
+
+// ValidateAutomaticFailoverCheckpointSource validates the DGD component that
+// produces the one canonical checkpoint source.
+func ValidateAutomaticFailoverCheckpointSource(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework string,
+) []error {
+	if !hasCheckpointFailover(component) {
+		return nil
+	}
+	violations := validateAutomaticFailoverCheckpointProfile(component, backendFramework)
+	config := component.Experimental.Checkpoint
+	if config.CheckpointRef != nil && *config.CheckpointRef != "" {
+		violations = append(violations, errors.New("checkpointRef must be omitted so the DGD owns the automatic checkpoint"))
+	}
+	return wrapFailoverCompatibilityViolations(violations)
+}
+
+// ValidateAutomaticFailoverCheckpointTarget validates the DCD that restores
+// the DGD-owned checkpoint into the configured failover engines.
+func ValidateAutomaticFailoverCheckpointTarget(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework string,
+	operatorGenerated bool,
+) []error {
+	if !hasCheckpointFailover(component) {
+		return nil
+	}
+	violations := validateAutomaticFailoverCheckpointProfile(component, backendFramework)
+	if !operatorGenerated {
+		violations = append(violations, errors.New("checkpoint failover is only supported for an operator-generated DCD"))
+	}
+	config := component.Experimental.Checkpoint
+	if config.CheckpointRef == nil || *config.CheckpointRef == "" {
+		violations = append(violations, errors.New("checkpointRef must name the DGD-owned automatic checkpoint"))
+	}
+	return wrapFailoverCompatibilityViolations(violations)
+}
+
+func hasCheckpointFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return component != nil &&
+		component.Experimental != nil &&
+		component.Experimental.Checkpoint != nil &&
+		component.Experimental.Checkpoint.Enabled &&
+		(component.Experimental.GPUMemoryService == nil ||
+			component.Experimental.GPUMemoryService.Mode != v1beta1.GMSModeInterPod) &&
+		IsIntraPodFailoverEnabled(component)
+}
+
+func validateAutomaticFailoverCheckpointProfile(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework string,
+) []error {
+	experimental := component.Experimental
+	config := experimental.Checkpoint
+	violations := make([]error, 0, 12)
+
+	if config.Mode != "" && config.Mode != v1beta1.CheckpointModeAuto {
+		violations = append(violations, errors.New("checkpoint mode must be automatic"))
+	}
+	if config.DeletionPolicy != "" && config.DeletionPolicy != v1beta1.CheckpointDeletionPolicyDelete {
+		violations = append(violations, errors.New("deletionPolicy must be Delete"))
+	}
+	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
+		violations = append(violations, errors.New("targetContainerName must be main"))
+	}
+	if BackendFramework(backendFramework) != BackendFrameworkVLLM {
+		violations = append(violations, errors.New("backendFramework must be vllm"))
+	}
+	if component.ComponentType != v1beta1.ComponentTypeWorker {
+		violations = append(violations, errors.New("component type must be Worker"))
+	}
+	if experimental.GPUMemoryService == nil ||
+		(experimental.GPUMemoryService.Mode != "" &&
+			experimental.GPUMemoryService.Mode != v1beta1.GMSModeIntraPod) {
+		violations = append(violations, errors.New("gpuMemoryService.mode must be IntraPod"))
+	}
+	if !IsIntraPodFailoverEnabled(component) {
+		violations = append(violations, errors.New("failover.mode must be IntraPod"))
+	}
+	if experimental.Failover.NumShadows < 0 || experimental.Failover.NumShadows > 2 {
+		violations = append(violations, errors.New("failover.numShadows must be 1 or 2"))
+	}
+	if component.GetNumberOfNodes() != 1 {
+		violations = append(violations, errors.New("worker must use exactly one node"))
+	}
+
+	main := GetMainContainer(component)
+	if main == nil {
+		return append(violations, errors.New("podTemplate must contain the main container"))
+	}
+	gpuCount, err := getGPUCount(main.Resources)
+	if err != nil {
+		violations = append(violations, fmt.Errorf("main container GPU resources are invalid: %w", err))
+	} else if gpuCount != 1 {
+		violations = append(violations, errors.New("main container must request exactly one GPU"))
+	}
+	if err := configureVLLMAutomaticSnapshotLoadProfile(main.DeepCopy()); err != nil {
+		violations = append(violations, err)
+		return violations
+	}
+	for _, profile := range []struct {
+		flag         string
+		defaultValue string
+		want         string
+		description  string
+	}{
+		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
+		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
+		{flag: tensorParallelSizeFlag, defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+		{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+		{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+	} {
+		value, _, _, found, err := tokenizedVLLMFlag(main.Args, profile.flag)
+		if err != nil {
+			violations = append(violations, err)
+			continue
+		}
+		if !found {
+			value = profile.defaultValue
+		}
+		if value != profile.want {
+			violations = append(violations, fmt.Errorf("%s (got %q)", profile.description, value))
+		}
+	}
+	return violations
+}
+
+func wrapFailoverCompatibilityViolations(violations []error) []error {
+	if len(violations) == 0 {
+		return nil
+	}
+	return []error{fmt.Errorf("%s: %w", checkpointFailoverCompatibilityMessage, errors.Join(violations...))}
+}
+
+// PrepareVLLMAutomaticFailoverSnapshotSource applies only checkpoint-source
+// changes to the canonical main container. Destination engine topology is
+// added later when the DGD worker pod is rendered.
+func PrepareVLLMAutomaticFailoverSnapshotSource(container *corev1.Container) error {
+	if container == nil {
+		return fmt.Errorf("automatic failover snapshot source container is nil")
+	}
+	updated := container.DeepCopy()
+	removeEnvVar(updated, "DYN_FORWARDPASS_METRIC_PORT")
+	updated.Env = MergeEnvs(updated.Env, []corev1.EnvVar{
+		{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "false"},
+		{Name: "DYN_VLLM_DISAGGREGATION_MODE", Value: "agg"},
+		{Name: "DYN_REQUEST_PLANE", Value: "tcp"},
+	})
+	if err := configureVLLMAutomaticSnapshotLoadProfile(updated); err != nil {
+		return fmt.Errorf("automatic failover snapshot source: %w", err)
+	}
+	*container = *updated
+	return nil
+}
+
+func configureVLLMAutomaticSnapshotLoadProfile(container *corev1.Container) error {
+	if !isDirectDynamoVLLMCommand(container) {
+		return fmt.Errorf(
+			"requires a direct python -m %s command with tokenized arguments (command=%q args=%q)",
+			vllmModuleName,
+			container.Command,
+			container.Args,
+		)
+	}
+	if slices.Contains(container.Args, "--") {
+		return fmt.Errorf("arguments after -- are unsupported")
+	}
+
+	workerClass, _, _, _, err := tokenizedVLLMFlag(container.Args, vllmWorkerClassFlag)
+	if err != nil {
+		return err
+	}
+	switch workerClass {
+	case gmsV1VLLMWorkerClass:
+		loadFormat, _, _, found, err := tokenizedVLLMFlag(container.Args, vllmLoadFormatFlag)
+		if err != nil {
+			return err
+		}
+		if found && loadFormat != "auto" {
+			return fmt.Errorf("%s %s requires %s auto", vllmWorkerClassFlag, gmsV1VLLMWorkerClass, vllmLoadFormatFlag)
+		}
+		return nil
+	case "", "auto", gmsV0VLLMWorkerClass, gmsV0VLLMWorkerClassAlt:
+		args, err := upsertTokenizedVLLMFlag(container.Args, vllmLoadFormatFlag, "gms")
+		if err != nil {
+			return err
+		}
+		container.Args = args
+		return nil
+	default:
+		return fmt.Errorf("%s %q is unsupported for automatic snapshot failover", vllmWorkerClassFlag, workerClass)
+	}
+}
+
+func isDirectDynamoVLLMCommand(container *corev1.Container) bool {
+	args := container.Args
+	switch {
+	case len(container.Command) == 0 &&
+		len(args) >= 3 &&
+		isPythonCommand(args[0]) &&
+		args[1] == "-m" &&
+		args[2] == vllmModuleName:
+		return true
+	case len(container.Command) == 1 &&
+		isPythonCommand(container.Command[0]) &&
+		len(args) >= 2 &&
+		args[0] == "-m" &&
+		args[1] == vllmModuleName:
+		return true
+	case len(container.Command) == 3 &&
+		isPythonCommand(container.Command[0]) &&
+		container.Command[1] == "-m" &&
+		container.Command[2] == vllmModuleName:
+		return true
+	default:
+		return false
+	}
+}
+
+func tokenizedVLLMFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
+	index = -1
+	for i, arg := range args {
+		switch {
+		case arg == flag:
+			if found {
+				return "", -1, false, false, fmt.Errorf("%s must appear at most once", flag)
+			}
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return "", -1, false, false, fmt.Errorf("%s requires a value", flag)
+			}
+			value, index, found = args[i+1], i, true
+		case strings.HasPrefix(arg, flag+"="):
+			if found {
+				return "", -1, false, false, fmt.Errorf("%s must appear at most once", flag)
+			}
+			value = strings.TrimPrefix(arg, flag+"=")
+			if value == "" {
+				return "", -1, false, false, fmt.Errorf("%s requires a value", flag)
+			}
+			index, equalsForm, found = i, true, true
+		}
+	}
+	return value, index, equalsForm, found, nil
+}
+
+func upsertTokenizedVLLMFlag(args []string, flag, value string) ([]string, error) {
+	_, index, equalsForm, found, err := tokenizedVLLMFlag(args, flag)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !found:
+		args = append(args, flag, value)
+	case equalsForm:
+		args[index] = flag + "=" + value
+	default:
+		args[index+1] = value
+	}
+	return args, nil
+}
+
+func configureCheckpointFailoverEngines(
+	podSpec *corev1.PodSpec,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) {
+	engineNames := IntraPodFailoverEngineContainerNames(component)
+	for i := range podSpec.Containers {
+		if slices.Contains(engineNames, podSpec.Containers[i].Name) {
+			podSpec.Containers[i].Env = MergeEnvs(podSpec.Containers[i].Env, []corev1.EnvVar{
+				{Name: "DYN_VLLM_DISAGGREGATION_MODE", Value: "agg"},
+				{Name: "DYN_REQUEST_PLANE", Value: "tcp"},
+			})
+		}
+	}
+}
 
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
@@ -413,15 +713,28 @@ func IsIntraPodFailoverEnabled(component *v1beta1.DynamoComponentDeploymentShare
 	return mode == "" || mode == v1beta1.GMSModeIntraPod
 }
 
-func IntraPodFailoverEngineContainerNames() []string {
-	names := make([]string, 0, failoverEngineCount)
-	for i := 0; i < failoverEngineCount; i++ {
+func IntraPodFailoverEngineContainerNames(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) []string {
+	if !IsIntraPodFailoverEnabled(component) {
+		return nil
+	}
+	numShadows := component.Experimental.Failover.NumShadows
+	if numShadows == 0 {
+		numShadows = 1
+	}
+	if numShadows < 1 || numShadows > 2 {
+		return nil
+	}
+	engineCount := int(numShadows) + 1
+	names := make([]string, 0, engineCount)
+	for i := 0; i < engineCount; i++ {
 		names = append(names, fmt.Sprintf("engine-%d", i))
 	}
 	return names
 }
 
-// buildFailoverPod clones the main container into two engine containers (active + standby).
+// buildFailoverPod clones the main container into active and standby engine containers.
 // This runs AFTER applyGPUMemoryService, so the main container already has DRA claims,
 // shared volume mount, and TMPDIR set. This function only handles engine duplication
 // and failover-specific env vars.
@@ -431,29 +744,37 @@ func buildFailoverPod(
 	podSpec *corev1.PodSpec,
 	numberOfNodes int32,
 	backendFramework BackendFramework,
+	engineCount int,
 ) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
+	}
+	if engineCount < failoverEngineCount || engineCount > failoverEngineCount+1 {
+		return fmt.Errorf("intra-pod failover supports one or two shadows")
 	}
 
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
 
-	engines := make([]corev1.Container, failoverEngineCount)
-	for i := range failoverEngineCount {
+	engines := make([]corev1.Container, engineCount)
+	for i := range engineCount {
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}
 
-	podSpec.Containers = append(engines, sidecars...)
+	updated := podSpec.DeepCopy()
+	updated.Containers = append(engines, sidecars...)
 
 	// Backend-specific overrides
 	switch backendFramework {
 	case BackendFrameworkVLLM:
-		applyVLLMOverrides(podSpec, numberOfNodes)
+		if err := applyVLLMOverrides(updated, numberOfNodes); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
 	}
 
+	*podSpec = *updated
 	return nil
 }
 

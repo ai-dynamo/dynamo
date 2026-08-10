@@ -214,7 +214,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="failover" type="FailoverSpec">
-  Configures active-passive GPU failover for a worker component. The `main` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+  Configures active-passive GPU failover for a worker component. In `IntraPod` mode, the `main` container is cloned into one active and one or two standby engine containers sharing GPUs through DRA. Standbys acquire the flock after the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
 </ParamField>
 
 <Indent>
@@ -224,7 +224,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>IntraPod</Badge> <Badge intent="note" minimal>InterPod</Badge></span>
   </ParamField>
   <ParamField path="numShadows" type="integer" default="1">
-    Number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow. Minimum `1`, maximum `1`.
+    Number of shadow (standby) engines per rank. `IntraPod` mode supports `1` or `2`. In `InterPod` mode, each rank has one primary plus `numShadows` shadow engine pods.
   </ParamField>
 </Indent>
 

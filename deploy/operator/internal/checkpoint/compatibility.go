@@ -13,7 +13,6 @@ import (
 
 const (
 	checkpointInterPodCompatibilityMessage = "Snapshot with gpuMemoryService.mode=InterPod is unsupported"
-	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover is temporarily unsupported"
 )
 
 // ValidateCheckpointCompatibility returns unsupported checkpoint combinations
@@ -28,9 +27,6 @@ func ValidateCheckpointCompatibility(experimental *nvidiacomv1beta1.Experimental
 	if experimental.GPUMemoryService != nil &&
 		experimental.GPUMemoryService.Mode == nvidiacomv1beta1.GMSModeInterPod {
 		violations = append(violations, errors.New(checkpointInterPodCompatibilityMessage))
-	}
-	if experimental.Failover != nil {
-		violations = append(violations, errors.New(checkpointFailoverCompatibilityMessage))
 	}
 
 	return violations

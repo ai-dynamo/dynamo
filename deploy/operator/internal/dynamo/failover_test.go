@@ -32,8 +32,11 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -597,7 +600,7 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 
 func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	// 2 engines + 1 preserved sidecar
@@ -609,14 +612,14 @@ func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
 func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang, failoverEngineCount)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "currently supported only for vLLM")
 }
@@ -624,7 +627,7 @@ func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	t.Log("Verify each engine keeps container discovery and receives its own container identity")
@@ -648,7 +651,7 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 
 func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -663,7 +666,7 @@ func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 
 func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -683,7 +686,7 @@ func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 
 func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -695,7 +698,7 @@ func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 
 func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -706,7 +709,7 @@ func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 
 func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -717,7 +720,7 @@ func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 
 func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -725,6 +728,210 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 		_, has := env["NNODES"]
 		assert.False(t, has, "engine-%d should not have NNODES for single-node", i)
 	}
+}
+
+func TestBuildFailoverPod_ThreeEnginesUseUniquePorts(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Args = []string{"-m", vllmModuleName, vllmMasterPortFlag + "=30000"}
+
+	require.NoError(t, buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount+1))
+	require.Len(t, ps.Containers, failoverEngineCount+2)
+
+	used := map[int]string{}
+	for i := range failoverEngineCount + 1 {
+		engine := ps.Containers[i]
+		assert.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
+		env := envToMap(engine.Env)
+		masterPort, found, err := tokenizedVLLMMasterPort(&engine)
+		require.NoError(t, err)
+		require.True(t, found)
+		for name, value := range map[string]string{
+			"system":              env["DYN_SYSTEM_PORT"],
+			"forward-pass metric": env["DYN_FORWARDPASS_METRIC_PORT"],
+			"NIXL side channel":   env["VLLM_NIXL_SIDE_CHANNEL_PORT"],
+			"KV event":            env["DYN_VLLM_KV_EVENT_PORT"],
+			"vLLM master":         strconv.Itoa(masterPort),
+		} {
+			port, err := strconv.Atoi(value)
+			require.NoError(t, err)
+			assert.Empty(t, used[port], "%s port %d collides with %s", name, port, used[port])
+			used[port] = fmt.Sprintf("engine-%d %s", i, name)
+		}
+	}
+	assert.Equal(t, "frontend-sidecar", ps.Containers[failoverEngineCount+1].Name)
+}
+
+func TestBuildFailoverPod_RejectsUnsupportedCountsAndMasterPorts(t *testing.T) {
+	for _, engineCount := range []int{failoverEngineCount - 1, failoverEngineCount + 2} {
+		ps := intraPodFailoverPodSpec()
+		before := ps.DeepCopy()
+		require.ErrorContains(
+			t,
+			buildFailoverPod(&ps, 1, BackendFrameworkVLLM, engineCount),
+			"supports one or two shadows",
+		)
+		assert.Equal(t, before, &ps)
+	}
+
+	for _, masterPort := range []string{"invalid", "65500", strconv.Itoa(commonconsts.DynamoSystemPort)} {
+		ps := intraPodFailoverPodSpec()
+		ps.Containers[0].Args = []string{vllmMasterPortFlag, masterPort}
+		before := ps.DeepCopy()
+		require.Error(t, buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount+1))
+		assert.Equal(t, before, &ps)
+	}
+
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Command = []string{"/bin/sh", "-c"}
+	ps.Containers[0].Args = []string{"python3 -m dynamo.vllm"}
+	before := ps.DeepCopy()
+	require.ErrorContains(
+		t,
+		buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount+1),
+		"cannot inject a unique --master-port",
+	)
+	assert.Equal(t, before, &ps)
+}
+
+func TestBuildFailoverPod_OneShadowPreservesShellWrappedMasterPort(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Command = []string{"sh", "-c"}
+	ps.Containers[0].Args = []string{"python3 -m dynamo.vllm --master-port 30000"}
+
+	require.NoError(t, buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount))
+	require.Len(t, ps.Containers, failoverEngineCount+1)
+	assert.Equal(t, "python3 -m dynamo.vllm --master-port 30000", ps.Containers[0].Args[0])
+	assert.Equal(t, "python3 -m dynamo.vllm --master-port 30100", ps.Containers[1].Args[0])
+}
+
+func TestBuildFailoverPod_MasterPortAcrossCommandArgsBoundary(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Command = []string{"python3", "-m", vllmModuleName, vllmMasterPortFlag}
+	ps.Containers[0].Args = []string{"30000"}
+
+	require.NoError(t, buildFailoverPod(&ps, 1, BackendFrameworkVLLM, failoverEngineCount+1))
+	for i := range failoverEngineCount + 1 {
+		port, found, err := tokenizedVLLMMasterPort(&ps.Containers[i])
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, 30000+i*vllmMasterPortStride, port)
+	}
+}
+
+func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
+	component := validAutomaticFailoverComponent()
+
+	t.Run("accepts DGD source and generated DCD target", func(t *testing.T) {
+		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(component, string(BackendFrameworkVLLM)))
+
+		target := component.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		require.Empty(t, ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkVLLM), true))
+
+		twoShadows := component.DeepCopy()
+		twoShadows.Experimental.Failover.NumShadows = 2
+		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(twoShadows, string(BackendFrameworkVLLM)))
+	})
+
+	t.Run("rejects unsupported shadow counts", func(t *testing.T) {
+		for _, count := range []int32{-1, 3} {
+			invalid := component.DeepCopy()
+			invalid.Experimental.Failover.NumShadows = count
+			violations := ValidateAutomaticFailoverCheckpointSource(invalid, string(BackendFrameworkVLLM))
+			require.Len(t, violations, 1)
+			assert.ErrorContains(t, violations[0], "failover.numShadows must be 1 or 2")
+		}
+	})
+
+	t.Run("rejects standalone target and incompatible runtime profile", func(t *testing.T) {
+		target := component.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		target.PodTemplate.Spec.Containers[0].Args = []string{
+			"-m", vllmModuleName,
+			"--disaggregation-mode", "decode",
+			"--request-plane=nats",
+			"--tensor-parallel-size", "2",
+			"--pipeline-parallel-size=2",
+			"--data-parallel-size", "2",
+		}
+
+		violations := ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkVLLM), false)
+		require.Len(t, violations, 1)
+		for _, message := range []string{
+			"only supported for an operator-generated DCD",
+			"disaggregation mode must be aggregated",
+			"request plane must be tcp",
+			"tensor parallel size must be 1",
+			"pipeline parallel size must be 1",
+			"data parallel size must be 1",
+		} {
+			assert.ErrorContains(t, violations[0], message)
+		}
+	})
+
+	t.Run("rejects a referenced DGD source", func(t *testing.T) {
+		source := component.DeepCopy()
+		source.Experimental.Checkpoint.CheckpointRef = ptr.To("foreign")
+		violations := ValidateAutomaticFailoverCheckpointSource(source, string(BackendFrameworkVLLM))
+		require.Len(t, violations, 1)
+		assert.ErrorContains(t, violations[0], "checkpointRef must be omitted")
+	})
+}
+
+func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
+	t.Run("shapes only the source load profile and listeners", func(t *testing.T) {
+		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+		container.Env = []corev1.EnvVar{
+			{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "9100"},
+			{Name: "KEEP_ME", Value: "yes"},
+			{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
+		}
+
+		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
+		env := envToMap(container.Env)
+		assert.NotContains(t, env, "DYN_FORWARDPASS_METRIC_PORT")
+		assert.Equal(t, "false", env["DYN_VLLM_GMS_SHADOW_MODE"])
+		assert.Equal(t, "agg", env["DYN_VLLM_DISAGGREGATION_MODE"])
+		assert.Equal(t, "tcp", env["DYN_REQUEST_PLANE"])
+		assert.Equal(t, "yes", env["KEEP_ME"])
+		assert.Equal(t, "gms", vllmFlagValue(t, container.Args, vllmLoadFormatFlag))
+	})
+
+	t.Run("leaves the source unchanged on an unsupported worker", func(t *testing.T) {
+		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+		container.Args = append(container.Args, vllmWorkerClassFlag, "unsupported.Worker")
+		original := container.DeepCopy()
+
+		require.Error(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
+		assert.Equal(t, *original, container)
+	})
+
+	t.Run("preserves the GMS V1 automatic load format", func(t *testing.T) {
+		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+		container.Args = append(
+			container.Args,
+			vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+			vllmLoadFormatFlag, "auto",
+		)
+
+		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
+		assert.Equal(t, "auto", vllmFlagValue(t, container.Args, vllmLoadFormatFlag))
+	})
+}
+
+func TestIsDGDControlled(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", UID: types.UID("graph-uid")},
+	}
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+		}},
+	}
+	assert.True(t, IsDGDControlled(dcd))
+
+	dcd.OwnerReferences[0].UID = ""
+	assert.False(t, IsDGDControlled(dcd))
 }
 
 // --- IsIntraPodFailoverEnabled ---
@@ -744,12 +951,58 @@ func TestIsIntraPodFailoverEnabled(t *testing.T) {
 }
 
 func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
-	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
+	component := validAutomaticFailoverComponent()
+	for _, tt := range []struct {
+		name       string
+		numShadows int32
+		want       []string
+	}{
+		{name: "default", want: []string{"engine-0", "engine-1"}},
+		{name: "one shadow", numShadows: 1, want: []string{"engine-0", "engine-1"}},
+		{name: "two shadows", numShadows: 2, want: []string{"engine-0", "engine-1", "engine-2"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			component.Experimental.Failover.NumShadows = tt.numShadows
+			assert.Equal(t, tt.want, IntraPodFailoverEngineContainerNames(component))
+		})
+	}
+	assert.Nil(t, IntraPodFailoverEngineContainerNames(nil))
+	component.Experimental.Failover.NumShadows = 3
+	assert.Nil(t, IntraPodFailoverEngineContainerNames(component))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedSpec {
+	return &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    commonconsts.MainContainerName,
+				Command: []string{"python3"},
+				Args:    []string{"-m", vllmModuleName},
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName("nvidia.com/gpu"): k8sresource.MustParse("1"),
+				}},
+			}},
+		}},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+			Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod, NumShadows: 1},
+		},
+	}
+}
+
+func vllmFlagValue(t *testing.T, args []string, flag string) string {
+	t.Helper()
+	value, _, _, found, err := tokenizedVLLMFlag(args, flag)
+	require.NoError(t, err)
+	require.True(t, found)
+	return value
+}
 
 func hasToleration(podSpec *corev1.PodSpec, key string) bool {
 	for _, t := range podSpec.Tolerations {

@@ -16,7 +16,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	admissionv1 "k8s.io/api/admission/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,12 +27,20 @@ import (
 
 func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocheckpoints.yaml")
+	const (
+		operatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
+		plannerPrincipal  = "system:serviceaccount:dynamo-system:dynamo-planner"
+		ordinaryUser      = "checkpoint-user"
+	)
 
 	tests := []struct {
 		name               string
 		checkpoint         *nvidiacomv1alpha1.DynamoCheckpoint
 		oldCheckpoint      *nvidiacomv1alpha1.DynamoCheckpoint
 		mutateRequest      func(*testing.T, map[string]any)
+		username           string
+		operatorPrincipal  string
+		omitAdmission      bool
 		checkpointDisabled bool
 		wantSchemaErr      string
 		wantCELErr         string
@@ -43,13 +53,65 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint: dynamoCheckpointForAdmission(nil),
 		},
 		{
-			name:       "missing identity is rejected by source schema",
-			checkpoint: dynamoCheckpointForAdmission(nil),
-			mutateRequest: func(t *testing.T, request map[string]any) {
-				t.Helper()
-				delete(request["spec"].(map[string]any), "identity")
+			name: "standalone checkpoint requires identity",
+			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Spec.Identity = nil
+			}),
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
 			},
-			wantSchemaErr: "spec.identity: Required value",
+		},
+		{
+			name:              "operator may create identity-free automatic checkpoint",
+			checkpoint:        automaticDynamoCheckpointForAdmission(nil),
+			username:          operatorPrincipal,
+			operatorPrincipal: operatorPrincipal,
+		},
+		{
+			name:              "ordinary user cannot forge automatic checkpoint marker",
+			checkpoint:        automaticDynamoCheckpointForAdmission(nil),
+			username:          ordinaryUser,
+			operatorPrincipal: operatorPrincipal,
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
+			},
+		},
+		{
+			name:              "planner cannot create identity-free automatic checkpoint",
+			checkpoint:        automaticDynamoCheckpointForAdmission(nil),
+			username:          plannerPrincipal,
+			operatorPrincipal: operatorPrincipal,
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
+			},
+		},
+		{
+			name:       "empty operator principal rejects identity omission",
+			checkpoint: automaticDynamoCheckpointForAdmission(nil),
+			username:   operatorPrincipal,
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
+			},
+		},
+		{
+			name:              "missing admission request rejects identity omission",
+			checkpoint:        automaticDynamoCheckpointForAdmission(nil),
+			operatorPrincipal: operatorPrincipal,
+			omitAdmission:     true,
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
+			},
+		},
+		{
+			name: "operator cannot omit identity without automatic marker",
+			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Spec.Identity = nil
+			}),
+			username:          operatorPrincipal,
+			operatorPrincipal: operatorPrincipal,
+			wantWebhook: []string{
+				"spec.identity: Required value: is required for a standalone checkpoint",
+			},
 		},
 		{
 			name: "unsupported GMS mode is rejected by source schema",
@@ -170,6 +232,55 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint:    preparedDynamoCheckpointForAdmission(nil),
 		},
 		{
+			name:              "operator may update identity-free automatic checkpoint",
+			oldCheckpoint:     automaticDynamoCheckpointForAdmission(nil),
+			checkpoint:        automaticDynamoCheckpointForAdmission(nil),
+			username:          operatorPrincipal,
+			operatorPrincipal: operatorPrincipal,
+		},
+		{
+			name: "legacy automatic identity is preserved on update",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				checkpoint.Spec.Identity = &identity
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				checkpoint.Spec.Identity = &identity
+			}),
+		},
+		{
+			name: "legacy automatic identity cannot be changed",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				checkpoint.Spec.Identity = &identity
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				identity.Model = alternateAdmissionModel
+				checkpoint.Spec.Identity = &identity
+			}),
+			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
+		},
+		{
+			name: "legacy automatic identity cannot be removed",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				checkpoint.Spec.Identity = &identity
+			}),
+			checkpoint: automaticDynamoCheckpointForAdmission(nil),
+			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
+		},
+		{
+			name:          "identity cannot be added to identity-free checkpoint",
+			oldCheckpoint: automaticDynamoCheckpointForAdmission(nil),
+			checkpoint: automaticDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				identity := admissionCheckpointIdentity()
+				checkpoint.Spec.Identity = &identity
+			}),
+			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
+		},
+		{
 			name:               "checkpoint feature gate applies on update",
 			oldCheckpoint:      dynamoCheckpointForAdmission(nil),
 			checkpoint:         dynamoCheckpointForAdmission(nil),
@@ -183,6 +294,14 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			oldCheckpoint: dynamoCheckpointForAdmission(nil),
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
 				checkpoint.Spec.Identity.Model = alternateAdmissionModel
+			}),
+			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
+		},
+		{
+			name:          "identity removal is rejected by source CEL",
+			oldCheckpoint: dynamoCheckpointForAdmission(nil),
+			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Spec.Identity = nil
 			}),
 			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
 		},
@@ -258,8 +377,15 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 				t.Fatalf("CEL errors = %v, want none", celErrs)
 			}
 
-			handler := NewDynamoCheckpointHandler()
-			ctx := dgdAdmissionContext(dynamoCheckpointAdmissionOperation(tt.oldCheckpoint), nvidiacomv1alpha1.GroupVersion.WithKind("DynamoCheckpoint"))
+			handler := NewDynamoCheckpointHandler(tt.operatorPrincipal)
+			ctx := t.Context()
+			if !tt.omitAdmission {
+				ctx = dgdAdmissionContextWithUserInfo(
+					dynamoCheckpointAdmissionOperation(tt.oldCheckpoint),
+					nvidiacomv1alpha1.GroupVersion.WithKind("DynamoCheckpoint"),
+					&authenticationv1.UserInfo{Username: tt.username},
+				)
+			}
 			ctx = features.WithGate(ctx, features.Gates{
 				Checkpoint: !tt.checkpointDisabled,
 			})
@@ -279,7 +405,7 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 }
 
 func TestDynamoCheckpointHandlerBoundaryErrorsRemainRegular(t *testing.T) {
-	handler := NewDynamoCheckpointHandler()
+	handler := NewDynamoCheckpointHandler("")
 	_, err := handler.ValidateCreate(t.Context(), &runtime.Unknown{})
 	if err == nil || !strings.Contains(err.Error(), "expected DynamoCheckpoint") {
 		t.Fatalf("ValidateCreate() error = %v, want cast error", err)
@@ -301,6 +427,7 @@ func TestDynamoCheckpointHandlerBoundaryErrorsRemainRegular(t *testing.T) {
 func dynamoCheckpointForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoCheckpoint),
 ) *nvidiacomv1alpha1.DynamoCheckpoint {
+	identity := admissionCheckpointIdentity()
 	checkpoint := &nvidiacomv1alpha1.DynamoCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
@@ -308,10 +435,7 @@ func dynamoCheckpointForAdmission(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "test-checkpoint", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:            "Qwen/Qwen3-0.6B",
-				BackendFramework: "vllm",
-			},
+			Identity: &identity,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -322,6 +446,30 @@ func dynamoCheckpointForAdmission(
 			},
 		},
 	}
+	if mutate != nil {
+		mutate(checkpoint)
+	}
+	return checkpoint
+}
+
+func admissionCheckpointIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
+	return nvidiacomv1alpha1.DynamoCheckpointIdentity{
+		Model:            "Qwen/Qwen3-0.6B",
+		BackendFramework: "vllm",
+	}
+}
+
+func automaticDynamoCheckpointForAdmission(
+	mutate func(*nvidiacomv1alpha1.DynamoCheckpoint),
+) *nvidiacomv1alpha1.DynamoCheckpoint {
+	checkpoint := dynamoCheckpointForAdmission(nil)
+	checkpoint.Annotations = map[string]string{
+		consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+	}
+	checkpoint.Labels = map[string]string{
+		snapshotprotocol.CheckpointIDLabel: "checkpoint-id",
+	}
+	checkpoint.Spec.Identity = nil
 	if mutate != nil {
 		mutate(checkpoint)
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -37,10 +38,22 @@ const (
 	dynamoCheckpointWebhookPath = "/validate-nvidia-com-v1alpha1-dynamocheckpoint"
 )
 
-type DynamoCheckpointHandler struct{}
+type DynamoCheckpointHandler struct {
+	operatorPrincipal string
+}
 
-func NewDynamoCheckpointHandler() *DynamoCheckpointHandler {
-	return &DynamoCheckpointHandler{}
+func NewDynamoCheckpointHandler(operatorPrincipal string) *DynamoCheckpointHandler {
+	return &DynamoCheckpointHandler{
+		operatorPrincipal: operatorPrincipal,
+	}
+}
+
+func (h *DynamoCheckpointHandler) requestUserInfo(ctx context.Context) *authenticationv1.UserInfo {
+	request, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return nil
+	}
+	return &request.UserInfo
 }
 
 func (h *DynamoCheckpointHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
@@ -51,7 +64,7 @@ func (h *DynamoCheckpointHandler) ValidateCreate(ctx context.Context, obj runtim
 	}
 	logger.Info("validate create", "name", ckpt.Name, "namespace", ckpt.Namespace)
 	validator := NewDynamoCheckpointValidator()
-	return validator.Validate(ctx, ckpt)
+	return validator.Validate(ctx, ckpt, h.requestUserInfo(ctx), h.operatorPrincipal)
 }
 
 func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
@@ -69,7 +82,7 @@ func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, ne
 		return nil, err
 	}
 	validator := NewDynamoCheckpointValidator()
-	return validator.ValidateUpdate(ctx, oldCheckpoint, ckpt)
+	return validator.ValidateUpdate(ctx, oldCheckpoint, ckpt, h.requestUserInfo(ctx), h.operatorPrincipal)
 }
 
 func (h *DynamoCheckpointHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {

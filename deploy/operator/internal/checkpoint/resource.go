@@ -47,13 +47,42 @@ func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
 	if ckpt.Labels != nil && ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != "" {
 		return ckpt.Labels[snapshotprotocol.CheckpointIDLabel], nil
 	}
+	if ckpt.Spec.Identity == nil {
+		return "", fmt.Errorf("checkpoint %s has no checkpoint ID or legacy identity", ckpt.Name)
+	}
 
-	hash, err := ComputeIdentityHash(ckpt.Spec.Identity)
+	hash, err := ComputeIdentityHash(*ckpt.Spec.Identity)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute checkpoint hash for %s: %w", ckpt.Name, err)
 	}
 
 	return hash, nil
+}
+
+// IsAutomaticCheckpointControlledBy reports whether a checkpoint carries the
+// automatic provenance marker and has the exact expected controller identity.
+func IsAutomaticCheckpointControlledBy(
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	expected *metav1.OwnerReference,
+) bool {
+	if ckpt == nil ||
+		expected == nil ||
+		expected.Controller == nil ||
+		!*expected.Controller ||
+		expected.APIVersion == "" ||
+		expected.Kind == "" ||
+		expected.Name == "" ||
+		expected.UID == "" ||
+		ckpt.Annotations[commonconsts.CheckpointAutoAnnotation] != commonconsts.KubeLabelValueTrue {
+		return false
+	}
+
+	actual := metav1.GetControllerOf(ckpt)
+	return actual != nil &&
+		actual.APIVersion == expected.APIVersion &&
+		actual.Kind == expected.Kind &&
+		actual.Name == expected.Name &&
+		actual.UID == expected.UID
 }
 
 func FindCheckpointByCheckpointID(
@@ -137,7 +166,7 @@ func CreateOrGetAutoCheckpoint(
 	c client.Client,
 	namespace string,
 	checkpointID string,
-	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
+	identity *nvidiacomv1alpha1.DynamoCheckpointIdentity,
 	podTemplate corev1.PodTemplateSpec,
 	targetContainerName string,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,

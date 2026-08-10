@@ -229,7 +229,7 @@ type GMSClientPodSpec struct {
 
 // FailoverSpec configures active-passive failover for a worker component.
 // For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
-// into engine containers (active + standby) within the same pod.
+// into one active and one or two standby engine containers within the same pod.
 // For interPod mode: the operator creates a dedicated GMS weight server pod and
 // multiple engine pods per rank that share GPUs via DRA resource claims.
 type FailoverSpec struct {
@@ -242,12 +242,9 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Enum=intraPod;interPod
 	// +optional
 	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
-	// NumShadows is the number of shadow (standby) engine pods per rank.
-	// Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
-	//
-	// NumShadows is only meaningful for mode=interPod; intraPod uses a fixed
-	// 1 primary + 1 shadow sidecar layout and any value other than 1 is
-	// rejected at admission time.
+	// NumShadows is the number of shadow (standby) engines per rank.
+	// In intraPod mode, one or two shadows are supported.
+	// In interPod mode, each rank has one primary plus NumShadows shadow engine pods.
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +optional
