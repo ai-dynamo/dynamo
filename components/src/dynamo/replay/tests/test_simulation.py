@@ -322,6 +322,7 @@ def test_factory_preserves_trtllm_disagg_gate() -> None:
 
     assert capabilities.supports_backend_topology("trtllm", "agg")
     assert not capabilities.supports_backend_topology("trtllm", "disagg")
+    assert not capabilities.supports_disaggregated_attention_dp
 
 
 def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
@@ -333,8 +334,12 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             replay_spec_api_version=999,
             supported_backend_topologies=(),
             supported_hooks=(),
+            supports_disaggregated_attention_dp=False,
         ):
             seen["version"] = replay_spec_api_version
+            seen["supports_disaggregated_attention_dp"] = (
+                supports_disaggregated_attention_dp
+            )
             self.replay_spec_api_version = replay_spec_api_version
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks
@@ -345,6 +350,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
 
     assert simulation._REPLAY_SPEC_API_VERSION == 1
     assert seen["version"] == 1
+    assert seen["supports_disaggregated_attention_dp"] is False
 
 
 def test_dynamo_sweep_cli_formats_adapter_validation_errors(

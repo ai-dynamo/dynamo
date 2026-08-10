@@ -36,6 +36,14 @@ def test_aisimulate_distribution_publishes_aisimulate_sweeper_package():
         assert not any(path.startswith("sweeper/") for path in packaged_files)
 
 
+def test_aisimulate_native_runtime_imports_from_installed_distribution():
+    runtime_spec = importlib.util.find_spec("aisimulate._runtime")
+
+    assert runtime_spec is not None
+    runtime = importlib.import_module("aisimulate._runtime")
+    assert callable(runtime.run_replay_json)
+
+
 def test_aisimulate_has_no_console_script():
     distribution = importlib.metadata.distribution("aisimulate")
 
