@@ -23,20 +23,17 @@
 all:
   - '**'
 
+# Gates four jobs in pre-merge.yml: Docs Lint, Fern Configuration Check, Docs
+# Website Composition Check, Fern Broken Links Check. Keep it to sources those
+# jobs actually read. Repo-wide catch-alls like '**/*.md' used to live here for
+# coverage classification, which meant editing any README in the repo ran all
+# four -- including the composition check, the most expensive of them -- while
+# Docs Lint scans docs/ and never looked at the file that triggered it. Those
+# patterns moved to `ignore`, which counts for coverage and gates nothing.
 docs:
   - 'docs/**'
   - 'fern/**'
   - '.github/workflows/fern-docs.yml'
-  # `**` skips dotfile directories, so the `**/*.md` rule above misses this one.
-  - '.github/FILTERS.md'
-  - '**/*.md'
-  - '**/*.txt'
-  - '**/.gitignore'
-  - '**/.helmignore'
-  - '**/.gitattributes'
-  - 'LICENSE'
-  - 'CODEOWNERS'
-  - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
@@ -55,6 +52,18 @@ examples:
   - 'deploy/pre-deployment/**'
 
 ignore:
+  # Classification-only, moved out of `docs`: these match files anywhere in the
+  # repo and must satisfy the coverage check without gating the Fern jobs.
+  - '**/*.md'
+  - '**/*.txt'
+  - '**/.gitignore'
+  - '**/.helmignore'
+  - '**/.gitattributes'
+  - 'LICENSE'
+  - 'CODEOWNERS'
+  - '.coveragerc'
+  # `**` skips dotfile directories, so the '**/*.md' rule above misses this one.
+  - '.github/FILTERS.md'
   - '.lycheeignore'
   - '.pre-commit-config.yaml'
   - '.coderabbit.yaml'
