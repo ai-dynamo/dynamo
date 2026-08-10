@@ -592,9 +592,18 @@ The "ray: not found" block above was resolved and the engine actually served. Ne
   a `channel.resourceClaimTemplate`), plus on each worker `resources.claims: [{name:
   compute-domain-channel}]` and `extraPodSpec.resourceClaims: [{name: compute-domain-channel,
   resourceClaimTemplateName: <cd>-channel}]`.
-  - **Can an on-demand follower join the leader's ComputeDomain? Yes — nothing gates it.** This was
-    the feature's key open question, since the recipes only ever gang-create pods that share one
-    `resourceClaimTemplate` at admission. The CRD's own documentation for `numNodes` settles it:
+  - **Can a follower pod created later join the ComputeDomain the leader is already in? Yes.** This
+    was the feature's key open question, because every GB200 recipe creates all of its pods at once.
+    Nothing here showed whether a pod that appears an hour later can still get in.
+
+    Some background first. A `ComputeDomain` is the group of nodes allowed to talk to each other over
+    NVLink. Joining is arranged by a small agent on each node — the **IMEX daemon** — that the DRA
+    driver starts. A pod asks to take part by referencing the domain's `ResourceClaimTemplate`, which
+    works like a stencil: every pod that references it gets its own claim stamped from it, so there is
+    no single shared object that could be used up or already taken by someone else.
+
+    The fear was that a domain fixes its guest list when it is created, and a follower arriving later
+    would be turned away at the door. It does not. The CRD's own documentation for `numNodes` says:
 
     > With `featureGates.IMEXDaemonsWithDNSNames=true` (the default) […] a `numNodes` value greater
     > than zero in particular **does not gate the startup of IMEX daemons**: individual IMEX daemons
@@ -602,24 +611,36 @@ The "ray: not found" block above was resolved and the engine actually served. Ne
     > right after its local IMEX daemon has started**. […] The `numNodes` parameter is deprecated and
     > will be removed in the next API version.
 
-    In that mode `numNodes` only drives status reporting. There is no admission-time membership set,
-    no fixed size, and no waiting for peers, so a pod created at any later time that references the
-    same `ResourceClaimTemplate` starts its own IMEX daemon and is released. Each pod generates its
-    own claim from the template, so there is no single shared object for followers to contend over.
+    Worth reading twice, because `numNodes` sounds like it declares how big the domain will be, and it
+    no longer does. Today it only decides when the domain reports itself Ready. Each node's IMEX
+    daemon starts up on its own without waiting for any other node, and a pod is allowed to run as
+    soon as the daemon on *its* node is up. Nobody waits for anybody. A pod created at any later time
+    therefore just joins — which is exactly what an on-demand follower needs. The setting is on its
+    way out of the API entirely.
 
-    The gang behaviour the recipes rely on is the **legacy** mode, `IMEXDaemonsWithDNSNames=false`,
-    where pods are held in `ContainerCreating` until `numNodes` daemons arrive and where the docs warn
-    that pods beyond `numNodes` "may lead to unexpected behavior". That mode would indeed have broken
-    the on-demand design. It is not in effect: the driver sets only
-    `FEATURE_GATES=CrashOnNVLinkFabricErrors=true`, so the DNS-names gate takes its default of true.
-    Confirm this on any new cluster before assuming the answer carries over.
+    There is a mode where the fear would have been justified, and it is worth knowing it exists.
+    Setting `IMEXDaemonsWithDNSNames=false` restores the old behaviour: pods are held in
+    `ContainerCreating` until `numNodes` daemons have arrived, and the docs warn that pods from more
+    nodes than that "may lead to unexpected behavior". That is the gang-style behaviour the recipes
+    were written against, and it would have broken the on-demand design outright. This cluster is not
+    in that mode — the driver sets only `FEATURE_GATES=CrashOnNVLinkFabricErrors=true`, leaving the
+    DNS-names setting at its default of true. **Check this before assuming the answer holds on a
+    different cluster**, with:
 
-    Live state is consistent: `tzulingk-compute-domain` reports two `Ready` nodes sharing one clique,
-    with the leader and follower pods each holding a claim from `tzulingk-compute-domain-channel`.
-    That confirms the mechanism but **not** late joining — those pods started one second apart, so
-    they came up together. To prove late joining, scale the follower Deployment from 1 to 2 and watch
-    `status.nodes` reach 3; that needs one free GPU and disturbs nothing already running. Prefer it to
-    a 1→0→1 cycle, which would kill a live pod.
+    ```bash
+    kubectl get deploy -n gpu-operator nvidia-dra-driver-gpu-controller \
+      -o jsonpath='{.spec.template.spec.containers[*].env[?(@.name=="FEATURE_GATES")].value}'
+    ```
+
+    What we can see running agrees, but does not yet prove the point. `tzulingk-compute-domain`
+    reports two nodes, both `Ready` and both in the same NVLink clique, and the leader and follower
+    pods each hold their own claim. So the mechanism works. What it does not show is a *late* join:
+    those two pods started one second apart, so they came up together, which is the ordinary case.
+
+    To turn the reasoning into an observation, scale the follower Deployment from 1 replica to 2. The
+    third pod is created long after the domain formed, so if `status.nodes` grows to 3 with the new
+    node `Ready`, late joining is proven. It needs one free GPU and adds a pod without touching
+    anything already running. Do not use a 1→0→1 cycle instead: that kills a live pod.
 
   - **Clique placement is a real hazard, just not on this cluster.** A separately scaled follower
     could in principle land on a node in a different NVLink partition, joining the ComputeDomain
