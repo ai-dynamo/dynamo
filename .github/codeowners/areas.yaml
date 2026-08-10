@@ -68,6 +68,7 @@ areas:
   - tests/router/configs/
   - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
+  - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
