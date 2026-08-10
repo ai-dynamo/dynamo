@@ -106,16 +106,7 @@ Despite the loop above, a change is good if it either **reduce latency** or **ha
 
 What exists in-tree, and what each one actually hands back. Everything here attaches to a running process — nothing on this list requires the benchmark or the SUT to be modified.
 
-| Tool | Where | What it gives you | Needs |
-|---|---|---|---|
-| **bpftrace programs** | `benchmarks/frontend/scripts/bpf/traces/` — 9 scripts | `runqlat` scheduler wait, `cpudist` on-CPU duration, `offcputime` blocked-thread stacks by duration, `syscall_latency`, `context_switches`, `funclatency` per-function, `transport_latency`, `tcplife` connection lifetime, `tcpretrans` retransmits | Root or `CAP_BPF`; `setup.sh` detects capability, `run.sh --batch` drives them |
-| **On-CPU profile → flame graph** | `flamegraph/cpu_flamegraph.sh`; skill's `profile_oncpu.sh` | Time distribution over call stacks. Tries cargo-flamegraph, then samply, then plain `perf` | Non-root at `perf_event_paranoid ≤ 1`; DWARF unwinding for Rust frames |
-| **Off-CPU profile** | `flamegraph/offcpu_flamegraph.sh`; skill's `capture_offcpu.sh` | What blocked threads waited on, duration-weighted — futex, epoll, timers | **Root**, even at `paranoid = -1`; tracefs event files are root-only |
-| **Differential flame graph** | `flamegraph/diff_flamegraph.sh` | Red/blue delta between two captures — where cost moved between arms | Two folded-stack files |
-| **Folded-stack analysis** | skill's `analyze_folded.py` | Top self-time leaves (on-CPU); innermost user frame plus a rayon / epoll / lock / channel / park bucket (off-CPU). Demangles Rust symbols | A `.folded` file |
-| **Nsight Systems** | `nsight/nsys_profile.sh` | GPU timeline correlated with host activity | Heavy; short windows; `profiling` build for useful names |
-| **py-spy** | not in-tree | Python-side sampling without restarting the process — the practical way to find event-loop blocking in a worker | Attach; `CAP_SYS_PTRACE` in a container |
-| **tokio-console** | `lib/runtime` feature `tokio-console` | Live per-task view of the async runtime: task poll times, wakes, and tasks that never yield | **Compile** — the feature is off by default |
+The tools, what each returns, and what each requires are in [Table A.1](#table-a1--supplementary-capture-tools).
 
 Two things to note about the set.
 
@@ -127,16 +118,7 @@ Two things to note about the set.
 
 Each source preserves some structure and destroys some. The properties that matter are **ordering** (is sequence and causality visible), **identity** (can a datum be tied to one request), **completeness** (exhaustive or sampled), and **reach** (on-CPU work, off-CPU blocking, or both). OS sampling is the clearest example: it gives a time distribution over call stacks but does not preserve ordering.
 
-| Source | What it gives you | Preserves | Loses / blind to | Decide by |
-|---|---|---|---|---|
-| **Client / load gen** | End-to-end per-request TTFT, ITL, throughput | Per-request identity, arrival order | Everything inside the SUT — one opaque interval | Run time |
-| **Prometheus** | Distributions and gauges over a window | Shape of the distribution, cheaply and continuously | Per-request identity — cannot ask "why was *that* request slow"; ordering; anything between scrape intervals | Launch |
-| **OTEL traces** | Per-request spans, parent/child, across process boundaries | Ordering *and* identity *and* causality — the only source with all three | Only what someone instrumented; sampling ratio drops requests | Launch (env) |
-| **NVTX** | Named ranges correlated with GPU activity | Ordering, GPU/CPU correlation | Nothing outside annotated ranges; Rust side needs a rebuild | **Compile** |
-| **Logs** | Whatever you chose to print | Ordering; arbitrary payload — most flexible | No aggregation; cost scales with volume; correlation is manual unless request IDs are threaded | Launch |
-| **On-CPU sampling** | Time distribution over call stacks | Where CPU time goes, no prior instrumentation needed | **Ordering** — a distribution, not a sequence; off-CPU time; per-request identity | Attach |
-| **Off-CPU sampling** | Kernel stacks of blocked threads, by duration | Why threads block — futex, epoll, timers | Ordering; identity; on-CPU cost | Attach |
-| **Kernel eBPF** | Scheduler, syscall, TCP behavior | Exhaustive per-event within scope; system-wide reach | Application semantics — knows threads and syscalls, not requests | Attach (needs privilege) |
+[Table A.2](#table-a2--what-each-data-source-preserves-and-destroys) sets out, per source, what it gives you and what it is blind to.
 
 Two consequences worth stating:
 
@@ -156,11 +138,7 @@ Supplementary capture is genuinely non-invasive to the source, but it is not fre
 
 Instrumentation differs in how far ahead it must be planned. Anything above the attach tier cannot be added to a run already in progress — miss it and the run is lost.
 
-| Tier | Sources | Cost if unplanned |
-|---|---|---|
-| **Compile time** | NVTX ranges, user-space symbols | Full rebuild |
-| **Launch time** | OTEL export, Prometheus, eBPF capabilities | Restart |
-| **Attach time** | bpftrace, py-spy | None — attach to the live run |
+[Table A.3](#table-a3--how-early-instrumentation-must-be-decided) lists the three tiers and the cost of missing each.
 
 NVTX is opt-in on both sides: gated behind a cargo feature flag in Rust, and opt-in on the Python side. A stock build carries no NVTX ranges. OTEL, by contrast, is runtime env-gated — enabling it costs a restart, not a rebuild.
 
@@ -209,6 +187,73 @@ The ladder is unevenly built. Rung 1 has parts, rung 2 has fragments, rung 3 exi
 
 **Rung 1 — programmatic.** The most complete, and entirely confined to one harness.
 
+[Table A.4](#table-a4--programmatic-analysis--what-exists) lists the deterministic transforms that exist today.
+
+**The gap is scope, not capability.** Every one of these is deterministic and reusable, but they only join sources *within* the frontend sweep harness. Nothing joins a client artifact to a Prometheus scrape to a trace for the same run — which is exactly the reconciliation §5 needs, and the reason the sum-of-parts check cannot currently be automated.
+
+Note also that no micro bench feeds this rung: criterion writes structured data under `target/criterion/`, and nothing collects it.
+
+**Rung 2 — procedural.** Fragments, each scoped to one failure class.
+
+[Table A.5](#table-a5--procedural-analysis--what-exists) lists the written checklists that exist today.
+
+**What is missing is the bottleneck decision tree** — symptom to check to next check, for *performance* rather than for failure. `dynamo-troubleshoot` answers "why is it broken." Nothing answers "TTFT is high; what do I look at first, and what does each answer rule out."
+
+**Rung 3 — agent-runnable.** The skills are the delivery mechanism, and they inherit rung 2's shape: strong where a procedure was written down, absent where it was not. `dynamo-benchmark` routes and gates; `dynamo-troubleshoot`, `dynamo-interconnect-check`, and `dynamo-router-starter` each execute their own checklist. None can diagnose a performance problem end to end, because the procedure for doing so does not exist yet — which is the ladder's own point: an agent cannot run what has not been written.
+
+**The one-sentence summary.** Transformation is solved inside one harness and absent across harnesses; the procedural rung covers failures but not slowness; and the agent rung is therefore capped by rung 2 rather than by agent capability.
+
+
+---
+
+## Appendix A — Tables
+
+Referenced from the sections above; collected here so the procedure reads as prose.
+
+### Table A.1 — Supplementary capture tools
+
+*what each attach-time tool hands back, and what it requires. Referenced from §3.1.1.*
+
+| Tool | Where | What it gives you | Needs |
+|---|---|---|---|
+| **bpftrace programs** | `benchmarks/frontend/scripts/bpf/traces/` — 9 scripts | `runqlat` scheduler wait, `cpudist` on-CPU duration, `offcputime` blocked-thread stacks by duration, `syscall_latency`, `context_switches`, `funclatency` per-function, `transport_latency`, `tcplife` connection lifetime, `tcpretrans` retransmits | Root or `CAP_BPF`; `setup.sh` detects capability, `run.sh --batch` drives them |
+| **On-CPU profile → flame graph** | `flamegraph/cpu_flamegraph.sh`; skill's `profile_oncpu.sh` | Time distribution over call stacks. Tries cargo-flamegraph, then samply, then plain `perf` | Non-root at `perf_event_paranoid ≤ 1`; DWARF unwinding for Rust frames |
+| **Off-CPU profile** | `flamegraph/offcpu_flamegraph.sh`; skill's `capture_offcpu.sh` | What blocked threads waited on, duration-weighted — futex, epoll, timers | **Root**, even at `paranoid = -1`; tracefs event files are root-only |
+| **Differential flame graph** | `flamegraph/diff_flamegraph.sh` | Red/blue delta between two captures — where cost moved between arms | Two folded-stack files |
+| **Folded-stack analysis** | skill's `analyze_folded.py` | Top self-time leaves (on-CPU); innermost user frame plus a rayon / epoll / lock / channel / park bucket (off-CPU). Demangles Rust symbols | A `.folded` file |
+| **Nsight Systems** | `nsight/nsys_profile.sh` | GPU timeline correlated with host activity | Heavy; short windows; `profiling` build for useful names |
+| **py-spy** | not in-tree | Python-side sampling without restarting the process — the practical way to find event-loop blocking in a worker | Attach; `CAP_SYS_PTRACE` in a container |
+| **tokio-console** | `lib/runtime` feature `tokio-console` | Live per-task view of the async runtime: task poll times, wakes, and tasks that never yield | **Compile** — the feature is off by default |
+
+### Table A.2 — What each data source preserves and destroys
+
+*ordering, identity, completeness, reach. Referenced from §3.2.*
+
+| Source | What it gives you | Preserves | Loses / blind to | Decide by |
+|---|---|---|---|---|
+| **Client / load gen** | End-to-end per-request TTFT, ITL, throughput | Per-request identity, arrival order | Everything inside the SUT — one opaque interval | Run time |
+| **Prometheus** | Distributions and gauges over a window | Shape of the distribution, cheaply and continuously | Per-request identity — cannot ask "why was *that* request slow"; ordering; anything between scrape intervals | Launch |
+| **OTEL traces** | Per-request spans, parent/child, across process boundaries | Ordering *and* identity *and* causality — the only source with all three | Only what someone instrumented; sampling ratio drops requests | Launch (env) |
+| **NVTX** | Named ranges correlated with GPU activity | Ordering, GPU/CPU correlation | Nothing outside annotated ranges; Rust side needs a rebuild | **Compile** |
+| **Logs** | Whatever you chose to print | Ordering; arbitrary payload — most flexible | No aggregation; cost scales with volume; correlation is manual unless request IDs are threaded | Launch |
+| **On-CPU sampling** | Time distribution over call stacks | Where CPU time goes, no prior instrumentation needed | **Ordering** — a distribution, not a sequence; off-CPU time; per-request identity | Attach |
+| **Off-CPU sampling** | Kernel stacks of blocked threads, by duration | Why threads block — futex, epoll, timers | Ordering; identity; on-CPU cost | Attach |
+| **Kernel eBPF** | Scheduler, syscall, TCP behavior | Exhaustive per-event within scope; system-wide reach | Application semantics — knows threads and syscalls, not requests | Attach (needs privilege) |
+
+### Table A.3 — How early instrumentation must be decided
+
+*compile, launch, and attach tiers. Referenced from §3.4.*
+
+| Tier | Sources | Cost if unplanned |
+|---|---|---|
+| **Compile time** | NVTX ranges, user-space symbols | Full rebuild |
+| **Launch time** | OTEL export, Prometheus, eBPF capabilities | Restart |
+| **Attach time** | bpftrace, py-spy | None — attach to the live run |
+
+### Table A.4 — Programmatic analysis — what exists
+
+*deterministic transforms available today. Referenced from §5.1.*
+
 | Piece | Where | Transforms |
 |---|---|---|
 | Sweep orchestration | `benchmarks/frontend/scripts/sweep_core/` — `planner`, `orchestrator`, `artifacts`, `naming`, `reporting` | A config grid into named artifact directories and a CSV |
@@ -217,11 +262,9 @@ The ladder is unevenly built. Rung 1 has parts, rung 2 has fragments, rung 3 exi
 | Stack folding | skill's `analyze_folded.py` | Folded stacks into ranked self-time and blocking categories |
 | Trace conversion | `benchmarks/request_trace/convert_to_perfetto.py` | `DYN_REQUEST_TRACE` output into a Perfetto timeline |
 
-**The gap is scope, not capability.** Every one of these is deterministic and reusable, but they only join sources *within* the frontend sweep harness. Nothing joins a client artifact to a Prometheus scrape to a trace for the same run — which is exactly the reconciliation §5 needs, and the reason the sum-of-parts check cannot currently be automated.
+### Table A.5 — Procedural analysis — what exists
 
-Note also that no micro bench feeds this rung: criterion writes structured data under `target/criterion/`, and nothing collects it.
-
-**Rung 2 — procedural.** Fragments, each scoped to one failure class.
+*written checklists available today. Referenced from §5.1.*
 
 | Piece | Where | Covers |
 |---|---|---|
@@ -231,11 +274,6 @@ Note also that no micro bench feeds this rung: criterion writes structured data 
 | Pitfall corpus | `dynamo-frontend-benchmark` SKILL.md | Closed-loop misreading, congestion collapse, client core starvation, cold first run, AIPerf finalizer hang |
 | Routing tables | `Performance Analysis` pages, `dynamo-benchmark` skill | Which tool answers which question class |
 
-**What is missing is the bottleneck decision tree** — symptom to check to next check, for *performance* rather than for failure. `dynamo-troubleshoot` answers "why is it broken." Nothing answers "TTFT is high; what do I look at first, and what does each answer rule out."
-
-**Rung 3 — agent-runnable.** The skills are the delivery mechanism, and they inherit rung 2's shape: strong where a procedure was written down, absent where it was not. `dynamo-benchmark` routes and gates; `dynamo-troubleshoot`, `dynamo-interconnect-check`, and `dynamo-router-starter` each execute their own checklist. None can diagnose a performance problem end to end, because the procedure for doing so does not exist yet — which is the ladder's own point: an agent cannot run what has not been written.
-
-**The one-sentence summary.** Transformation is solved inside one harness and absent across harnesses; the procedural rung covers failures but not slowness; and the agent rung is therefore capped by rung 2 rather than by agent capability.
 
 ## Open items
 
