@@ -597,7 +597,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub first_admission_reused_input_tokens: usize,
 }
 
-/// SLA thresholds used to classify requests for goodput. Mirrors Spica's
+/// SLA thresholds used to classify requests for goodput. Mirrors Sweeper's
 /// `SLATarget` shape: set `ttft_ms` + `itl_ms` together, or `e2e_ms` alone.
 /// Only the thresholds that are set are checked, so an e2e-only SLA gates on
 /// e2e and a ttft+itl SLA gates on both. All-`None` (the default) means "no

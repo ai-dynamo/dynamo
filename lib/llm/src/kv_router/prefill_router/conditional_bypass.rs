@@ -303,8 +303,8 @@ where
         session_affinity: Option<&SessionAffinityId>,
     ) -> Option<bool> {
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
-        let prefill_router = self.prefill_router.get()?;
-        let router = match prefill_router {
+        let binding = self.binding.load_full()?;
+        let router = match &binding.router {
             InnerPrefillRouter::KvRouter(router) => router,
             InnerPrefillRouter::SimpleRouter(_) => return None,
         };

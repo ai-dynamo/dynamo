@@ -248,6 +248,14 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     assert captured["model"] == TEST_MODEL
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
 
+    guided_decoding = captured["sampling_options"].get("guided_decoding")
+    assert isinstance(guided_decoding, dict)
+    structural_tag = guided_decoding.get("structural_tag")
+    assert isinstance(structural_tag, dict)
+    serialized_tag = json.dumps(structural_tag)
+    assert "search_gutenberg_books" in serialized_tag
+    assert "search_terms" in serialized_tag
+
     decoded_prompt = captured["decoded_prompt"]
     assert "What are the titles of some James Joyce books?" in decoded_prompt
     assert "search_gutenberg_books" in decoded_prompt
