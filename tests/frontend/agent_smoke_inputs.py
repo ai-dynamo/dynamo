@@ -12,9 +12,9 @@ LIST_DIRECTORY_PROMPT = (
 )
 
 CODEX_LIST_DIRECTORY_PROMPT = (
-    "Call exec_command exactly once with cmd=\"ls\". Do not request elevated "
-    "permissions or set sandbox_permissions. Then report each filename verbatim "
-    "from the output."
+    'Call exec_command exactly once with the complete argument object {"cmd":"ls"}. '
+    "Do not add justification, sandbox_permissions, or any other field. Then report "
+    "each filename verbatim from the output."
 )
 
 
