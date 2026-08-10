@@ -111,9 +111,6 @@ spec:
                 - --tensor-parallel-size
                 - "1"
                 - --trust-remote-code
-                - --enable-auto-tool-choice
-                - --tool-call-parser
-                - qwen3_coder
                 - --reasoning-parser
                 - nemotron_v3
                 - --kv-cache-dtype
