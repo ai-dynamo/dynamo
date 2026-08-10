@@ -1700,7 +1700,7 @@ mod tests {
         // Both emitted IDs must be Anthropic-native and distinct.
         let starts: Vec<_> = finish_events
             .iter()
-            .filter(|e| e.event == "content_block_start")
+            .filter(|e| e.event_type == "content_block_start")
             .collect();
         assert_eq!(starts.len(), 2);
         let ids: Vec<_> = starts
