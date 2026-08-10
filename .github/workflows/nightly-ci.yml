@@ -60,6 +60,7 @@ jobs:
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           suppress_fallback_warning: 'true'
 
   # ============================================================================
@@ -369,13 +370,15 @@ jobs:
           # independent of the -nightly image-tag suffix.
           artifact_tag: ${{ github.sha }}-operator
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator-nightly
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-operator-nightly
           # OSRB CSV diff baseline: previous successful scheduled nightly run
           # (first nightly soft-degrades to baseline_unavailable).
           diff_event_context: nightly
@@ -456,8 +459,10 @@ jobs:
           # independent of the -nightly image-tag suffix.
           artifact_tag: ${{ github.sha }}-snapshot-agent
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
           # OSRB CSV diff baseline: previous successful scheduled nightly run
           # (first nightly soft-degrades to baseline_unavailable).
           diff_event_context: nightly
@@ -594,6 +599,7 @@ jobs:
           vcluster_name: nightly-ci-${{ github.run_id }}
           vcluster_namespace: nightly-ci-${{ github.run_id }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -1302,6 +1308,7 @@ jobs:
         with:
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
           buildkit_worker_addresses: ''
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           skip_bootstrap: 'true'
       - name: Remove K8s builder
         shell: bash

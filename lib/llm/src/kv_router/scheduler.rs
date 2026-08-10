@@ -8,7 +8,7 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
 pub use dynamo_kv_router::scheduling::{
     AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, NonMaxOverlapSelectionObserver,
     OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -46,7 +46,7 @@ where
 
 impl<Sel, RF> KvScheduler<Sel, RF>
 where
-    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + 'static,
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 {
     /// Start the scheduler, optionally wiring an [`OverlapScoresRefresh`] into the queue so
@@ -61,6 +61,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
@@ -111,6 +112,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            available_worker_provider,
             queue_recheck_interval,
             kv_router_config.router_track_prefill_tokens,
             cancellation_token.child_token(),
@@ -378,6 +380,17 @@ where
         Ok(())
     }
 
+    /// Release `request_id` only if it is still booked on `worker`.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.inner.free_if_worker(request_id, worker).await?;
+        self.update_queue_metrics();
+        Ok(())
+    }
+
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
@@ -522,6 +535,7 @@ mod tests {
             &config,
             None,
             None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
             None,
             Some("test-model"),
             "decode",

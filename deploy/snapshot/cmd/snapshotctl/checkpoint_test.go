@@ -94,7 +94,7 @@ func TestPodSnapshotNameUIDPinned(t *testing.T) {
 	podUID := types.UID("pod-uid-abc")
 
 	tests := []struct {
-		name    string
+		name     string
 		snapName string
 	}{
 		{name: "short name", snapName: "my-snap"},
@@ -275,4 +275,3 @@ func TestWaitForPodSnapshotContextDeadline(t *testing.T) {
 	_, err := waitForPodSnapshot(ctx, crClient, "default", "snap-pending")
 	require.Error(t, err)
 }
-
