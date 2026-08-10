@@ -567,34 +567,6 @@ impl RadixTree {
         );
     }
 
-    /// Remove one worker's coverage from every descendant below `node`.
-    ///
-    /// A worker can only cover a child after covering the complete parent
-    /// edge. Truncating that parent therefore invalidates all of the worker's
-    /// descendant coverage, even when another worker keeps the subtree alive.
-    fn invalidate_worker_descendants(
-        node: &SharedRadixBlock,
-        worker: WorkerWithDpRank,
-    ) -> Vec<ExternalSequenceBlockHash> {
-        let mut stale_hashes = Vec::new();
-        let mut stack = node.borrow().children.values().cloned().collect::<Vec<_>>();
-        while let Some(descendant) = stack.pop() {
-            let mut descendant_ref = descendant.borrow_mut();
-            // Preserve the traversal before this mutation possibly detaches
-            // the children from their parent.
-            stack.extend(descendant_ref.children.values().cloned());
-            let cutoff = descendant_ref.state.current_cutoff(worker);
-            stale_hashes.extend(
-                descendant_ref.state.edge[..cutoff]
-                    .iter()
-                    .map(|&(_, hash)| hash),
-            );
-            descendant_ref.state.drop_worker(worker);
-            descendant_ref.clear_children_if_unreachable();
-        }
-        stale_hashes
-    }
-
     fn apply_removed(
         &mut self,
         worker: WorkerWithDpRank,
@@ -606,14 +578,11 @@ impl RadixTree {
         };
         let mut first_error = None;
         let mut eagerly_removed = FxHashSet::default();
-        let block_hashes = remove.block_hashes;
-        let mut group_start = 0;
+        let mut block_hashes = remove.block_hashes.into_iter().peekable();
 
-        while group_start < block_hashes.len() {
-            let block_hash = block_hashes[group_start];
-            let Some(node) = lookup.get(&block_hash).cloned() else {
+        while let Some(block_hash) = block_hashes.next() {
+            let Some(node) = lookup.remove(&block_hash) else {
                 if eagerly_removed.contains(&block_hash) {
-                    group_start += 1;
                     continue;
                 }
                 tracing::warn!(
@@ -624,66 +593,61 @@ impl RadixTree {
                     "Failed to find block to remove; skipping remove operation"
                 );
                 first_error.get_or_insert(KvCacheEventError::BlockNotFound);
-                group_start += 1;
                 continue;
             };
 
-            let first_pos = {
+            let (min_pos, min_hash) = {
                 let node_ref = node.borrow();
                 let Some(&first_pos) = node_ref.state.edge_index.get(&block_hash) else {
+                    drop(node_ref);
+                    lookup.insert(block_hash, node);
                     first_error.get_or_insert(KvCacheEventError::BlockNotFound);
-                    group_start += 1;
                     continue;
                 };
-                first_pos
-            };
-
-            if !node.borrow().state.covers_pos(worker, first_pos) {
-                // The lookup entry is already inconsistent with this worker's
-                // coverage. Scrub it directly; mutating the node cannot expose
-                // any additional hashes because the worker was already absent
-                // at this position.
-                lookup.remove(&block_hash);
-                eagerly_removed.insert(block_hash);
-                group_start += 1;
-                continue;
-            }
-
-            let (group_end, min_pos) = {
-                let node_ref = node.borrow();
-                let mut group_end = group_start + 1;
                 let mut min_pos = first_pos;
-                while let Some(&candidate_hash) = block_hashes.get(group_end) {
-                    let Some(candidate_node) = lookup.get(&candidate_hash) else {
-                        break;
-                    };
-                    if !Rc::ptr_eq(&node, candidate_node) {
-                        break;
+                let mut min_hash = block_hash;
+                if node_ref.state.covers_pos(worker, first_pos) {
+                    while let Some(&candidate_hash) = block_hashes.peek() {
+                        let Some(candidate_node) = lookup.get(&candidate_hash) else {
+                            break;
+                        };
+                        if !Rc::ptr_eq(&node, candidate_node) {
+                            break;
+                        }
+                        let Some(&candidate_pos) = node_ref.state.edge_index.get(&candidate_hash)
+                        else {
+                            break;
+                        };
+                        if !node_ref.state.covers_pos(worker, candidate_pos) {
+                            break;
+                        }
+                        if candidate_pos < min_pos {
+                            min_pos = candidate_pos;
+                            min_hash = candidate_hash;
+                        }
+                        block_hashes.next();
                     }
-                    let Some(&candidate_pos) = node_ref.state.edge_index.get(&candidate_hash)
-                    else {
-                        break;
-                    };
-                    if !node_ref.state.covers_pos(worker, candidate_pos) {
-                        break;
-                    }
-                    min_pos = min_pos.min(candidate_pos);
-                    group_end += 1;
                 }
-                (group_end, min_pos)
+                (min_pos, min_hash)
             };
 
             let outcome = {
                 let mut node_ref = node.borrow_mut();
-                node_ref.state.truncate_worker_at_pos(worker, min_pos)
+                // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
+                // subtree when a mid-edge removal leaves the node alive for another
+                // worker. Otherwise stale descendants can be reused as store parents,
+                // reactivated by restoring only the removed block, or emitted by dumps
+                // without a valid worker-specific parent.
+                let outcome = node_ref
+                    .state
+                    .remove_worker_at_pos(worker, min_pos, min_hash);
+                node_ref.clear_children_if_unreachable();
+                outcome
             };
-            let descendant_hashes = Self::invalidate_worker_descendants(&node, worker);
-            node.borrow_mut().clear_children_if_unreachable();
-            for stale_hash in outcome.stale_hashes.into_iter().chain(descendant_hashes) {
+            for stale_hash in outcome.stale_hashes {
                 lookup.remove(&stale_hash);
                 eagerly_removed.insert(stale_hash);
             }
-            group_start = group_end;
         }
 
         first_error.map_or(Ok(()), Err)
@@ -866,8 +830,7 @@ mod tests {
     use super::*;
     use crate::indexer::WorkerKvQueryResponse;
     use crate::test_utils::{
-        create_remove_event, create_store_event, descendant_invalidation_regression_events,
-        make_store_event, snapshot_events,
+        create_remove_event, create_store_event, make_store_event, snapshot_events,
     };
 
     #[test]
@@ -1005,71 +968,6 @@ mod tests {
         assert_eq!(
             snapshot_events(with_missing.dump_tree_as_events()),
             snapshot_events(expected.dump_tree_as_events())
-        );
-    }
-
-    #[test]
-    fn already_uncovered_remove_scrubs_stale_lookup_entry_directly() {
-        let mut tree = RadixTree::new();
-        tree.apply_event(create_store_event(0, 0, vec![1, 2, 3], None))
-            .unwrap();
-        tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
-            .unwrap();
-        tree.apply_event(create_remove_event(0, 1, vec![2]))
-            .unwrap();
-
-        let worker0 = WorkerWithDpRank::new(0, 0);
-        let worker1 = WorkerWithDpRank::new(1, 0);
-        let stale_hash = ExternalSequenceBlockHash(300);
-        let node = tree.lookup[&worker1][&stale_hash].clone();
-        tree.lookup
-            .get_mut(&worker0)
-            .unwrap()
-            .insert(stale_hash, node);
-
-        tree.apply_event(create_remove_event(0, 2, vec![3]))
-            .unwrap();
-        assert!(!tree.lookup[&worker0].contains_key(&stale_hash));
-        assert_eq!(
-            tree.find_matches(
-                vec![1, 2, 3].into_iter().map(LocalBlockHash).collect(),
-                false
-            )
-            .scores
-            .get(&worker1)
-            .copied(),
-            Some(3)
-        );
-    }
-
-    #[test]
-    fn parent_removal_invalidates_only_the_removed_workers_descendants() {
-        let mut tree = RadixTree::new();
-        let (stores, removal) = descendant_invalidation_regression_events();
-        for event in stores {
-            tree.apply_event(event).unwrap();
-        }
-        tree.apply_event(removal).unwrap();
-
-        let scores = tree.find_matches(
-            [1, 2, 3, 4, 5].into_iter().map(LocalBlockHash).collect(),
-            false,
-        );
-        assert_eq!(
-            scores.scores.get(&WorkerWithDpRank::new(0, 0)).copied(),
-            Some(1)
-        );
-        assert_eq!(
-            scores.scores.get(&WorkerWithDpRank::new(1, 0)).copied(),
-            Some(5)
-        );
-        assert_eq!(
-            tree.tree_size_for_worker(WorkerWithDpRank::new(0, 0)),
-            Some(1)
-        );
-        assert_eq!(
-            tree.tree_size_for_worker(WorkerWithDpRank::new(1, 0)),
-            Some(5)
         );
     }
 
