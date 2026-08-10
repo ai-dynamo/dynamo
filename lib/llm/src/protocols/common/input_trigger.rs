@@ -77,9 +77,13 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                     if msg.role == InputRole::User {
                         InputTrigger::UserMessage
                     } else {
+                        // System/Developer input messages have no clear trigger.
                         InputTrigger::Unknown
                     }
                 }
+                InputItem::Item(Item::Message(MessageItem::Output(_)))
+                | InputItem::Item(Item::FunctionCall(_))
+                | InputItem::Item(Item::Reasoning(_)) => InputTrigger::Continuation,
                 InputItem::EasyMessage(easy) => match easy.role {
                     ResponseRole::User => InputTrigger::UserMessage,
                     ResponseRole::Assistant => InputTrigger::Continuation,
@@ -133,7 +137,11 @@ mod tests {
     use crate::protocols::openai::{
         chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
     };
-    use dynamo_protocols::types::responses::{CreateResponse, EasyInputContent, EasyInputMessage};
+    use dynamo_protocols::types::responses::{
+        AssistantRole, CreateResponse, EasyInputContent, EasyInputMessage, FunctionToolCall,
+        InputOutputMessage, InputOutputMessageContent, InputOutputTextContent, InputReasoningItem,
+        SummaryPart, SummaryTextContent,
+    };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestToolMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
@@ -218,5 +226,65 @@ mod tests {
     fn responses_easy_message_system() {
         let req = response_request_with_easy_messages(ResponseRole::System);
         assert_eq!(classify_response_request(&req), InputTrigger::Unknown);
+    }
+
+    fn response_request_with_item(item: InputItem) -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![item]),
+                model: Some("test".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn responses_output_message() {
+        let req = response_request_with_item(InputItem::Item(Item::Message(MessageItem::Output(
+            InputOutputMessage {
+                id: None,
+                role: AssistantRole::Assistant,
+                status: None,
+                phase: None,
+                content: vec![InputOutputMessageContent::OutputText(
+                    InputOutputTextContent {
+                        text: "4".into(),
+                        annotations: vec![],
+                        logprobs: None,
+                    },
+                )],
+            },
+        ))));
+        assert_eq!(classify_response_request(&req), InputTrigger::Continuation);
+    }
+
+    #[test]
+    fn responses_function_call() {
+        let req =
+            response_request_with_item(InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                arguments: "{}".into(),
+                call_id: "call_1".into(),
+                namespace: None,
+                name: "test".into(),
+                id: None,
+                status: None,
+            })));
+        assert_eq!(classify_response_request(&req), InputTrigger::Continuation);
+    }
+
+    #[test]
+    fn responses_reasoning_item() {
+        let req =
+            response_request_with_item(InputItem::Item(Item::Reasoning(InputReasoningItem {
+                id: None,
+                summary: vec![SummaryPart::SummaryText(SummaryTextContent {
+                    text: "thinking".into(),
+                })],
+                content: None,
+                encrypted_content: None,
+                status: None,
+            })));
+        assert_eq!(classify_response_request(&req), InputTrigger::Continuation);
     }
 }

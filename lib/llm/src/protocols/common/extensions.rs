@@ -83,8 +83,10 @@ pub enum InputTrigger {
 }
 
 /// Identity metadata for agentic workloads.
+// Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
+// format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
+// across the N-2 mixed-version compatibility window.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     /// Stable reasoning/tool session identifier.
     pub session_id: String,
