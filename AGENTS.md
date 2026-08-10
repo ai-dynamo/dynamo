@@ -137,28 +137,16 @@ cargo fmt --all && cargo clippy --workspace
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
-  generated file says so, in a `do not edit` marker or a generated-span comment,
-  and its generator has a `--check` mode that fails when the committed output is
-  stale. The root `CODEOWNERS` and `CONTRIBUTORS.md` come from
-  `.github/codeowners/areas.yaml` via `emit_codeowners.py`; CI gates 100%
-  coverage and `CODEOWNERS`↔`areas.yaml` drift (see
-  `.github/codeowners/README.md`, and `who_owns.py` to check who reviews a path).
-  The generated spans in `docs/fern/pages/reference/`, `assets/releases.json` and
-  `assets/releases-atom.xml` come from `docs/fern/components/releases.data.ts`
-  via `docs/fern/scripts/gen_llms_tables.py`. Others exist; trust the marker
-  rather than this list.
-- Resolve a merge conflict in a generated file by regenerating, never by editing
-  the conflict. Take the source side, run the generator, and commit its output:
-  a hand-resolved artifact passes review and then fails the next `--check`,
-  because the resolution is not reproducible from the source.
-- A PR that changes a generator owes a regeneration immediately before merge. Its
-  own output goes stale whenever main touches the source the generator reads, and
-  the freshness gate correctly attributes that to the branch, so a regeneration
-  from earlier in review will not still be current.
-- Resolve a conflict in an aggregate list — the changed-files coverage set, a
-  filter list, an allowlist — as the union of both sides. Each side added an
-  entry; dropping either silently removes coverage and fails a gate for a reason
-  unrelated to the change.
+  generated file says so in a `do not edit` marker, and its generator has a
+  `--check` mode that fails when the committed output is stale. The root
+  `CODEOWNERS` and `CONTRIBUTORS.md` come from `.github/codeowners/areas.yaml`
+  via `emit_codeowners.py`; CI gates 100% coverage and
+  `CODEOWNERS`↔`areas.yaml` drift (see `.github/codeowners/README.md`, and
+  `who_owns.py` to check who reviews a path). Resolve a conflict in a generated
+  file by regenerating rather than editing the conflict — a hand-resolved
+  artifact passes review and then fails the next `--check` — and resolve one in
+  an aggregate list, such as a coverage set or a filter list, as the union of
+  both sides.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. Fix failures before requesting human review.
