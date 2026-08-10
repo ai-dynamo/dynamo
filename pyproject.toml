@@ -24,6 +24,7 @@ dependencies = [
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
+    "tqdm>=4.0.0",
 ]
 
 classifiers = [
@@ -48,7 +49,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc22",
+    "tensorrt-llm==1.3.0rc23",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -88,6 +89,10 @@ mocker = [
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
+
+[project.entry-points."aisimulate.sweep_config_providers"]
+"dynamo.planner" = "dynamo.planner.simulation:create_provider"
+"dynamo.router" = "dynamo.router.simulation:create_provider"
 
 [dependency-groups]
 docs = [
@@ -259,6 +264,7 @@ markers = [
     "nightly: marks tests to run nightly",
     "skip_in_nightly: excludes a test from the nightly pipeline only (still runs in pre_merge/post_merge). Used via `not skip_in_nightly` in nightly-ci.yml marker filters",
     "frontend_api_surface_compliance: marks tests that validate Dynamo's HTTP API surface (Responses/Anthropic wire shape, tool-call routing) against upstream compliance harnesses",
+    "token_budget_parity: compares native backend and Dynamo prompt/output overflow behavior",
     "weekly: marks tests to run weekly",
     "release: marks tests to run on release pipelines",
     "gpu_0: marks tests that don't require GPU",
@@ -368,6 +374,13 @@ ignore_errors = true
 # Manual planner helpers are operational scripts, not typed library surfaces.
 module = ["dynamo.planner.manual.*"]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# AI Simulate is a separate, optional distribution. Load its types when it is
+# installed without reporting errors that originate inside that distribution.
+module = ["aisimulate", "aisimulate.*"]
+follow_imports = "silent"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on backend framework internals.

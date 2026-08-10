@@ -1056,7 +1056,7 @@ fn depythonize_kv_event_inputs(events: &Bound<'_, PyAny>) -> PyResult<Vec<KvEven
 impl KvEventPublisher {
     /// Wrap an already-constructed Rust publisher as the Python pyclass.
     ///
-    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// Used by the Backend SDK bridge (`crate::backend`) so the Worker
     /// can hand a publisher built from a [`PushSource`] back to the Python
     /// engine without going through the Python-side `__init__` (which
     /// requires an `Endpoint` and rebuilds the publisher from scratch).
@@ -1070,9 +1070,8 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
-            // The unified backend does not run TRT-LLM multimodal, so this bridge
-            // carries no image marker; the non-unified path sets it via the
-            // constructor.
+            // This bridge has no image-token configuration. Python callers can
+            // set one through the public constructor when needed.
             image_token_id: None,
         }
     }
