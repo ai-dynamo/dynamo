@@ -215,7 +215,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -239,7 +239,74 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend=ray %s`,
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend=ray %s`,
+				VLLMPort, VLLMPort, enableElasticEPFlag,
+			)},
+			expectProbesKept:    true,
+			expectDPMasterIPEnv: true,
+		},
+		// vLLM v0.26.0 documents -dpb as the short alias for
+		// --data-parallel-backend, so both its split and equals spellings must
+		// also start a Ray head (regression guard for the -dpb alias).
+		{
+			name:              "single node elastic EP gets a ray head with the -dpb short alias",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "-dpb", "ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			},
+			gpuCount: 4,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test -dpb ray %s`,
+				VLLMPort, VLLMPort, enableElasticEPFlag,
+			)},
+			expectProbesKept:    true,
+			expectDPMasterIPEnv: true,
+		},
+		{
+			name:              "single node elastic EP gets a ray head with the inline -dpb alias",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "-dpb=ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			},
+			gpuCount: 4,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test -dpb=ray %s`,
+				VLLMPort, VLLMPort, enableElasticEPFlag,
+			)},
+			expectProbesKept:    true,
+			expectDPMasterIPEnv: true,
+		},
+		// The elastic-EP flags may be carried in Command instead of Args; detection
+		// scans the full command line, so this must also start a Ray head.
+		{
+			name:              "single node elastic EP detects flags placed in Command",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:        []string{"python3", "-m", "dynamo.vllm", "--data-parallel-backend", "ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			},
+			gpuCount: 4,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -777,10 +844,10 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
-			description: "A component deployed as one pod is expanded as RoleMain rather than RoleLeader, so the leader arm must match it or the Ray head is never started",
+			description: "A component deployed as one pod is expanded as RoleMain rather than RoleLeader, so the leader arm must match it (with exec, so vLLM receives SIGTERM) or the Ray head is never started",
 		},
 	}
 

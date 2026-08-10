@@ -24,7 +24,10 @@ const (
 	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
 	dataParallelBackendFlag   = "--data-parallel-backend"
-	dataParallelBackendRay    = "ray"
+	// dataParallelBackendShortFlag is vLLM's documented short alias for
+	// --data-parallel-backend (see the v0.26.0 `vllm serve` CLI reference).
+	dataParallelBackendShortFlag = "-dpb"
+	dataParallelBackendRay       = "ray"
 )
 
 type VLLMBackend struct {
@@ -73,7 +76,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
-	} else if role == RoleMain && isElasticEPRayLaunch(getExpandedArgs(container)) {
+	} else if role == RoleMain && isElasticEPRayLaunch(container) {
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
@@ -448,17 +451,27 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		for i, arg := range container.Args {
 			quotedArgs[i] = shellQuoteForBashC(arg)
 		}
+		vllmCommand := strings.TrimSpace(strings.Join(quotedCmd, " ") + " " + strings.Join(quotedArgs, " "))
+		// A single-pod RoleMain leader is an ordinary serving pod that Kubernetes
+		// rolls, evicts, and deletes, so exec the engine: it then runs as the
+		// container's main process (PID 1) and receives SIGTERM directly for a
+		// graceful shutdown, instead of being killed after the grace period with
+		// in-flight requests dropped. The backgrounded Ray head continues as its
+		// child. The multinode RoleLeader keeps its historical no-exec form so
+		// this stays scoped to the new single-pod path.
+		if role == RoleMain {
+			vllmCommand = "exec " + vllmCommand
+		}
 		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
 		// An unbounded `until` loop would spin forever if `ray start --head` crashes
 		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
 			`ray start --head --port=%s --block & `+
 				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
-				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s %s`,
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s`,
 			VLLMPort,
 			VLLMPort,
-			strings.Join(quotedCmd, " "),
-			strings.Join(quotedArgs, " "),
+			vllmCommand,
 		)}
 	case RoleWorker:
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
@@ -489,21 +502,39 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 	container.Command = []string{"/bin/sh", "-c"}
 }
 
-// isElasticEPRayLaunch reports whether args ask for the elastic-EP Ray topology.
+// isElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
+// topology.
 //
 // Elastic EP only works on the Ray data-parallel backend: vLLM's Ray executor is
 // what grows and shrinks workers at runtime, and the engine refuses a scale
 // request on any other backend. Requiring both flags keeps a Ray head off pods
 // that pass --enable-elastic-ep while running the default backend, where it
 // would launch a process nothing ever talks to.
-func isElasticEPRayLaunch(expandedArgs []string) bool {
-	// hasArg matches both the "--data-parallel-backend ray" and
-	// "--data-parallel-backend=ray" spellings. vLLM (argparse) treats them as
-	// equivalent, so the equals form must trigger Ray-head injection too;
-	// otherwise a single-pod deployment written that way silently starts
-	// without a Ray head and followers can never join.
-	return hasFlag(expandedArgs, enableElasticEPFlag) &&
-		hasArg(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay)
+//
+// Detection scans the full command line (Command + Args) so the flags are found
+// whether the manifest carries them in Command or Args, and it accepts vLLM's
+// long --data-parallel-backend flag and its documented -dpb alias in both the
+// "flag value" and "flag=value" spellings — vLLM's argparse treats all of these
+// as equivalent, so any of them must trigger Ray-head injection.
+func isElasticEPRayLaunch(container *corev1.Container) bool {
+	expanded := getExpandedCommandLine(container)
+	return hasFlag(expanded, enableElasticEPFlag) &&
+		(hasArg(expanded, dataParallelBackendFlag, dataParallelBackendRay) ||
+			hasArg(expanded, dataParallelBackendShortFlag, dataParallelBackendRay))
+}
+
+// getExpandedCommandLine flattens Command and Args and splits any space-joined
+// tokens, so flag detection works whether the manifest puts flags in Command or
+// Args and whether they are separate list items or a single combined string.
+func getExpandedCommandLine(container *corev1.Container) []string {
+	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
+	commandLine = append(commandLine, container.Command...)
+	commandLine = append(commandLine, container.Args...)
+	expanded := make([]string, 0, len(commandLine))
+	for _, arg := range commandLine {
+		expanded = append(expanded, strings.Fields(arg)...)
+	}
+	return expanded
 }
 
 // hasFlag returns true if flag exists in expandedArgs.
