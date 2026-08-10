@@ -89,11 +89,12 @@ spec:
           mkdir -p "${RUN_DIR}"
 
           TRACE_LINES=$(wc -l < "${TRACE_FILE}")
-          # NUM_REQUESTS=0 (default) replays the full trace - required for rows comparable
-          # to the published README tables. Set a positive value (e.g. 400) for bounded
-          # iteration runs; the first N trace rows are identical across runs, which keeps
-          # paired A/B comparisons content-identical.
-          if [ "${NUM_REQUESTS:-0}" -gt 0 ]; then TRACE_LINES="${NUM_REQUESTS}"; fi
+          # NUM_REQUESTS (default 400) bounds the run: the first N trace rows are
+          # identical across runs, keeping paired A/B comparisons content-identical, and
+          # a 400-request run finishes in minutes rather than hours. Set NUM_REQUESTS=0
+          # to replay the full trace (see the deadline note above for the wall-clock
+          # arithmetic before doing so).
+          if [ "${NUM_REQUESTS:-400}" -gt 0 ]; then TRACE_LINES="${NUM_REQUESTS:-400}"; fi
 
           echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} requests=${TRACE_LINES} concurrency=${CONCURRENCY}"
           aiperf profile \
@@ -129,8 +130,9 @@ spec:
         - name: CONCURRENCY
           value: "16"
         - name: NUM_REQUESTS
-          # 0 = full trace (README-comparable). Positive = bounded run for iteration.
-          value: "0"
+          # 400 = bounded default (minutes, content-identical across configs for A/B).
+          # 0 = full-trace replay (hours - see the activeDeadlineSeconds note).
+          value: "400"
         - name: REQUEST_TIMEOUT_SECONDS
           value: "1200"
         - name: AIPERF_VERSION

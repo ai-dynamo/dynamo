@@ -9,7 +9,8 @@ Dynamo + vLLM serving recipes for **DeepSeek-V4-Pro** and **DeepSeek-V4-Flash**,
 tuned for the **agentic** workload (64k ISL / 400 OSL / 90% KV reuse) at a floor of
 **≥ 50 output tok/s/user**. (400 OSL is the trace *median*; the mean is ~2,455 with a heavy
 right tail, which is what determines benchmark wall-clock - see the deadline note in
-[`perf/perf.yaml`](perf/perf.yaml).) Each variant is a `DynamoGraphDeployment` (DGD); a single
+[`perf/perf.yaml`](perf/perf.yaml). The perf Job defaults to a bounded 400-request run;
+set `NUM_REQUESTS=0` for a full-trace replay and budget several hours.) Each variant is a `DynamoGraphDeployment` (DGD); a single
 shared [`perf/`](perf) Job replays the benchmark traces against any variant.
 
 ## Recipes by model
