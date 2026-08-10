@@ -218,8 +218,8 @@ explicit user-side wiring.
 
 ## What's different from the TRT-LLM sibling
 
-The [`../../trtllm/agg/nvidia/`](../../trtllm/agg/nvidia/) deployment uses TP=8 and a
-ConfigMap-based engine YAML, and ships as a single `DynamoGraphDeployment` letting
+The [`../../../trtllm/`](../../../trtllm/) deployments use TP=8 and a
+ConfigMap-based engine YAML, and ship as a single `DynamoGraphDeployment` letting
 the Dynamo Operator generate the underlying `Deployment`s/`Service`s. This recipe
 differs on three axes:
 

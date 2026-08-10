@@ -47,7 +47,14 @@ jobs:
 
   # Structural docs rules the Fern CLI does not cover: SPDX headers, frontmatter, body H1,
   # link scope, dangling nav paths, and internal references. Read-only, so it reports through
-  # inline annotations and the job summary rather than a pull request comment.
+  # the job summary rather than a pull request comment.
+  #
+  # The step summary lists every finding; that is the surface to point readers at.
+  # Inline annotations are best-effort on top of it, for two reasons: GitHub caps
+  # workflow-command annotations at 10 per level per step, so a PR introducing 15
+  # errors surfaces only 10 in the diff, and the step scans all of docs/ rather
+  # than the changed files, so a finding outside the diff has no line to attach to
+  # and appears only in the run log.
   docs-lint:
     name: Docs Lint
     needs: changed-files

@@ -262,27 +262,32 @@ def check_links(rel: str, abspath: str, text: str, repo: str, out: list) -> None
 def check_internal(rel: str, text: str, out: list) -> None:
     # Blank the whole file once: a fence spans several lines, so blanking a single line in
     # isolation never sees the opening and closing markers and cannot exempt a code example.
-    blanked = blank_code(text).splitlines()
-    for i, (ln, blanked_ln) in enumerate(zip(text.splitlines(), blanked), 1):
-        if NVBUG_RE.search(ln):
+    # Every rule below reads the blanked line, not the raw one. Previously only
+    # TODO_RE did, so the two error rules and the host warning fired inside code
+    # fences -- a troubleshooting page quoting a real log line, or contributing
+    # docs showing an example tracker ID, failed a required check for content
+    # that is deliberately verbatim.
+    for i, blanked_ln in enumerate(blank_code(text).splitlines(), 1):
+        if NVBUG_RE.search(blanked_ln):
             out.append(
                 Finding(rel, i, "INTERNAL", "error", "NVBug reference in shipped docs")
             )
-        if JIRA_RE.search(ln):
+        jira = JIRA_RE.search(blanked_ln)
+        if jira:
             out.append(
                 Finding(
                     rel,
                     i,
                     "INTERNAL",
                     "error",
-                    f"tracker ID in shipped docs: {JIRA_RE.search(ln).group(0)}",
+                    f"tracker ID in shipped docs: {jira.group(0)}",
                 )
             )
         if TODO_RE.search(blanked_ln):
             out.append(
                 Finding(rel, i, "INTERNAL", "warn", "TODO/FIXME in shipped docs")
             )
-        for h in NV_HOST_RE.findall(ln):
+        for h in NV_HOST_RE.findall(blanked_ln):
             if h.lower() not in PUBLIC_NV_HOSTS:
                 out.append(
                     Finding(rel, i, "INTERNAL", "warn", f"internal-looking host: {h}")
@@ -328,7 +333,14 @@ def check_nav(repo: str, out: list) -> None:
             if rel not in referenced:
                 out.append(
                     Finding(
-                        rel,
+                        # `rel` is relative to docs/fern because that is what
+                        # index.yml `path:` entries are measured against, and
+                        # the membership test above needs it in that form. What
+                        # gets reported has to be repo-relative like every other
+                        # rule: Finding.file feeds emit_github, and GitHub
+                        # silently drops an annotation whose path it cannot
+                        # resolve, so the warning never reached the file.
+                        os.path.join(FERN_DIR, rel),
                         1,
                         "NAV",
                         "warn",
@@ -338,14 +350,25 @@ def check_nav(repo: str, out: list) -> None:
                 )
 
 
+class MissingScanTree(Exception):
+    """A requested scan tree does not exist."""
+
+
 def gather(repo: str, scan: list) -> list:
     exts = (".md", ".mdx", ".py", ".sh", ".yaml", ".yml")
     files = []
     for tree in scan:
         root = os.path.join(repo, tree)
-        for dirpath, _, names in os.walk(root):
-            if "/.git" in dirpath or "/node_modules" in dirpath:
-                continue
+        # os.walk on a nonexistent root yields nothing and raises nothing, so a
+        # moved directory or a typo in the workflow argument produced a passing
+        # required check that verified zero files.
+        if not os.path.isdir(root):
+            raise MissingScanTree(tree)
+        for dirpath, dirnames, names in os.walk(root):
+            # Prune rather than test the joined path: `"/.git" in dirpath` also
+            # matches `.github`, so `--scan .github` skipped its whole tree.
+            # Pruning is also cheaper, since os.walk never descends.
+            dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules"}]
             for n in names:
                 if n.endswith(exts):
                     files.append(os.path.join(dirpath, n))
@@ -411,11 +434,19 @@ def main() -> int:
     args = ap.parse_args()
     repo = os.path.abspath(args.repo)
 
-    files = (
-        [os.path.abspath(f) for f in args.files]
-        if args.files
-        else gather(repo, [t.strip() for t in args.scan.split(",") if t.strip()])
-    )
+    try:
+        files = (
+            [os.path.abspath(f) for f in args.files]
+            if args.files
+            else gather(repo, [t.strip() for t in args.scan.split(",") if t.strip()])
+        )
+    except MissingScanTree as missing:
+        print(
+            f"--scan names a tree that does not exist under {repo}: {missing}. "
+            f"Refusing to report a clean run over nothing.",
+            file=sys.stderr,
+        )
+        return 2
 
     out: list = []
     if not args.no_nav:
