@@ -218,14 +218,14 @@ explicit user-side wiring.
 
 ## What's different from the TRT-LLM sibling
 
-The [`../../../trtllm/`](../../../trtllm/) deployments use TP=8 and a
+The [`recipes/kimi-k2.5/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm) deployments use TP=8 and a
 ConfigMap-based engine YAML, and ship as a single `DynamoGraphDeployment` letting
 the Dynamo Operator generate the underlying `Deployment`s/`Service`s. This recipe
 differs on three axes:
 
 1. **Engine knobs are inline CLI flags, not a ConfigMap.** TokenSpeed accepts engine
    knobs directly on the worker command line, similar to vLLM. Layout therefore
-   mirrors [`recipes/llama-3-70b/vllm/agg/`](../../../../llama-3-70b/vllm/agg/) rather
+   mirrors [`recipes/llama-3-70b/vllm/agg/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg) rather
    than the TRT-LLM ConfigMap pattern.
 2. **Raw `Deployment` + `Service` resources, not a `DynamoGraphDeployment`.** The
    operator's `backendFramework` enum currently only validates `vllm`, `sglang`,
