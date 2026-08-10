@@ -81,23 +81,32 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
 		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
-			// Bind VLLM_DP_MASTER_IP only when a Ray head was actually injected.
+			// Bind both addresses only when a Ray head was actually injected.
 			//
-			// At --data-parallel-size 1, vLLM discards the DP master IP it derives
-			// from the Ray node and reads VLLM_DP_MASTER_IP instead, which defaults
-			// to 127.0.0.1. Ray registers the head under the pod IP, so the engine
-			// then looks for a node that does not exist and aborts with "The DP
-			// master node (ip: 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP
-			// nor --data-parallel-address survives that overwrite; this env var is
-			// the only value the fallback reads.
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name: commonconsts.VLLMDPMasterIPEnvVar,
-				ValueFrom: &corev1.EnvVarSource{
+			// Both resolve from status.podIP, which is the point: the Ray head
+			// registers under that address and vLLM searches for that address, so
+			// the two cannot disagree. POD_IP is what the launch command
+			// interpolates into --node-ip-address; VLLM_DP_MASTER_IP is what the
+			// engine reads.
+			//
+			// The engine needs telling because at --data-parallel-size 1 vLLM
+			// discards the DP master IP it derives from the Ray node and falls back
+			// to VLLM_DP_MASTER_IP, which defaults to 127.0.0.1 — so it looks for a
+			// node that does not exist and aborts with "The DP master node (ip:
+			// 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP nor
+			// --data-parallel-address survives that overwrite; this env var is the
+			// only value the fallback reads.
+			podIPRef := func() *corev1.EnvVarSource {
+				return &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
 						FieldPath: "status.podIP",
 					},
-				},
-			})
+				}
+			}
+			container.Env = append(container.Env,
+				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
+				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
+			)
 		}
 	}
 
@@ -483,14 +492,27 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		if role == RoleMain {
 			vllmCommand = "exec " + vllmCommand
 		}
+		// Name the head's address on the single-pod path instead of letting Ray
+		// pick one. vLLM is told the DP master is at status.podIP (see the caller)
+		// and then looks for the Ray node registered under that exact address.
+		// Ray left to itself chooses an interface by its own heuristic, so on a
+		// pod with more than one network the two disagree and the engine aborts
+		// with the same "DP master node is missing or dead" the env var exists to
+		// prevent. The multinode leader keeps auto-detection: neither side of that
+		// pair is pinned, so both run the same heuristic and agree with each other.
+		nodeIPFlag := ""
+		if role == RoleMain {
+			nodeIPFlag = fmt.Sprintf(` --node-ip-address="$%s"`, commonconsts.PodIPEnvVar)
+		}
 		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
 		// An unbounded `until` loop would spin forever if `ray start --head` crashes
 		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
-			`ray start --head --port=%s --block & `+
+			`ray start --head --port=%s%s --block & `+
 				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
 				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s`,
 			VLLMPort,
+			nodeIPFlag,
 			VLLMPort,
 			vllmCommand,
 		)}

@@ -188,6 +188,10 @@ const (
 	// VLLMDPMasterIPEnvVar is the env var that tells vLLM which IP hosts the data-parallel master.
 	VLLMDPMasterIPEnvVar = "VLLM_DP_MASTER_IP"
 
+	// PodIPEnvVar carries the pod's own IP from the downward API, for launch
+	// commands that must name an address rather than let a library guess one.
+	PodIPEnvVar = "POD_IP"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection

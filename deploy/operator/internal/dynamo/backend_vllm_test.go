@@ -254,7 +254,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				`ray start --head --port=%s --node-ip-address="$POD_IP" --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -278,7 +278,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend=ray %s`,
+				`ray start --head --port=%s --node-ip-address="$POD_IP" --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend=ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -302,7 +302,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test -dpb ray %s`,
+				`ray start --head --port=%s --node-ip-address="$POD_IP" --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test -dpb ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -323,7 +323,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test -dpb=ray %s`,
+				`ray start --head --port=%s --node-ip-address="$POD_IP" --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test -dpb=ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -345,7 +345,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			gpuCount: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --data-parallel-backend ray %s`,
+				`ray start --head --port=%s --node-ip-address="$POD_IP" --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			expectProbesKept:    true,
@@ -450,15 +450,23 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				g.Expect(tt.initialContainer.StartupProbe).ToNot(gomega.BeNil())
 			}
 
-			// Asserted on every case, so that the env var cannot leak into a
+			// Asserted on every case, so that neither env var can leak into a
 			// container that did not ask for a Ray head.
 			dpMasterIP := findEnvVar(tt.initialContainer.Env, commonconsts.VLLMDPMasterIPEnvVar)
+			podIP := findEnvVar(tt.initialContainer.Env, commonconsts.PodIPEnvVar)
 			if tt.expectDPMasterIPEnv {
 				t.Log("without this, vLLM looks for the DP master at 127.0.0.1 and aborts")
 				g.Expect(dpMasterIP).ToNot(gomega.BeNil())
 				g.Expect(dpMasterIP.ValueFrom.FieldRef.FieldPath).To(gomega.Equal("status.podIP"))
+
+				// The launch command interpolates POD_IP into --node-ip-address, so
+				// an unset value would start the Ray head with an empty address.
+				t.Log("the Ray head registers under this address; vLLM searches for it")
+				g.Expect(podIP).ToNot(gomega.BeNil())
+				g.Expect(podIP.ValueFrom.FieldRef.FieldPath).To(gomega.Equal("status.podIP"))
 			} else {
 				g.Expect(dpMasterIP).To(gomega.BeNil())
+				g.Expect(podIP).To(gomega.BeNil())
 			}
 		})
 	}
@@ -899,7 +907,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
+				`ray start --head --port=%s --node-ip-address="$POD_IP" --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && exec python3 -m dynamo.vllm --model test --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, enableElasticEPFlag,
 			)},
 			description: "A component deployed as one pod is expanded as RoleMain rather than RoleLeader, so the leader arm must match it (with exec, so vLLM receives SIGTERM) or the Ray head is never started",
