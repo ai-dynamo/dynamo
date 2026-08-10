@@ -229,6 +229,8 @@ def _materialize_engine_execution_spec(
             "decode",
         )
         for role, role_config in (("prefill", prefill), ("decode", decode)):
+            # TODO(#12965): Keep this fail-fast until disaggregated handoff and
+            # lifecycle evidence carry a logical-worker plus DP-rank identity.
             if role_config["dp_size"] != 1:
                 raise ValueError(
                     "disaggregated engine replay requires "

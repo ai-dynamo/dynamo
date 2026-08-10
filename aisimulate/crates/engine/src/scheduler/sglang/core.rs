@@ -129,11 +129,12 @@ impl SglangCore {
             prebuilt_ready: VecDeque::new(),
             running: Vec::new(),
             new_token_ratio: SglangConfig::from_args(&args).init_new_token_ratio,
-            kv_manager: SglangKvManager::new(
+            kv_manager: SglangKvManager::new_with_prefix_caching(
                 total_tokens,
                 args.block_size,
                 kv_event_publishers,
                 dp_rank,
+                args.enable_prefix_caching,
             ),
             speculative_sampler,
             kv_event_buffer,

@@ -113,6 +113,7 @@ pub(crate) struct AllocResult {
 
 pub struct SglangKvManager {
     cache: RadixCache,
+    enable_prefix_caching: bool,
     kv_event_publishers: KvEventPublishers,
     dp_rank: u32,
     next_event_id: u64,
@@ -171,11 +172,22 @@ impl DecodeTokenReservation {
 }
 
 impl SglangKvManager {
+    #[cfg(test)]
     pub fn new(
         total_tokens: usize,
         page_size: usize,
         kv_event_publishers: KvEventPublishers,
         dp_rank: u32,
+    ) -> Self {
+        Self::new_with_prefix_caching(total_tokens, page_size, kv_event_publishers, dp_rank, true)
+    }
+
+    pub(crate) fn new_with_prefix_caching(
+        total_tokens: usize,
+        page_size: usize,
+        kv_event_publishers: KvEventPublishers,
+        dp_rank: u32,
+        enable_prefix_caching: bool,
     ) -> Self {
         let page_to_block_hash = if kv_event_publishers.is_empty() {
             Vec::new()
@@ -184,6 +196,7 @@ impl SglangKvManager {
         };
         Self {
             cache: RadixCache::new(total_tokens, page_size),
+            enable_prefix_caching,
             kv_event_publishers,
             dp_rank,
             next_event_id: 0,
@@ -219,7 +232,7 @@ impl SglangKvManager {
         let page_size = self.cache.page_size();
         lease.ensure_page_hashes(token_ids, page_size);
         let materialized_hashes = lease.page_hashes_through(token_ids.len(), page_size);
-        let (prefix_len, last_node) = self.cache.match_prefix_hashes_and_lock(materialized_hashes);
+        let (prefix_len, last_node) = self.match_prefix_hashes_and_lock(materialized_hashes);
         let required_pages = token_ids.len().div_ceil(page_size) - prefix_len / page_size;
         let required_tokens = required_pages * page_size;
 
@@ -308,6 +321,9 @@ impl SglangKvManager {
         token_ids: &[u32],
         lease: &mut RadixRequestLease,
     ) {
+        if !self.enable_prefix_caching {
+            return;
+        }
         lease.ensure_page_hashes(token_ids, self.cache.page_size());
         let complete_len = token_ids.len() / self.cache.page_size() * self.cache.page_size();
         if complete_len <= lease.cached_tokens {
@@ -352,6 +368,11 @@ impl SglangKvManager {
             debug_assert_eq!(lease.cached_tokens, 0);
             return;
         };
+        if !self.enable_prefix_caching {
+            self.free_pages(&lease.pages);
+            self.cache.dec_lock_ref(last_node);
+            return;
+        }
         let complete_len =
             token_ids.len().min(lease.len()) / self.cache.page_size() * self.cache.page_size();
         assert!(
@@ -468,7 +489,7 @@ impl SglangKvManager {
         page_hashes: &[LocalBlockHash],
         token_count: usize,
     ) -> Option<SglangDestinationReservation> {
-        let (prefix_len, last_node) = self.cache.match_prefix_hashes_and_lock(page_hashes);
+        let (prefix_len, last_node) = self.match_prefix_hashes_and_lock(page_hashes);
         let prefix_pages = self.collect_path_pages_through(last_node, prefix_len);
 
         let allocated_tokens = if token_count == 0 {
@@ -519,16 +540,23 @@ impl SglangKvManager {
             allocated_tokens: _,
         } = reservation;
         prefix_pages.append(&mut unpublished_pages);
-        let new_last_node = self.cache_unfinished_hashes(
-            lease.page_hashes_through(token_count, self.cache.page_size()),
-            &mut prefix_pages,
-            last_node,
-            prefix_len,
-        );
+        let (new_last_node, cached_tokens) = if self.enable_prefix_caching {
+            (
+                self.cache_unfinished_hashes(
+                    lease.page_hashes_through(token_count, self.cache.page_size()),
+                    &mut prefix_pages,
+                    last_node,
+                    prefix_len,
+                ),
+                token_count / self.cache.page_size() * self.cache.page_size(),
+            )
+        } else {
+            (last_node, 0)
+        };
         self.log_trace("activate_destination", missing_tokens);
         lease.pages = prefix_pages;
         lease.materialized_tokens = token_count;
-        lease.cached_tokens = token_count / self.cache.page_size() * self.cache.page_size();
+        lease.cached_tokens = cached_tokens;
         lease.last_node = Some(new_last_node);
         prefix_len
     }
@@ -577,6 +605,14 @@ impl SglangKvManager {
         lease.materialized_tokens = 0;
         lease.cached_tokens = 0;
         capacity_improved
+    }
+
+    fn match_prefix_hashes_and_lock(&mut self, page_hashes: &[LocalBlockHash]) -> (usize, NodeId) {
+        if self.enable_prefix_caching {
+            self.cache.match_prefix_hashes_and_lock(page_hashes)
+        } else {
+            (0, self.cache.root())
+        }
     }
 
     /// Collect physical pages from the matched prefix path by walking root→last_node.

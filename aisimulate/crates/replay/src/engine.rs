@@ -124,6 +124,8 @@ impl ReplayEngineConfig {
             for stage in [WorkerStage::Prefill, WorkerStage::Decode] {
                 let role = self.role(stage);
                 if role.dp_size != 1 {
+                    // TODO(#12965): Carry logical-worker plus DP-rank identity through
+                    // disaggregated handoff before removing this fail-fast guard.
                     let role_name = match stage {
                         WorkerStage::Prefill => "prefill",
                         WorkerStage::Decode => "decode",
