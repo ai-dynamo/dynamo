@@ -341,7 +341,13 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 routing_inputs,
                 ..
             } = &mut *state;
-            if candidates.is_empty() {
+            if let Some(preferred) = request.preferred_worker
+                && let Some(candidate) = candidates
+                    .iter()
+                    .find(|candidate| candidate.worker == preferred)
+            {
+                Some((candidate.worker, candidate.cost))
+            } else if candidates.is_empty() {
                 None
             } else {
                 debug_assert!(
@@ -462,6 +468,7 @@ mod test_support {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,

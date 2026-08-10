@@ -543,6 +543,7 @@ struct KvRouterConfigSerde {
     _legacy_router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
+    session_affinity_soft: bool,
     #[serde(default)]
     router_policy_config: Option<String>,
     router_event_threads: u32,
@@ -590,6 +591,7 @@ impl Default for KvRouterConfigSerde {
             _legacy_router_reset_states: false,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
+            session_affinity_soft: config.session_affinity_soft,
             router_policy_config: config.router_policy_config,
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
@@ -690,6 +692,10 @@ pub struct KvRouterConfig {
     /// If None, queueing is disabled and all requests go directly to ready.
     /// Disabled by default. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
     pub router_queue_threshold: Option<f64>,
+
+    /// Treat session affinity as a preferred worker instead of a hard pin.
+    #[serde(default)]
+    pub session_affinity_soft: bool,
 
     /// Optional startup-only YAML policy-class configuration.
     #[serde(default)]
@@ -818,6 +824,7 @@ impl Default for KvRouterConfig {
             router_prefill_load_model: RouterPrefillLoadModel::default(),
             router_ttl_secs: 120.0,
             router_queue_threshold: None,
+            session_affinity_soft: false,
             router_policy_config: None,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),
@@ -879,6 +886,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_prefill_load_model: compat.router_prefill_load_model,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
+            session_affinity_soft: compat.session_affinity_soft,
             router_policy_config: compat.router_policy_config,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),

@@ -405,6 +405,19 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         ));
     }
 
+    if let Some(worker) = request.preferred_worker
+        && let Ok(config) = eligibility.validate_worker_rank(workers, worker)
+    {
+        let preferred_taint_multiplier = request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints());
+        let row = input.row(worker, preferred_taint_multiplier, WorkerInputs::ALL);
+        return Some((
+            worker,
+            scorer.worker_logit(&input.context, &row, "Session affinity formula"),
+        ));
+    }
+
     let temperature = input
         .context
         .router_temperature_override
@@ -709,6 +722,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -928,6 +942,36 @@ mod tests {
     }
 
     #[test]
+    fn preferred_worker_is_selected_until_overloaded() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let preferred = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([
+            (preferred.worker_id, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.preferred_worker = Some(preferred);
+
+        let selected = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(selected.worker, preferred);
+
+        let overloaded = HashSet::from([preferred.worker_id]);
+        let selected = selector
+            .select_worker(
+                &workers,
+                &request,
+                request.eligibility_with_overloaded(Some(&overloaded)),
+                16,
+            )
+            .unwrap();
+        assert_eq!(selected.worker.worker_id, 1);
+    }
+
+    #[test]
     fn test_all_eligible_workers_overloaded_returns_overload_error() {
         use crate::test_utils::SimpleWorkerConfig;
 
@@ -1016,6 +1060,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::from(["mdc-b".to_string()]),
@@ -1069,6 +1114,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::from(["mdc-b".to_string()]),
@@ -1140,6 +1186,7 @@ mod tests {
                 session_id: None,
                 expected_output_tokens: None,
                 pinned_worker: None,
+                preferred_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: crate::protocols::RoutingConstraints {
                     required_taints: HashSet::from([required_taint.clone()]),
@@ -1209,6 +1256,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::new(),
@@ -1274,6 +1322,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::new(),
@@ -1355,6 +1404,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: Some(shared_hits),
@@ -1427,6 +1477,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -1703,6 +1754,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -1760,6 +1812,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,

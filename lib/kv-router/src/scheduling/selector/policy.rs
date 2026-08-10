@@ -417,7 +417,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use rustc_hash::FxHashMap;
 
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_picker_receives_requested_cache_inputs() {
+    fn custom_policy_honors_preferred_worker_until_overloaded() {
         struct HighestOverlapPicker;
 
         impl WorkerPicker for HighestOverlapPicker {
@@ -504,6 +504,7 @@ mod tests {
         let mut request = base_request(16);
         request.overlap.effective_overlap_blocks =
             HashMap::from([(worker0, 0.25), (worker1, 0.75)]);
+        request.preferred_worker = Some(worker0);
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
@@ -513,6 +514,17 @@ mod tests {
 
         let selected = policy
             .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(selected.worker, worker0);
+
+        let overloaded = HashSet::from([worker0.worker_id]);
+        let selected = policy
+            .select_worker(
+                &workers,
+                &request,
+                request.eligibility_with_overloaded(Some(&overloaded)),
+                16,
+            )
             .unwrap();
         assert_eq!(selected.worker, worker1);
     }

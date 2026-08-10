@@ -417,6 +417,7 @@ def test_frontend_rejection_thresholds_default_to_none(
         "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
+        "session_affinity_mode": "hard",
     }
     assert "busy-worker rejection disabled" in caplog.text
 
@@ -545,6 +546,7 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
+        "session_affinity_mode": "hard",
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -689,20 +691,26 @@ def test_rejection_threshold_validation_rejects_invalid_values(
 
 def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MODE", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
     assert config.session_affinity_ttl_secs is None
+    assert config.session_affinity_mode == "hard"
     assert config.router_kwargs()["session_affinity_ttl_secs"] is None
+    assert config.router_kwargs()["session_affinity_mode"] == "hard"
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MODE", "soft")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
     assert config.session_affinity_ttl_secs == 600
+    assert config.session_affinity_mode == "soft"
     assert config.router_kwargs()["session_affinity_ttl_secs"] == 600
+    assert config.router_kwargs()["session_affinity_mode"] == "soft"
 
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)

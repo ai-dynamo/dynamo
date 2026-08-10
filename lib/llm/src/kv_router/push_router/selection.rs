@@ -54,6 +54,7 @@ impl<'a> RoutingRequestParts<'a> {
 
 pub(super) struct SelectionOptions {
     pub(super) affinity_worker: Option<WorkerWithDpRank>,
+    pub(super) soft_affinity: bool,
     pub(super) policy_class: Option<String>,
     pub(super) session_id: Option<String>,
 }
@@ -72,6 +73,7 @@ struct BestMatchArgs<'a> {
     session_id: Option<String>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
+    preferred_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
 }
@@ -98,6 +100,7 @@ where
                 args.session_id,
                 args.expected_output_tokens,
                 args.pinned_worker,
+                args.preferred_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 FindBestMatchAdmission::WithAdmission {
@@ -186,12 +189,14 @@ where
             !is_query_only && self.chooser.indexer().records_routing_decisions();
         let SelectionOptions {
             affinity_worker,
+            soft_affinity,
             policy_class,
             session_id,
         } = options;
         let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let preferred_worker = if soft_affinity { affinity_worker } else { None };
         let Some((pinned_worker_id, requested_dp_rank)) =
-            merge_affinity_pin(explicit_pin, affinity_pin)
+            merge_affinity_pin(explicit_pin, affinity_pin, soft_affinity)
         else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
@@ -209,6 +214,7 @@ where
                     session_id,
                     expected_output_tokens,
                     pinned_worker: None,
+                    preferred_worker,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
                 })
@@ -281,6 +287,7 @@ where
             session_id,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
+            preferred_worker: None,
             allowed_worker_ids,
             routing_constraints,
         })
@@ -291,6 +298,7 @@ where
 fn merge_affinity_pin(
     explicit: Option<(u64, Option<u32>)>,
     affinity: Option<(u64, Option<u32>)>,
+    soft_affinity: bool,
 ) -> Option<(u64, Option<u32>)> {
     match (explicit, affinity) {
         (Some((worker_id, None)), Some((affinity_worker_id, affinity_rank)))
@@ -299,7 +307,8 @@ fn merge_affinity_pin(
             Some((worker_id, affinity_rank))
         }
         (Some(explicit), _) => Some(explicit),
-        (None, affinity) => affinity,
+        (None, affinity) if !soft_affinity => affinity,
+        (None, _) => None,
     }
 }
 
@@ -377,15 +386,18 @@ mod tests {
     }
 
     #[test]
-    fn affinity_pin_supplies_rank_for_matching_explicit_worker() {
+    fn affinity_mode_controls_pin_and_supplies_matching_rank() {
         assert_eq!(
-            merge_affinity_pin(Some((7, None)), Some((7, Some(0)))),
+            merge_affinity_pin(Some((7, None)), Some((7, Some(0))), true),
             Some((7, Some(0)))
         );
         assert_eq!(
-            merge_affinity_pin(Some((7, Some(2))), Some((7, Some(3)))),
+            merge_affinity_pin(Some((7, Some(2))), Some((7, Some(3))), true),
             Some((7, Some(2)))
         );
+        let affinity = Some((7, Some(0)));
+        assert_eq!(merge_affinity_pin(None, affinity, false), affinity);
+        assert_eq!(merge_affinity_pin(None, affinity, true), None);
     }
 
     #[test]

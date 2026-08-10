@@ -75,6 +75,7 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
         lora_name: None,
         expected_output_tokens: Some(256),
         pinned_worker: None,
+        preferred_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
         router_config_override: None,

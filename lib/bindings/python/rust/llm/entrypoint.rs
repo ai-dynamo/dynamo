@@ -462,7 +462,8 @@ pub struct RouterConfig {
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -471,6 +472,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -492,9 +494,15 @@ impl RouterConfig {
         }
         .validate()
         .map_err(PyValueError::new_err)?;
+        let mut kv_router_config = config.unwrap_or_default();
+        kv_router_config.inner.session_affinity_soft = match session_affinity_mode {
+            "hard" => false,
+            "soft" => true,
+            _ => return Err(PyValueError::new_err("expected 'hard' or 'soft'")),
+        };
         Ok(Self {
             router_mode: mode,
-            kv_router_config: config.unwrap_or_default(),
+            kv_router_config,
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
