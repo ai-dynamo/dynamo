@@ -35,6 +35,7 @@ spec:
             - Qwen/Qwen3-8B
             - --disaggregation-mode
             - decode
+            - --disable-hybrid-kv-cache-manager
             - --kv-transfer-config
             - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             - --gpu-memory-utilization
