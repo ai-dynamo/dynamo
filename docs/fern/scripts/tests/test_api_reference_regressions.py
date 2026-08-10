@@ -270,7 +270,7 @@ def test_api_landing_points_kubernetes_at_colocated_route() -> None:
     """The landing card group must point Kubernetes at the colocated route."""
     source = API_LANDING.read_text(encoding="utf-8")
     card = re.search(
-        r'<Card title="Kubernetes" href="([^"]+)"',
+        r'<Card title="Kubernetes"[^>]*?href="([^"]+)"',
         source,
     )
 
@@ -278,6 +278,27 @@ def test_api_landing_points_kubernetes_at_colocated_route() -> None:
     assert (
         card.group(1) == "../kubernetes-api/full-api-reference.mdx"
     ), f"Kubernetes card must point at the colocated page, got {card.group(1)!r}"
+
+
+def test_api_landing_cards_carry_the_sidebar_icons() -> None:
+    """Each landing card must show the brand icon its sidebar entry shows.
+
+    The cards are the first thing on the tab and were the only place the three
+    surfaces appeared without their icons, so a reader arriving at the landing
+    page saw a different visual vocabulary than the sidebar beside it.
+    """
+    source = API_LANDING.read_text(encoding="utf-8")
+    for title, icon in (
+        ("Python", "fa-brands fa-python"),
+        ("Rust", "fa-brands fa-rust"),
+        ("Kubernetes", "fa-brands fa-kubernetes"),
+    ):
+        card = re.search(rf'<Card title="{title}"[^>]*>', source)
+        assert card is not None, f"{title} card not found on the API landing page"
+        assert f'icon="{icon}"' in card.group(0), (
+            f"{title} card must carry {icon!r} to match its sidebar entry, "
+            f"got {card.group(0)!r}"
+        )
 
 
 _UNMERGED_DOCS_LINK_RE = re.compile(
