@@ -92,6 +92,8 @@ The operator change in `deploy/operator/internal/dynamo/backend_vllm.go` makes a
 elastic EP component start a Ray head. Previously only a multi-node leader received the Ray launch
 wiring, so a solo leader came up with no Ray cluster for followers to join later. A single-pod
 component is expanded as `RoleMain`, never `RoleLeader`, so the leader arm now matches both roles.
+The same branch binds `VLLM_DP_MASTER_IP` to the pod IP, without which the engine looks for the
+data-parallel master at `127.0.0.1` and aborts; see Part C for the full explanation.
 
 The engine change in `components/src/dynamo/vllm/handlers.py` replaces a hardcoded
 `new_data_parallel_size < 2` rejection with the constraint vLLM actually enforces, namely that
@@ -108,8 +110,8 @@ they can be built, reviewed, and merged separately. Rebasing onto current `main`
 | Branch | Contents |
 |---|---|
 | `tzulingk/elastic-ep-p0-grove-spike` | Design document and the Phase 0 Grove spike manifest with its recorded results. Documentation only. |
-| `tzulingk/elastic-ep-scale-floor` | The `handlers.py` scale-floor fix plus `components/src/dynamo/vllm/tests/test_vllm_elastic_ep_handlers.py`. |
-| `tzulingk/elastic-ep-p2-ray-head` | The `backend_vllm.go` Ray-head change plus cases added to `backend_vllm_test.go`. |
+| `tzulingk/elastic-ep-scale-floor` | The `handlers.py` scale-floor fix plus `components/src/dynamo/vllm/tests/test_vllm_elastic_ep_handlers.py`. Open as [#12937](https://github.com/ai-dynamo/dynamo/pull/12937). |
+| `tzulingk/elastic-ep-p2-ray-head` | The `backend_vllm.go` Ray-head change and the `VLLM_DP_MASTER_IP` binding, plus cases added to `backend_vllm_test.go`. Open as [#12943](https://github.com/ai-dynamo/dynamo/pull/12943). |
 
 Unit tests on both code branches pass locally. The Go tests were confirmed to fail without the
 production change and pass with it.
@@ -313,10 +315,45 @@ Write a DynamoGraphDeployment modelled on
 which already carries the correct vLLM flags and environment for elastic EP, but reshaped as
 follows. Annotate the deployment with `nvidia.com/enable-grove: "false"`. Give it a leader component
 at one replica requesting four GPUs, and a follower component at `replicas: 0` with
-`scalingAdapter: {}` and an identical pod template. Set tensor-parallel size to four so one pod
-holds exactly one data-parallel rank, keep `--data-parallel-backend ray`, `--enable-elastic-ep`,
-`--enable-eplb` and `VLLM_ALL2ALL_BACKEND=allgather_reducescatter`, and point `HF_HOME` at the
-`shared-model-cache` PVC. Use the worker image from Part A for both components.
+`scalingAdapter: {}`. Set tensor-parallel size to four so one pod holds exactly one data-parallel
+rank, keep `--data-parallel-backend ray`, `--enable-elastic-ep`, `--enable-eplb` and
+`VLLM_ALL2ALL_BACKEND=allgather_reducescatter`, and point `HF_HOME` at the `shared-model-cache` PVC.
+Use the worker image from Part A for both components.
+
+Two details that are easy to get wrong, and that cost a full deploy cycle each.
+
+**The follower is not a copy of the leader.** An earlier draft of this runbook said "an identical
+pod template", which is wrong: the operator expands a standalone single-pod component as `RoleMain`,
+so a follower with the leader's template would start its own Ray *head* and form a second, separate
+cluster. Nothing would ever join anything. The follower's Ray wiring is Phase 4 and is not
+implemented, so hand-write its command to wait for the leader and then join:
+
+```
+until curl -sf http://<dgd>-leader-ray:9090/live >/dev/null; do sleep 5; done && \
+  ray start --address=<dgd>-leader-ray:6379 --block
+```
+
+The leader must be reachable through a **headless** Service, not the operator's per-component
+`<dgd>-leader` Service — that one is ClusterIP on 9090 only and cannot carry Ray's pod-to-pod
+traffic across its several ports.
+
+**The leader needs `VLLM_DP_MASTER_IP` bound to its own pod IP.** With the Part A operator this is
+injected automatically. If you are taking the escape hatch and hand-writing the leader command
+against the existing cluster operator, you must add it yourself:
+
+```yaml
+env:
+  - name: VLLM_DP_MASTER_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+```
+
+Without it the leader crashes at engine startup with `The DP master node (ip: 127.0.0.1) is missing
+or dead`. Ray registers the head under the pod IP, but at `--data-parallel-size 1` vLLM discards the
+address it derives from Ray and falls back to this environment variable, which defaults to
+`127.0.0.1`. Neither `VLLM_HOST_IP` nor `--data-parallel-address` helps — the same fallback discards
+both. This only affects dp=1, which is why `moe_elastic_ep_demo.yaml` at dp=2 does not show it.
 
 Work through the sequence in the diagram above, checking each stage before moving on.
 
