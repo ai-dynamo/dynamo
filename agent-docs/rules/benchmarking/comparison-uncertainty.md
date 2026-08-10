@@ -31,6 +31,10 @@ is expensive, so do not collect repetitions only to produce confidence intervals
 - Record neighbour occupancy (what else runs on the node) with every measurement and compare only like with like. A
   fleet or full-node projection from idle-neighbour measurements is invalid until confirmed by one co-located
   measurement with load generation verified unsaturated.
+- Cache-state policy for reuse-heavy workloads: reset caches between points and rank candidates on cold, identical
+  content (comparability), but before promising an absolute number — a floor-pick or a fleet projection — on a
+  workload with substantial prefix reuse, confirm the finalist once at warm steady state. A cold, short window
+  measures the cold-to-warm transient, not the regime production runs in.
 - A clear, substantial improvement or regression may support a conclusion from one valid, isolated, plausible run.
   State that the comparison is single-run evidence.
 - Repeat a valid benchmark only when the existing evidence cannot support a consequential decision, another run is
