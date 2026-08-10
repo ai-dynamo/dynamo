@@ -10,7 +10,8 @@ use dynamo_backend_common::{
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
-use dynamo_vllm_sidecar::proto::generate_server::GenerateServer;
+use dynamo_vllm_sidecar::proto::control_server::ControlServer;
+use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -35,10 +36,20 @@ impl RunningServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let server_service = service.clone();
+        let inference_service = service.clone();
+        let control_service = service.clone();
+        let (health, health_service) = tonic_health::server::health_reporter();
+        health
+            .set_serving::<ControlServer<VllmMockerService>>()
+            .await;
+        health
+            .set_serving::<InferenceServer<VllmMockerService>>()
+            .await;
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(GenerateServer::new(server_service))
+                .add_service(InferenceServer::new(inference_service))
+                .add_service(ControlServer::new(control_service))
+                .add_service(health_service)
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -73,13 +84,11 @@ fn fast_engine_args() -> MockEngineArgs {
         .unwrap()
 }
 
-fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine {
+async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine {
     let mut argv = vec![
         "dynamo-vllm-sidecar".to_string(),
         "--vllm-endpoint".to_string(),
         endpoint.to_string(),
-        "--model-path".to_string(),
-        "mocker-model".to_string(),
         "--grpc-connections".to_string(),
         "1".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
@@ -90,7 +99,11 @@ fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine {
     if mode != DisaggregationMode::Aggregated {
         argv.extend(["--disaggregation-mode".to_string(), mode.to_string()]);
     }
-    VllmSidecarEngine::from_args(Some(argv)).unwrap().0
+    tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0
 }
 
 fn request(max_tokens: u32) -> PreprocessedRequest {
@@ -132,7 +145,7 @@ async fn collect(
 #[tokio::test]
 async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
     let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated);
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
 
     let outputs = collect(&engine, request(3)).await;
@@ -160,8 +173,8 @@ async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
 async fn prefill_handoff_round_trips_through_a_decode_server() {
     let prefill_server = RunningServer::start(ServerMode::Prefill, fast_engine_args()).await;
     let decode_server = RunningServer::start(ServerMode::Decode, fast_engine_args()).await;
-    let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill);
-    let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode);
+    let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
+    let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode).await;
     prefill.start(0).await.unwrap();
     decode.start(1).await.unwrap();
 
@@ -199,7 +212,7 @@ async fn dropping_sidecar_stream_cancels_mocker_work() {
     let mut args = fast_engine_args();
     args.speedup_ratio = 0.1;
     let server = RunningServer::start(ServerMode::Aggregated, args).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated);
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
 
     let context = dynamo_backend_common::testing::mock_context();

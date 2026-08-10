@@ -5,7 +5,7 @@ state. Keep edits scoped and read the more specific `CLAUDE.md` in subdirectorie
 when one exists.
 
 When router configuration is serialized inside a model deployment card, it is
-part of the N-1 worker/frontend wire contract described in
+part of the N-2 worker/frontend wire contract described in
 [`lib/llm/CLAUDE.md`](../llm/CLAUDE.md). Keep compatibility handling narrow and
 give deprecated wire fields a versioned removal TODO.
 

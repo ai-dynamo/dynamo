@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
+      fern_components: ${{ steps.changes.outputs.fern_components }}
       operator: ${{ steps.changes.outputs.operator }}
       snapshot: ${{ steps.changes.outputs.snapshot }}
       rust: ${{ steps.changes.outputs.rust }}
@@ -82,6 +83,61 @@ jobs:
     - name: Validate Fern configuration
       working-directory: docs/fern
       run: fern check
+    - name: Cache the npm store for esbuild
+      if: needs.changed-files.outputs.fern_components == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: ~/.npm
+        # Keyed on the pinned version, so bumping esbuild misses the cache
+        # deliberately rather than serving a stale tarball for a new pin.
+        key: npm-esbuild-0.24.0-${{ runner.os }}
+    - name: Parse custom MDX components
+      # Scoped to the narrow fern_components filter rather than the repo-wide
+      # docs one: this step exercises component sources only, and on the docs
+      # filter roughly 95% of its runs have no component change to check.
+      if: needs.changed-files.outputs.fern_components == 'true'
+      working-directory: docs/fern
+      # `fern check` validates configuration and navigation, never component
+      # syntax, so a component that does not compile merges green and only
+      # surfaces when Fern builds the site. #12330 shipped a LandingStyles.tsx
+      # whose CSS comment contained raw backticks that closed the enclosing
+      # template literal; it took #12402 to repair. esbuild transforms each
+      # file without bundling, which is exactly the syntax gate that was
+      # missing. Keep the version pinned so a bad esbuild release cannot
+      # redefine this gate.
+      run: |
+        set -euo pipefail
+        # Installed rather than run through `npx --yes`, which re-fetches
+        # 4.35 MB from the registry on every run with no integrity check. This
+        # step is a hard dependency of pre-merge-status-check, so a registry
+        # 5xx would red a PR that only touched an .mdx page. --no-save keeps
+        # the tree clean (there is no package.json beside fern/), and the
+        # npm cache below makes a warm run need no network at all.
+        npm install --no-save --no-audit --no-fund esbuild@0.24.0
+        ESBUILD=./node_modules/.bin/esbuild
+        # Same four suffixes Fern's bundler scans, and the same set
+        # docs/fern/scripts/check_component_imports.py covers. Keep them aligned.
+        find_components() {
+          find components -type f \
+            \( -name '*.tsx' -o -name '*.ts' -o -name '*.jsx' -o -name '*.js' \) "$@"
+        }
+        COUNT=$(find_components | wc -l)
+        if [ "$COUNT" -eq 0 ]; then
+          echo "::error::No component sources found under docs/fern/components"
+          exit 1
+        fi
+        echo "Parsing $COUNT component sources"
+        # Hoisted out of the xargs line: as a word on that command line the
+        # command substitution's exit status is invisible to set -e, so a
+        # failing mktemp expanded to --outdir= and esbuild ran anyway.
+        OUTDIR=$(mktemp -d)
+        # --outbase=. keeps the input tree structure under OUTDIR. Without it
+        # every entry point is keyed by basename alone, so a future Foo.ts plus
+        # Foo.tsx aborts the whole run with esbuild's "Two output files share
+        # the same path" -- a red gate whose message has nothing to do with
+        # component syntax.
+        find_components -print0 \
+          | xargs -0 "$ESBUILD" --outbase=. --outdir="$OUTDIR"
 
   docs-website-composition:
     name: Docs Website Composition Check
