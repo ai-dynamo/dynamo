@@ -910,14 +910,16 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   display: none;
 }
 
-/* "Dynamo blogs" is a section and "External publications" a page, and Fern
-   weights section headers more heavily. They sit next to each other at the top
-   of this tab as siblings, so both take this type rather than reading as two
+/* "Dynamo blogs" is a section and the other two are pages, and Fern weights
+   section headers more heavily. All three sit side by side at the top of this
+   tab as siblings, so they take the same type rather than reading as two
    different ranks. */
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/research-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/research-publications"] .fern-sidebar-link-title-inner {
   display: block;
   font-size: 0.8rem;
   font-weight: 720;
