@@ -323,6 +323,25 @@ For full documentation on implementing KV event publishing for custom inference 
 - **ZMQ relay**: For engines that emit raw KV events over ZMQ (like SGLang and vLLM), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
 - API reference, event structure, ZMQ wire format, and best practices
 
+### Advertising a separate KV-state endpoint
+
+By default, consumers assume a worker's KV state is described by the same endpoint it serves
+requests on. Pass `kv_state_endpoint` to `WorkerConfig` when KV-state ownership lives somewhere
+other than the serving endpoint, so the two can be discovered independently:
+
+```python
+config = WorkerConfig(
+    namespace="dynamo",
+    component="backend",
+    endpoint="generate",
+    kv_state_endpoint="dynamo.kvstate.events",
+    model_name=model_name,
+)
+```
+
+Leave it unset for the common case. Existing deployments stay wire-compatible, since an unset
+value resolves to the serving endpoint.
+
 ## Global Router (Hierarchical Routing)
 
 For deployments with multiple worker pools, the **Global Router** enables hierarchical routing by sitting between the frontend and local routers. It selects the appropriate pool for each request based on configurable policies, supporting disaggregated topologies where pools are tuned for different workload characteristics.
