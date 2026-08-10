@@ -137,14 +137,6 @@ on:
         required: false
         type: boolean
         default: false
-      allow_license_policy_failure:
-        description: |
-          Allow a non-zero license-policy result while retaining its log and
-          marking the generated compliance inventory. Default false; callers
-          must scope any exception explicitly.
-        required: false
-        type: boolean
-        default: false
       artifact_retention_days:
         description: |
           Retention (days) for the uploaded /legal NOTICES + /sboms CSV
@@ -512,7 +504,6 @@ jobs:
             DYNAMO_COMMIT_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
-            ALLOW_LICENSE_POLICY_FAILURE=${{ inputs.allow_license_policy_failure }}
             ${{ inputs.extra_build_args }}
       # Compliance extract + verify. Runs as a step INSIDE the build job
       # (inline_compliance), right after "Build and Push Image", so it reuses
@@ -613,7 +604,6 @@ jobs:
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}
-          allow_license_policy_failure: ${{ inputs.allow_license_policy_failure }}
           artifact_retention_days: ${{ inputs.artifact_retention_days }}
           # Source archival is opt-in per top-level caller (see the
           # `archive_sources` input above). PR / on-demand leave it false;
