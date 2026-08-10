@@ -418,6 +418,8 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_success_total: IntCounterVec,
+    model_migration_failure_total: IntCounterVec,
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
@@ -972,6 +974,24 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_success_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_SUCCESS_TOTAL),
+                "Total number of request migrations that recovered on another worker",
+            ),
+            &["model", frontend_service::MIGRATION_TYPE_LABEL],
+        )
+        .unwrap();
+
+        let model_migration_failure_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_FAILURE_TOTAL),
+                "Total number of request migrations that did not recover",
+            ),
+            &["model", frontend_service::MIGRATION_TYPE_LABEL],
+        )
+        .unwrap();
+
         let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
@@ -1026,6 +1046,8 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_success_total,
+            model_migration_failure_total,
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
@@ -1186,6 +1208,8 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.model_migration_success_total.clone()))?;
+        registry.register(Box::new(self.model_migration_failure_total.clone()))?;
         registry.register(Box::new(
             self.model_migration_max_seq_len_exceeded_total.clone(),
         ))?;
@@ -1271,6 +1295,34 @@ impl Metrics {
     pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the successful migration counter for a migration type.
+    pub fn inc_migration_success(&self, model: &str, migration_type: &str) {
+        self.model_migration_success_total
+            .with_label_values(&[model, migration_type])
+            .inc();
+    }
+
+    /// Increment the failed migration counter for a migration type.
+    pub fn inc_migration_failure(&self, model: &str, migration_type: &str) {
+        self.model_migration_failure_total
+            .with_label_values(&[model, migration_type])
+            .inc();
+    }
+
+    /// Get the successful migration count for a model and migration type.
+    pub fn get_migration_success_count(&self, model: &str, migration_type: &str) -> u64 {
+        self.model_migration_success_total
+            .with_label_values(&[model, migration_type])
+            .get()
+    }
+
+    /// Get the failed migration count for a model and migration type.
+    pub fn get_migration_failure_count(&self, model: &str, migration_type: &str) -> u64 {
+        self.model_migration_failure_total
+            .with_label_values(&[model, migration_type])
             .get()
     }
 

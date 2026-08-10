@@ -24,6 +24,7 @@ use crate::{
 
 use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, BackendError, DynamoError, ErrorType};
+use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait,
@@ -313,7 +314,7 @@ where
             metrics,
             last_worker_link: None,
         };
-        slf.new_stream().await?;
+        slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
         Ok(slf)
     }
@@ -334,7 +335,10 @@ where
                 {
                     tracing::warn!(error = %err, "Stream disconnected, recreating stream");
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
-                    if let Err(err) = self.new_stream().await {
+                    if let Err(err) = self
+                        .new_stream(Some(frontend_service::migration_type::ONGOING_REQUEST))
+                        .await
+                    {
                         tracing::warn!(error = ?err, "Cannot recreate stream");
                     } else {
                         continue;
@@ -347,7 +351,7 @@ where
         }
     }
 
-    async fn new_stream(&mut self) -> Result<()> {
+    async fn new_stream(&mut self, mut migration_type: Option<&'static str>) -> Result<()> {
         let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
         while self.retries_left > 0 {
             self.retries_left -= 1;
@@ -369,6 +373,10 @@ where
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
+                if let Some(migration_type) = migration_type {
+                    self.metrics
+                        .inc_migration_failure(&self.model_name, migration_type);
+                }
                 return Err(DynamoError::builder()
                     .error_type(ErrorType::Cancelled)
                     .message(format!(
@@ -383,20 +391,37 @@ where
                 && is_migratable_for_request(&self.request, err.as_ref())
             {
                 tracing::warn!(error = %err, "Creating new stream, retrying");
-                self.metrics.inc_migration_new_request(&self.model_name);
+                if migration_type.is_none() {
+                    migration_type = Some(frontend_service::migration_type::NEW_REQUEST);
+                    self.metrics.inc_migration_new_request(&self.model_name);
+                }
                 continue;
             }
             break;
         }
         match response_stream {
             Some(Ok(next_stream)) => {
+                if let Some(migration_type) = migration_type {
+                    self.metrics
+                        .inc_migration_success(&self.model_name, migration_type);
+                }
                 self.next_stream = Some(next_stream);
                 Ok(())
             }
-            Some(Err(err)) => Err(err), // should propagate original error if any
-            None => Err(Error::msg(
-                "Migration limit exhausted", // should propagate original error if any
-            )),
+            Some(Err(err)) => {
+                if let Some(migration_type) = migration_type {
+                    self.metrics
+                        .inc_migration_failure(&self.model_name, migration_type);
+                }
+                Err(err) // should propagate original error if any
+            }
+            None => {
+                if let Some(migration_type) = migration_type {
+                    self.metrics
+                        .inc_migration_failure(&self.model_name, migration_type);
+                }
+                Err(Error::msg("Migration limit exhausted"))
+            }
         }
     }
 
@@ -1159,6 +1184,20 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+        assert_eq!(
+            metrics.get_migration_success_count(
+                TEST_MODEL,
+                frontend_service::migration_type::NEW_REQUEST,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_migration_failure_count(
+                TEST_MODEL,
+                frontend_service::migration_type::NEW_REQUEST,
+            ),
+            0
+        );
     }
 
     /// Test case 3: Ongoing request migration
@@ -1216,6 +1255,20 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            metrics.get_migration_success_count(
+                TEST_MODEL,
+                frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_migration_failure_count(
+                TEST_MODEL,
+                frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            0
+        );
     }
 
     /// Test case 4: New request migration - indefinite failure
@@ -1257,8 +1310,22 @@ mod tests {
             assert!(error.to_string().contains("no responders"));
         }
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+        assert_eq!(
+            metrics.get_migration_success_count(
+                TEST_MODEL,
+                frontend_service::migration_type::NEW_REQUEST,
+            ),
+            0
+        );
+        assert_eq!(
+            metrics.get_migration_failure_count(
+                TEST_MODEL,
+                frontend_service::migration_type::NEW_REQUEST,
+            ),
+            1
+        );
     }
 
     /// Test case 5: Ongoing request migration - indefinite failure
@@ -1318,8 +1385,22 @@ mod tests {
         let err = error_response.err().expect("expected error response");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3); // 2 retries + 1 final failure
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1); // initial ongoing failure retry
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            metrics.get_migration_success_count(
+                TEST_MODEL,
+                frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            0
+        );
+        assert_eq!(
+            metrics.get_migration_failure_count(
+                TEST_MODEL,
+                frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            1
+        );
     }
 
     /// Test case 6: Ongoing request migration - indefinite failure with stream errors
@@ -1381,6 +1462,20 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
+        assert_eq!(
+            metrics.get_migration_success_count(
+                TEST_MODEL,
+                frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            3
+        );
+        assert_eq!(
+            metrics.get_migration_failure_count(
+                TEST_MODEL,
+                frontend_service::migration_type::ONGOING_REQUEST,
+            ),
+            1
+        );
     }
 
     /// Test case 7: Request cancelled when creating new stream

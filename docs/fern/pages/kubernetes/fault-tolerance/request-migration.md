@@ -85,6 +85,8 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_model_migration
 ```
 
 - `dynamo_frontend_model_migration_total` — total migrations, labeled by `model` and `migration_type` (`new_request` vs `ongoing_request`).
+- `dynamo_frontend_model_migration_success_total` — migration events that recovered on another worker, labeled by `model` and `migration_type`.
+- `dynamo_frontend_model_migration_failure_total` — migration events that ended without recovery, labeled by `model` and `migration_type`.
 - `dynamo_frontend_model_migration_max_seq_len_exceeded_total` — times migration was disabled because a request exceeded `--migration-max-seq-len`.
 
 A rising `max_seq_len_exceeded` counter means your limit may be too low for the workload. For full field definitions and labels, see [Migration](../../reference/observability/metrics-catalog.mdx#migration) in the Metrics Catalog.
