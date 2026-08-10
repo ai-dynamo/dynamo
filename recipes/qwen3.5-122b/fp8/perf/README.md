@@ -37,7 +37,8 @@ replays a small default instead of the file, so add one:
 
 ```bash
 git lfs install
-git lfs pull --include "recipes/qwen3.5-122b/fp8/perf/traces/*"
+# the trace here is a symlink into recipes/kimi-k2.6, where the LFS object lives
+git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
 python3 -c "
 import json
 src='recipes/qwen3.5-122b/fp8/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'

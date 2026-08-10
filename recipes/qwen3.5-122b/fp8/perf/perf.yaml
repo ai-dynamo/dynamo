@@ -164,6 +164,7 @@ spec:
             --tokenizer-trust-remote-code \
             --input-file "$TRACE_FILE" \
             --custom-dataset-type mooncake_trace \
+            --prompt-input-tokens-block-size 512 \
             --synthesis-max-isl 500000 \
             --synthesis-max-osl 12000 \
             --num-requests $(/busybox/wc -l < "${TRACE_FILE}") \
