@@ -66,8 +66,9 @@ Do not:
 
 Review a materialized proposal or a stop-request. For a `no-proposal` or `blocked` consultation that carries no
 stop-request, return without creating a candidate review. For a stop-request, validate completeness and evidence
-class: every lever family carries a terminal disposition, and every `ruled-out` row cites a measurement, a sourced
-hard constraint, a confirmed incompatibility, or an explicit operator decision. Append the verdict to
+class: every lever family carries a terminal disposition, every `ruled-out` row cites a measurement, a sourced
+hard constraint, a confirmed incompatibility, or an explicit operator decision, and the final recommendation carries
+its required `Correctness status:` line. Append the verdict to
 `challenger-reviews.jsonl` as for any review, and state in it that this is procedural validation, not independent
 adversarial assurance.
 

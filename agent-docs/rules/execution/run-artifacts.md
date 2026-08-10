@@ -138,6 +138,8 @@ runs/<EXP_ID>/
   `deploy-draft.yaml`.
 - Make direct comparisons only when `benchmark_audit.json` marks every run valid and their plan and benchmark-series
   identities match.
+- `recommended_config.md` MUST carry a `Correctness status:` line — `verified (scope stated)`,
+  `unverified (waived: reason)`, or `blocked (ask recorded)`. A recommendation without it is incomplete.
 - Do not treat a final recommendation as reproducible unless it points to the user workload, original user-provided
   DGD, applied manifests, deployment ledger, applicable benchmark plans, audits, summaries, performance analyses, and
   raw benchmark artifacts.
