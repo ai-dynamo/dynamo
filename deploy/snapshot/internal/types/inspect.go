@@ -28,6 +28,13 @@ type CheckpointContainerSnapshot struct {
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
 	GPUUUIDs       []string // source GPU UUIDs from kubelet PodResources API
+
+	// CUDAHasJobFile records whether the workload's CUDA processes are
+	// coordinated through a cuda-checkpoint job file, determined at
+	// checkpoint time from the launch-job entrypoint wrapping. When true
+	// (or when the entrypoint is unknown), restore-side cuda-checkpoint
+	// operations must run serially.
+	CUDAHasJobFile bool
 }
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
