@@ -120,12 +120,24 @@ const PUBLICATIONS_CSS = `
   color: var(--dynamo-blog-green);
 }
 
+/* Fern's prose styles give svg a display of block, which drops the arrow onto a
+   line of its own beneath the title instead of trailing the last word. Keep the
+   braces out of this comment: a closing one ends the rule early and silently
+   drops every declaration after it. */
 .dynamo-pubs__title svg {
+  display: inline-block !important;
   width: 11px;
   height: 11px;
-  margin-left: 0.35rem;
-  vertical-align: 1px;
+  margin-left: 0.3rem;
+  vertical-align: baseline;
   opacity: 0.5;
+}
+
+/* The arrow rides with the closing word. Inline alone is not enough: on a title
+   whose last line is full, the arrow is its own break opportunity and wraps to
+   a line by itself. */
+.dynamo-pubs__title-end {
+  white-space: nowrap;
 }
 
 @media (max-width: 768px) {
@@ -186,6 +198,12 @@ function PublisherMark({ partner }: { partner: string }) {
 
 function PublicationCard({ publication }: { publication: Publication }) {
   const { title, url, partner, date } = publication;
+  // The arrow is tied to the closing word so the two wrap together and it never
+  // ends up alone on a line. Split here rather than in a helper component: a
+  // helper returning a fragment does not survive Fern's component transform.
+  const words = title.trim().split(/\s+/);
+  const lastWord = words.pop() ?? "";
+  const leadingWords = words.join(" ");
   return (
     <a
       className="dynamo-pubs__card"
@@ -199,8 +217,11 @@ function PublicationCard({ publication }: { publication: Publication }) {
         <span className="dynamo-pubs__date">{date}</span>
       </span>
       <span className="dynamo-pubs__title">
-        {title}
-        <ExternalMark />
+        {leadingWords ? `${leadingWords} ` : ""}
+        <span className="dynamo-pubs__title-end">
+          {lastWord}
+          <ExternalMark />
+        </span>
       </span>
     </a>
   );
