@@ -9,6 +9,7 @@ import pickle
 import pytest
 
 import aisimulate
+from aisimulate import aic
 from aisimulate.runner import (
     EngineReplayRunner,
     EngineReplayRunnerFactory,
@@ -155,6 +156,43 @@ def test_runner_lowers_sglang_with_prefix_caching_disabled():
     assert runtime.execution_spec["engine"]["rank"]["enable_prefix_caching"] is False
 
 
+def test_runner_materializes_aic_capacity_before_native_execution(monkeypatch):
+    runtime = RecordingRuntime()
+    engine_args = _engine_args()
+    engine_args.pop("num_gpu_blocks")
+    engine_args.pop("timing_model")
+    engine_args["aic_backend_version"] = "test"
+    engine_args["aic_nextn"] = 3
+    engine_args["aic_pp_size"] = 2
+    engine_args["systems_path"] = "/tmp/custom-systems.yaml"
+    calls = []
+
+    def estimate(**kwargs):
+        calls.append(kwargs)
+        return 321
+
+    monkeypatch.setattr(aic, "estimate_num_gpu_blocks", estimate)
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="test",
+        agg_engine_args=engine_args,
+        num_workers=1,
+    )
+
+    EngineReplayRunnerFactory(runtime=runtime).create(0).run(
+        _spec(deployment=deployment)
+    )
+
+    assert runtime.execution_spec["engine"]["rank"]["num_gpu_blocks"] == 321
+    timing_config = runtime.execution_spec["engine"]["rank"]["timing_model"]["config"]
+    assert timing_config["pp"] == 2
+    assert timing_config["systems_path"] == "/tmp/custom-systems.yaml"
+    assert calls[0]["pp_size"] == 2
+    assert calls[0]["systems_path"] == "/tmp/custom-systems.yaml"
+    assert "nextn" not in calls[0]
+
+
 def test_runner_captures_requested_raw_and_per_request_report():
     runtime = RecordingRuntime()
     runner = EngineReplayRunnerFactory(runtime=runtime).create(worker_id=7)
@@ -203,6 +241,51 @@ def test_runner_preserves_closed_loop_concurrency_in_execution_spec():
     assert {
         request["arrival_time_ms"] for request in runtime.execution_spec["requests"]
     } == {0.0}
+
+
+def test_runner_materializes_fixed_interval_open_loop_requests():
+    runtime = RecordingRuntime()
+    spec = _spec(
+        workload={
+            "isl": 4,
+            "osl": 1,
+            "request_count": 3,
+            "arrival_interval_ms": 2.5,
+        }
+    )
+
+    EngineReplayRunnerFactory(runtime=runtime).create(0).run(spec)
+
+    assert runtime.execution_spec["max_in_flight"] is None
+    assert [
+        request["arrival_time_ms"] for request in runtime.execution_spec["requests"]
+    ] == [0.0, 2.5, 5.0]
+
+
+def test_runner_materializes_seeded_poisson_open_loop_requests():
+    execution_specs = []
+    for _ in range(2):
+        runtime = RecordingRuntime()
+        spec = _spec(
+            workload={
+                "isl": 4,
+                "osl": 1,
+                "request_count": 4,
+                "request_rate": 2.0,
+                "arrival_seed": 17,
+            }
+        )
+        EngineReplayRunnerFactory(runtime=runtime).create(0).run(spec)
+        execution_specs.append(runtime.execution_spec)
+
+    arrivals = [
+        request["arrival_time_ms"] for request in execution_specs[0]["requests"]
+    ]
+    assert arrivals == [
+        request["arrival_time_ms"] for request in execution_specs[1]["requests"]
+    ]
+    assert arrivals[0] == 0.0
+    assert arrivals == sorted(arrivals)
 
 
 def test_runner_lowers_disaggregated_grouped_engines():

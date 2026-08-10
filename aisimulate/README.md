@@ -11,17 +11,32 @@ SPDX-License-Identifier: Apache-2.0
 > without a standard deprecation period. They provide no SLA, accuracy, or configuration-optimality
 > guarantees.
 
-AI Simulate is a standalone Python distribution in the Dynamo repository. Its first package,
-`aisimulate.sweeper`, searches backend deployment settings by evaluating serializable replay
-specifications. The package does not depend on `ai-dynamo`.
+AI Simulate is a standalone Python distribution in the Dynamo repository. Its engine-only replay
+CLI and `aisimulate.sweeper` package evaluate serializable replay specifications without depending
+on `ai-dynamo`.
 
 Sweeper accepts a replay `RunnerFactory` through its Python API. Optional feature adapters own
 their search spaces and runtime hooks. An engine-only sweep can use a Dynamo-free replay runner;
 a sweep configured with Dynamo Planner or Router adapters uses Dynamo's runner composition.
 
-For a Dynamo-integrated single replay run, use `python -m dynamo.replay`. For configuration
-search, call `Sweeper(runner_factory=...).run(config)` or start from an example under
-`aisimulate/examples/sweeper`.
+For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
+Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share the
+engine, topology, traffic, replay-mode, SLA, and output arguments; Dynamo adds its adapter options.
+They share option names and the base `ReplaySpec` schema; the selected runtime validates each
+`--*-engine-args` JSON payload, which can therefore contain runtime-specific fields.
+For configuration search, call `Sweeper(runner_factory=...).run(config)` or start from an example
+under `aisimulate/examples/sweeper`.
+
+For example, run one engine-only synthetic replay with fixed timing:
+
+```bash
+python -m aisimulate.replay \
+  --extra-engine-args '{"engine_type":"vllm","num_gpu_blocks":1024,"block_size":16,"timing_model":{"type":"fixed","prefill_ms":10,"decode_ms":2}}' \
+  --input-tokens 1024 \
+  --output-tokens 128 \
+  --request-count 16 \
+  --replay-concurrency 4
+```
 
 Install AI Simulate by itself for engine-only development:
 

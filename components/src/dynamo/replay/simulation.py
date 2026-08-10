@@ -16,6 +16,7 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
+from aisimulate.aic import materialize_aic_num_gpu_blocks
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -214,7 +215,9 @@ class DynamoReplayRunner:
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        return MockEngineArgs.from_json(json.dumps(payload))
+        return MockEngineArgs.from_json(
+            json.dumps(materialize_aic_num_gpu_blocks(payload))
+        )
 
     def _run_trace(self, spec: ReplaySpec, common: dict[str, Any]):
         deployment = spec.backend_deployment
