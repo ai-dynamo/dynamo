@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Phase 0 spike for on-demand elastic EP followers.
+#
+# Question: can a standalone PodClique rest at zero replicas beside a healthy
+# leader gang, and be scaled up later without disturbing the leader?
+#
+# Deliberately uses busybox on CPU-only nodes: the subject is Grove controller
+# behaviour, not GPU placement, and the spike should cost no accelerators.
+#
+# Result on Grove v0.1.0-alpha.11 (see docs/design-docs/operator-elastic-ep-follower.md):
+#   - `minAvailable: 0` is rejected by the validating webhook.
+#   - `replicas: 0` is rewritten to 1 by the defaulting webhook.
+#   - Scaling the resulting PodClique to 0 afterwards works and is durable,
+#     survives terminationDelay, and is not reverted by PodCliqueSet updates.
+# Hence the follower must be born at one replica and parked at zero by the operator.
+#
+# Usage:
+#   kubectl apply -f elastic_ep_phase0_grove_spike.yaml
+#   kubectl scale podclique -n <ns> ep0-spike-0-flw --replicas=0   # park it
+#   kubectl scale podclique -n <ns> ep0-spike-0-flw --replicas=1   # attach it
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: ep0-spike
+spec:
+  replicas: 1
+  template:
+    terminationDelay: 5m
+    cliques:
+      - name: ldr
+        spec:
+          roleName: leader
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            nodeSelector:
+              kubernetes.io/arch: arm64
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: nvidia.com/gpu.product
+                          operator: DoesNotExist
+            containers:
+              - name: main
+                image: busybox:1.36
+                command: ["sh", "-c", "sleep 100000"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # The follower: outside every scaling group. Born at one because Grove
+      # will not admit zero; the operator parks it immediately afterwards.
+      - name: flw
+        spec:
+          roleName: follower
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            nodeSelector:
+              kubernetes.io/arch: arm64
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: nvidia.com/gpu.product
+                          operator: DoesNotExist
+            containers:
+              - name: main
+                image: busybox:1.36
+                command: ["sh", "-c", "sleep 100000"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
