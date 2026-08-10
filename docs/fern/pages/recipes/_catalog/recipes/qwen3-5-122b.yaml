@@ -22,11 +22,10 @@ targets:
   techniques:
   - tp1
   - fp8-kv-cache
-  - mtp-spec-dec
   - kv-aware-routing
   workload:
     type: agentic-trace-replay
-    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 80
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 50
   deploy:
     asset: recipes/qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/deploy.yaml
   benchmark:
@@ -34,7 +33,7 @@ targets:
     asset: recipes/qwen3.5-122b/nvfp4/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 1806.4 output tok/s/GPU, 50.4 user tok/s P50, TTFT P50 335 ms at concurrency 80 over 2 TP1 replicas (3,541-request agentic trace)
+    summary: 1173.2 output tok/s/GPU, 52.4 user tok/s P50, TTFT P50 246 ms at concurrency 50 over 2 TP1 replicas (3,541-request agentic trace)
 - id: agg-h200-agentic
   recommended: true
   hardware:
