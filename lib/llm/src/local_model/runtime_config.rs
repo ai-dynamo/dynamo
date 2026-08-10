@@ -70,6 +70,7 @@ pub enum StructuralTagScope {
 }
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
+pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 
 /// Worker-advertised support for Dynamo's vLLM-compatible
 /// `POST /inference/v1/generate` adapter.
@@ -169,6 +170,11 @@ pub struct ModelRuntimeConfig {
     /// `DYN_TOKENIZER`; when set, this explicit value wins over process environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_backend: Option<TokenizerBackend>,
+
+    /// Frontend tokenizer fallback override. When unset, direct Rust callers can still use
+    /// `DYN_TOKENIZER_FALLBACK`; when set, this explicit value wins over process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_fallback_enabled: Option<bool>,
 
     /// Whether structural tag guided decoding is enabled for tool calls.
     #[serde(default)]
@@ -302,6 +308,7 @@ impl Default for ModelRuntimeConfig {
             tool_call_parser: None,
             reasoning_parser: None,
             tokenizer_backend: None,
+            tokenizer_fallback_enabled: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -542,6 +549,16 @@ impl ModelRuntimeConfig {
             .unwrap_or_else(TokenizerBackend::from_env_or_default)
     }
 
+    pub fn is_tokenizer_fallback_enabled(&self) -> bool {
+        self.tokenizer_fallback_enabled.unwrap_or_else(|| {
+            std::env::var(ENV_TOKENIZER_FALLBACK)
+                .ok()
+                .as_deref()
+                .and_then(dynamo_runtime::config::parse_bool_opt)
+                .unwrap_or(true)
+        })
+    }
+
     /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
     /// default for workers that do not advertise an explicit mapping.
     pub fn effective_kv_state_endpoint(&self, serving_endpoint: &EndpointId) -> EndpointId {
@@ -555,6 +572,11 @@ impl ModelRuntimeConfig {
         tokenizer_backend: Option<TokenizerBackend>,
     ) -> &mut Self {
         self.tokenizer_backend = tokenizer_backend;
+        self
+    }
+
+    pub fn set_tokenizer_fallback_enabled(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.tokenizer_fallback_enabled = enabled;
         self
     }
 
@@ -824,6 +846,53 @@ mod tests {
             let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.tokenizer_backend, Some(backend));
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_fallback_env_default_and_explicit_config_precedence() {
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("false"))], || {
+            let config = ModelRuntimeConfig::default();
+            assert!(!config.is_tokenizer_fallback_enabled());
+
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(true),
+                ..Default::default()
+            };
+            assert!(config.is_tokenizer_fallback_enabled());
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("true"))], || {
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(false),
+                ..Default::default()
+            };
+            assert!(!config.is_tokenizer_fallback_enabled());
+        });
+
+        temp_env::with_vars_unset([ENV_TOKENIZER_FALLBACK], || {
+            let config = ModelRuntimeConfig::default();
+            assert!(config.is_tokenizer_fallback_enabled());
+        });
+    }
+
+    #[test]
+    fn tokenizer_fallback_roundtrips_through_serde_json() {
+        for enabled in [true, false] {
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(enabled),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_fallback_enabled\":{enabled}")));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_fallback_enabled, Some(enabled));
+        }
+
+        let json = serde_json::to_string(&ModelRuntimeConfig::default()).unwrap();
+        assert!(!json.contains("tokenizer_fallback_enabled"));
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.tokenizer_fallback_enabled, None);
     }
 
     #[test]

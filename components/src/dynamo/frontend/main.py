@@ -390,7 +390,6 @@ async def async_main():
         kv_router_config = None
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    os.environ["DYN_TOKENIZER_FALLBACK"] = str(config.tokenizer_fallback).lower()
     router_config = RouterConfig(
         router_mode, kv_router_config, **config.router_kwargs()
     )
@@ -413,6 +412,7 @@ async def async_main():
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
+        "tokenizer_fallback": config.tokenizer_fallback,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len

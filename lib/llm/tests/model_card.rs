@@ -219,7 +219,7 @@ fn test_alternate_tokenizer_load_failure_is_rejected_when_fallback_is_disabled()
     temp_env::with_vars(
         [
             ("DYN_TOKENIZER_CACHE", Some("0")),
-            ("DYN_TOKENIZER_FALLBACK", Some("0")),
+            ("DYN_TOKENIZER_FALLBACK", Some("1")),
         ],
         || {
             for backend in [
@@ -232,6 +232,7 @@ fn test_alternate_tokenizer_load_failure_is_rejected_when_fallback_is_disabled()
                     CheckedFile::from_disk(&tokenizer_path).unwrap(),
                 ));
                 mdc.runtime_config.tokenizer_backend = Some(backend);
+                mdc.runtime_config.tokenizer_fallback_enabled = Some(false);
 
                 let error = mdc
                     .tokenizer()

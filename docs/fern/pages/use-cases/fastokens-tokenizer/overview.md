@@ -125,7 +125,8 @@ Stay on the default backend if:
       Kind -->|BPE tokenizer.json| Load{"fastokens loads?"}
       Kind -->|.model / .tiktoken| Other["Use existing TikToken backend"]
       Load -->|Yes| Fast["Encode with fastokens<br/>Decode with HuggingFace"]
-      Load -->|No| Warn["Log warning"] --> Default["Use HuggingFace backend"]
+      Load -->|No, fallback true| Warn["Log warning"] --> Default["Use HuggingFace backend"]
+      Load -->|No, fallback false| Fail["Model initialization fails"]
       Fast --> Serve["Serve requests"]
       Default --> Serve
       Other --> Serve
