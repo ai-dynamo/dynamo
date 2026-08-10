@@ -276,30 +276,38 @@ class MmKwargsNixlSender(MmKwargsSender):
         )
         return {"mm_kwargs_nixl": metadata.model_dump()}
 
-    def _release_all(self, items: list[Any]) -> BaseException | None:
-        """Release every operation, returning the first failure (if any).
+    def _release_all(self, items: list[Any]) -> None:
+        """Release every operation. Best-effort by design.
 
-        Broad ``except`` is deliberate here and is *not* re-raised inside the
-        loop: releasing is best-effort across all items, and aborting early
-        would leak exactly the buffers this method exists to free. The failure
-        is logged at warning level and returned so the caller can re-raise it
-        once every item has been attempted, per .ai/python-guidelines.md
-        ("always re-raise after logging").
+        A broad ``except`` that logs instead of re-raising is deliberate, and
+        is the kind of exception the style guide asks to be justified inline:
+
+        * the sibling ``MmKwargsShmSender.cleanup()`` is best-effort too, so
+          raising here would make the two senders diverge on failure;
+        * the only caller awaits this from a bare ``finally``
+          (``vllm_processor._generator_inner``) with no guard, so a raise would
+          surface as a late exception after the stream has completed and, on a
+          client cancel, would *replace* the in-flight ``CancelledError``;
+        * aborting the loop early would leak the very buffers this frees.
+
+        Releasing every item is what fixes the leak; reporting failures at
+        warning level is enough for monitoring to notice them.
+
+        Each release is a blocking native call (``deregister_memory``). Measured
+        cost on GB200 for 8-20 MB buffers: p50 0.005 ms, p95 0.016 ms, i.e.
+        ~0.02 ms of event-loop time for a 4-image request -- well below the cost
+        of handing off to an executor, so it stays inline.
         """
-        first_error: BaseException | None = None
         for op in items:
             try:
                 # ReadableOperation.__exit__ -> _release() -> deregister.
                 # _release() skips descriptors that are already deregistered,
                 # so this stays safe alongside __del__.
                 op.__exit__(None, None, None)
-            except Exception as exc:
+            except Exception:
                 logger.warning(
                     "[NIXL-Sender] failed to release transfer", exc_info=True
                 )
-                if first_error is None:
-                    first_error = exc
-        return first_error
 
     async def cleanup(self, items: list[Any]) -> None:
         """Await NIXL completion, then release the registered memory regions.
@@ -328,7 +336,6 @@ class MmKwargsNixlSender(MmKwargsSender):
         """
         if not items:
             return
-        completion_error: BaseException | None = None
         try:
             results = await asyncio.wait_for(
                 asyncio.gather(
@@ -354,24 +361,11 @@ class MmKwargsNixlSender(MmKwargsSender):
                     len(items),
                     failures[0],
                 )
-                # Surface a genuine transfer error rather than swallowing it.
-                # Deliberately skips CancelledError and friends: a cancelled
-                # sibling is not a fault worth converting into one here.
-                completion_error = next(
-                    (f for f in failures if isinstance(f, Exception)), None
-                )
             else:
                 logger.debug("[NIXL-Sender] all transfers completed")
         finally:
-            release_error = self._release_all(items)
-        # Raised outside the finally so neither can mask an exception that was
-        # already propagating (e.g. cancellation). A release failure takes
-        # precedence over a completion failure: it means a buffer is still
-        # registered, which is the condition this method exists to prevent.
-        if release_error is not None:
-            raise release_error
-        if completion_error is not None:
-            raise completion_error
+            # The release is the actual leak fix, so it must always run.
+            self._release_all(items)
 
 
 # ---------------------------------------------------------------------------

@@ -209,10 +209,10 @@ class TestMmKwargsNixlSenderCleanup:
                 super().__exit__(exc_type, exc_value, traceback)
 
         slow = _SlowOp()
-        # The completion failure is re-raised, but only after every sibling has
-        # been awaited and every buffer released.
-        with pytest.raises(RuntimeError, match="transfer failed"):
-            await sender.cleanup([_RaisingOp(), slow])
+        # cleanup() is best-effort and does not raise: the caller awaits it
+        # from a bare finally, where a raise would replace an in-flight
+        # CancelledError.
+        await sender.cleanup([_RaisingOp(), slow])
 
         assert slow.done, "cleanup returned before the pending transfer finished"
         assert not released_while_pending, "released a buffer whose read was in flight"
@@ -220,7 +220,7 @@ class TestMmKwargsNixlSenderCleanup:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(10)
-    async def test_release_failure_is_raised_after_every_item_is_attempted(self):
+    async def test_release_failure_does_not_stop_remaining_releases(self):
         """A failing release must not stop the remaining buffers being freed."""
         sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
 
@@ -232,8 +232,8 @@ class TestMmKwargsNixlSenderCleanup:
                 raise RuntimeError("deregister failed")
 
         good = TestMmKwargsNixlSenderCleanup._FakeOp(never_completes=False)
-        with pytest.raises(RuntimeError, match="deregister failed"):
-            await sender.cleanup([_BadRelease(), good])
+        # Best-effort: the failure is logged, not raised, and the loop continues.
+        await sender.cleanup([_BadRelease(), good])
 
         assert (
             good.released
