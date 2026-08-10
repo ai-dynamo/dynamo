@@ -51,6 +51,10 @@ class VllmEngineMonitor:
         )
 
     def __del__(self):
+        self.cancel()
+
+    def cancel(self) -> None:
+        """Cancel background tasks when monitor ownership cannot be transferred."""
         self._monitor_task.cancel()
         self._stats_task.cancel()
 

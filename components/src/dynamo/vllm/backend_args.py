@@ -218,7 +218,8 @@ class DynamoVllmArgGroup(ArgGroup):
                 "Enable GMS shadow/standby mode. Shadow engines skip KV cache "
                 "allocation at startup, automatically pause after initialization, "
                 "and resume on demand when the active engine dies. "
-                "Requires --load-format=gms."
+                "Requires --load-format=gms or the GMS V1 worker with normal "
+                "--load-format=auto."
             ),
         )
 

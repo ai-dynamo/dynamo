@@ -9,6 +9,7 @@ lane instead of the dedicated GPU job.
 """
 
 import asyncio
+import errno
 import multiprocessing
 import os
 import signal
@@ -95,6 +96,40 @@ async def test_two_engines_contention(lock_path):
 
     await lock_b.release()
     task_b.cancel()
+
+
+@pytest.mark.asyncio
+async def test_cancel_contended_acquire_closes_fd(lock_path, monkeypatch):
+    holder = FlockFailoverLock(lock_path)
+    contender = FlockFailoverLock(lock_path)
+    await holder.acquire("holder")
+
+    real_open = os.open
+    contender_fd = None
+
+    def track_open(*args, **kwargs):
+        nonlocal contender_fd
+        contender_fd = real_open(*args, **kwargs)
+        return contender_fd
+
+    monkeypatch.setattr(
+        "gpu_memory_service.failover_lock.flock.lock.os.open", track_open
+    )
+    task = asyncio.create_task(contender.acquire("contender", poll_interval=0.01))
+    while not contender.was_contended:
+        await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert contender._fd is None
+    assert contender_fd is not None
+    with pytest.raises(OSError) as exc_info:
+        os.fstat(contender_fd)
+    assert exc_info.value.errno == errno.EBADF
+
+    await holder.release()
 
 
 # ── Test 3: process death releases lock ──────────────────────────────

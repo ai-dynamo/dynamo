@@ -13,7 +13,12 @@ from dynamo.common.snapshot.constants import (
 )
 from dynamo.common.snapshot.lifecycle import SnapshotConfig
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(30),
+    pytest.mark.pre_merge,
+]
 
 
 class _PauseController:
@@ -31,7 +36,9 @@ class _PauseController:
         pass
 
 
-async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tmp_path):
+async def test_snapshot_lifecycle_returns_paused_after_restore_sentinel(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
     controller = _PauseController()
     config = SnapshotConfig.from_env()
@@ -50,7 +57,7 @@ async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tm
         (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
 
         assert await lifecycle is True
-        assert controller.resumed is True
+        assert controller.resumed is False
         assert not (tmp_path / READY_FOR_SNAPSHOT_FILE).exists()
         assert not (tmp_path / RESTORE_COMPLETE_FILE).exists()
     finally:
@@ -81,7 +88,7 @@ async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
         (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
 
         assert await lifecycle is True
-        assert controller.resumed is True
+        assert controller.resumed is False
         assert "HF_HUB_OFFLINE" not in os.environ
     finally:
         if not lifecycle.done():

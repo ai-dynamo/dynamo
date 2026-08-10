@@ -148,6 +148,8 @@ class _SnapshotRuntimeProxy:
             config,
             self._argv,
         )
+        await pause_controller.resume()
+        pause_controller.mark_resumed()
         self._runtime, _ = _create_runtime(
             discovery_backend=config.discovery_backend,
             request_plane=config.request_plane,

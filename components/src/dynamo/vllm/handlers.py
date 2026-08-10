@@ -17,6 +17,7 @@ from collections import deque
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import (
+    TYPE_CHECKING,
     Any,
     AsyncIterator,
     Callable,
@@ -106,6 +107,9 @@ from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
+
+if TYPE_CHECKING:
+    from gpu_memory_service.failover_lock.interface import FailoverLock
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -844,12 +848,12 @@ def build_sampling_params(
                     if isinstance(existing_kv_transfer_params, dict)
                     else {}
                 )
-                passthrough_kv_transfer_params[
-                    _ROUTER_HINT_EXTRA_ARGS_KEY
-                ] = passthrough_router_hint
-                passthrough_extra_args[
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                ] = passthrough_kv_transfer_params
+                passthrough_kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = (
+                    passthrough_router_hint
+                )
+                passthrough_extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = (
+                    passthrough_kv_transfer_params
+                )
                 sampling_params.extra_args = passthrough_extra_args
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
@@ -1090,6 +1094,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     _benchmark_results: Optional[dict] = None
     _scale_ep_in_progress: bool = False
+    _failover_lock: "FailoverLock | None" = None
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -1114,6 +1119,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Optional[Client] = None,
+        engine_monitor: VllmEngineMonitor | None = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -1122,7 +1128,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
+        self.engine_monitor = (
+            engine_monitor
+            if engine_monitor is not None
+            else VllmEngineMonitor(runtime, engine, shutdown_event)
+        )
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
@@ -2675,6 +2685,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        self.engine_monitor.cancel()
         if self._custom_encoder is not None:
             # Run backend.close() on the actor thread, then stop it — executor
             # GC would only end the thread, never call close().
@@ -2985,9 +2996,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[
-                        output_idx
-                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    total_output_tokens_by_index[output_idx] = (
+                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    )
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -3027,11 +3038,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                                completion_token_counts=total_output_tokens_by_index,
+                            )
                         )
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
@@ -3078,36 +3089,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
-    def __init__(
-        self,
-        runtime,
-        config: Config,
-        engine,
-        default_sampling_params,
-        model_max_len: int | None = None,
-        model_config: ModelConfig | None = None,
-        enable_multimodal: bool = False,
-        generate_endpoint=None,
-        use_vllm_tokenizer: bool = False,
-        shutdown_event: asyncio.Event | None = None,
-        enable_frontend_decoding: bool = False,
-        encode_worker_client: Client | None = None,
-    ):
-        super().__init__(
-            runtime,
-            config,
-            engine,
-            default_sampling_params,
-            model_max_len=model_max_len,
-            model_config=model_config,
-            enable_multimodal=enable_multimodal,
-            generate_endpoint=generate_endpoint,
-            use_vllm_tokenizer=use_vllm_tokenizer,
-            shutdown_event=shutdown_event,
-            enable_frontend_decoding=enable_frontend_decoding,
-            encode_worker_client=encode_worker_client,
-        )
-
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
@@ -3400,9 +3381,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"][
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            tok["completion_usage"]["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -3554,6 +3535,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        engine_monitor: VllmEngineMonitor | None = None,
     ):
         super().__init__(
             runtime,
@@ -3568,6 +3550,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             shutdown_event=shutdown_event,
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
+            engine_monitor=engine_monitor,
         )
 
         self._multimodal_request_processor.initialize_prefill_handoff()
@@ -3735,9 +3718,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params[
-                "expanded_prompt_token_ids"
-            ] = expanded_prompt_token_ids
+            disaggregated_params["expanded_prompt_token_ids"] = (
+                expanded_prompt_token_ids
+            )
 
         return disaggregated_params if disaggregated_params else None
 

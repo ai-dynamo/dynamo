@@ -18,6 +18,7 @@ from dynamo.common.snapshot.constants import (
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
     refresh_snapshot_restore_config,
+    write_snapshot_restore_context,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -67,6 +68,22 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
+
+
+def test_write_restore_context_is_allowlisted(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_ID", "2")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/gms/failover.lock")
+    monkeypatch.setenv("DYN_VLLM_GMS_SHADOW_MODE", "true")
+    monkeypatch.setenv("SECRET_TOKEN", "do-not-copy")
+
+    write_snapshot_restore_context(str(tmp_path))
+
+    context_path = tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE
+    captured = json.loads(context_path.read_text(encoding="utf-8"))["env"]
+    assert captured["ENGINE_ID"] == "2"
+    assert captured["FAILOVER_LOCK_PATH"] == "/gms/failover.lock"
+    assert captured["DYN_VLLM_GMS_SHADOW_MODE"] == "true"
+    assert "SECRET_TOKEN" not in captured
 
 
 async def test_refresh_snapshot_restore_config_reparses_runtime_fields(

@@ -84,8 +84,10 @@ class FlockFailoverLock(FailoverLock):
                                 f"for engine {engine_id} after {elapsed:.1f}s"
                             )
                     await asyncio.sleep(poll_interval)
-        except Exception as e:
+        except BaseException as e:
             os.close(fd)
+            if not isinstance(e, Exception):
+                raise
             logger.error(
                 "Failed to acquire failover lock at %s for engine %s: %s",
                 self._lock_path,
