@@ -102,10 +102,6 @@ sglang:
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: nightly-dev-cu13-20260810-7c90840b
-    kimi_k3_torch_cuda_arch_list: "9.0;10.0a;10.3a"
-    kimi_k3_nvimgcodec_version: "0.9.0.20"
-    kimi_k3_flashinfer_version: "0.6.15.post1"
-    kimi_k3_trtllm_gen_moe_cubin_count: "1696"
     # Keep subtracting the clean nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04
     # baseline rather than self-baselining the newer lmsysorg/sglang nightly.
     # The nightly is built FROM the same nvidia/cuda cudnn-devel lineage, so the

@@ -14,12 +14,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
-{% if device == "cuda" %}
-ARG TORCH_CUDA_ARCH_LIST
-ARG NVIMGCODEC_VERSION
-ARG FLASHINFER_VERSION
-ARG TRTLLM_GEN_MOE_CUBIN_COUNT
-{% endif %}
 
 WORKDIR /workspace
 
@@ -169,11 +163,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
         --requirement /tmp/requirements.sglang.txt
 
 {% if device == "cuda" %}
+
 # Patch stock DeepEP for Kimi K3, then rebuild a fat binary containing sm_90,
 # sm_100a, and sm_103a cubins. The same GPU cubin set is retained in both the
 # amd64 and arm64 runtime images.
 RUN test -f /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
-    bash /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
+    TORCH_CUDA_ARCH_LIST="9.0;10.0a;10.3a" \
+      bash /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
     rm -rf /sgl-workspace/DeepEP/build /sgl-workspace/DeepEP/dist
 
 # High-fidelity GPU JPEG decode. The K3 processor enables nvJPEG interpolated
@@ -182,7 +178,7 @@ RUN test -f /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     python3 -m pip install --break-system-packages \
-      "nvidia-nvimgcodec-cu13[all]==${NVIMGCODEC_VERSION}"
+      "nvidia-nvimgcodec-cu13[all]==0.9.0.20"
 
 # The selected nightly already carries the matching FlashInfer package trio,
 # its CuTeDSL MLA DCP runtime patch, and the pinned GenMoE cubin pool. Verify
@@ -195,15 +191,15 @@ RUN set -eu; \
         fi; \
         actual_version="$(printf '%s\n' "${package_info}" | sed -n 's/^Version: //p')"; \
         actual_version="${actual_version%%+*}"; \
-        if [ "${actual_version}" != "${FLASHINFER_VERSION}" ]; then \
-            echo "Inherited ${package} version ${actual_version}; expected ${FLASHINFER_VERSION}" >&2; \
+        if [ "${actual_version}" != "0.6.15.post1" ]; then \
+            echo "Inherited ${package} version ${actual_version}; expected 0.6.15.post1" >&2; \
             exit 1; \
         fi; \
     done; \
     cubin_pool="${SGLANG_TRTLLM_GEN_MOE_CUBIN_POOL:-}"; \
     cubin_count="$(find "${cubin_pool}" -type f -name '*.cubin' 2>/dev/null | wc -l)"; \
-    if [ "${cubin_count}" -ne "${TRTLLM_GEN_MOE_CUBIN_COUNT}" ]; then \
-        echo "Inherited GenMoE pool has ${cubin_count} cubins; expected ${TRTLLM_GEN_MOE_CUBIN_COUNT}" >&2; \
+    if [ "${cubin_count}" -ne 1696 ]; then \
+        echo "Inherited GenMoE pool has ${cubin_count} cubins; expected 1696" >&2; \
         exit 1; \
     fi; \
     flashinfer_site_packages="$(python3 -m pip show flashinfer-python | sed -n 's/^Location: //p')"; \
