@@ -12,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -84,28 +83,6 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 					}},
-				},
-			},
-		},
-	}
-}
-
-func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeployment {
-	return &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-graph",
-			Namespace: "default",
-		},
-		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType:          consts.ComponentTypeWorker,
-					RuntimeVersionOverride: "1.1.0",
-					Replicas:               k8sptr.To(int32(1)),
-					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
-						MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
-					},
 				},
 			},
 		},

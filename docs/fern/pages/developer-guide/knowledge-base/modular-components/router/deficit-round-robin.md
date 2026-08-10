@@ -202,3 +202,105 @@ cache-bucket schema, thresholds, and per-worker queue limits, see
 [Configuration and Tuning](configuration-and-tuning.md#policy-class-queues). See
 the tested [sample policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml)
 for a complete profile.
+
+## Prioritize Premium Requests with Policy Classes
+
+Policy classes help a shared deployment protect premium traffic during demand
+spikes. Under sustained prefill pressure, the router gives premium requests a
+larger share of queued service while regular requests continue receiving
+service. When premium demand subsides, regular traffic can use all available
+capacity.
+
+### Configure Premium and Regular Classes
+
+This example mirrors the CPU Mocker regression test: one aggregated worker
+serves four concurrent sequences, and every request has 512 uncached input
+tokens and generates one output token. Save the following configuration as
+`policy-classes.yaml`:
+
+```yaml
+default_policy_family: regular
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: premium
+    policy_family: premium
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 512
+    prefill_busy_threshold: 1536
+    request_queue_limit_per_worker: 1024
+  - name: regular
+    policy_family: regular
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 128
+    prefill_busy_threshold: 1536
+    request_queue_limit_per_worker: 1024
+```
+
+Start the backend worker, then launch the frontend with load tracking and the
+policy configuration:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --load-aware \
+    --router-policy-config ./policy-classes.yaml
+```
+
+In this one-output-token, four-wide workload,
+`prefill_busy_threshold: 1536` admits four 512-token requests before sustained
+prefill pressure causes later requests to enter the policy queues. While both
+queues remain backlogged, the `512:128` quantum ratio gives premium four times
+the DRR credit. Tune the threshold to the request sizes and prefill pressure at
+which queueing should begin in your deployment.
+
+### Select a Class on Each Request
+
+Send the requested policy family in the `x-dynamo-meta-policy-class` header:
+
+```bash
+curl http://localhost:8000/v1/completions \
+    -H "content-type: application/json" \
+    -H "x-dynamo-meta-policy-class: premium" \
+    -d '{"model":"YOUR_MODEL","prompt":"YOUR_PROMPT","max_tokens":1}'
+
+curl http://localhost:8000/v1/completions \
+    -H "content-type: application/json" \
+    -H "x-dynamo-meta-policy-class: regular" \
+    -d '{"model":"YOUR_MODEL","prompt":"YOUR_PROMPT","max_tokens":1}'
+```
+
+Requests with a missing or unrecognized class header use the `regular`
+default family in this configuration. See
+[Policy-Class Queues](configuration-and-tuning.md#policy-class-queues) for the
+complete class and cache-bucket resolution rules.
+
+### Observe the Premium Share
+
+The regression workload releases 320 distinct 512-token prompts from each
+class at the same time. This keeps both queues backlogged with identical
+request costs. An equal-share control changes the regular quantum from `128`
+to `512`. Across four fresh CPU Mocker runs, the test observed:
+
+| Configuration | First 320 client completions | Regular requests left when premium finishes |
+|---|---|---:|
+| Equal `512:512` | 159-161 premium and 159-161 regular | 0-3 |
+| Weighted `512:128` | 254-257 premium and 63-66 regular | 237-240 |
+
+The weighted configuration shifts the first 320 completions from an even
+split to approximately 4:1. Premium receives substantially more service, and
+regular still completes 63-66 requests during the same window. Measuring a
+completion prefix captures the service share while both queues are active.
+
+Each request costs 512 uncached tokens in this workload. Premium earns 512
+tokens of DRR credit per round and regular earns 128, producing the ideal
+`256:64` split. Equal request costs make the queued token-service ratio visible
+directly in request completions; with varied request sizes, `quantum` continues
+to control the share of uncached-token service.
+
+The CPU Mocker regression test at
+`tests/router/test_policy_class.py`
+asserts both the larger premium share and continued regular progress.

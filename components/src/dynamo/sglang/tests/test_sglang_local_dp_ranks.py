@@ -17,7 +17,6 @@ from dynamo.sglang.capacity import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.unified,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.skipif(

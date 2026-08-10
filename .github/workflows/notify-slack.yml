@@ -18,7 +18,7 @@ on:
       ignored_jobs:
         description: |
           Newline-separated substrings; failed jobs whose names contain any of them are
-          excluded from Slack reporting (see ops-support).
+          excluded from Slack reporting.
         required: false
         type: string
         default: |
@@ -106,4 +106,4 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "<@U0AQRCAT0R4> please investigate and post a preliminary debug with clear next steps for @ops-support to action, address, and drive to closure."
+                  text: "<@U0AQRCAT0R4> please investigate and post a preliminary debug with clear next steps to action, address, and drive to closure."

@@ -876,6 +876,7 @@ mod tests {
         let token_logprobs = vec![ChatCompletionTokenLogprob {
             token: "unlikely_selection".to_string(),
             logprob: (0.15_f32).ln(), // Selected but not optimal: 15%
+            token_id: None,
             bytes: None,
             top_logprobs: vec![
                 TopLogprobs {
@@ -932,6 +933,7 @@ mod tests {
         ChatCompletionTokenLogprob {
             token: token.to_string(),
             logprob: prob.ln(),
+            token_id: None,
             bytes: None,
             top_logprobs: top_probs
                 .into_iter()
