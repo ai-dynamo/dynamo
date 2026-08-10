@@ -12,7 +12,15 @@ metadata:
   name: dsv4-bench
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 7200
+  # NOTE on the deadline (issue #12971): with ignore_eos:true a full-trace replay must
+  # generate the trace's entire output-token sum. For the default 15% agentic subset that
+  # is 8,694,196 tokens (OSL median 399, but MEAN 2,455 with p90 6,943 - the tail
+  # dominates wall-clock). At the published H200 AGG throughput (4x145.4 = 581.6 tok/s)
+  # that is ~4.15h; the previous 7200s deadline killed the Job mid-run and AIPerf writes
+  # its summary only at completion, so the run was a total loss. 28800s covers full-trace
+  # replays down to ~300 tok/s system throughput; for quick paired comparisons set
+  # NUM_REQUESTS (below) instead of relying on the deadline.
+  activeDeadlineSeconds: 28800
   completions: 1
   parallelism: 1
   template:
@@ -81,8 +89,13 @@ spec:
           mkdir -p "${RUN_DIR}"
 
           TRACE_LINES=$(wc -l < "${TRACE_FILE}")
+          # NUM_REQUESTS=0 (default) replays the full trace - required for rows comparable
+          # to the published README tables. Set a positive value (e.g. 400) for bounded
+          # iteration runs; the first N trace rows are identical across runs, which keeps
+          # paired A/B comparisons content-identical.
+          if [ "${NUM_REQUESTS:-0}" -gt 0 ]; then TRACE_LINES="${NUM_REQUESTS}"; fi
 
-          echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} lines=${TRACE_LINES} concurrency=${CONCURRENCY}"
+          echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} requests=${TRACE_LINES} concurrency=${CONCURRENCY}"
           aiperf profile \
             -m "${TARGET_MODEL}" \
             --tokenizer "${TARGET_MODEL}" \
@@ -115,6 +128,9 @@ spec:
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: CONCURRENCY
           value: "16"
+        - name: NUM_REQUESTS
+          # 0 = full trace (README-comparable). Positive = bounded run for iteration.
+          value: "0"
         - name: REQUEST_TIMEOUT_SECONDS
           value: "1200"
         - name: AIPERF_VERSION
