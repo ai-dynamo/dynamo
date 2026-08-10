@@ -36,16 +36,6 @@ impl DiscoveredModel {
                 server.api_version
             )));
         }
-        if server
-            .parallelism
-            .as_ref()
-            .is_some_and(|parallelism| parallelism.data_parallel_size > 1)
-            && !server.supports_explicit_data_parallel_rank
-        {
-            return Err(client::protocol_error(
-                "vLLM reports data parallelism greater than one but does not advertise explicit data-parallel rank routing",
-            ));
-        }
         if let Some(parallelism) = server.parallelism.as_ref() {
             if parallelism.data_parallel_size == 0 {
                 return Err(client::protocol_error(

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request};
+use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
 use crate::model::DiscoveredModel;
 
 pub struct VllmSidecarEngine {
@@ -192,6 +192,7 @@ impl LLMEngine for VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
         let mut state = ResponseState::new(&request, self.mode);
+        let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
         proto_request.model.clone_from(&self.model.served_name);
         let defer_request_cancellation = self.mode.is_decode();
@@ -204,14 +205,14 @@ impl LLMEngine for VllmSidecarEngine {
             tokio::select! {
                 biased;
                 _ = shutdown_cancellation.as_mut() => None,
-                result = client.generate_stream(proto_request) => Some(result?),
+                result = client.generate_stream(proto_request, data_parallel_rank) => Some(result?),
             }
         } else {
             tokio::select! {
                 biased;
                 _ = shutdown_cancellation.as_mut() => None,
                 _ = request_cancellation.as_mut() => None,
-                result = client.generate_stream(proto_request) => Some(result?),
+                result = client.generate_stream(proto_request, data_parallel_rank) => Some(result?),
             }
         };
         let Some(mut stream) = stream else {

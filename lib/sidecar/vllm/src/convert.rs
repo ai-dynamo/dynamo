@@ -20,14 +20,6 @@ pub(crate) fn build_generate_request(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
 
-    let data_parallel_rank = request.routing.as_ref().and_then(|routing| {
-        if mode.is_prefill() {
-            routing.prefill_dp_rank.or(routing.dp_rank)
-        } else {
-            routing.dp_rank
-        }
-    });
-
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() {
@@ -102,7 +94,19 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media: Vec::new(),
-        data_parallel_rank,
+    })
+}
+
+pub(crate) fn data_parallel_rank(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+) -> Option<u32> {
+    request.routing.as_ref().and_then(|routing| {
+        if mode.is_prefill() {
+            routing.prefill_dp_rank.or(routing.dp_rank)
+        } else {
+            routing.dp_rank
+        }
     })
 }
 

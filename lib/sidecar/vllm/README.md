@@ -31,7 +31,7 @@ The protocol does not support multimodal input, LoRA, encode workers, beam searc
 
 ## Run
 
-Start a vLLM build with the split Inference and Control services and explicit data-parallel-rank capability used by the vendored protocol:
+Start a vLLM build with the split Inference and Control services. Data-parallel routing requires a build containing [vLLM PR #51178](https://github.com/vllm-project/vllm/pull/51178) or a release that includes it:
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
@@ -53,7 +53,7 @@ provided through the environment.
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size and whether explicit rank routing is supported; Dynamo forwards the selected rank on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
+The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 

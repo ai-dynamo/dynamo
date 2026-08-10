@@ -32,6 +32,7 @@ use crate::proto as pb;
 #[derive(Clone, Default)]
 struct FakeVllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
+    data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
     reject: Arc<AtomicBool>,
@@ -73,6 +74,16 @@ impl pb::inference_server::Inference for FakeVllm {
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
+        let data_parallel_rank = request
+            .metadata()
+            .get("x-data-parallel-rank")
+            .map(|value| value.to_str().map(str::to_owned))
+            .transpose()
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.data_parallel_rank_metadata
+            .lock()
+            .await
+            .push(data_parallel_rank);
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
         if self.hang_before_headers.load(Ordering::SeqCst) {
@@ -263,7 +274,6 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
-        supports_explicit_data_parallel_rank: true,
     }
 }
 
@@ -687,7 +697,10 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let sent = requests.first().expect("recorded request");
     assert_eq!(sent.model, "served-model");
     assert_eq!(sent.priority, 0);
-    assert_eq!(sent.data_parallel_rank, Some(1));
+    assert_eq!(
+        server.service.data_parallel_rank_metadata.lock().await[0],
+        Some("1".to_string())
+    );
     let sampling = sent.sampling.as_ref().unwrap();
     assert_eq!(
         (sampling.top_k, sampling.top_p, sampling.min_p),
@@ -817,11 +830,14 @@ async fn pool_uses_each_configured_connection() {
 
     for index in 0..4 {
         let mut stream = client
-            .generate_stream(pb::GenerateRequest {
-                request_id: format!("request-{index}"),
-                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-                ..Default::default()
-            })
+            .generate_stream(
+                pb::GenerateRequest {
+                    request_id: format!("request-{index}"),
+                    prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+                    ..Default::default()
+                },
+                None,
+            )
             .await
             .expect("start stream");
         while stream.message().await.expect("message").is_some() {}
@@ -836,6 +852,15 @@ async fn pool_uses_each_configured_connection() {
         .map(SocketAddr::port)
         .collect();
     assert_eq!(ports.len(), 2);
+    assert!(
+        server
+            .service
+            .data_parallel_rank_metadata
+            .lock()
+            .await
+            .iter()
+            .all(Option::is_none)
+    );
 }
 
 #[tokio::test]

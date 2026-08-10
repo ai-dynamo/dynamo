@@ -8,6 +8,7 @@ use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
 use tokio::time::{Instant, sleep_until, timeout_at};
+use tonic::metadata::MetadataValue;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
@@ -17,6 +18,7 @@ use crate::proto as pb;
 
 pub(crate) const CONTROL_SERVICE: &str = "vllm.Control";
 pub(crate) const INFERENCE_SERVICE: &str = "vllm.Inference";
+const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
 
 pub(crate) struct VllmClient {
     pool: GrpcChannelPool,
@@ -147,10 +149,17 @@ impl VllmClient {
     pub(crate) async fn generate_stream(
         &self,
         request: pb::GenerateRequest,
+        data_parallel_rank: Option<u32>,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
         let mut client = pb::inference_client::InferenceClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        let mut request = tonic::Request::new(request);
+        if let Some(rank) = data_parallel_rank {
+            request
+                .metadata_mut()
+                .insert(DATA_PARALLEL_RANK_METADATA_KEY, MetadataValue::from(rank));
+        }
         client
             .generate_stream(request)
             .await
