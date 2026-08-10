@@ -13,9 +13,12 @@ subtitle: Backend-neutral simulation and configuration-search tools
 AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
 simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
-For a Dynamo-integrated single replay run, use `python -m dynamo.replay`. For configuration
-search, call `Sweeper(runner_factory=...).run(config)` or start from an example under
-`aisimulate/examples/sweeper`.
+For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
+Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share their base
+replay configuration; Dynamo extends it with adapter options. The selected runtime validates each
+`--*-engine-args` JSON payload, so runtime-specific fields can differ. For configuration search, call
+`Sweeper(runner_factory=...).run(config)` or start from an example under
+[`aisimulate/examples/sweeper`](https://github.com/ai-dynamo/dynamo/tree/main/aisimulate/examples/sweeper).
 
 ## Sweeper
 

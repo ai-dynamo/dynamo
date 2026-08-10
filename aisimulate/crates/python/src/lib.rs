@@ -256,7 +256,8 @@ fn estimate_aic_num_gpu_blocks(config: &AicTimingConfig, role: &ReplayRoleConfig
         kwargs.set_item("fmha_quant_mode", config.fmha_dtype.as_deref())?;
         kwargs.set_item("kvcache_quant_mode", config.kv_cache_dtype.as_deref())?;
         kwargs.set_item("comm_quant_mode", config.comm_dtype.as_deref())?;
-        kwargs.set_item("nextn", config.nextn)?;
+        // Capacity intentionally omits NextN until AIC's Eagle memory model no
+        // longer returns negative KV capacity. Timing compilation still uses it.
         kwargs.set_item("systems_path", config.systems_path.as_deref())?;
         memory
             .getattr("estimate_num_gpu_blocks")?

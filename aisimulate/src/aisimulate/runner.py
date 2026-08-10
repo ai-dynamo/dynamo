@@ -8,11 +8,13 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import random
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Real
 from typing import Protocol, runtime_checkable
 
+from .aic import materialize_aic_num_gpu_blocks
 from .sweeper.provider import JSONValue
 from .sweeper.replay import (
     ReplayOutputRequirements,
@@ -32,6 +34,7 @@ _SUPPORTED_BACKEND_TOPOLOGIES = (
 
 _AIC_TIMING_FIELD_ALIASES = {
     "backend_version": ("backend_version", "aic_backend_version"),
+    "pp": ("aic_pp_size",),
     "moe_tp_size": ("moe_tp_size", "aic_moe_tp_size"),
     "moe_ep_size": ("moe_ep_size", "aic_moe_ep_size"),
     "gemm_dtype": ("gemm_dtype", "aic_gemm_dtype"),
@@ -284,6 +287,9 @@ def _materialize_engine_execution_spec(
 
     requests, max_in_flight = _materialize_requests(spec, trace_block_size)
     sla = _materialize_sla(spec)
+    max_sim_time_ms = spec.workload.get("max_sim_time_ms")
+    if max_sim_time_ms is not None:
+        max_sim_time_ms = _nonnegative_time(max_sim_time_ms, "max_sim_time_ms")
 
     return {
         "version": 1,
@@ -299,6 +305,7 @@ def _materialize_engine_execution_spec(
                 "config": None,
             },
         },
+        "max_sim_time_ms": max_sim_time_ms,
         "max_in_flight": max_in_flight,
         "record_per_request": record_per_request,
         "sla": sla,
@@ -327,12 +334,15 @@ def _materialize_requests(
     if trace_path is not None:
         if not isinstance(trace_path, str) or not trace_path:
             raise TypeError("trace_path must be a non-empty string")
+        configured_trace_block_size = workload.get("trace_block_size")
         requests = materialize_configured_traffic(
             {
                 "trace_path": trace_path,
                 "format": workload.get("trace_format", "mooncake"),
                 "trace_block_size": _positive_int(
-                    workload.get("trace_block_size", trace_block_size),
+                    trace_block_size
+                    if configured_trace_block_size is None
+                    else configured_trace_block_size,
                     "trace_block_size",
                 ),
                 "speedup": _positive_number(
@@ -358,21 +368,55 @@ def _materialize_requests(
         if request_rate is not None
         else None
     )
+    raw_interval = workload.get("arrival_interval_ms")
+    arrival_interval_ms = (
+        _nonnegative_time(raw_interval, "arrival_interval_ms")
+        if raw_interval is not None
+        else None
+    )
+    if rate is not None and arrival_interval_ms is not None:
+        raise ValueError(
+            "synthetic replay cannot combine request_rate and arrival_interval_ms"
+        )
     if concurrency is not None:
         load = float(concurrency)
     elif rate is not None:
         load = rate
-    else:
+    elif arrival_interval_ms is None:
         raise ValueError(
-            "synthetic replay requires concrete concurrency or request_rate"
+            "synthetic replay requires concurrency, request_rate, or "
+            "arrival_interval_ms"
         )
-    ratio = _positive_number(workload.get("num_request_ratio"), "num_request_ratio")
-    request_count = max(1, round(ratio * load))
-    arrival_interval_ms = 1_000.0 / rate if rate is not None else 0.0
+    raw_request_count = workload.get("request_count")
+    if raw_request_count is not None:
+        request_count = _positive_int(raw_request_count, "request_count")
+    else:
+        if arrival_interval_ms is not None:
+            raise ValueError(
+                "synthetic replay with arrival_interval_ms requires request_count"
+            )
+        ratio = _positive_number(workload.get("num_request_ratio"), "num_request_ratio")
+        request_count = max(1, round(ratio * load))
+
+    if rate is not None:
+        arrival_seed = workload.get("arrival_seed", 42)
+        if (
+            not isinstance(arrival_seed, int)
+            or isinstance(arrival_seed, bool)
+            or arrival_seed < 0
+        ):
+            raise ValueError("arrival_seed must be a non-negative integer")
+        rng = random.Random(arrival_seed)
+        arrival_times = [0.0]
+        for _ in range(1, request_count):
+            arrival_times.append(arrival_times[-1] + rng.expovariate(rate) * 1_000.0)
+    else:
+        interval = arrival_interval_ms or 0.0
+        arrival_times = [index * interval for index in range(request_count)]
     requests = [
         {
             "id": f"synthetic-{index}",
-            "arrival_time_ms": index * arrival_interval_ms,
+            "arrival_time_ms": arrival_times[index],
             "input_tokens": isl,
             "output_tokens": osl,
             "metadata": None,
@@ -405,6 +449,11 @@ def _materialize_engine_role(
     """Materialize one single-rank or attention-DP generalized engine."""
 
     role_config = dict(raw_config)
+    # The shared CLI/Sweeper form is flat. Nested rank descriptors are already
+    # execution-level input and retain the native runtime's compatibility
+    # fallback after their structure has been validated below.
+    if "rank" not in role_config:
+        role_config = materialize_aic_num_gpu_blocks(role_config)
     for name in ("engine_type", "aic_backend"):
         configured = role_config.pop(name, None)
         if configured is not None and configured != deployment_backend:
@@ -514,7 +563,7 @@ def _materialize_engine_role(
         if not configured:
             continue
         value = rank.pop(configured[0])
-        if target in {"moe_tp_size", "moe_ep_size"}:
+        if target in {"pp", "moe_tp_size", "moe_ep_size"}:
             value = _positive_int(value, f"engine provider {role} {target}")
         elif not isinstance(value, str) or not value:
             raise ValueError(f"engine provider {role} {target} must be a string")

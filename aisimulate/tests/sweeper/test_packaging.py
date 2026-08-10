@@ -25,11 +25,13 @@ def test_aisimulate_distribution_publishes_aisimulate_sweeper_package():
     packaged_files = {str(path) for path in distribution.files or ()}
 
     assert distribution.metadata["Name"] == "aisimulate"
+    assert importlib.util.find_spec("aisimulate.replay") is not None
     assert importlib.util.find_spec("aisimulate.sweeper") is not None
     # Editable installs expose only their .pth/dist-info records. In wheel-based
     # Planner CI, assert the artifact contains the canonical package and no alias.
     if any(path.startswith("aisimulate/") for path in packaged_files):
         assert any(path.startswith("aisimulate/sweeper/") for path in packaged_files)
+        assert any(path.startswith("aisimulate/replay/") for path in packaged_files)
         assert not any(path.startswith("aisimulate/spica/") for path in packaged_files)
         assert not any(path.startswith("sweeper/") for path in packaged_files)
 

@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+import aisimulate.aic as replay_aic
 import dynamo._internal.aic as aic_helpers
 import dynamo.replay.main as replay_main
 from dynamo.mocker import MockEngineArgs
@@ -58,7 +59,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
         return 46000
 
     monkeypatch.setattr(
-        replay_main, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
+        replay_aic, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
     )
 
     engine_args = replay_main._load_engine_args(
@@ -85,7 +86,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
             "block_size": 64,
             "max_num_batched_tokens": 4096,
             "gpu_memory_utilization": 0.8,
-            "mem_fraction_static": 0.88,
+            "mem_fraction_static": None,
             "free_gpu_memory_fraction": None,
             "backend_version": None,
             "moe_tp_size": None,
@@ -108,7 +109,7 @@ def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
         return 46000
 
     monkeypatch.setattr(
-        replay_main, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
+        replay_aic, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
     )
 
     raw = {
@@ -139,7 +140,7 @@ def test_resolve_aic_blocks_keeps_per_rank_capacity_for_attention_dp(monkeypatch
     # estimate_num_gpu_blocks returns a per-rank count. Offline replay mirrors the live
     # mocker by creating one scheduler and KV pool per DP rank, so the block count remains
     # per-rank while attention_dp_size selects the runtime topology.
-    monkeypatch.setattr(replay_main, "estimate_num_gpu_blocks", lambda **kw: 1000)
+    monkeypatch.setattr(replay_aic, "estimate_num_gpu_blocks", lambda **kw: 1000)
 
     def _resolve(dp):
         raw = {
