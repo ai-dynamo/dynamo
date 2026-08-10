@@ -114,7 +114,15 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% if framework in ["vllm", "sglang"] -%}
 # ModelExpress Python client for model loading (optional)
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
-{%- endif -%}
+{% endif %}
+
+{% if framework == "sglang" and device == "cuda" -%}
+# Kimi K3 additions coupled to the selected SGLang nightly.
+ARG TORCH_CUDA_ARCH_LIST="{{ context.sglang[device_key].kimi_k3_torch_cuda_arch_list }}"
+ARG NVIMGCODEC_VERSION="{{ context.sglang[device_key].kimi_k3_nvimgcodec_version }}"
+ARG FLASHINFER_VERSION="{{ context.sglang[device_key].kimi_k3_flashinfer_version }}"
+ARG TRTLLM_GEN_MOE_CUBIN_COUNT={{ context.sglang[device_key].kimi_k3_trtllm_gen_moe_cubin_count }}
+{% endif %}
 
 {% if framework == "sglang" and device == "xpu" -%}
 # SGLang XPU build: clone and build from source (no pre-built runtime image)

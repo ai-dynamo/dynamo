@@ -101,13 +101,17 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: kimi-k3
-    # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
-    # nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.1,
-    # cuDNN 9.13.0.50, ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
-    # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
-    # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
-    # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
+    runtime_image_tag: nightly-dev-cu13-20260810-7c90840b
+    kimi_k3_torch_cuda_arch_list: "9.0;10.0a;10.3a"
+    kimi_k3_nvimgcodec_version: "0.9.0.20"
+    kimi_k3_flashinfer_version: "0.6.15.post1"
+    kimi_k3_trtllm_gen_moe_cubin_count: "1696"
+    # Keep subtracting the clean nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04
+    # baseline rather than self-baselining the newer lmsysorg/sglang nightly.
+    # The nightly is built FROM the same nvidia/cuda cudnn-devel lineage, so the
+    # older clean floor conservatively attributes its newer CUDA delta together
+    # with everything SGLang adds (framework, Python stack, system libs) rather
+    # than hiding it. Per-arch stem;
     # the licenses stage appends -${TARGETARCH}.cdx.json. (sglang ships no system
     # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
     # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)

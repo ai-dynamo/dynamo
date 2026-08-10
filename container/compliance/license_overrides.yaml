@@ -90,6 +90,26 @@ overrides:
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
 
+  - ecosystem: python
+    name: nvidia-nvjpeg
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-nvjpeg2k-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA nvJPEG2000 SDK license — https://docs.nvidia.com/cuda/nvjpeg2000/license.html"
+
+  - ecosystem: python
+    name: nvidia-nvtiff-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA nvTIFF SDK license — https://docs.nvidia.com/cuda/nvtiff/license.html"
+
+  - ecosystem: python
+    name: nvidia-libnvcomp-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA nvCOMP SDK license — https://docs.nvidia.com/cuda/nvcomp/license.html"
+
   # --- NVIDIA -cu12 wheel variants (sglang v0.5.11 cuda12.9 image installs these
   # alongside dynamo's own CUDA-12 wheels; mirrors the unsuffixed entries above)
   - ecosystem: python
