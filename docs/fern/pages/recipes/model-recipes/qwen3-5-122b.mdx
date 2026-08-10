@@ -249,7 +249,7 @@ Aggregated leads on both SKUs — 1806.4 against 916.6 output tok/s per GPU on B
 - Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
 - MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
 
-<div data-sku="h200" data-variant="disagg">
+<div data-variant="disagg">
 
 - Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
 

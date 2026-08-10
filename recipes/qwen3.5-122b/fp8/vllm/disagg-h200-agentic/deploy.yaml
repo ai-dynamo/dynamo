@@ -230,7 +230,7 @@ spec:
                 - --block-size=64
                 # Larger decode batch than prefill: spends 1P2D's interactivity
                 # surplus for throughput. With the enlarged KV pool (util 0.95)
-                # this profile measures ~254 tok/s/GPU at its SLA knee (c16) on
+                # this profile measures 256.5 tok/s/GPU at its SLA knee (c18) on
                 # the real mooncake trace.
                 - --max-num-seqs=128
                 - --max-num-batched-tokens=16384
@@ -242,7 +242,7 @@ spec:
                 # the NIXL RDMA write and can erase the KV that prefill just
                 # transferred. Silent - no error, no failed transfer - but the decode
                 # worker then attends to zeros. Measured on this recipe: IFEval
-                # 91.31 -> 51.02 and GPQA-Diamond 85.35 -> 19.19 (below random),
+                # 84.66 -> 51.02 and GPQA-Diamond 83.84 -> 19.19 (below random),
                 # with ~36% of requests answered as if the prompt were empty.
                 # Upstream: vllm-project/vllm#42182, #37285. Fixed by #45357
                 # (vLLM 0.24.0) and #48481 (vLLM 0.26.0); no Dynamo release ships

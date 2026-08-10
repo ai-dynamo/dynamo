@@ -113,7 +113,7 @@ maintainer: null
 gaps:
 - aggregated is the recommended path on both SKUs; disaggregated is retained for deployments
   that scale prefill and decode independently
-- H200 disaggregated carries --no-async-scheduling on vLLM < 0.26.0, costing ~7% throughput
+- both disaggregated targets carry --no-async-scheduling on vLLM < 0.26.0, costing ~7% throughput
 - TP2 sharding is an H200 FP8 win only. On B200 NVFP4 it loses in both topologies, and on
   H200 disaggregated it reaches 294.8 tok/s/GPU but regresses IFEval 84.66 to 80.22, so
   only the H200 aggregated profile ships sharded

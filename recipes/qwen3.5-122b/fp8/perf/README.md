@@ -37,10 +37,10 @@ replays a small default instead of the file, so add one:
 
 ```bash
 git lfs install
-git lfs pull --include "recipes/*/perf/traces/*"
+git lfs pull --include "recipes/qwen3.5-122b/fp8/perf/traces/*"
 python3 -c "
 import json
-src='traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+src='recipes/qwen3.5-122b/fp8/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
 for line in open(src):
     print(json.dumps({'timestamp': 0, **json.loads(line)}))
 " > mooncake_agentic.jsonl
@@ -106,9 +106,10 @@ Metrics land in `profile_export_aiperf.{csv,json}`: `Output Token Throughput`,
 `Output Token Throughput Per User`. KV-cache hit rate is on the frontend `/metrics`
 (`dynamo_component_router_kv_hit_rate_{sum,count}`).
 
-> Benchmark aggregated with the shipped `speculative-config` key — MTP measures an
-> acceptance length of ~3.2 on this trace, so the `speculative-config-synthetic` override
-> is not needed. Disaggregated runs without MTP.
+> Benchmark aggregated with the `speculative-config-synthetic` key (forced AL 2.937,
+> measured against real text). Real MTP reports ~3.2 on this trace because mooncake
+> synthesises prompts from `hash_ids` and the draft predicts them more easily than real
+> text. Ship the `speculative-config` key. Disaggregated runs without MTP.
 
 ## Running a concurrency sweep
 
@@ -122,8 +123,9 @@ kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD} --timeout=7200s
 ```
 
-In mooncake mode AIPerf replays the whole trace file (`--num-requests` is ignored) provided
-each row carries a `timestamp`; subset the file to cap request count. Do not compare partial
+In mooncake mode AIPerf replays the whole trace file provided each row carries a
+`timestamp`; `perf.yaml` sets `--num-requests` to the trace line count. Subset the file to
+cap request count. Do not compare partial
 runs — check `Request Count` and account for successful, errored, and unfinished requests
 before reporting aggregate throughput.
 
