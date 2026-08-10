@@ -76,7 +76,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
-	} else if role == RoleMain && isElasticEPRayLaunch(container) {
+	} else if role == RoleMain && IsElasticEPRayLaunch(container) {
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
@@ -546,7 +546,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 	return true
 }
 
-// isElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
+// IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
 // topology.
 //
 // Elastic EP only works on the Ray data-parallel backend: vLLM's Ray executor is
@@ -560,7 +560,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // long --data-parallel-backend flag and its documented -dpb alias in both the
 // "flag value" and "flag=value" spellings — vLLM's argparse treats all of these
 // as equivalent, so any of them must trigger Ray-head injection.
-func isElasticEPRayLaunch(container *corev1.Container) bool {
+func IsElasticEPRayLaunch(container *corev1.Container) bool {
 	expanded := getExpandedCommandLine(container)
 	return hasFlag(expanded, enableElasticEPFlag) &&
 		(hasArg(expanded, dataParallelBackendFlag, dataParallelBackendRay) ||

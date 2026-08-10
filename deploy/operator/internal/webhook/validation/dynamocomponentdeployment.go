@@ -131,12 +131,14 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		grovePathway                      = false
 		validateInferencePoolAvailability = false
 	)
-	return v.validateDynamoComponentDeploymentSharedSpec(
+	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		grovePathway,
 		validateInferencePoolAvailability,
-	)
+	)...)
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentUpdate validates an update. newDCD and oldDCD must not be nil.
