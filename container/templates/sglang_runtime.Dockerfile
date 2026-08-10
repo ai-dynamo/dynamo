@@ -180,7 +180,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m pip install --break-system-packages \
       "nvidia-nvimgcodec-cu13[all]==0.9.0.20"
 
-# The selected nightly already carries the matching FlashInfer package trio,
+# The selected v0.5.17 runtime already carries the matching FlashInfer package trio,
 # its CuTeDSL MLA DCP runtime patch, and the pinned GenMoE cubin pool. Verify
 # those inherited Kimi prerequisites instead of reinstalling or reapplying them.
 RUN set -eu; \
