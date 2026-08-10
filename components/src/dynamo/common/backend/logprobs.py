@@ -158,7 +158,7 @@ def extract_prompt_logprobs_from_completion_output(
     Returns ``None`` if the engine didn't compute prompt logprobs.
     """
     prompt_logprobs = getattr(output, "prompt_logprobs", None)
-    if prompt_logprobs is None:
+    if not prompt_logprobs:
         return None
 
     payload: list[Optional[dict[str, dict[str, Any]]]] = []

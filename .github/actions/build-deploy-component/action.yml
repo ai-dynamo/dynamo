@@ -27,11 +27,17 @@ inputs:
   builder_name:
     description: 'Buildx builder name'
     required: true
+  namespace:
+    description: 'Kubernetes namespace for BuildKit workers and fallback pods'
+    required: true
   aws_default_region:
     description: 'AWS Default Region'
     required: true
-  aws_account_id:
-    description: 'AWS Account ID'
+  ecr_registry:
+    description: 'ECR registry hostname'
+    required: true
+  ecr_repository:
+    description: 'ECR repository path'
     required: true
   azure_acr_hostname:
     description: 'Optional Azure ACR hostname for docker login'
@@ -147,12 +153,13 @@ runs:
         builder_name: ${{ inputs.builder_name }}
         flavor: general
         arch: ${{ steps.settings.outputs.build_platforms }}
+        namespace: ${{ inputs.namespace }}
 
     - name: Docker Login
       uses: ./.github/actions/docker-login
       with:
         aws_default_region: ${{ inputs.aws_default_region }}
-        aws_account_id: ${{ inputs.aws_account_id }}
+        ecr_registry: ${{ inputs.ecr_registry }}
         azure_acr_hostname: ${{ inputs.azure_acr_hostname }}
         azure_acr_user: ${{ inputs.azure_acr_user }}
         azure_acr_password: ${{ inputs.azure_acr_password }}
@@ -162,11 +169,10 @@ runs:
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-        IMAGE_REGISTRY: ai-dynamo
-        IMAGE_REPOSITORY: dynamo
+        ECR_REGISTRY: ${{ inputs.ecr_registry }}
+        ECR_REPOSITORY: ${{ inputs.ecr_repository }}
       run: |
-        ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+        ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
         IMAGE_URIS=("${ECR_DEFAULT_IMAGE_BASE}:${{ inputs.image_tag }}")
 
         # Append optional full extra image URIs provided by caller.
@@ -189,7 +195,7 @@ runs:
           TARGET_FLAG="--target ${TARGET}"
         fi
 
-        BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/")
         # Inline-compliance build args (operator + snapshot). BASELINE_SBOM_FILE
         # is the per-arch baseline *stem*; the licenses stage appends
         # -${TARGETARCH}.cdx.json to subtract each arch's own floor (mirrors
@@ -243,7 +249,7 @@ runs:
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        ECR_HOSTNAME: ${{ inputs.ecr_registry }}
       run: |
         mkdir -p /tmp/compliance
         # Single FROM-scratch compliance_artifact stage → the unified /legal tree
@@ -457,7 +463,7 @@ runs:
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        ECR_HOSTNAME: ${{ inputs.ecr_registry }}
       run: |
         mkdir -p /tmp/sources
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")

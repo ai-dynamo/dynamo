@@ -20,7 +20,7 @@ bench = []
 profile = []
 standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:serde_json", "dep:zmq"]
-standalone-selection = ["standalone-indexer"]
+standalone-selection = ["standalone-indexer", "dep:once_cell"]
 
 [dependencies]
 # repo
@@ -37,7 +37,7 @@ blake3 = { workspace = true }
 dashmap = { workspace = true }
 indexmap = { workspace = true }
 ordered-float = { workspace = true }
-once_cell = "1"
+once_cell = { version = "1", optional = true }
 derive_builder = { workspace = true }
 fastrand = "2"
 prometheus = { workspace = true, optional = true }
