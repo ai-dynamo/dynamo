@@ -29,6 +29,14 @@ export interface ResearchPaper {
 
 export const RESEARCH_PAPERS: ResearchPaper[] = [
   {
+    title: "ARK: Avoiding Routing Collisions for KV Cache Transfer in Disaggregated LLM Inference",
+    url: "https://saeed.github.io/files/arc_niac26.pdf",
+    org: "Georgia Tech",
+    venue: "SIGCOMM",
+    date: "Aug 2026",
+    iso: "2026-08-17",
+  },
+  {
     title: "A Photonic-CXL Memory Appliance for Scalable KV Cache Management in LLM Inference",
     url: "https://arxiv.org/abs/2607.27187",
     org: "Marwell",
@@ -59,6 +67,22 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     venue: "arXiv",
     date: "Jun 11, 2026",
     iso: "2026-06-11",
+  },
+  {
+    title: "Breaking the Ice: Analyzing Cold Start Latency in vLLM",
+    url: "https://proceedings.mlsys.org/paper_files/paper/2026/file/29416b66c2149872b9d1415a3fd2c5e0-Paper-Conference.pdf",
+    org: "",
+    venue: "MLSys 2026",
+    date: "May 2026",
+    iso: "2026-05-18",
+  },
+  {
+    title: "A Pragmatic Exploration of Prefill-Decode Disaggregation in Large Scale Inference",
+    url: "https://proceedings.mlsys.org/paper_files/paper/2026/file/d49cee5f3a79d97d719df255689d83d7-Paper-Conference.pdf",
+    org: "NVIDIA",
+    venue: "MLSys 2026",
+    date: "May 2026",
+    iso: "2026-05-18",
   },
   {
     title: "Adaptive Parallelism for LLM Inference with Model Irrelevant Profiler",
@@ -115,30 +139,6 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     venue: "arXiv",
     date: "Jan 9, 2026",
     iso: "2026-01-09",
-  },
-  {
-    title: "ARK: Avoiding Routing Collisions for KV Cache Transfer in Disaggregated LLM Inference",
-    url: "https://saeed.github.io/files/arc_niac26.pdf",
-    org: "Georgia Tech",
-    venue: "SIGCOMM",
-    date: "2026",
-    iso: "2026-01-03",
-  },
-  {
-    title: "Breaking the Ice: Analyzing Cold Start Latency in vLLM",
-    url: "https://proceedings.mlsys.org/paper_files/paper/2026/file/29416b66c2149872b9d1415a3fd2c5e0-Paper-Conference.pdf",
-    org: "",
-    venue: "MLSys 2026",
-    date: "2026",
-    iso: "2026-01-02",
-  },
-  {
-    title: "A Pragmatic Exploration of Prefill-Decode Disaggregation in Large Scale Inference",
-    url: "https://proceedings.mlsys.org/paper_files/paper/2026/file/d49cee5f3a79d97d719df255689d83d7-Paper-Conference.pdf",
-    org: "NVIDIA",
-    venue: "MLSys 2026",
-    date: "2026",
-    iso: "2026-01-01",
   },
   {
     title: "Optimizing GPU Workloads on Kubernetes: An Integrated Approach Using NVIDIA Dynamo, run:ai (KAI), and Amazon EKS",
