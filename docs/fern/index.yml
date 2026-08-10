@@ -1118,9 +1118,18 @@ navigation:
 
   - tab: blog
     layout:
-      - page: External publications
+      # A section rather than a page so Research publications can sit beneath it
+      # in the sidebar. `path:` keeps the partner list itself reachable as the
+      # section's own overview, so the entry stays clickable and the URL is
+      # unchanged.
+      - section: External publications
         path: pages/blog/external-publications.mdx
         slug: external-publications
+        collapsed: open-by-default
+        contents:
+          - page: Research publications
+            path: pages/blog/research-publications.mdx
+            slug: research
 
       # "Latest" is no longer its own sidebar entry. The page it pointed at is
       # this section's overview instead, so the page is not orphaned and every

@@ -75,7 +75,9 @@ def check(path: Path) -> list[str]:
 
 # Components that hold a CSS literal without being named *Styles.tsx. Keep in
 # step with the `files:` pattern of the check-style-components pre-commit hook.
-EXTRA_TARGETS = ("EcosystemPublications.tsx",)
+# Empty today: the publication card CSS moved into PublicationsStyles.tsx, which
+# the *Styles.tsx glob already covers.
+EXTRA_TARGETS = ()
 
 
 def main() -> int:
