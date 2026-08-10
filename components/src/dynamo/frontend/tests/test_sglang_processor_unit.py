@@ -3251,6 +3251,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             {
                 "token_ids": tokenizer.encode("<|user|>"),
                 "finish_reason": "stop",
+                "raw_finish_reason": {"type": "stop", "matched": "<|user|>"},
             }
         )
 
@@ -3275,6 +3276,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             {
                 "token_ids": tokenizer.encode("er|>"),
                 "finish_reason": "stop",
+                "raw_finish_reason": {"type": "stop", "matched": "<|user|>"},
             }
         )
 
@@ -3282,6 +3284,26 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert first["delta"]["content"] == "Hello"
         assert final is not None
         assert final["delta"] == {}
+        assert final["finish_reason"] == "stop"
+
+    def test_stop_suffix_is_preserved_when_eos_matched(self, tokenizer):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"\n\n"},
+        )
+
+        final = post.process_output(
+            {
+                "token_ids": tokenizer.encode("Hello\n\n"),
+                "finish_reason": "stop",
+                "raw_finish_reason": {"type": "eos", "matched": None},
+            }
+        )
+
+        assert final is not None
+        assert final["delta"]["content"] == "Hello\n\n"
         assert final["finish_reason"] == "stop"
 
     def test_empty_token_ids(self, tokenizer):

@@ -445,6 +445,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "min_new_tokens": stop_conditions.get("min_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                # With --skip-tokenizer-init, SGLang may not have a tokenizer
+                # available for stop-string matching; tokenizer-enabled workers
+                # still need the string stop conditions forwarded.
                 "stop": stop,
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),

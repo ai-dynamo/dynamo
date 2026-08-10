@@ -722,6 +722,7 @@ class SglangProcessor:
             def flush_pending(
                 *,
                 finish_reason: str | None,
+                raw_finish_reason: Any | None,
                 stop_reason: Any | None,
                 engine_data: Any | None,
             ) -> dict[str, Any]:
@@ -738,6 +739,7 @@ class SglangProcessor:
                 mapped_response: dict[str, Any] = {
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
+                    "raw_finish_reason": raw_finish_reason,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -845,6 +847,7 @@ class SglangProcessor:
                     if pending_logprob_shape != chunk_logprob_shape:
                         yield flush_pending(
                             finish_reason=None,
+                            raw_finish_reason=None,
                             stop_reason=None,
                             engine_data=None,
                         )
@@ -875,6 +878,7 @@ class SglangProcessor:
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
                     yield flush_pending(
                         finish_reason=finish_reason,
+                        raw_finish_reason=raw_finish,
                         stop_reason=stop_reason,
                         engine_data=engine_data,
                     )
