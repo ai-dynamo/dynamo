@@ -170,6 +170,11 @@ export function EventsCalendar() {
                       .join(" ") || undefined
                   }
                   aria-current={day === selectedDay ? "date" : undefined}
+                  aria-label={
+                    eventDays.has(day)
+                      ? `${MONTHS[month]} ${day}, has an event`
+                      : undefined
+                  }
                 >
                   {day}
                 </span>
