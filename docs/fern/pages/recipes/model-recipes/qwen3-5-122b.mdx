@@ -64,13 +64,12 @@ All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A
 ## Prerequisites
 
 1. Dynamo Platform installed on the target cluster with DGD CRDs served.
-2. nvcr pull access for `nvcr.io/nvidia/ai-dynamo`. The manifests set no `imagePullSecrets` — create `nvcr-secret` and attach it to the namespace's default service account.
-3. A Hugging Face token stored as `hf-token-secret`. The checkpoint is public and Apache-2.0.
-4. A `model-cache` PVC (ReadWriteMany), populated with the manifests in `model-cache/`.
+2. A Hugging Face token stored as `hf-token-secret`. The checkpoint is public and Apache-2.0.
+3. A `model-cache` PVC (ReadWriteMany), populated with the manifests in `model-cache/`.
 
 <div data-variant="disagg">
 
-5. GPU-local RDMA NICs exposed to pods (an `rdma/ib` device plugin) for NIXL KV transfer.
+4. GPU-local RDMA NICs exposed to pods (an `rdma/ib` device plugin) for NIXL KV transfer.
 
 </div>
 
@@ -231,7 +230,7 @@ Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loo
 | `agg-h200-agentic` | H200 | Aggregated | 4 | MTP, 3 tokens | c64, at the 50 tok/s/user floor |
 | `disagg-h200-agentic` | H200 | Disaggregated 1P2D | 3 | None | c18, at the 50 tok/s/user floor |
 
-Aggregated leads on both SKUs at the same SLA — 1173.2 against 916.6 output tok/s per GPU on B200, and 720.3 against 256.5 on H200. Disaggregated remains supported for deployments that scale prefill and decode independently.
+Aggregated leads on both SKUs at the same SLA — 1173.2 against 916.6 output tok/s per GPU on B200, and 720.3 against 256.5 on H200. **Aggregated is the recommended profile; the disaggregated targets are a functional reference rather than a throughput recommendation.** This workload runs at a 90% KV-cache hit rate, so the dedicated prefill worker has little to do while still emitting no output tokens, and on H200 disaggregation additionally gives up MTP. Choose it when prefill and decode must scale independently, or for a workload with a lower cache-hit rate.
 
 ## Notes
 
