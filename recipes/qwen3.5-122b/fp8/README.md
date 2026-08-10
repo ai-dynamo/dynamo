@@ -36,11 +36,9 @@ Scale aggregated to a full node with `replicas: 4`.
 ## Prerequisites
 
 1. Dynamo Platform installed with DGD CRDs served.
-2. nvcr pull access for `nvcr.io/nvidia/ai-dynamo`. The manifests set no
-   `imagePullSecrets` — create `nvcr-secret` and attach it to the default service account.
-3. Hugging Face token as `hf-token-secret` (model is public, Apache-2.0).
-4. `model-cache` PVC (ReadWriteMany), populated via `model-cache/`.
-5. Disaggregated only: GPU-local RDMA NICs exposed to pods (`rdma/ib` device plugin) for
+2. Hugging Face token as `hf-token-secret` (model is public, Apache-2.0).
+3. `model-cache` PVC (ReadWriteMany), populated via `model-cache/`.
+4. Disaggregated only: GPU-local RDMA NICs exposed to pods (`rdma/ib` device plugin) for
    NIXL KV transfer.
 
 ## Quick Start
@@ -51,16 +49,6 @@ export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
 ```
-> [!NOTE]
-> If the namespace lacks nvcr pull access:
-> ```bash
-> kubectl create secret docker-registry nvcr-secret \
->   --docker-server=nvcr.io --docker-username='$oauthtoken' \
->   --docker-password="<your-NGC-API-key>" -n ${NAMESPACE}
-> kubectl patch serviceaccount default -n ${NAMESPACE} \
->   -p '{"imagePullSecrets":[{"name":"nvcr-secret"}]}'
-> ```
-
 ### 2. Storage
 > [!NOTE]
 > Edit `model-cache/model-cache.yaml` — set `storageClassName` to a ReadWriteMany class.
@@ -112,6 +100,15 @@ Aggregated runs `replicas: 2`.
 |--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
 | `vllm/agg-h200-agentic/deploy.yaml` | H200 | AGG, 2x TP2 (4 GPU) | agentic | yes | 64 | 52.9 | 313 ms | 720.3 |
 | `vllm/disagg-h200-agentic/deploy.yaml` | H200 | 1P2D (3 GPU) | agentic | no | 18 | 52.5 | 3087 ms | 256.5 |
+
+**Aggregated is the recommended profile.** Disaggregated is 2.8x lower per GPU on this
+workload and is provided as a functional reference, not a throughput recommendation. Two
+reasons, both specific to this workload rather than to disaggregation in general: at 90%
+KV-cache hit the prefill worker has little to do, yet it emits no output tokens, so a third
+of the fleet is unproductive; and MTP cannot run disaggregated on this architecture (see
+Known Issues), so decode gives up speculative decoding. Use it when prefill and decode must
+scale independently, or on a workload with a lower cache-hit rate where the prefill GPU
+earns its place.
 
 ## Known Issues
 
