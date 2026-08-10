@@ -44,13 +44,9 @@ spec:
         - name: vllm-engine
           image: vllm/vllm-openai:v0.26.0
           restartPolicy: Always
-          # vllm-rs exposes no gRPC health method (grpc.health.v1 and any Generate
-          # HealthCheck both return UNIMPLEMENTED), so unlike the TensorRT-LLM and
-          # SGLang sidecars these probes can only confirm the gRPC port accepts a
-          # connection, not that the model is loaded. exec (not tcpSocket) because
-          # the loopback-bound listener is unreachable from the pod IP. The
-          # readinessProbe still drops the worker if the engine dies at runtime
-          # (port closes -> pod NotReady -> frontend stops routing to it).
+          # These lightweight lifecycle probes confirm that the loopback listener
+          # accepts connections. The Dynamo sidecar independently waits for both
+          # services through the standard gRPC health API before registration.
           startupProbe:
             exec:
               command:
@@ -98,10 +94,6 @@ spec:
           args:
           - --vllm-endpoint
           - 127.0.0.1:50051
-          # vLLM's gRPC does not expose model metadata; the sidecar needs the
-          # model for tokenization, chat templates, and registration.
-          - --model-path
-          - Qwen/Qwen3-0.6B
           envFrom:
           - secretRef:
               name: hf-token-secret

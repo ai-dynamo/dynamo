@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Deployment tests for Kubernetes-based LLM deployments.
+DynamoGraphDeployment tests for Kubernetes-based LLM deployments.
 
 These tests verify that deployments can be created, become ready, and respond
 to chat completion requests correctly.
@@ -21,12 +21,8 @@ import requests
 import yaml
 
 from tests.deploy.conftest import DeploymentTarget
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    ManagedDeployment,
-    _get_workspace_dir,
-)
 
 logger = logging.getLogger(__name__)
 
