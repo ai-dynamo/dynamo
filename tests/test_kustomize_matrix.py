@@ -23,9 +23,6 @@ def load_matrix_module():
     return module
 
 
-kustomize_matrix = load_matrix_module()
-
-
 def write_kustomization(path: Path, content: str) -> None:
     path.mkdir(parents=True)
     (path / "kustomization.yaml").write_text(content, encoding="utf-8")
@@ -95,6 +92,7 @@ def test_compose_requires_target_first():
 
 
 def test_scan_yaml_uses_name_selectors_for_list_comments():
+    kustomize_matrix = load_matrix_module()
     document = kustomize_matrix.scan_yaml(
         "apiVersion: v1\n"
         "kind: ConfigMap\n"
