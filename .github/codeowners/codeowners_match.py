@@ -65,7 +65,7 @@ class Area(TypedDict, total=False):
 
 
 class SharedSpec(TypedDict):
-    """Multi-owner override (``shared:``/``advisory:`` entry)."""
+    """Multi-owner override (``shared:`` entry)."""
 
     glob: str
     owners: list[str]
@@ -75,13 +75,11 @@ class FiletypeRule(TypedDict, total=False):
     """Filetype-level rule (``classify.filetype_rules`` entry).
 
     ``pattern`` is the single source of truth for the glob; ``coowner`` is the
-    legacy key naming the file-type default owner. ``advisory: true`` routes
-    the rule to the non-blocking advisory file instead of CODEOWNERS.
+    legacy key naming the file-type default owner.
     """
 
     pattern: str
     coowner: str
-    advisory: bool
 
 
 @dataclass
@@ -113,9 +111,7 @@ class ResolvedModel:
     catch_all: str
     areas: list[ResolvedArea]
     shared: list[SharedSpec]
-    advisory: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
-    filetype_advisory: list[FiletypeRule]
     meta: dict = field(default_factory=dict)
 
     def label_to_team(self) -> dict[str, str]:
@@ -317,12 +313,10 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
     * ``shared``      -- passed through as declared.
-    * ``advisory``    -- passed through as declared.
     * ``classify.filetype_rules`` -- each blocking rule becomes one stable
       row with the coowner as the sole owner (a single ``*Dockerfile*``
       line owns every Dockerfile at any depth unless a later explicit path
-      override or shared rule applies). Advisory rules go to the
-      advisory-reviewers file.
+      override or shared rule applies).
     * ``classify.keyword_rules`` -- no longer supported. Auto-promotion of
       unmatched dirs into an area, and keyword-level co-ownership, both
       required walking the live tree -- pure poison for a stable output.
@@ -364,8 +358,6 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     # explicitly in ``shared`` with a path glob.
     filetype_shared: list[FiletypeShared] = []
     for rule in filetype_rules:
-        if rule.get("advisory"):
-            continue
         pattern = rule.get("pattern")
         coowner = rule.get("coowner")
         if not pattern or not coowner:
@@ -375,15 +367,11 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             )
         filetype_shared.append(FiletypeShared(glob=pattern, owners=[coowner]))
 
-    filetype_advisory = [r for r in filetype_rules if r.get("advisory")]
-
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
         shared=list(spec_shared),
-        advisory=spec.get("advisory", []) or [],
         filetype_shared=filetype_shared,
-        filetype_advisory=filetype_advisory,
         meta=dict(spec.get("meta", {})),
     )
 
