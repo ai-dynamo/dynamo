@@ -156,22 +156,27 @@ class CancellableRequest:
             return
 
         if self.exception is not None:
+            exception = self.exception
+            self.cancel()
             raise AssertionError(
-                f"Request failed before reaching the worker: {self.exception}"
-            ) from self.exception
+                f"Request failed before reaching the worker: {exception}"
+            ) from exception
 
         if self.response is None:
+            self.cancel()
             raise AssertionError(
                 "Request finished before reaching the worker without a response"
             )
 
         if not 200 <= self.response.status_code < 300:
+            status_code = self.response.status_code
             response_body = self.response.text.strip()
             if len(response_body) > 1000:
                 response_body = f"{response_body[:1000]}..."
+            self.cancel()
             raise AssertionError(
                 "Request failed before reaching the worker: "
-                f"HTTP {self.response.status_code}: {response_body}"
+                f"HTTP {status_code}: {response_body}"
             )
 
     def get_response(self):
