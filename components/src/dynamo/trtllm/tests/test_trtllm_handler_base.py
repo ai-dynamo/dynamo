@@ -783,6 +783,29 @@ class TestGenerateLocally:
             prompt_logprobs = []
         return self._make_mock_generation_result_sequence([prompt_logprobs])
 
+    @staticmethod
+    def _trtllm_prompt_logprobs():
+        """Engine-shaped prompt logprobs for the `[1, 2, 3]` prompt.
+
+        TRT-LLM computes these against `prompt_token_ids[1:] +
+        first_generation_token`, so the array covers prompt tokens 2 and 3
+        followed by the first generated token (42).
+        """
+        return [
+            {2: MagicMock(logprob=-0.25, rank=1, decoded_token="two")},
+            {3: MagicMock(logprob=-0.5, rank=1, decoded_token="three")},
+            {42: MagicMock(logprob=-0.75, rank=1, decoded_token="gen")},
+        ]
+
+    @staticmethod
+    def _expected_prompt_logprobs():
+        """Dynamo-shaped payload: index i describes prompt token i, BOS=None."""
+        return [
+            None,
+            {"2": {"logprob": -0.25, "rank": 1, "decoded_token": "two"}},
+            {"3": {"logprob": -0.5, "rank": 1, "decoded_token": "three"}},
+        ]
+
     def _make_mock_generation_result_sequence(self, prompt_logprobs_per_chunk):
         """Mock GenerationResult with cumulative output across streaming chunks."""
         results = []
@@ -862,13 +885,11 @@ class TestGenerateLocally:
     @pytest.mark.asyncio
     async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):
         handler = self._make_handler()
-        prompt_logprob = MagicMock(
-            logprob=-0.25,
-            rank=1,
-            decoded_token="two",
-        )
+        # TRT-LLM aligns prompt logprobs to
+        # `prompt_token_ids[1:] + first_generation_token`, so a 3-token prompt
+        # yields 3 entries: tokens 2 and 3, then the first generated token.
         generation_result = self._make_mock_generation_result(
-            prompt_logprobs=[None, {2: prompt_logprob}]
+            prompt_logprobs=self._trtllm_prompt_logprobs()
         )
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
 
@@ -887,16 +908,38 @@ class TestGenerateLocally:
 
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["sampling_params"].prompt_logprobs == 0
-        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
-            None,
-            {
-                "2": {
-                    "logprob": -0.25,
-                    "rank": 1,
-                    "decoded_token": "two",
-                }
-            },
+        # Index 0 is `None` (no logprob for the first prompt token) and the
+        # generated-token entry is dropped, matching the vLLM/SGLang shape.
+        assert (
+            chunks[-1]["engine_data"]["prompt_logprobs"]
+            == self._expected_prompt_logprobs()
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_token_prompt_logprobs_collapses_to_bos_only(self):
+        handler = self._make_handler()
+        # A 1-token prompt leaves TRT-LLM with a single entry, and it belongs
+        # to the first generated token, so nothing survives but the BOS `None`.
+        generation_result = self._make_mock_generation_result(
+            prompt_logprobs=[
+                {42: MagicMock(logprob=-0.75, rank=1, decoded_token="gen")}
+            ]
+        )
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
         ]
+
+        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [None]
 
     @pytest.mark.asyncio
     async def test_empty_prompt_logprobs_is_not_returned(self):
@@ -920,13 +963,8 @@ class TestGenerateLocally:
     @pytest.mark.asyncio
     async def test_prompt_logprobs_can_arrive_after_empty_streaming_chunk(self):
         handler = self._make_handler()
-        prompt_logprob = MagicMock(
-            logprob=-0.25,
-            rank=1,
-            decoded_token="two",
-        )
         generation_result = self._make_mock_generation_result_sequence(
-            [[], [None, {2: prompt_logprob}]]
+            [[], self._trtllm_prompt_logprobs()]
         )
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
 
@@ -942,16 +980,10 @@ class TestGenerateLocally:
             async for chunk in handler.generate_locally(request, self._make_context())
         ]
 
-        assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
-            None,
-            {
-                "2": {
-                    "logprob": -0.25,
-                    "rank": 1,
-                    "decoded_token": "two",
-                }
-            },
-        ]
+        assert (
+            chunks[-1]["engine_data"]["prompt_logprobs"]
+            == self._expected_prompt_logprobs()
+        )
 
     def test_trtllm_sampling_params_accepts_zero_prompt_logprobs(self):
         sampling_params = SamplingParams(prompt_logprobs=0)
