@@ -166,11 +166,18 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 
 # Patch stock DeepEP for Kimi K3, then rebuild a fat binary containing sm_90,
 # sm_100a, and sm_103a cubins. The same GPU cubin set is retained in both the
-# amd64 and arm64 runtime images.
-RUN test -f /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
+# amd64 and arm64 runtime images. The stable runtime omits the RDMA development
+# headers required by DeepEP, so install them only for this build step.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libibverbs-dev && \
+    test -f /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
     TORCH_CUDA_ARCH_LIST="9.0;10.0a;10.3a" \
       bash /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
-    rm -rf /sgl-workspace/DeepEP/build /sgl-workspace/DeepEP/dist
+    rm -rf /sgl-workspace/DeepEP/build /sgl-workspace/DeepEP/dist && \
+    apt-get purge -y --auto-remove libibverbs-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # High-fidelity GPU JPEG decode. The K3 processor enables nvJPEG interpolated
 # chroma upsampling through nvImageCodec and zero-copy DLPack handoff to Torch.
