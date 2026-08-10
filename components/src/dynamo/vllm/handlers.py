@@ -1074,6 +1074,27 @@ RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
 
+def _as_exact_int(value: object) -> Optional[int]:
+    """Return ``value`` as an int only if it represents an exact integer.
+
+    Rejects bools and fractional numbers/strings. A bare ``int(value)`` would
+    truncate ``1.5`` to ``1`` and coerce ``True`` to ``1``, silently scaling to a
+    size the caller never requested.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -1407,34 +1428,41 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        new_dp_size = body.get("new_data_parallel_size")
-        if new_dp_size is None:
+        raw_dp_size = body.get("new_data_parallel_size")
+        if raw_dp_size is None:
             return {
                 "status": "error",
                 "message": "Missing required field: new_data_parallel_size",
             }
-        try:
-            new_dp_size = int(new_dp_size)
-        except (TypeError, ValueError):
+        new_dp_size = _as_exact_int(raw_dp_size)
+        if new_dp_size is None:
             return {
                 "status": "error",
-                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+                "message": f"new_data_parallel_size must be an integer, got: {raw_dp_size!r}",
             }
         if new_dp_size < 1:
             return {
                 "status": "error",
                 "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
             }
-        # vLLM's config validation rejects EPLB, which elastic EP requires, unless
-        # tensor_parallel_size * data_parallel_size > 1. Mirror it so a scale request
-        # cannot drive a live engine into a topology its own startup would refuse.
-        tp_size = self.engine_client.vllm_config.parallel_config.tensor_parallel_size
-        if tp_size * new_dp_size <= 1:
+        # Mirror vLLM's EPLB gate exactly (vllm/config/parallel.py, verified against
+        # v0.26.0): startup rejects enable_eplb -- which elastic EP requires -- unless
+        # tensor_parallel_size * prefill_context_parallel_size * data_parallel_size > 1.
+        # pipeline_parallel_size is deliberately excluded, matching upstream. Enforcing
+        # the same product keeps a scale request from driving a live engine into a
+        # topology its own startup would refuse. prefill_context_parallel_size is absent
+        # on engines that predate PCP; treat that as 1 (no prefill-context parallelism).
+        parallel_config = self.engine_client.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+        if tp_size * pcp_size * new_dp_size <= 1:
             return {
                 "status": "error",
                 "message": (
-                    "tensor_parallel_size * new_data_parallel_size must be > 1 when "
-                    f"elastic EP/ePLB is enabled, but got tensor_parallel_size={tp_size}, "
+                    "tensor_parallel_size * prefill_context_parallel_size * "
+                    "new_data_parallel_size must be > 1 when elastic EP/ePLB is enabled, "
+                    f"but got tensor_parallel_size={tp_size}, "
+                    f"prefill_context_parallel_size={pcp_size}, "
                     f"new_data_parallel_size={new_dp_size}"
                 ),
             }
