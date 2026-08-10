@@ -2,8 +2,10 @@ package dynamo
 
 import (
 	"fmt"
+	"os/exec"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -12,6 +14,43 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// TestShellQuotePOSIX_ArgvRoundTrip re-parses the quoted tokens through a real
+// /bin/sh and verifies every original argv element comes back byte-for-byte —
+// including embedded single quotes, whitespace, newlines, shell control
+// operators, and the empty string. Asserting only the generated string cannot
+// prove argv is preserved, so this exercises the shell itself.
+func TestShellQuotePOSIX_ArgvRoundTrip(t *testing.T) {
+	tokens := []string{
+		"python3", "-m", "dynamo.vllm",
+		"--model", "test",
+		"--data-parallel-backend=ray", "-dpb=ray", enableElasticEPFlag,
+		`--chat-template={{ 'it''s' }}`, // single quotes and spaces
+		"",                              // empty token must survive as its own arg
+		"a b\tc",                        // whitespace
+		"line1\nline2",                  // newline
+		"semi;pipe|amp&",                // shell control operators
+		`d$ollar$(whoami)`,              // no command/parameter expansion
+		`back\slash`,
+		`glob*?[x]`,
+	}
+	quoted := make([]string, len(tokens))
+	for i, tok := range tokens {
+		quoted[i] = shellQuotePOSIX(tok)
+	}
+	// set -- re-splits the quoted line into positional params; printing each
+	// NUL-delimited lets empties and whitespace compare exactly.
+	script := "set -- " + strings.Join(quoted, " ") + `; for a in "$@"; do printf '%s\000' "$a"; done`
+	out, err := exec.Command("/bin/sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("/bin/sh -c failed: %v", err)
+	}
+	got := strings.Split(string(out), "\x00")
+	got = got[:len(got)-1] // trailing NUL yields a final empty element
+	if !reflect.DeepEqual(got, tokens) {
+		t.Fatalf("argv not preserved through sh -c:\n got  %#v\n want %#v", got, tokens)
+	}
+}
 
 func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
 	for i := range env {
@@ -311,6 +350,22 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			)},
 			expectProbesKept:    true,
 			expectDPMasterIPEnv: true,
+		},
+		// A single-pod spec may omit Command and run only the image ENTRYPOINT
+		// with Args. The operator cannot see the ENTRYPOINT, so it must leave that
+		// invocation intact instead of emitting a command with no executable, and
+		// it must not bind VLLM_DP_MASTER_IP for a Ray head it never started.
+		{
+			name:              "single node elastic EP with no Command preserves the ENTRYPOINT invocation",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Args: []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
+			},
+			gpuCount:          4,
+			expectNotModified: true,
 		},
 		{
 			name:              "single node without elastic EP keeps its plain command",

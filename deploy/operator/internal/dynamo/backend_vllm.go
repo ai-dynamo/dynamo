@@ -80,23 +80,25 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
-		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
-
-		// At --data-parallel-size 1, vLLM discards the DP master IP it derives
-		// from the Ray node and reads VLLM_DP_MASTER_IP instead, which defaults
-		// to 127.0.0.1. Ray registers the head under the pod IP, so the engine
-		// then looks for a node that does not exist and aborts with "The DP
-		// master node (ip: 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP
-		// nor --data-parallel-address survives that overwrite; this env var is
-		// the only value the fallback reads.
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name: commonconsts.VLLMDPMasterIPEnvVar,
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "status.podIP",
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
+			// Bind VLLM_DP_MASTER_IP only when a Ray head was actually injected.
+			//
+			// At --data-parallel-size 1, vLLM discards the DP master IP it derives
+			// from the Ray node and reads VLLM_DP_MASTER_IP instead, which defaults
+			// to 127.0.0.1. Ray registers the head under the pod IP, so the engine
+			// then looks for a node that does not exist and aborts with "The DP
+			// master node (ip: 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP
+			// nor --data-parallel-address survives that overwrite; this env var is
+			// the only value the fallback reads.
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: commonconsts.VLLMDPMasterIPEnvVar,
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "status.podIP",
+					},
 				},
-			},
-		})
+			})
+		}
 	}
 
 	// Set compilation cache environment variables for VLLM
@@ -438,18 +440,37 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 //
 // Leader (or a single-pod RoleMain): ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
-func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+// injectElasticEPRayLaunchFlags returns true when it rewrote the container to
+// front the engine with a Ray head, and false when it deliberately left the
+// container untouched (see the empty-Command case below), so callers can gate
+// side effects such as the VLLM_DP_MASTER_IP injection on whether a Ray head was
+// actually set up.
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) bool {
 	switch role {
 	// RoleMain is a component deployed as a single pod; it heads the Ray
 	// cluster exactly as a multi-node leader does.
 	case RoleLeader, RoleMain:
+		// The Ray-head wrapper has to run a concrete executable once the head is
+		// up, but an empty Command means the real entrypoint is the image
+		// ENTRYPOINT, which the operator cannot see or reconstruct. Rewriting here
+		// would emit a shell command with no executable (e.g. `exec --model ...`)
+		// and break a pod that Kubernetes would otherwise start from its
+		// ENTRYPOINT. Leave that invocation intact and skip the Ray head; a
+		// single-pod Ray head needs an explicit Command.
+		if len(container.Command) == 0 {
+			log.Log.WithName("vllm-backend").Info(
+				"elastic-EP Ray head not injected: container has no explicit Command; "+
+					"set an explicit command to start the single-pod Ray head",
+				"service", serviceName, "role", role)
+			return false
+		}
 		quotedCmd := make([]string, len(container.Command))
 		for i, tok := range container.Command {
-			quotedCmd[i] = shellQuoteForBashC(tok)
+			quotedCmd[i] = shellQuotePOSIX(tok)
 		}
 		quotedArgs := make([]string, len(container.Args))
 		for i, arg := range container.Args {
-			quotedArgs[i] = shellQuoteForBashC(arg)
+			quotedArgs[i] = shellQuotePOSIX(arg)
 		}
 		vllmCommand := strings.TrimSpace(strings.Join(quotedCmd, " ") + " " + strings.Join(quotedArgs, " "))
 		// A single-pod RoleMain leader is an ordinary serving pod that Kubernetes
@@ -500,6 +521,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
+	return true
 }
 
 // isElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray

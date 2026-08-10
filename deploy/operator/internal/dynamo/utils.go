@@ -54,6 +54,25 @@ func shellQuoteForBashC(s string) string {
 	return s
 }
 
+// shellSafeToken matches tokens that are literal to the shell in every context
+// and therefore need no quoting inside sh -c.
+var shellSafeToken = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
+
+// shellQuotePOSIX renders s as exactly one argv token that survives `sh -c`
+// unchanged. Tokens built only from shell-neutral characters pass through
+// unquoted for readability; everything else — whitespace, quotes, $, ;, |, &,
+// globs, and the empty string — is wrapped in single quotes, inside which every
+// byte is literal except the single quote itself, which is closed and re-opened
+// via the '\” idiom. Unlike shellQuoteForBashC this is argv-preserving: it
+// round-trips arbitrary tokens (including empty ones and embedded quotes)
+// through the shell without splitting, dropping, or reinterpreting them.
+func shellQuotePOSIX(s string) string {
+	if shellSafeToken.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // containerHasArg reports whether the container already carries the given
 // flag/value pair in its Args (either as adjacent tokens "flag", "value" or
 // as a single token "flag=value" or "flag value" embedded inside a shell
