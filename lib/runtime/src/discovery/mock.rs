@@ -296,6 +296,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             transport: TransportType::Tcp(transport.to_string()),
             device_type: None,
+            request_plane_codec: None,
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
 
@@ -370,6 +371,7 @@ mod tests {
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
+            request_plane_codec: None,
         };
 
         let query = DiscoveryQuery::Endpoint {

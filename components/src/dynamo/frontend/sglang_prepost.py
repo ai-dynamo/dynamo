@@ -598,6 +598,17 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
+    # TODO: this applies a structural-tag constraint for tool_choice="auto"
+    # whenever a tool-call parser is configured, and reads NONE of
+    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
+    # knobs are accepted on the CLI and published into the model card by
+    # sglang/register.py, so an operator setting the mode to "off" still gets a
+    # constraint on this path. prepost.py requires structural_tag_mode == "on"
+    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
+    # requires StructuralTagMode != Off, so at the default mode ("off") the same
+    # request is unconstrained on both of those paths and constrained here.
+    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
+    # scope="always" with no way to narrow it.
     elif tool_call_parser_name:
         tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
@@ -819,6 +830,18 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    # TODO: response_format wins here even when tool_choice is "required" or names
+    # a function, so a request that demanded a tool call can come back with none
+    # -- the tool constraint is dropped and only logged. The other two paths do
+    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
+    # and keeps the tool constraint, and prepost.py does the same after narrowing
+    # its conflict check. response_format is scoped by the OpenAI spec to the
+    # message the model returns to the user, not to tool calls, so the tool
+    # constraint is the one that must survive.
+    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
@@ -979,6 +1002,7 @@ class SglangStreamingPostProcessor:
         # incomplete byte-fallback sequence.
         self._decode_context_ids = list((prompt_token_ids or [])[-5:])
         self._pending_decode_ids: list[int] = []
+        self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
         # chunks).  However, the base detector processes at most one event
@@ -1015,6 +1039,12 @@ class SglangStreamingPostProcessor:
             token_ids,
             skip_special_tokens=self._skip_special_tokens,
         )
+
+    def _with_initial_role(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_emitted_role:
+            delta["role"] = "assistant"
+            self._has_emitted_role = True
+        return delta
 
     def _incremental_decode(
         self, new_token_ids: list[int], *, flush: bool = False
@@ -1112,14 +1142,14 @@ class SglangStreamingPostProcessor:
             if delta_text:
                 return {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
+                    "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
             elif finish_reason:
                 return {
                     "index": 0,
-                    "delta": {},
+                    "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
@@ -1162,7 +1192,7 @@ class SglangStreamingPostProcessor:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
-        delta: dict[str, Any] = {"role": "assistant"}
+        delta: dict[str, Any] = {}
         has_content = False
 
         if content_text:
@@ -1336,7 +1366,7 @@ class SglangStreamingPostProcessor:
         if has_content or effective_finish:
             return {
                 "index": 0,
-                "delta": delta if has_content else {},
+                "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
                 "logprobs": None,
             }

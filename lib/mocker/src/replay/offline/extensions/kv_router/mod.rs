@@ -291,6 +291,8 @@ impl PendingRequest {
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,

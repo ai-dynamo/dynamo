@@ -14,6 +14,9 @@ from gpu_memory_service.common.locks import GrantedLockType
 class ServerState(str, Enum):
     EMPTY = "EMPTY"
     RW = "RW"
+    # Pages are durable and reattachable; nothing is promised about their contents.
+    # COMMITTED additionally asserts the contents are stable, which is what admits readers.
+    LAYOUT_COMMITTED = "LAYOUT_COMMITTED"
     COMMITTED = "COMMITTED"
     RO = "RO"
 
@@ -22,6 +25,8 @@ class StateEvent(Enum):
     RW_CONNECT = auto()
     RW_COMMIT = auto()
     RW_ABORT = auto()
+    RW_DISCONNECT = auto()
+    LAYOUT_COMMIT = auto()
     RO_CONNECT = auto()
     RO_DISCONNECT = auto()
 
@@ -59,7 +64,9 @@ class Transition:
 
 TRANSITIONS: list[Transition] = [
     Transition(
-        from_states=frozenset({ServerState.EMPTY, ServerState.COMMITTED}),
+        from_states=frozenset(
+            {ServerState.EMPTY, ServerState.LAYOUT_COMMITTED, ServerState.COMMITTED}
+        ),
         event=StateEvent.RW_CONNECT,
         to_state=ServerState.RW,
     ),
@@ -68,10 +75,24 @@ TRANSITIONS: list[Transition] = [
         event=StateEvent.RW_COMMIT,
         to_state=ServerState.COMMITTED,
     ),
+    # Seals the shape without ending the session, so the state stays RW until the
+    # writer disconnects.
+    Transition(
+        from_states=frozenset({ServerState.RW}),
+        event=StateEvent.LAYOUT_COMMIT,
+        to_state=ServerState.RW,
+    ),
+    # The writer left without sealing, so its work is discarded.
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_ABORT,
         to_state=ServerState.EMPTY,
+    ),
+    # The writer left a sealed layout behind, so the pages survive it.
+    Transition(
+        from_states=frozenset({ServerState.RW}),
+        event=StateEvent.RW_DISCONNECT,
+        to_state=ServerState.LAYOUT_COMMITTED,
     ),
     Transition(
         from_states=frozenset({ServerState.COMMITTED, ServerState.RO}),
@@ -98,6 +119,7 @@ class GMSFSM:
         self._rw_conn: Optional[Connection] = None
         self._ro_conns: Set[Connection] = set()
         self._committed = False
+        self._layout_committed = False
 
     @property
     def state(self) -> ServerState:
@@ -105,8 +127,11 @@ class GMSFSM:
             return ServerState.RW
         if self._ro_conns:
             return ServerState.RO
+        # COMMITTED implies a durable layout, so it wins when both hold.
         if self._committed:
             return ServerState.COMMITTED
+        if self._layout_committed:
+            return ServerState.LAYOUT_COMMITTED
         return ServerState.EMPTY
 
     @property
@@ -124,6 +149,15 @@ class GMSFSM:
     @property
     def committed(self) -> bool:
         return self._committed
+
+    @property
+    def layout_committed(self) -> bool:
+        """The allocation set is sealed, so it outlives the session that built it.
+
+        Implied by ``committed``. Separate because ``RW_CONNECT`` clears ``_committed``
+        -- a new writer invalidates the contents -- but must not clear this.
+        """
+        return self._layout_committed or self._committed
 
     def _check_condition(self, condition: Optional[str], conn: Connection) -> bool:
         if condition is None:
@@ -152,11 +186,17 @@ class GMSFSM:
 
         if event == StateEvent.RW_CONNECT:
             self._rw_conn = conn
+            # A new writer invalidates any published contents but not the pages,
+            # unless it asked for full RW, which means "replace this layout".
             self._committed = False
+            if conn.mode == GrantedLockType.RW:
+                self._layout_committed = False
         elif event == StateEvent.RW_COMMIT:
             self._committed = True
             self._rw_conn = None
-        elif event == StateEvent.RW_ABORT:
+        elif event == StateEvent.LAYOUT_COMMIT:
+            self._layout_committed = True
+        elif event in (StateEvent.RW_ABORT, StateEvent.RW_DISCONNECT):
             self._rw_conn = None
         elif event == StateEvent.RO_CONNECT:
             self._ro_conns.add(conn)
