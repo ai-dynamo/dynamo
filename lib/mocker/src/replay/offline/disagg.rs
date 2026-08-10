@@ -53,7 +53,8 @@ use crate::replay::{
     OfflineDisaggReplayConfig, ReplayRequestPool, ReplayTerminalStatus, TraceCollector,
 };
 use crate::scheduler::{
-    AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
+    AdmissionEvent, EngineOutputs, SchedulerCommand, SchedulerCommandResult,
+    SchedulerLifecycleEvent,
 };
 
 fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
@@ -611,15 +612,14 @@ impl DisaggFlowState {
         collector: &mut TraceCollector,
     ) -> Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
+        if self.requests.contains_key(&uuid) {
+            bail!("offline disagg replay request {uuid} is already active");
+        }
         let input_length = request.input_length();
         let output_length = request.metadata().max_output_tokens;
         request.metadata_mut().uuid = Some(uuid);
         request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
-        collector.on_arrival(uuid, arrival_time_ms, input_length, output_length);
-        if self.requests.contains_key(&uuid) {
-            bail!("offline disagg replay request {uuid} is already active");
-        }
         let handoff_id = HandoffId::new();
         let mut state = DisaggRequestState::new(
             request,
@@ -637,6 +637,7 @@ impl DisaggFlowState {
             .checked_add(1)
             .expect("logical in-flight request count overflow");
         self.action_queues.enqueue_all(uuid, actions);
+        collector.on_arrival(uuid, arrival_time_ms, input_length, output_length);
         Ok(uuid)
     }
 
@@ -862,11 +863,13 @@ impl DisaggFlowState {
         }
 
         let handoff_id = self.state(uuid)?.handoff_id;
-        self.state_mut(uuid)?.mark_done();
-        let removed = self.requests_by_handoff.remove(&handoff_id);
-        if removed != Some(uuid) {
+        if self.requests_by_handoff.get(&handoff_id).copied() != Some(uuid) {
             bail!("offline disagg replay handoff index is inconsistent for {uuid}");
         }
+        self.state_mut(uuid)?.mark_done();
+        self.requests_by_handoff
+            .remove(&handoff_id)
+            .expect("validated disaggregated handoff index must remain present");
         Ok(())
     }
 }
@@ -1899,14 +1902,12 @@ where
     /// Apply the side effects of a finished prefill pass.
     fn process_prefill_pass(
         &mut self,
-        _worker_idx: usize,
-        _completed_requests: usize,
-        output_signals: Vec<OutputSignal>,
+        output_signals: EngineOutputs,
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
         engine_events: Observation::Batch,
     ) -> Result<()> {
         self.apply_prefill_observations(engine_events, KvIngestBoundary::PassEnd)?;
-        for signal in output_signals {
+        for signal in output_signals.into_untracked()? {
             self.process_prefill_signal(signal)?;
         }
         self.process_lifecycle_events(lifecycle_events)?;
@@ -1916,7 +1917,7 @@ where
     /// Apply the side effects of a finished decode pass.
     fn process_decode_pass(
         &mut self,
-        output_signals: Vec<OutputSignal>,
+        output_signals: EngineOutputs,
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
         engine_events: Observation::Batch,
         accept_length_output_tokens: usize,
@@ -1925,7 +1926,7 @@ where
         self.apply_decode_observations(engine_events, KvIngestBoundary::PassEnd)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
-        for signal in output_signals {
+        for signal in output_signals.into_untracked()? {
             self.process_decode_signal(signal)?;
         }
         self.process_lifecycle_events(lifecycle_events)?;
@@ -1966,8 +1967,6 @@ where
                         .insert(payload.worker_idx, fpm, self.now_ms);
                 }
                 self.process_prefill_pass(
-                    payload.worker_idx,
-                    payload.completed_requests,
                     payload.output_signals,
                     payload.lifecycle_events,
                     payload.engine_events,

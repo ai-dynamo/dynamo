@@ -158,6 +158,7 @@ fn make_decoded_request(
     let alloc = kv_manager.allocate_for_request(&prompt_tokens).unwrap();
     let mut running = vec![SglangRequest {
         uuid: Uuid::new_v4(),
+        replay_request_key: None,
         sequence_tokens: prompt_tokens,
         prompt_len,
         max_output_tokens,
@@ -206,6 +207,7 @@ fn zero_output_completion_survives_decode_reservation_failure() {
     let mut running = vec![
         SglangRequest {
             uuid: zero_uuid,
+            replay_request_key: None,
             sequence_tokens: vec![1, 2, 3, 4],
             prompt_len: 4,
             max_output_tokens: 0,
@@ -216,6 +218,7 @@ fn zero_output_completion_survives_decode_reservation_failure() {
         },
         SglangRequest {
             uuid: normal_uuid,
+            replay_request_key: None,
             sequence_tokens: vec![5, 6, 7, 8],
             prompt_len: 4,
             max_output_tokens: 1,
@@ -266,6 +269,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_pages() {
     kv_manager.finish(&prompt, cached.lease);
     let mut waiting = VecDeque::from([SglangRequest {
         uuid: Uuid::from_u128(90_002),
+        replay_request_key: None,
         sequence_tokens: prompt.clone(),
         prompt_len: prompt.len(),
         max_output_tokens: 1,
@@ -289,6 +293,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_pages() {
     let blocker_alloc = kv_manager.allocate_for_request(&blocker_tokens).unwrap();
     let blocker = SglangRequest {
         uuid: Uuid::from_u128(90_003),
+        replay_request_key: None,
         sequence_tokens: blocker_tokens,
         prompt_len: 3,
         max_output_tokens: 1,
@@ -392,9 +397,9 @@ mod source_holds {
         .unwrap();
 
         let first = execute(&mut core, 0.0);
-        assert!(!first.output_signals[0].completed);
+        assert!(!first.output_signals.as_slice()[0].completed);
         let terminal = execute(&mut core, first.end_ms);
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert!(matches!(
             terminal.lifecycle_events.as_slice(),
             [SchedulerLifecycleEvent::SourceHeld {
@@ -459,7 +464,7 @@ mod source_holds {
 
         let first = execute(&mut core, 0.0);
         let terminal = execute(&mut core, first.end_ms);
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert!(!core.source_is_held(second_id));
     }
 
@@ -471,7 +476,7 @@ mod source_holds {
         let first = execute(&mut core, 0.0);
         let terminal = execute(&mut core, first.end_ms);
 
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert_eq!(occupied_tokens(&core), 8);
     }
 
@@ -893,6 +898,7 @@ mod destination_lifecycle {
         assert!(
             blocker_terminal
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == blocker_uuid && signal.completed)
         );
@@ -918,6 +924,7 @@ mod destination_lifecycle {
         assert!(
             terminal
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == logical_uuid && signal.completed)
         );
@@ -1126,6 +1133,7 @@ mod scheduling {
         let mut waiting = VecDeque::from([
             SglangRequest {
                 uuid: no_match_uuid,
+                replay_request_key: None,
                 sequence_tokens: vec![9, 8, 7],
                 prompt_len: 3,
                 max_output_tokens: 1,
@@ -1136,6 +1144,7 @@ mod scheduling {
             },
             SglangRequest {
                 uuid: match_uuid,
+                replay_request_key: None,
                 sequence_tokens: vec![1, 2, 3, 4, 5, 6, 7],
                 prompt_len: 5,
                 max_output_tokens: 1,
@@ -1169,6 +1178,7 @@ mod scheduling {
         for _ in 0..33 {
             waiting.push_back(SglangRequest {
                 uuid: Uuid::new_v4(),
+                replay_request_key: None,
                 sequence_tokens: duplicate_prefix.clone(),
                 prompt_len: duplicate_prefix.len(),
                 max_output_tokens: 1,
@@ -1181,6 +1191,7 @@ mod scheduling {
         let unique_uuid = Uuid::new_v4();
         waiting.push_back(SglangRequest {
             uuid: unique_uuid,
+            replay_request_key: None,
             sequence_tokens: (100..132).collect(),
             prompt_len: 32,
             max_output_tokens: 1,
@@ -1222,6 +1233,8 @@ mod core_behavior {
             let pass = core.execute_pass(&mut collector, step as f64);
             emitted.extend(
                 pass.output_signals
+                    .into_untracked()
+                    .unwrap()
                     .into_iter()
                     .filter(|signal| signal.uuid == uuid)
                     .map(|signal| signal.token_id.expect("planned token should be present")),
@@ -1247,6 +1260,7 @@ mod core_behavior {
         let mut kv_manager = SglangKvManager::new(10000, 4, KvEventPublishers::default(), 0);
         let mut waiting = VecDeque::from([SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1; 6],
             prompt_len: 6,
             max_output_tokens: 3,
@@ -1277,6 +1291,7 @@ mod core_behavior {
         let mut kv_manager = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
         let mut waiting = VecDeque::from([SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1; 16],
             prompt_len: 16,
             max_output_tokens: 2,
@@ -1310,6 +1325,7 @@ mod core_behavior {
         let mut waiting = VecDeque::from([
             SglangRequest {
                 uuid: first_uuid,
+                replay_request_key: None,
                 sequence_tokens: vec![1; 7],
                 prompt_len: 7,
                 max_output_tokens: 3,
@@ -1320,6 +1336,7 @@ mod core_behavior {
             },
             SglangRequest {
                 uuid: second_uuid,
+                replay_request_key: None,
                 sequence_tokens: vec![2; 8],
                 prompt_len: 8,
                 max_output_tokens: 3,
@@ -1354,6 +1371,7 @@ mod core_behavior {
         kv_manager.extend_cached_prefix(&[1, 2, 3, 4], &mut alloc.lease);
         let mut running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1, 2, 3, 4, 5, 6],
             prompt_len: 6,
             max_output_tokens: 4,
@@ -1398,6 +1416,7 @@ mod core_behavior {
         let base_alloc = base_kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
         let mut base_running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1, 2, 3, 4],
             prompt_len: 4,
             max_output_tokens: 4,
@@ -1411,6 +1430,7 @@ mod core_behavior {
         let fast_alloc = fast_kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
         let mut fast_running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1, 2, 3, 4],
             prompt_len: 4,
             max_output_tokens: 4,
@@ -1460,6 +1480,7 @@ mod core_behavior {
         let mut running = vec![
             SglangRequest {
                 uuid: Uuid::new_v4(),
+                replay_request_key: None,
                 sequence_tokens: vec![1, 2, 3, 4, 11, 12, 13, 14],
                 prompt_len: 4,
                 max_output_tokens: 10,
@@ -1470,6 +1491,7 @@ mod core_behavior {
             },
             SglangRequest {
                 uuid: Uuid::new_v4(),
+                replay_request_key: None,
                 sequence_tokens: vec![9, 8, 7, 6, 21],
                 prompt_len: 4,
                 max_output_tokens: 10,
@@ -1501,6 +1523,7 @@ mod core_behavior {
         let alloc = kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
         let mut running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1, 2, 3, 4],
             prompt_len: 4,
             max_output_tokens: 4,
@@ -1588,6 +1611,7 @@ mod core_behavior {
         let second = core.execute_pass(&mut collector, first.end_ms);
         let ordered = second
             .output_signals
+            .as_slice()
             .iter()
             .map(|signal| (signal.uuid, signal.completed))
             .collect::<Vec<_>>();
@@ -1617,6 +1641,7 @@ mod core_behavior {
         assert_eq!(
             third
                 .output_signals
+                .as_slice()
                 .iter()
                 .map(|signal| signal.uuid)
                 .collect::<Vec<_>>(),
@@ -1803,6 +1828,7 @@ mod router_events {
         let prompt_tokens = vec![101, 202];
         let mut expected_request = SglangRequest {
             uuid,
+            replay_request_key: None,
             sequence_tokens: prompt_tokens.clone(),
             prompt_len: prompt_tokens.len(),
             max_output_tokens: 2,
@@ -1915,6 +1941,7 @@ mod router_events {
 
         let mut waiting = VecDeque::from([SglangRequest {
             uuid: Uuid::new_v4(),
+            replay_request_key: None,
             sequence_tokens: vec![1, 2, 3, 4, 5, 6, 7],
             prompt_len: 7,
             max_output_tokens: 3,
@@ -2148,6 +2175,7 @@ mod router_events {
         let pass = core.execute_pass(&mut collector, 0.0);
         let signal = pass
             .output_signals
+            .as_slice()
             .first()
             .expect("prefill pass should emit one completed signal");
 

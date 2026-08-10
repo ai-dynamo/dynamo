@@ -85,7 +85,7 @@ mod tests {
     use super::*;
     use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
     use crate::scheduler::vllm::MockerMetrics;
-    use crate::scheduler::{AdmissionEvent, RouterEventVisibility};
+    use crate::scheduler::{AdmissionEvent, EngineOutputs, RouterEventVisibility};
     use uuid::Uuid;
 
     #[test]
@@ -97,13 +97,13 @@ mod tests {
             end_ms: 20.0,
             token_completion_ms: 5.0,
             completed_requests: 1,
-            output_signals: vec![OutputSignal {
+            output_signals: EngineOutputs::untracked(vec![OutputSignal {
                 uuid,
                 token_id: Some(1),
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: None,
-            }],
+            }]),
             admissions: vec![AdmissionEvent {
                 uuid,
                 reused_input_tokens: 0,

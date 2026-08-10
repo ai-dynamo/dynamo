@@ -21,7 +21,8 @@ use crate::kv_manager::G1Acquire;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
 use crate::scheduler::{
-    RouterEventVisibility, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
+    EngineRequest, ReplayRequestKey, RouterEventVisibility, SchedulerCommand,
+    SchedulerCommandResult, SchedulerLifecycleEvent,
 };
 
 use super::core::{RequestStatus, VllmCore, VllmRequestState};
@@ -368,6 +369,7 @@ fn speculative_batch_drains_zero_output_before_emitting_tokens() {
     assert_eq!(pass.completed_requests, 2);
     assert_eq!(
         pass.output_signals
+            .as_slice()
             .iter()
             .filter(|signal| signal.uuid == zero_uuid && signal.token_id.is_none())
             .count(),
@@ -375,6 +377,7 @@ fn speculative_batch_drains_zero_output_before_emitting_tokens() {
     );
     assert_eq!(
         pass.output_signals
+            .as_slice()
             .iter()
             .filter(|signal| signal.uuid == normal_uuid && signal.token_id.is_some())
             .count(),
@@ -429,7 +432,7 @@ mod source_holds {
         .unwrap();
 
         let first = execute(&mut core, 0.0);
-        assert!(!first.output_signals[0].completed);
+        assert!(!first.output_signals.as_slice()[0].completed);
         let active_before_terminal = core.kv_manager.num_active_blocks();
         assert!(active_before_terminal > 0);
         let expected_held_blocks = core.state.requests[&request_id]
@@ -438,7 +441,7 @@ mod source_holds {
             .div_ceil(core.args.block_size);
 
         let terminal = execute(&mut core, first.end_ms);
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert!(matches!(
             terminal.lifecycle_events.as_slice(),
             [SchedulerLifecycleEvent::SourceHeld {
@@ -502,7 +505,7 @@ mod source_holds {
 
         let first = execute(&mut core, 0.0);
         let terminal = execute(&mut core, first.end_ms);
-        assert!(terminal.output_signals[0].completed);
+        assert!(terminal.output_signals.as_slice()[0].completed);
         assert!(!core.source_is_held(second_id));
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
     }
@@ -853,6 +856,7 @@ mod destination_lifecycle {
             now_ms = pass.end_ms;
             if pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == blocker_uuid && signal.completed)
             {
@@ -929,6 +933,7 @@ mod destination_lifecycle {
         assert!(
             blocker_terminal
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == activation_blocker_uuid && signal.completed)
         );
@@ -957,6 +962,7 @@ mod destination_lifecycle {
         assert!(
             terminal
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == logical_uuid && signal.completed)
         );
@@ -1130,6 +1136,8 @@ mod core_behavior {
             let pass = core.execute_pass(&mut collector, step as f64);
             emitted.extend(
                 pass.output_signals
+                    .into_untracked()
+                    .unwrap()
                     .into_iter()
                     .filter(|signal| signal.uuid == uuid)
                     .map(|signal| signal.token_id.expect("planned token should be present")),
@@ -1245,7 +1253,12 @@ mod core_behavior {
         core.execute_pass(&mut collector, 0.0);
         let pass = core.execute_pass(&mut collector, 1.0);
 
-        assert!(pass.output_signals.iter().any(|signal| signal.uuid == r1));
+        assert!(
+            pass.output_signals
+                .as_slice()
+                .iter()
+                .any(|signal| signal.uuid == r1)
+        );
         assert_eq!(
             core.state.requests.get(&r2).unwrap().num_computed_tokens,
             0,
@@ -1344,6 +1357,7 @@ mod core_behavior {
         let pass = core.execute_pass(&mut collector, 0.0);
         let signal = pass
             .output_signals
+            .as_slice()
             .first()
             .expect("prefill pass should emit one completed signal");
 
@@ -1369,8 +1383,8 @@ mod core_behavior {
         let pass = core.execute_pass(&mut collector, 0.0);
 
         assert_eq!(pass.output_signals.len(), 1);
-        assert_eq!(pass.output_signals[0].uuid, uuid);
-        assert!(!pass.output_signals[0].completed);
+        assert_eq!(pass.output_signals.as_slice()[0].uuid, uuid);
+        assert!(!pass.output_signals.as_slice()[0].completed);
         assert_eq!(
             core.state
                 .requests
@@ -1496,6 +1510,7 @@ mod core_behavior {
         assert!(
             pass1
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == holder && signal.completed)
         );
@@ -1535,25 +1550,40 @@ mod core_behavior {
         let mut core = VllmCore::new(args);
         let oversized = Uuid::from_u128(1);
         let follower = Uuid::from_u128(2);
+        let mut replay_keys = slotmap::SlotMap::<ReplayRequestKey, ()>::with_key();
+        let mut oversized_key = None;
         for (uuid, range) in [(oversized, 0u32..20u32), (follower, 100u32..104u32)] {
-            core.receive(DirectRequest {
-                tokens: range.collect(),
-                max_output_tokens: 1,
-                output_token_ids: None,
-                uuid: Some(uuid),
-                dp_rank: 0,
-                arrival_timestamp_ms: None,
-                ..Default::default()
-            });
+            let key = replay_keys.insert(());
+            if uuid == oversized {
+                oversized_key = Some(key);
+            }
+            core.receive_engine(EngineRequest::for_replay(
+                DirectRequest {
+                    tokens: range.collect(),
+                    max_output_tokens: 1,
+                    output_token_ids: None,
+                    uuid: Some(uuid),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                    ..Default::default()
+                },
+                key,
+            ))
+            .unwrap();
         }
 
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
 
-        assert!(
-            pass.output_signals
-                .iter()
-                .any(|signal| { signal.uuid == oversized && signal.completed && signal.rejected })
+        let oversized_index = pass
+            .output_signals
+            .as_slice()
+            .iter()
+            .position(|signal| signal.uuid == oversized && signal.completed && signal.rejected)
+            .unwrap();
+        assert_eq!(
+            pass.output_signals.replay_key_at(oversized_index),
+            oversized_key
         );
         assert!(
             pass.admissions
@@ -1615,6 +1645,7 @@ mod core_behavior {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
+                replay_request_key: None,
                 sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
@@ -1700,6 +1731,7 @@ mod core_behavior {
         let pass = core.execute_pass(&mut collector, first.end_ms);
         let ordered = pass
             .output_signals
+            .as_slice()
             .iter()
             .map(|signal| (signal.uuid, signal.completed))
             .collect::<Vec<_>>();
@@ -3142,6 +3174,7 @@ mod offload {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
+                replay_request_key: None,
                 sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens,
@@ -3240,6 +3273,7 @@ mod offload {
         assert!(
             sampled_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == blocked),
             "sampling must not acquire the dangling token's new block"
@@ -3254,6 +3288,7 @@ mod offload {
         assert!(
             blocked_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .all(|signal| signal.uuid != blocked),
             "the sampled token must wait before computation when its block cannot be acquired"
@@ -3261,6 +3296,7 @@ mod offload {
         assert!(
             blocked_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == unrelated),
             "the unrelated running request should continue"
@@ -3286,6 +3322,7 @@ mod offload {
         assert!(
             resumed
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == blocked),
             "decode must resume after its exact offload dependency terminates"
@@ -3350,6 +3387,7 @@ mod offload {
         assert_eq!(
             resumed
                 .output_signals
+                .as_slice()
                 .iter()
                 .filter(|signal| signal.uuid == blocked)
                 .count(),
@@ -3358,6 +3396,7 @@ mod offload {
         assert_eq!(
             resumed
                 .output_signals
+                .as_slice()
                 .iter()
                 .filter(|signal| signal.uuid == unrelated)
                 .count(),
@@ -3444,6 +3483,7 @@ mod offload {
             let pass = core.execute_pass(&mut collector, now_ms);
             now_ms = pass.end_ms;
             pass.output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == cached_uuid && signal.completed)
         });
@@ -3463,6 +3503,7 @@ mod offload {
         assert!(
             blocker_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == blocker_uuid && !signal.completed)
         );
@@ -4414,6 +4455,7 @@ mod offload {
             let pass = core.execute_pass(&mut collector, now_ms);
             now_ms = pass.end_ms;
             pass.output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == cached_uuid && signal.completed)
         });

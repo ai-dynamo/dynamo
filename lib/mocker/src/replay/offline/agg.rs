@@ -44,12 +44,108 @@ use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
 use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
-use anyhow::bail;
+use anyhow::{anyhow, bail, ensure};
 use rustc_hash::FxHashMap;
+use slotmap::SlotMap;
 #[cfg(test)]
 use std::collections::HashMap;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque, hash_map::Entry};
 use uuid::Uuid;
+
+use crate::scheduler::{EngineOutputs, EngineRequest, ReplayRequestKey};
+
+#[derive(Default)]
+struct AggRequests {
+    by_uuid: FxHashMap<Uuid, ReplayRequestKey>,
+    states: SlotMap<ReplayRequestKey, (Uuid, AggRequestState)>,
+}
+
+impl AggRequests {
+    fn contains_uuid(&self, uuid: Uuid) -> bool {
+        self.by_uuid.contains_key(&uuid)
+    }
+
+    fn insert(&mut self, uuid: Uuid, state: AggRequestState) -> anyhow::Result<ReplayRequestKey> {
+        match self.by_uuid.entry(uuid) {
+            Entry::Occupied(_) => {
+                bail!("offline replay request {uuid} is already active")
+            }
+            Entry::Vacant(entry) => {
+                let key = self.states.insert((uuid, state));
+                entry.insert(key);
+                Ok(key)
+            }
+        }
+    }
+
+    fn get_mut_by_uuid(
+        &mut self,
+        uuid: Uuid,
+    ) -> anyhow::Result<(ReplayRequestKey, &mut AggRequestState)> {
+        let key =
+            self.by_uuid.get(&uuid).copied().ok_or_else(|| {
+                anyhow!("offline aggregate replay missing request state for {uuid}")
+            })?;
+        Ok((key, self.get_mut_by_key(key, uuid)?))
+    }
+
+    fn get_mut_by_key(
+        &mut self,
+        key: ReplayRequestKey,
+        uuid: Uuid,
+    ) -> anyhow::Result<&mut AggRequestState> {
+        let (stored_uuid, state) = self
+            .states
+            .get_mut(key)
+            .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        Self::validate_stored_uuid(*stored_uuid, uuid)?;
+        Ok(state)
+    }
+
+    fn remove(&mut self, key: ReplayRequestKey, uuid: Uuid) -> anyhow::Result<AggRequestState> {
+        let Entry::Occupied(entry) = self.by_uuid.entry(uuid) else {
+            bail!("offline aggregate replay missing request state for {uuid}");
+        };
+        ensure!(
+            *entry.get() == key,
+            "offline aggregate replay request state indexes disagree for {uuid}"
+        );
+        let (stored_uuid, _) = self
+            .states
+            .get(key)
+            .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        Self::validate_stored_uuid(*stored_uuid, uuid)?;
+        let (_, state) = self
+            .states
+            .remove(key)
+            .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        entry.remove();
+        Ok(state)
+    }
+
+    #[cfg(test)]
+    fn get_by_key(&self, key: ReplayRequestKey, uuid: Uuid) -> anyhow::Result<&AggRequestState> {
+        let (stored_uuid, state) = self
+            .states
+            .get(key)
+            .ok_or_else(|| anyhow!("offline aggregate replay missing request state for {uuid}"))?;
+        Self::validate_stored_uuid(*stored_uuid, uuid)?;
+        Ok(state)
+    }
+
+    fn validate_stored_uuid(stored_uuid: Uuid, uuid: Uuid) -> anyhow::Result<()> {
+        ensure!(
+            stored_uuid == uuid,
+            "offline aggregate replay request state key does not match {uuid}"
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = (Uuid, &AggRequestState)> {
+        self.states.values().map(|(uuid, state)| (*uuid, state))
+    }
+}
 
 fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
     let first = origins.next()?;
@@ -126,7 +222,7 @@ where
     next_event_seq: u64,
     next_scaling_tick_ordinal: u64,
     admission: AdmissionQueue<Metadata>,
-    requests: FxHashMap<Uuid, AggRequestState>,
+    requests: AggRequests,
     engine: EngineComponent<Observation>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent<Observation::Batch>>,
@@ -223,7 +319,7 @@ where
             next_event_seq: 0,
             next_scaling_tick_ordinal: 0,
             admission,
-            requests: FxHashMap::default(),
+            requests: AggRequests::default(),
             engine,
             collector,
             events: BinaryHeap::new(),
@@ -355,8 +451,12 @@ where
         request: DirectRequest,
         uuid: Uuid,
         worker_idx: usize,
+        replay_request_key: ReplayRequestKey,
     ) -> anyhow::Result<()> {
-        self.engine.dispatch(worker_idx, request)?;
+        self.engine.dispatch_engine(
+            worker_idx,
+            EngineRequest::for_replay(request, replay_request_key),
+        )?;
         self.record_dispatch(uuid, worker_idx);
         // Aggregated replay uses a single pool. Treat the assignment as the
         // decode_worker_idx so per-request records consistently carry the
@@ -400,14 +500,9 @@ where
                 dp_rank,
                 placement.reported_overlap_tokens,
             );
-            let request = self
-                .requests
-                .get_mut(&uuid)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("offline replay missing queued request state for {uuid}")
-                })?
-                .take_queued_request(uuid)?;
-            self.dispatch_to_worker(request, uuid, placement.scheduler_id)?;
+            let (replay_request_key, request) = self.requests.get_mut_by_uuid(uuid)?;
+            let request = request.take_queued_request(uuid)?;
+            self.dispatch_to_worker(request, uuid, placement.scheduler_id, replay_request_key)?;
         }
         Ok(())
     }
@@ -421,6 +516,9 @@ where
         session_id: Option<String>,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
+        if self.requests.contains_uuid(uuid) {
+            bail!("offline replay request {uuid} is already active");
+        }
         let input_length = request.input_length();
         let output_length = request.metadata().max_output_tokens;
         request.metadata_mut().uuid = Some(uuid);
@@ -461,21 +559,22 @@ where
                     dp_rank,
                     placement.reported_overlap_tokens,
                 );
-                self.requests.insert(
+                let replay_request_key = self.requests.insert(
                     uuid,
                     AggRequestState::new_running(input_length, output_length),
-                );
+                )?;
                 self.dispatch_to_worker(
                     request.into_direct_request(),
                     uuid,
                     placement.scheduler_id,
+                    replay_request_key,
                 )?;
             }
             PlacementDecision::Queued => {
                 self.collector
                     .on_route_queued(uuid, ReplayRequestPool::Agg, self.now_ms);
                 self.requests
-                    .insert(uuid, AggRequestState::new_queued(request));
+                    .insert(uuid, AggRequestState::new_queued(request))?;
             }
         }
         self.record_router_pending();
@@ -563,11 +662,16 @@ where
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
-    fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
-        if let Some(token_id) = signal.token_id {
-            CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
-        }
+    fn process_output_signal(
+        &mut self,
+        signal: OutputSignal,
+        replay_request_key: ReplayRequestKey,
+    ) -> anyhow::Result<()> {
         if signal.completed {
+            let removed_state = self.requests.remove(replay_request_key, signal.uuid)?;
+            if let Some(token_id) = signal.token_id {
+                CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
+            }
             let status = if signal.rejected {
                 ReplayTerminalStatus::Rejected
             } else {
@@ -582,9 +686,6 @@ where
                 self.stats.router_freed_count += 1;
             }
             self.record_router_pending();
-            let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
-                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
-            })?;
             // Rejected requests never ran: keep them out of completed-request
             // shape and latency samples. Their offered demand was already
             // recorded at arrival, matching requests_started_total.
@@ -617,23 +718,24 @@ where
             return Ok(());
         }
 
-        let already_marked = self
-            .requests
-            .get(&signal.uuid)
-            .ok_or_else(|| {
-                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
-            })?
-            .prefill_completed;
-        if already_marked {
+        let marks_prefill_completion = {
+            let state = self
+                .requests
+                .get_mut_by_key(replay_request_key, signal.uuid)?;
+            if state.prefill_completed {
+                false
+            } else {
+                state.prefill_completed = true;
+                true
+            }
+        };
+        if let Some(token_id) = signal.token_id {
+            CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
+        }
+        if !marks_prefill_completion {
             return Ok(());
         }
 
-        self.requests
-            .get_mut(&signal.uuid)
-            .ok_or_else(|| {
-                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
-            })?
-            .prefill_completed = true;
         let placements = self.placement.prefill_completed(signal.uuid, self.now_ms)?;
         #[cfg(test)]
         if self.placement.is_router() {
@@ -663,9 +765,7 @@ where
     /// Apply one completed pass: free request slots, publish KV events, and handle outputs.
     fn process_completed_pass(
         &mut self,
-        _worker_idx: usize,
-        _completed_requests: usize,
-        output_signals: Vec<OutputSignal>,
+        output_signals: EngineOutputs,
         engine_events: Observation::Batch,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
@@ -673,8 +773,8 @@ where
         self.apply_engine_observations(engine_events, KvIngestBoundary::PassEnd)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
-        for signal in output_signals {
-            self.process_output_signal(signal)?;
+        for (signal, replay_request_key) in output_signals.into_tracked()? {
+            self.process_output_signal(signal, replay_request_key)?;
         }
         Ok(())
     }
@@ -715,8 +815,6 @@ where
             self.record_fpm(payload.worker_idx, fpm)?;
         }
         self.process_completed_pass(
-            payload.worker_idx,
-            payload.completed_requests,
             payload.output_signals,
             payload.engine_events,
             payload.accept_length_output_tokens,
@@ -1323,14 +1421,14 @@ where
             .requests
             .iter()
             .filter(|(_, state)| state.phase == AggRequestPhase::QueuedAtRouter)
-            .map(|(uuid, _)| *uuid)
+            .map(|(uuid, _)| uuid)
             .collect::<Vec<_>>();
         router_pending_request_ids.sort_unstable();
         let mut prefill_completed = self
             .requests
             .iter()
             .filter(|(_, state)| state.prefill_completed)
-            .map(|(uuid, _)| *uuid)
+            .map(|(uuid, _)| uuid)
             .collect::<Vec<_>>();
         prefill_completed.sort_unstable();
 
@@ -1362,6 +1460,119 @@ mod tests {
     use rstest::rstest;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn aggregate_request_tracking_validates_keys_and_duplicates() {
+        let args = replay_args(false, false);
+        let mut runtime =
+            RoundRobinAggRuntime::new_round_robin(&args, VecDeque::new(), 1, ReplayMode::Trace)
+                .unwrap();
+        let stale_uuid = Uuid::from_u128(9);
+        let stale_key = runtime
+            .requests
+            .insert(stale_uuid, AggRequestState::new_running(4, 2))
+            .unwrap();
+        runtime.requests.remove(stale_key, stale_uuid).unwrap();
+
+        let uuid = Uuid::from_u128(10);
+        let request = |tokens, max_output_tokens| DirectRequest {
+            tokens: vec![1; tokens],
+            max_output_tokens,
+            uuid: Some(uuid),
+            ..Default::default()
+        };
+        runtime
+            .assign_request(
+                ReplayRequestPayload::materialized(request(4, 2)),
+                0.0,
+                (),
+                None,
+            )
+            .unwrap();
+        let key = runtime.requests.by_uuid[&uuid];
+        assert_ne!(stale_key, key);
+        assert!(
+            runtime
+                .requests
+                .insert(uuid, AggRequestState::new_running(9, 7))
+                .is_err()
+        );
+        assert_eq!(runtime.requests.by_uuid[&uuid], key);
+
+        let collector_before = runtime.collector.snapshot(uuid).unwrap();
+        let in_flight_before = runtime.engine.in_flight();
+        assert!(
+            runtime
+                .assign_request(
+                    ReplayRequestPayload::materialized(request(9, 7)),
+                    10.0,
+                    (),
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(runtime.collector.snapshot(uuid), Some(collector_before));
+        assert_eq!(runtime.engine.in_flight(), in_flight_before);
+
+        let signal = |uuid, token_id, completed| OutputSignal {
+            uuid,
+            token_id,
+            completed,
+            rejected: false,
+            handoff_delay_ms: None,
+        };
+        let state_before = runtime.debug_snapshot();
+        let collector_before = runtime.collector.snapshot(uuid).unwrap();
+        assert!(
+            runtime
+                .process_output_signal(signal(uuid, Some(1), true), stale_key)
+                .is_err()
+        );
+        assert_eq!(runtime.debug_snapshot(), state_before);
+        assert_eq!(
+            runtime.collector.snapshot(uuid),
+            Some(collector_before.clone())
+        );
+        assert!(
+            runtime
+                .process_output_signal(signal(Uuid::from_u128(11), Some(1), true), key,)
+                .is_err()
+        );
+        assert_eq!(runtime.debug_snapshot(), state_before);
+        assert_eq!(runtime.collector.snapshot(uuid), Some(collector_before));
+        assert!(
+            runtime
+                .process_output_signal(signal(uuid, Some(1), false), stale_key)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .process_output_signal(signal(Uuid::from_u128(11), Some(1), false), key)
+                .is_err()
+        );
+
+        runtime
+            .process_output_signal(signal(uuid, None, false), key)
+            .unwrap();
+        assert!(
+            runtime
+                .requests
+                .get_by_key(key, uuid)
+                .unwrap()
+                .prefill_completed
+        );
+
+        runtime
+            .process_output_signal(signal(uuid, Some(1), false), key)
+            .unwrap();
+        assert!(
+            runtime
+                .requests
+                .get_by_key(key, uuid)
+                .unwrap()
+                .prefill_completed
+        );
+    }
 
     struct CaptureOncePolicy {
         at_ms: f64,

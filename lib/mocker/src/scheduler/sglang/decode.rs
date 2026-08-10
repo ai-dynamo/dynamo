@@ -14,13 +14,13 @@ use crate::replay::offline::evidence::{
 
 use super::config::{SglangConfig, floor_to_block};
 use super::request::SglangRequest;
-use crate::scheduler::AcceptLengthSample;
+use crate::scheduler::{AcceptLengthSample, EngineOutputs};
 
 #[derive(Default)]
 pub(super) struct DecodeResult {
     pub(super) requests: Vec<SglangRequest>,
     pub(super) completed_requests: Vec<SglangRequest>,
-    pub(super) output_signals: Vec<OutputSignal>,
+    pub(super) output_signals: EngineOutputs,
     pub(super) accept_length: AcceptLengthSample,
     pub(super) retracted_any: bool,
     pub(super) end_ms: f64,
@@ -232,10 +232,10 @@ pub(super) fn simulate_decode_step_with_sampler(
         .enumerate()
         .filter_map(|(idx, req)| (req.remaining_output_tokens() == 0).then_some(idx))
         .collect::<Vec<_>>();
-    let mut output_signals = already_completed_indices
-        .iter()
-        .map(|&idx| {
-            let req = &running[idx];
+    let mut output_signals = EngineOutputs::with_capacity(already_completed_indices.len());
+    for &idx in &already_completed_indices {
+        let req = &running[idx];
+        output_signals.push(
             OutputSignal {
                 uuid: req.uuid,
                 token_id: None,
@@ -248,9 +248,10 @@ pub(super) fn simulate_decode_step_with_sampler(
                     config.kv_transfer_bandwidth,
                     config.kv_bytes_per_token,
                 ),
-            }
-        })
-        .collect::<Vec<_>>();
+            },
+            req.replay_request_key,
+        );
+    }
     let mut completed_requests = already_completed_indices
         .iter()
         .rev()
@@ -349,19 +350,22 @@ pub(super) fn simulate_decode_step_with_sampler(
             req.debug_assert_invariants(config.block_size);
 
             let is_complete = req.output_len() >= req.max_output_tokens;
-            output_signals.push(OutputSignal {
-                uuid: req.uuid,
-                token_id: Some(token_id),
-                completed: is_complete,
-                rejected: false,
-                handoff_delay_ms: compute_prefill_handoff_delay_ms(
-                    config.worker_type,
-                    is_complete,
-                    req.prompt_len(),
-                    config.kv_transfer_bandwidth,
-                    config.kv_bytes_per_token,
-                ),
-            });
+            output_signals.push(
+                OutputSignal {
+                    uuid: req.uuid,
+                    token_id: Some(token_id),
+                    completed: is_complete,
+                    rejected: false,
+                    handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                        config.worker_type,
+                        is_complete,
+                        req.prompt_len(),
+                        config.kv_transfer_bandwidth,
+                        config.kv_bytes_per_token,
+                    ),
+                },
+                req.replay_request_key,
+            );
             emitted_tokens += 1;
 
             if is_complete {

@@ -292,6 +292,34 @@ fn request(
 }
 
 #[test]
+fn disagg_rejects_duplicate_request_before_recording_arrival() {
+    let mut flow = DisaggFlowState::new(HandoffOrder::SourceFirst, false);
+    let mut collector = TraceCollector::default();
+    let uuid = flow
+        .on_external_arrival(
+            ReplayRequestPayload::materialized(request(90_100, 8, 2, 0.0)),
+            0.0,
+            None,
+            None,
+            &mut collector,
+        )
+        .unwrap();
+
+    assert!(
+        flow.on_external_arrival(
+            ReplayRequestPayload::materialized(request(90_100, 16, 4, 1.0)),
+            1.0,
+            None,
+            None,
+            &mut collector,
+        )
+        .is_err()
+    );
+    assert_eq!(flow.logical_in_flight, 1);
+    assert_eq!(collector.snapshot(uuid).unwrap().input_length, 8);
+}
+
+#[test]
 fn scaling_tick_emits_idle_fpm_for_both_disagg_pools() {
     let mut config = disagg_config();
     config.num_prefill_workers = 1;

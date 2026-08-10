@@ -16,9 +16,13 @@ use super::super::state::OfflineWorkerState;
 #[cfg(feature = "kvbm-offload")]
 use super::ObservedOffloadEffects;
 use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
+#[cfg(test)]
+use crate::common::protocols::DirectRequest;
+use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
-use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
+use crate::scheduler::{
+    EngineOutputs, EnginePassResult, EngineRequest, RouterEventVisibility, SchedulerCommand,
+};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -556,15 +560,24 @@ where
         ready
     }
 
+    pub(in crate::replay::offline) fn dispatch_engine(
+        &mut self,
+        rank_id: usize,
+        request: EngineRequest,
+    ) -> anyhow::Result<()> {
+        self.update_worker(rank_id, |worker| worker.receive_engine_request(request))
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))??;
+        self.refresh_rank(rank_id);
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(in crate::replay::offline) fn dispatch(
         &mut self,
         rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        self.update_worker(rank_id, |worker| worker.receive_request(request))
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
-        self.refresh_rank(rank_id);
-        Ok(())
+        self.dispatch_engine(rank_id, EngineRequest::untracked(request))
     }
 
     pub(in crate::replay::offline) fn apply_command(
@@ -790,7 +803,7 @@ where
                                     stage: self.stage,
                                     worker_idx: rank_id,
                                     completed_requests: 0,
-                                    output_signals: Vec::new(),
+                                    output_signals: EngineOutputs::default(),
                                     lifecycle_events: Vec::new(),
                                     engine_events: Observation::Batch::default(),
                                     progress: EngineProgress::default(),
@@ -945,7 +958,10 @@ mod tests {
         DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType,
     };
     use crate::replay::offline::extensions::kv_events::RouterEventObservation;
-    use crate::scheduler::{SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent};
+    use crate::scheduler::{
+        ReplayRequestKey, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
+    };
+    use slotmap::SlotMap;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -1059,8 +1075,21 @@ mod tests {
         let mut engine = ranked_timing_engine(2);
         let fast = Uuid::from_u128(30);
         let slow = Uuid::from_u128(31);
-        engine.dispatch(0, timed_request(fast, 4)).unwrap();
-        engine.dispatch(1, timed_request(slow, 8)).unwrap();
+        let mut replay_keys = SlotMap::<ReplayRequestKey, ()>::with_key();
+        let fast_key = replay_keys.insert(());
+        let slow_key = replay_keys.insert(());
+        engine
+            .dispatch_engine(
+                0,
+                EngineRequest::for_replay(timed_request(fast, 4), fast_key),
+            )
+            .unwrap();
+        engine
+            .dispatch_engine(
+                1,
+                EngineRequest::for_replay(timed_request(slow, 8), slow_key),
+            )
+            .unwrap();
         let mut collector = TraceCollector::default();
         collector.on_arrival(fast, 0.0, 4, 1);
         collector.on_arrival(slow, 0.0, 8, 1);
@@ -1084,6 +1113,14 @@ mod tests {
         assert!(scheduled.payloads.iter().all(|payload| {
             (payload.fpm.as_ref().unwrap().wall_time_secs - 0.009).abs() < f64::EPSILON
         }));
+        assert_eq!(
+            scheduled.payloads[0].output_signals.replay_key_at(0),
+            Some(fast_key)
+        );
+        assert_eq!(
+            scheduled.payloads[1].output_signals.replay_key_at(0),
+            Some(slow_key)
+        );
         assert_eq!(collector.request_latencies(fast).unwrap().0, 9.0);
         assert_eq!(collector.request_latencies(slow).unwrap().0, 9.0);
     }
@@ -1472,6 +1509,7 @@ mod tests {
         assert!(
             final_pass
                 .output_signals
+                .as_slice()
                 .iter()
                 .any(|signal| signal.uuid == uuid && signal.completed)
         );

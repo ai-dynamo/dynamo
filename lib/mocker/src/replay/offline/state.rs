@@ -10,7 +10,7 @@ use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::scheduler::{
-    EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
+    EngineCore, EnginePassResult, EngineRequest, SchedulerCommand, SchedulerCommandEffects,
     SchedulerCommandResult, SchedulerLifecycleEvent,
 };
 use uuid::Uuid;
@@ -324,13 +324,26 @@ impl OfflineWorkerState {
         self.in_flight
     }
 
-    pub(crate) fn receive_request(&mut self, mut request: DirectRequest) {
+    pub(crate) fn receive_engine_request(
+        &mut self,
+        mut request: EngineRequest,
+    ) -> anyhow::Result<()> {
         self.in_flight = self
             .in_flight
             .checked_add(1)
             .expect("offline worker in-flight request count overflow");
-        request.dp_rank = self.dp_rank;
-        self.core.receive(request);
+        request.set_dp_rank(self.dp_rank);
+        if let Err(error) = self.core.receive_engine(request) {
+            self.in_flight -= 1;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receive_request(&mut self, request: DirectRequest) {
+        self.receive_engine_request(EngineRequest::untracked(request))
+            .expect("ordinary request ID must be unique");
     }
 
     pub(crate) fn apply_command(

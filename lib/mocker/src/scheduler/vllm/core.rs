@@ -33,10 +33,11 @@ use crate::scheduler::vllm::policy::{self, AdmissionDecision, PolicySequence};
 use crate::scheduler::vllm::request::RequestKvState;
 use crate::scheduler::{
     AcceptLengthSample, ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
-    CapturedRouterEventBuffer, DestinationHolds, EnginePassResult, ForwardPassSnapshot,
-    MockerMetrics, PendingDestinations, RemovedSource, RouterEventVisibility, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion,
-    SourceHolds, build_fpm_snapshot, capture_router_event_sink,
+    CapturedRouterEventBuffer, DestinationHolds, EngineOutputs, EnginePassResult, EngineRequest,
+    ForwardPassSnapshot, MockerMetrics, PendingDestinations, RemovedSource, ReplayRequestKey,
+    RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
+    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub(crate) enum RequestStatus {
 }
 
 pub(crate) struct VllmRequestState {
+    pub(crate) replay_request_key: Option<ReplayRequestKey>,
     pub(crate) sequence: RequestKvState,
     pub(crate) status: RequestStatus,
     pub(crate) num_computed_tokens: usize,
@@ -557,13 +559,16 @@ impl VllmCore {
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
-        match self
-            .apply_command(SchedulerCommand::Submit(request))
+        self.receive_engine(EngineRequest::untracked(request))
             .expect("ordinary request ID must be unique")
-        {
-            SchedulerCommandResult::Submitted(uuid) => uuid,
-            _ => unreachable!("submit command must return a request ID"),
-        }
+    }
+
+    pub(crate) fn receive_engine(&mut self, request: EngineRequest) -> anyhow::Result<Uuid> {
+        let (mut request, replay_request_key) = request.into_parts();
+        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        request.uuid = Some(uuid);
+        self.validate_request_id(uuid)?;
+        self.submit_with_replay_key(request, replay_request_key)
     }
 
     #[cfg(test)]
@@ -601,7 +606,7 @@ impl VllmCore {
                 request.uuid = Some(uuid);
                 self.validate_request_id(uuid)?;
                 Ok(SchedulerCommandEffects::new(
-                    SchedulerCommandResult::Submitted(self.submit(request)?),
+                    SchedulerCommandResult::Submitted(self.submit_with_replay_key(request, None)?),
                 ))
             }
             SchedulerCommand::CancelRequest { request_id } => {
@@ -626,7 +631,7 @@ impl VllmCore {
                 self.validate_request_id(uuid)?;
                 self.source_holds.register(uuid, handoff_id)?;
                 let submitted = self
-                    .submit(request)
+                    .submit_with_replay_key(request, None)
                     .expect("prevalidated handoff request must submit");
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(submitted),
@@ -666,7 +671,11 @@ impl VllmCore {
                 {
                     anyhow::bail!("destination handoff {handoff_id:?} is already active");
                 }
-                let request = self.make_request_state(request, RequestStatus::WaitingForRemoteKv);
+                let request = self.make_request_state_with_replay_key(
+                    request,
+                    RequestStatus::WaitingForRemoteKv,
+                    None,
+                );
                 if request.sequence.current_known_blocks() > self.args.num_gpu_blocks {
                     anyhow::bail!("destination prompt exceeds the KV pool capacity");
                 }
@@ -858,13 +867,21 @@ impl VllmCore {
         max_output_tokens.min(kv_remaining).min(model_remaining)
     }
 
-    fn submit(&mut self, mut request: DirectRequest) -> anyhow::Result<Uuid> {
+    fn submit_with_replay_key(
+        &mut self,
+        mut request: DirectRequest,
+        replay_request_key: Option<ReplayRequestKey>,
+    ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
         if self.state.requests.contains_key(&uuid) {
             anyhow::bail!("request {uuid} is already active");
         }
-        let request = self.make_request_state(request, RequestStatus::Waiting);
+        let request = self.make_request_state_with_replay_key(
+            request,
+            RequestStatus::Waiting,
+            replay_request_key,
+        );
         self.state.insert_waiting(uuid, request);
         if let Some(request) = self.state.requests.get(&uuid) {
             request.debug_assert_progress(uuid);
@@ -872,10 +889,11 @@ impl VllmCore {
         Ok(uuid)
     }
 
-    fn make_request_state(
+    fn make_request_state_with_replay_key(
         &self,
         request: DirectRequest,
         status: RequestStatus,
+        replay_request_key: Option<ReplayRequestKey>,
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let prompt_len = request.tokens.len();
@@ -934,6 +952,7 @@ impl VllmCore {
             )
         };
         VllmRequestState {
+            replay_request_key,
             sequence,
             status,
             num_computed_tokens: 0,
@@ -1483,7 +1502,7 @@ impl VllmCore {
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
         let scheduling_policy = self.args.scheduling_policy();
         let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
-        let mut rejected_uuids: Vec<Uuid> = Vec::new();
+        let mut rejected_requests: Vec<(Uuid, Option<ReplayRequestKey>)> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
             let prefer_materialized = matches!(
                 admission.stage_for(false),
@@ -1565,7 +1584,13 @@ impl VllmCore {
                         num_gpu_blocks = self.args.num_gpu_blocks,
                         "rejecting request that exceeds a worker admission limit"
                     );
-                    rejected_uuids.push(uuid);
+                    let replay_request_key = self
+                        .state
+                        .requests
+                        .get(&uuid)
+                        .expect("rejected waiting request must remain active")
+                        .replay_request_key;
+                    rejected_requests.push((uuid, replay_request_key));
                     self.drop_request(uuid);
                     continue;
                 }
@@ -1614,19 +1639,22 @@ impl VllmCore {
         let (decode_time, mut output_signals, accept_length) = self.emit_ready_tokens()?;
         // Emit the terminal signals for the requests the gate rejected above
         // (see the gate comment for why this can't be done inline).
-        for uuid in rejected_uuids {
-            output_signals.push(OutputSignal {
-                uuid,
-                token_id: None,
-                completed: true,
-                rejected: true,
-                handoff_delay_ms: None,
-            });
+        for (uuid, replay_request_key) in rejected_requests {
+            output_signals.push(
+                OutputSignal {
+                    uuid,
+                    token_id: None,
+                    completed: true,
+                    rejected: true,
+                    handoff_delay_ms: None,
+                },
+                replay_request_key,
+            );
         }
         #[cfg(debug_assertions)]
         debug_assert_eq!(
             (accept_length.output_tokens, accept_length.decode_forwards),
-            crate::scheduler::accept_length_sample(&output_signals)
+            crate::scheduler::accept_length_sample(output_signals.as_slice())
         );
         let token_completion_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
         #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
@@ -2175,7 +2203,7 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     fn emit_ready_tokens(
         &mut self,
-    ) -> anyhow::Result<(Duration, Vec<OutputSignal>, AcceptLengthSample)> {
+    ) -> anyhow::Result<(Duration, EngineOutputs, AcceptLengthSample)> {
         let mut ready = Vec::with_capacity(self.state.running.len());
         let mut already_complete = Vec::new();
         let mut total_length = 0usize;
@@ -2196,7 +2224,12 @@ impl VllmCore {
                 );
                 let effects = split_terminal_effects(request.sequence.terminal_signals());
                 debug_assert!(effects.immediate.is_empty());
-                already_complete.push((uuid, handoff_delay_ms, effects.cleanup));
+                already_complete.push((
+                    uuid,
+                    request.replay_request_key,
+                    handoff_delay_ms,
+                    effects.cleanup,
+                ));
                 continue;
             }
             ready.push(uuid);
@@ -2205,16 +2238,19 @@ impl VllmCore {
 
         // Requests already terminal after prefill must release their running slots
         // without manufacturing an output token.
-        let mut output_signals = Vec::with_capacity(already_complete.len() + ready.len());
-        for (uuid, handoff_delay_ms, cleanup) in already_complete {
+        let mut output_signals = EngineOutputs::with_capacity(already_complete.len() + ready.len());
+        for (uuid, replay_request_key, handoff_delay_ms, cleanup) in already_complete {
             self.complete_source(uuid, cleanup);
-            output_signals.push(OutputSignal {
-                uuid,
-                token_id: None,
-                completed: true,
-                rejected: false,
-                handoff_delay_ms,
-            });
+            output_signals.push(
+                OutputSignal {
+                    uuid,
+                    token_id: None,
+                    completed: true,
+                    rejected: false,
+                    handoff_delay_ms,
+                },
+                replay_request_key,
+            );
         }
 
         if ready.is_empty() {
@@ -2229,14 +2265,11 @@ impl VllmCore {
         }
 
         if self.speculative_sampler.is_some() {
-            if output_signals.is_empty() {
-                return self.emit_speculative_ready_tokens(ready);
+            if !output_signals.is_empty() {
+                self.state.compact_running();
             }
-
-            self.state.compact_running();
-            let (decode_time, mut speculative_signals, accept_length) =
-                self.emit_speculative_ready_tokens(ready)?;
-            output_signals.append(&mut speculative_signals);
+            let (decode_time, accept_length) =
+                self.emit_speculative_ready_tokens(ready, &mut output_signals)?;
             return Ok((decode_time, output_signals, accept_length));
         }
 
@@ -2343,16 +2376,20 @@ impl VllmCore {
                 continue;
             }
 
-            let handoff_delay_ms = self.state.requests.get(&uuid).and_then(|request| {
-                request.debug_assert_progress(uuid);
-                compute_prefill_handoff_delay_ms(
-                    self.args.worker_type,
-                    completed,
-                    request.sequence.num_input_tokens(),
-                    self.args.kv_transfer_bandwidth,
-                    self.args.kv_bytes_per_token,
-                )
-            });
+            let request = self
+                .state
+                .requests
+                .get(&uuid)
+                .ok_or_else(|| anyhow::anyhow!("vLLM missing request state for {uuid}"))?;
+            request.debug_assert_progress(uuid);
+            let replay_request_key = request.replay_request_key;
+            let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                self.args.worker_type,
+                completed,
+                request.sequence.num_input_tokens(),
+                self.args.kv_transfer_bandwidth,
+                self.args.kv_bytes_per_token,
+            );
             let output_signal = OutputSignal {
                 uuid,
                 token_id: emitted_token_id,
@@ -2364,7 +2401,7 @@ impl VllmCore {
                 self.complete_source(uuid, deferred_deref);
                 running_changed = true;
             }
-            output_signals.push(output_signal);
+            output_signals.push(output_signal, replay_request_key);
             accept_length.record_forward(1);
         }
 
@@ -2384,7 +2421,8 @@ impl VllmCore {
     fn emit_speculative_ready_tokens(
         &mut self,
         mut ready: Vec<Uuid>,
-    ) -> anyhow::Result<(Duration, Vec<OutputSignal>, AcceptLengthSample)> {
+        output_signals: &mut EngineOutputs,
+    ) -> anyhow::Result<(Duration, AcceptLengthSample)> {
         let max_burst = if self.args.worker_type == WorkerType::Prefill {
             1
         } else {
@@ -2395,7 +2433,7 @@ impl VllmCore {
         };
         for uuid in ready.iter().copied() {
             if self.refresh_request_offload_dependency(uuid).is_some() {
-                return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
+                return Ok((Duration::ZERO, AcceptLengthSample::default()));
             }
         }
         let mut running_changed = false;
@@ -2434,7 +2472,7 @@ impl VllmCore {
                             .expect("speculative dependency request must remain active");
                         request.offload_dependency = dependency;
                     }
-                    return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
+                    return Ok((Duration::ZERO, AcceptLengthSample::default()));
                 }
                 G1Acquire::RetryNow { .. } => {
                     panic!("speculative reservation must consume bounded RetryNow internally")
@@ -2446,7 +2484,7 @@ impl VllmCore {
                 if running_changed {
                     self.state.compact_running();
                 }
-                return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
+                return Ok((Duration::ZERO, AcceptLengthSample::default()));
             };
             running_changed = true;
             self.finish_preemption(preempted);
@@ -2464,7 +2502,7 @@ impl VllmCore {
             }
             if ready.is_empty() {
                 self.state.compact_running();
-                return Ok((Duration::ZERO, Vec::new(), AcceptLengthSample::default()));
+                return Ok((Duration::ZERO, AcceptLengthSample::default()));
             }
         };
 
@@ -2510,15 +2548,14 @@ impl VllmCore {
                     } else {
                         sampler.sample_output_tokens(remaining)
                     };
-                    (*uuid, burst)
+                    (*uuid, burst, request.replay_request_key)
                 })
                 .collect::<Vec<_>>()
         };
 
-        let mut output_signals =
-            Vec::with_capacity(sampled_bursts.iter().map(|(_, burst)| *burst).sum());
+        output_signals.reserve(sampled_bursts.iter().map(|(_, burst, _)| *burst).sum());
         let mut accept_length = AcceptLengthSample::default();
-        for (uuid, burst) in sampled_bursts {
+        for (uuid, burst, replay_request_key) in sampled_bursts {
             let mut emitted_tokens = 0usize;
             let mut completed = false;
             let mut deferred_deref = Vec::new();
@@ -2589,19 +2626,22 @@ impl VllmCore {
                     }
                     request.sequence.num_input_tokens()
                 };
-                output_signals.push(OutputSignal {
-                    uuid,
-                    token_id: Some(token_id),
-                    completed: is_complete,
-                    rejected: false,
-                    handoff_delay_ms: compute_prefill_handoff_delay_ms(
-                        self.args.worker_type,
-                        is_complete,
-                        prompt_tokens,
-                        self.args.kv_transfer_bandwidth,
-                        self.args.kv_bytes_per_token,
-                    ),
-                });
+                output_signals.push(
+                    OutputSignal {
+                        uuid,
+                        token_id: Some(token_id),
+                        completed: is_complete,
+                        rejected: false,
+                        handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                            self.args.worker_type,
+                            is_complete,
+                            prompt_tokens,
+                            self.args.kv_transfer_bandwidth,
+                            self.args.kv_bytes_per_token,
+                        ),
+                    },
+                    replay_request_key,
+                );
                 emitted_tokens += 1;
                 if is_complete {
                     completed = true;
@@ -2636,7 +2676,7 @@ impl VllmCore {
         if running_changed {
             self.state.compact_running();
         }
-        Ok((decode_time, output_signals, accept_length))
+        Ok((decode_time, accept_length))
     }
 }
 

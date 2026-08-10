@@ -5,8 +5,8 @@ use std::cmp::Ordering;
 
 use super::core::{EngineEventBatch, EngineProgress};
 use crate::common::handoff::HandoffId;
-use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
-use crate::scheduler::SchedulerLifecycleEvent;
+use crate::common::protocols::ForwardPassSnapshot;
+use crate::scheduler::{EngineOutputs, SchedulerLifecycleEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::replay::offline) enum SimulationWorkerStage {
@@ -20,7 +20,7 @@ pub(in crate::replay::offline) struct WorkerCompletionPayload<Events: EngineEven
     pub(in crate::replay::offline) stage: SimulationWorkerStage,
     pub(in crate::replay::offline) worker_idx: usize,
     pub(in crate::replay::offline) completed_requests: usize,
-    pub(in crate::replay::offline) output_signals: Vec<OutputSignal>,
+    pub(in crate::replay::offline) output_signals: EngineOutputs,
     pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
     pub(in crate::replay::offline) engine_events: Events,
     pub(in crate::replay::offline) progress: EngineProgress,
@@ -35,7 +35,7 @@ pub(in crate::replay::offline) enum SimulationEventKind<Events: EngineEventBatch
         stage: SimulationWorkerStage,
         worker_idx: usize,
         completed_requests: usize,
-        output_signals: Vec<OutputSignal>,
+        output_signals: EngineOutputs,
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
         engine_events: Events,
         made_progress: bool,
