@@ -42,10 +42,19 @@ Resolve these blocking fields:
 
 - one concrete user-provided YAML document containing a `DynamoGraphDeployment`;
 - workload profile name, type, and a concrete description of the serving traffic;
-- exact model source and revision when the user fixes one;
+- exact model source and revision when the user fixes one, plus the fallback policy when the requested revision
+  may be unsupported by the available engine or weights (fall back to a named alternative and mark the target
+  blocked, or halt);
+- the user's current production deployment configuration when one exists (path or paste): it anchors every
+  later comparison and seeds topology priors; when unavailable, record that explicitly as a known comparison
+  limitation;
 - allowed hardware type and count, including heterogeneous allocations;
 - Kubernetes context and existing namespace; and
-- either an exact trace or enough traffic-shape information to configure a defensible benchmark.
+- either an exact trace or enough traffic-shape information to configure a defensible benchmark. A parametric
+  description is a first-class option between presets and traces: AIPerf synthesizes static shapes (ISL/OSL mean
+  and stddev, prefix reuse via the prefix-prompt pool and length controls) and multiturn sessions (session count,
+  turns per session mean/stddev, per-turn delay) in a single command — offer "describe your workload" whenever the
+  user has neither a matching preset nor a trace, and record the elicited parameters in the contract.
 
 Objectives, SLOs, framework, precision, topology, storage class, and exact token or load values may remain unspecified
 when the user explicitly has no constraint or preference. Represent those values with the schema's empty value; do not
@@ -69,6 +78,11 @@ Ask only for blocking facts that remain unknown or contradictory after reading a
 - When the user's production deployment shape differs from the unit under test (for example, fleet-level traffic
   numbers but a single-replica test deployment), derive the per-unit load explicitly and confirm it with the user
   before recording it.
+
+Before writing the contract, enumerate every fact the downstream roles (deployer, benchmarker, hypothesis loop,
+analyzer) will require, and ask all still-missing ones in the single upfront batch: a question that first surfaces
+after the optimization loop has started is an interview defect. Record any fact the user defers as an explicit
+assumption in the contract so the loop can proceed non-blockingly.
 
 If blocking facts remain, return the questions to the parent and stop without handing work to a downstream role.
 
@@ -161,3 +175,8 @@ Return:
 
 The user interviewer hands both path-and-hash pairs directly to `recipe-deployer`. The workload path and hash remain
 supporting context for `perf-analyzer`, `hypothesis-generator`, and `hypothesis-challenger`.
+
+End with an operator handoff line before any deployment starts: state that the interview is complete, give the
+contract path, and tell the operator that the engagement now runs a long unattended loop — without goal mode the
+session pauses for input at every turn end — and that this is the moment to arm it (AGENTS.md, Long-Running Runs,
+has the condition template; fill in the budget).

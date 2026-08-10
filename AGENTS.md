@@ -102,9 +102,13 @@ notices. Two rules:
    report exists. Parked on pending asks with nothing else testable is a valid pause, not completion. Valid stops: an
    operator-granted stop-request, the authorized budget exhausted, access lost, or operator interrupt." Always name
    the budget (GPU-hours, wall-clock, failed-deployment limit) in the condition; a bare "never stop" silently relies
-   on credential expiry as its budget. If an unattended
-   run is requested and no goal mode or external loop is in place, say so at the start rather than discovering it at
-   the first stall.
+   on credential expiry as its budget. Tell the operator at the START of any optimization
+   engagement — not only when they say "unattended" — that this is long-running work and how to arm goal mode; the
+   user-interviewer's contract handoff is the natural moment. The template's parked-on-asks pause assumes a
+   reachable operator: for runs where the operator will be away, instruct the agent not to park on asks (asks are
+   logged and the loop continues) and keep only the hard stops. Blocking question tools suspend the turn BEFORE the
+   goal hook can evaluate, so one blocking question can hang an unattended run for hours; harnesses that support
+   tool restrictions should disallow blocking question tools in goal mode.
 2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
    background work that will re-invoke you, or return the specific blocking question you need answered.
 
