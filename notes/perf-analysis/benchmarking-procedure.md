@@ -102,7 +102,26 @@ Despite the loop above, a change is good if it either **reduce latency** or **ha
 
 **3. Supplementary data.** Externally injected capture: eBPF and sampling profilers. These require minimal or no change to benchmark or SUT code. The available tools are a small set — treat the named ones as a **starting point to extend**, not a fixed list.
 
-### [TODO] identified supplementary tools and what data the tool gives you
+### 3.1.1 Supplementary tools available today
+
+What exists in-tree, and what each one actually hands back. Everything here attaches to a running process — nothing on this list requires the benchmark or the SUT to be modified.
+
+| Tool | Where | What it gives you | Needs |
+|---|---|---|---|
+| **bpftrace programs** | `benchmarks/frontend/scripts/bpf/traces/` — 9 scripts | `runqlat` scheduler wait, `cpudist` on-CPU duration, `offcputime` blocked-thread stacks by duration, `syscall_latency`, `context_switches`, `funclatency` per-function, `transport_latency`, `tcplife` connection lifetime, `tcpretrans` retransmits | Root or `CAP_BPF`; `setup.sh` detects capability, `run.sh --batch` drives them |
+| **On-CPU profile → flame graph** | `flamegraph/cpu_flamegraph.sh`; skill's `profile_oncpu.sh` | Time distribution over call stacks. Tries cargo-flamegraph, then samply, then plain `perf` | Non-root at `perf_event_paranoid ≤ 1`; DWARF unwinding for Rust frames |
+| **Off-CPU profile** | `flamegraph/offcpu_flamegraph.sh`; skill's `capture_offcpu.sh` | What blocked threads waited on, duration-weighted — futex, epoll, timers | **Root**, even at `paranoid = -1`; tracefs event files are root-only |
+| **Differential flame graph** | `flamegraph/diff_flamegraph.sh` | Red/blue delta between two captures — where cost moved between arms | Two folded-stack files |
+| **Folded-stack analysis** | skill's `analyze_folded.py` | Top self-time leaves (on-CPU); innermost user frame plus a rayon / epoll / lock / channel / park bucket (off-CPU). Demangles Rust symbols | A `.folded` file |
+| **Nsight Systems** | `nsight/nsys_profile.sh` | GPU timeline correlated with host activity | Heavy; short windows; `profiling` build for useful names |
+| **py-spy** | not in-tree | Python-side sampling without restarting the process — the practical way to find event-loop blocking in a worker | Attach; `CAP_SYS_PTRACE` in a container |
+| **tokio-console** | `lib/runtime` feature `tokio-console` | Live per-task view of the async runtime: task poll times, wakes, and tasks that never yield | **Compile** — the feature is off by default |
+
+Two things to note about the set.
+
+**Off-CPU is the one that needs root, and it is the one you need most often.** On-CPU sampling shows a busy process's hot paths; a process that is slow because it is *waiting* looks idle to it. Event-loop blocking, lock convoys, and starved worker pools are off-CPU phenomena.
+
+**`tokio-console` sits in the wrong tier for its value.** It is the only tool that sees async-task structure directly — which task is blocking the runtime, rather than which stack is hot — but it is compile-gated, so it cannot be added to a run in progress, and it is undocumented outside the Cargo manifest.
 
 ### 3.2 What each source can and cannot tell you
 
@@ -184,7 +203,39 @@ Analysis covers visualization and the implications of different data sources. Th
 
 An agent cannot run a procedure that has not been written down, and a procedure cannot be written until collection and transformation are deterministic.
 
-### [TODO] what do we have now? visualizer for "programmatic"? sweeper for "programmatic", "procedural"? Some rulebook (/ troubleshooting guide) for procedural?
+### 5.1 What exists against each rung
+
+The ladder is unevenly built. Rung 1 has parts, rung 2 has fragments, rung 3 exists but rests on the two below it.
+
+**Rung 1 — programmatic.** The most complete, and entirely confined to one harness.
+
+| Piece | Where | Transforms |
+|---|---|---|
+| Sweep orchestration | `benchmarks/frontend/scripts/sweep_core/` — `planner`, `orchestrator`, `artifacts`, `naming`, `reporting` | A config grid into named artifact directories and a CSV |
+| Report generation | `analysis/create_report.py`, `frontend_perf_analysis.py`, `parsing_util.py` | Raw artifacts into per-run `report.md` and a `summary.md` |
+| Throughput extraction | skill's `extract_throughput.py` | Raw AIPerf JSONL into throughput and latency, bypassing the finalizer |
+| Stack folding | skill's `analyze_folded.py` | Folded stacks into ranked self-time and blocking categories |
+| Trace conversion | `benchmarks/request_trace/convert_to_perfetto.py` | `DYN_REQUEST_TRACE` output into a Perfetto timeline |
+
+**The gap is scope, not capability.** Every one of these is deterministic and reusable, but they only join sources *within* the frontend sweep harness. Nothing joins a client artifact to a Prometheus scrape to a trace for the same run — which is exactly the reconciliation §5 needs, and the reason the sum-of-parts check cannot currently be automated.
+
+Note also that no micro bench feeds this rung: criterion writes structured data under `target/criterion/`, and nothing collects it.
+
+**Rung 2 — procedural.** Fragments, each scoped to one failure class.
+
+| Piece | Where | Covers |
+|---|---|---|
+| Failure decision tree | `dynamo-troubleshoot/references/failure-decision-tree.md` | Deployment failures — pods, PVCs, model cache, endpoints |
+| Interconnect checklist | `dynamo-interconnect-check/references/interconnect-env-vars.md` | Is the KV transport on the intended path |
+| Router-mode reference | `dynamo-router-starter/references/router-modes.md` | Is the router in the mode you believe |
+| Pitfall corpus | `dynamo-frontend-benchmark` SKILL.md | Closed-loop misreading, congestion collapse, client core starvation, cold first run, AIPerf finalizer hang |
+| Routing tables | `Performance Analysis` pages, `dynamo-benchmark` skill | Which tool answers which question class |
+
+**What is missing is the bottleneck decision tree** — symptom to check to next check, for *performance* rather than for failure. `dynamo-troubleshoot` answers "why is it broken." Nothing answers "TTFT is high; what do I look at first, and what does each answer rule out."
+
+**Rung 3 — agent-runnable.** The skills are the delivery mechanism, and they inherit rung 2's shape: strong where a procedure was written down, absent where it was not. `dynamo-benchmark` routes and gates; `dynamo-troubleshoot`, `dynamo-interconnect-check`, and `dynamo-router-starter` each execute their own checklist. None can diagnose a performance problem end to end, because the procedure for doing so does not exist yet — which is the ladder's own point: an agent cannot run what has not been written.
+
+**The one-sentence summary.** Transformation is solved inside one harness and absent across harnesses; the procedural rung covers failures but not slowness; and the agent rung is therefore capped by rung 2 rather than by agent capability.
 
 ## Open items
 
@@ -192,3 +243,5 @@ An agent cannot run a procedure that has not been written down, and a procedure 
 - **Overhead universality is unverified.** §4.1 rests on an assumption that has not been measured. Decide whether a one-time calibration run is worth doing.
 - **The visualizer dashboard needs a home.** §4.1 depends on a dashboard hosted in a personal internal namespace. The link is held out of this copy. A durable, referenceable location is needed before this document can cite it.
 - **§3.4 and the two consequences in §3.2 are synthesis**, not statements from the source notes. Confirm or cut.
+- **No cross-source join exists.** §5.1 rung 1 transforms artifacts only within the frontend sweep harness. Reconciling a client interval against a trace and a Prometheus scrape for the same run — the check §5 is built around — has no tooling.
+- **The bottleneck decision tree is the missing procedural piece.** §5.1 rung 2 has checklists for failure and for configuration, none for slowness.
