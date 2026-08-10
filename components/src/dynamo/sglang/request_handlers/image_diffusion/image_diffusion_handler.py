@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 MAX_NUM_INFERENCE_STEPS = 50
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 7.5
+# Upper bound for the OpenAI `n` request field. The engine generates one
+# image per call, so `n` is served as sequential generations; the cap keeps
+# a single request from monopolizing the worker.
+MAX_IMAGES_PER_REQUEST = 8
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -115,16 +119,34 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
             width, height = self._parse_size(req.size)
 
-            images = await self._generate_images(
-                prompt=req.prompt,
-                negative_prompt=nvext.negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=nvext.seed,
-                input_reference=req.input_reference,
-            )
+            num_images = req.n
+            if num_images < 1:
+                raise ValueError(f"n must be >= 1, got {num_images}")
+            if num_images > MAX_IMAGES_PER_REQUEST:
+                logger.warning(
+                    f"n={num_images} exceeds max {MAX_IMAGES_PER_REQUEST}, "
+                    "clamping"
+                )
+                num_images = MAX_IMAGES_PER_REQUEST
+
+            # The engine produces one image per call, so serve OpenAI `n`
+            # semantics as n sequential generations. With an explicit seed use
+            # seed+i: deterministic overall, yet each sample is distinct.
+            # Without a seed, each generation draws its own random seed.
+            images: list[bytes] = []
+            for i in range(num_images):
+                images.extend(
+                    await self._generate_images(
+                        prompt=req.prompt,
+                        negative_prompt=nvext.negative_prompt,
+                        width=width,
+                        height=height,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        seed=nvext.seed + i if nvext.seed is not None else None,
+                        input_reference=req.input_reference,
+                    )
+                )
 
             context_id = context.id()
             assert context_id is not None
