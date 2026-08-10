@@ -30,8 +30,8 @@ configuration. Never tune the revisions separately.
 | SGLang aggregated | 4 workers; engine/page block 512; G1 blocks 1,536; max sequences 256; batch tokens 32,768 | 1 retraction; 1,024 produced 8 and 2,048 produced 0 |
 | SGLang disaggregated | 2 prefill + 2 decode; engine/page block 512; G1 blocks 17,408; max sequences 256; batch tokens 32,768; KV bytes/token 262,144; 100 GB/s full-prompt transfer | 2 retractions; 16,384 produced 12 and 18,432 produced 0 |
 
-The vLLM configurations rely on native/default G1 selection. An experiment-only
-`--g1-backend` switch is not required to reproduce the native seeds.
+The configurations use the framework-local native G1 implementation. The removed
+`--g1-backend` switch is not part of the current replay contract.
 
 ### CLI templates
 
@@ -129,25 +129,3 @@ detectors:
 Every row must complete all 5,000 requests with no rejected, canceled, failed, or stranded
 requests. A changed counter is not automatically a product failure, but it means the seed
 must be requalified and the cause recorded before freezing the row.
-
-## Derive and sanity-check KVBM rows
-
-Derive each vLLM KVBM row from its corresponding native seed by enabling G2 and modestly
-reducing or limiting G1. Keep the topology fixed; start disaggregated qualification at
-exactly 2 prefill + 2 decode workers. Tune capacity or concurrency identically for both
-revisions.
-
-Require all of the following before freezing a KVBM row:
-
-- all 5,000 requests complete;
-- one to three bounded preemptions, without repeated preempt/re-admit cycling;
-- nonzero G1-to-G2 eviction completion;
-- nonzero G2-to-G1 restoration hits;
-- identical lifecycle counts across repeated baseline and candidate runs;
-- 5,000 complete, backend-valid handoffs for disaggregated replay; and
-- one canonical digest per revision, with baseline and candidate digests matching.
-
-Do not infer offload coverage from successful completion. Do not proceed to performance
-when lifecycle counters match but a revision's canonical repetitions differ; that is an
-internal determinism failure. SGLang KVBM offload is unsupported by the current harness
-and must be reported as `UNSUPPORTED`, not simulated by toggling an ignored G1 option.

@@ -126,6 +126,67 @@ async fn sglang_live_metrics_retain_the_last_prefill_cache_observation() {
     engine.shutdown().await.unwrap();
 }
 
+async fn assert_mtp_lifecycle_drains_through_live_boundary(engine_type: EngineType) {
+    let mut mtp_args = args(engine_type);
+    mtp_args.aic_nextn = Some(2);
+    mtp_args.aic_nextn_accept_rates = Some("1,1".to_string());
+    let fpm = Arc::new(CountingFpmSink::default());
+    let engine = LiveEngine::start_with_options(
+        mtp_args,
+        0,
+        LiveEngineOptions {
+            fpm_publisher: FpmPublisher::new(Some(Arc::clone(&fpm) as Arc<dyn FpmSink>)),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+
+    let mut submissions = Vec::new();
+    for ordinal in 0..8_u128 {
+        let engine = engine.clone();
+        submissions.push(tokio::spawn(async move {
+            let first_token = 1_000 + ordinal as u32 * 10;
+            let output_token_ids = (0..7)
+                .map(|offset| first_token + offset)
+                .collect::<Vec<_>>();
+            let request = engine
+                .submit(DirectRequest {
+                    tokens: vec![ordinal as u32 + 1; 5],
+                    max_output_tokens: output_token_ids.len(),
+                    output_token_ids: Some(output_token_ids.clone()),
+                    uuid: Some(Uuid::from_u128(10_000 + ordinal)),
+                    ..Default::default()
+                })
+                .await?;
+            anyhow::Ok((request, output_token_ids))
+        }));
+    }
+
+    for submission in submissions {
+        let (mut request, expected) = submission.await.unwrap().unwrap();
+        let mut observed = Vec::new();
+        while let Some(output) = request.recv().await {
+            if let Some(token_id) = output.token_id {
+                observed.push(token_id);
+            }
+            if output.completed {
+                break;
+            }
+        }
+        assert_eq!(observed, expected);
+        assert!(request.recv().await.is_none());
+    }
+
+    wait_for_idle(&engine).await;
+    let passes = fpm.0.load(Ordering::Relaxed);
+    assert!(passes > 0);
+    assert!(
+        passes < 7,
+        "MTP should emit seven planned tokens in fewer than seven forward passes, got {passes}"
+    );
+    engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn attention_dp_live_handles_share_one_grouped_engine() {
     let mut grouped_args = args(EngineType::Vllm);
@@ -202,6 +263,16 @@ async fn streams_planned_tokens_to_the_owning_request() {
         assert!(request.recv().await.is_none());
         assert_eq!(engine.active_request_count(), 0);
     }
+}
+
+#[tokio::test]
+async fn vllm_mtp_lifecycle_drains_through_live_boundary() {
+    assert_mtp_lifecycle_drains_through_live_boundary(EngineType::Vllm).await;
+}
+
+#[tokio::test]
+async fn sglang_mtp_lifecycle_drains_through_live_boundary() {
+    assert_mtp_lifecycle_drains_through_live_boundary(EngineType::Sglang).await;
 }
 
 #[tokio::test]
@@ -711,6 +782,80 @@ async fn dropping_an_active_request_cleans_up_and_allows_id_reuse() {
     let output = replacement.recv().await.unwrap();
     assert_eq!(output.token_id, Some(22));
     assert!(output.completed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_live_submits_are_applied_at_one_pass_boundary() {
+    let mut timed_args = args(EngineType::Vllm);
+    timed_args.speedup_ratio = 0.1;
+    let engine = LiveEngine::start(timed_args, 0).unwrap();
+    let boundary = engine.pause_completion_boundary_before_finish();
+    let first = engine
+        .submit(DirectRequest {
+            tokens: vec![1],
+            max_output_tokens: 100,
+            output_token_ids: Some(vec![7; 100]),
+            uuid: Some(Uuid::from_u128(100)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    boundary.wait_until_reached().await;
+
+    let mut submissions = Vec::new();
+    for request_id in 101..107 {
+        let engine = engine.clone();
+        submissions.push(tokio::spawn(async move {
+            engine
+                .submit(DirectRequest {
+                    tokens: vec![request_id as u32],
+                    max_output_tokens: 100,
+                    output_token_ids: Some(vec![request_id as u32; 100]),
+                    uuid: Some(Uuid::from_u128(request_id)),
+                    ..Default::default()
+                })
+                .await
+        }));
+    }
+    while engine.active_request_count() != 7 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    let boundary_time = tokio::time::Instant::now();
+    boundary.release();
+    for _ in 0..1_000 {
+        if submissions.iter().any(tokio::task::JoinHandle::is_finished) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        submissions.iter().any(tokio::task::JoinHandle::is_finished),
+        "at least one queued submit should be acknowledged at the released boundary"
+    );
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        submissions.iter().all(tokio::task::JoinHandle::is_finished),
+        "the production command bridge must drain the whole submit burst before the next pass"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        boundary_time,
+        "batched submit acknowledgements must not advance modeled time"
+    );
+
+    let mut requests = Vec::new();
+    for submission in submissions {
+        requests.push(submission.await.unwrap().unwrap());
+    }
+    drop(requests);
+    drop(first);
+    engine.shutdown().await.unwrap();
 }
 
 #[tokio::test]

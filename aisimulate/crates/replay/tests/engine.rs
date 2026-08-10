@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use aisimulate_engine::{Backend, EngineConfig, SglangConfig, TimingModel, TimingModelConfig};
@@ -348,6 +350,67 @@ fn scaling_composition_changes_round_robin_capacity_before_arrival() {
         .collect::<Vec<_>>();
     workers.sort_unstable();
     assert_eq!(workers, vec![0, 0, 1, 1]);
+}
+
+struct CaptureAttentionDpFpm {
+    identities: Rc<RefCell<Vec<(usize, String, u32)>>>,
+}
+
+impl ReplayScalingPolicy for CaptureAttentionDpFpm {
+    fn initial_tick_ms(&mut self) -> Result<f64> {
+        Ok(250.0)
+    }
+
+    fn on_tick(&mut self, snapshot: ReplayScalingSnapshot) -> Result<ReplayScalingDecision> {
+        self.identities.borrow_mut().extend(
+            snapshot
+                .decode_fpm
+                .into_iter()
+                .map(|(worker_id, fpm)| (worker_id, fpm.worker_id, fpm.dp_rank)),
+        );
+        Ok(ReplayScalingDecision::default())
+    }
+}
+
+#[test]
+fn attention_dp_offline_fpm_preserves_logical_worker_and_rank_identity() {
+    let mut config = engine_config(TimingModelConfig::Fixed {
+        prefill_ms: 100.0,
+        decode_ms: 100.0,
+    });
+    config.dp_size = 2;
+    let mut replay = spec(config);
+    replay.adapters.scaling = ProviderSpec {
+        provider: "capture_attention_dp_fpm".to_string(),
+        config: serde_json::Value::Null,
+    };
+    replay.requests = vec![
+        ReplayRequest {
+            dp_rank: Some(0),
+            ..request("rank-0", 0.0, 8, 20)
+        },
+        ReplayRequest {
+            dp_rank: Some(1),
+            ..request("rank-1", 0.0, 8, 20)
+        },
+    ];
+    let identities = Rc::new(RefCell::new(Vec::new()));
+    let composition = ScalingRoundRobin {
+        policy: Some(Box::new(CaptureAttentionDpFpm {
+            identities: Rc::clone(&identities),
+        })),
+    };
+
+    let report = Replayer::with_composition(replay, ReplayEngineFactory::new(), composition)
+        .unwrap()
+        .run()
+        .unwrap();
+
+    assert_eq!(report.request_counts.completed_requests, 2);
+    assert_eq!(
+        *identities.borrow(),
+        vec![(0, "0".to_string(), 0), (0, "0".to_string(), 1)]
+    );
 }
 
 #[test]

@@ -526,7 +526,6 @@ async fn forward_command(
     reply: Option<oneshot::Sender<Result<SchedulerCommandEffects>>>,
     bridge: &RankBridgeContext,
 ) {
-    let wait_for_response = reply.is_some();
     let translated = match translate_command(command, discard_pending_output, &bridge.compatibility)
     {
         Ok(command) => command,
@@ -576,43 +575,27 @@ async fn forward_command(
         }
     };
     debug_assert_eq!(queued.command_id, command_id);
-    if !wait_for_response {
-        // `SchedulerHandle::receive` is an unbounded fire-and-forget lane. Do
-        // not serialize it on the actor acknowledgement: draining the burst
-        // here lets the grouped actor snapshot all already-queued requests
-        // into the same pass, matching the historical Live Mocker batching
-        // boundary. One shared monitor handles exceptional response paths;
-        // request volume must not create one Tokio task per submission.
-        if bridge
-            .response_monitor
-            .send(MonitoredCommandResponse {
-                command_id,
-                context: "applying request",
-                response: queued.response,
-            })
-            .await
-            .is_err()
-        {
-            fail_pending_command(
-                command_id,
-                anyhow!("grouped live command response monitor is closed"),
-                &bridge.compatibility,
-                &bridge.pending,
-            );
-        }
-        return;
-    }
-    match queued.response.await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-            fail_pending_command(command_id, error, &bridge.compatibility, &bridge.pending)
-        }
-        Err(_) => fail_pending_command(
+    // Do not serialize either scheduler input lane on the actor
+    // acknowledgement. The bridge must keep draining a burst so every command
+    // already queued at a pass boundary can enter the same actor snapshot.
+    // One shared monitor handles exceptional response paths without spawning a
+    // Tokio task per command.
+    if bridge
+        .response_monitor
+        .send(MonitoredCommandResponse {
             command_id,
-            anyhow!("grouped live engine stopped before applying command {command_id}"),
+            context: "applying command",
+            response: queued.response,
+        })
+        .await
+        .is_err()
+    {
+        fail_pending_command(
+            command_id,
+            anyhow!("grouped live command response monitor is closed"),
             &bridge.compatibility,
             &bridge.pending,
-        ),
+        );
     }
 }
 
