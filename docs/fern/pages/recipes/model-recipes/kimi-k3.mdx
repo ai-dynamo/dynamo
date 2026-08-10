@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Kimi-K3"
-subtitle: "Serve Kimi-K3 with Dynamo and vLLM on GB200 or GB300, aggregated or disaggregated over NVLink."
+subtitle: "Serve Kimi-K3 with Dynamo on GB200 or GB300, aggregated or disaggregated over NVLink."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
+
+<Tabs>
+  <Tab title="vLLM">
 
 Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and tensor parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your GPU architecture and serving topology; every command on this page updates to match.
 
@@ -228,9 +231,19 @@ All four targets serve Kimi-K3 on vLLM with FP8 KV cache, KV-aware routing, pref
 
 ## Source
 
-- Source README: [recipes/kimi-k3/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/README.md)
-- Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml)
-- Disaggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml)
-- Aggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml)
-- Disaggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml)
-- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-download.yaml)
+    - Source README: [recipes/kimi-k3/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/README.md)
+    - Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml)
+    - Disaggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml)
+    - Aggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml)
+    - Disaggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml)
+    - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-download.yaml)
+
+  </Tab>
+  <Tab title="SGLang">
+
+<Info>
+No SGLang recipe is currently published for Kimi-K3. Select vLLM to use the available recipes.
+</Info>
+
+  </Tab>
+</Tabs>
