@@ -293,10 +293,10 @@ because Pipecat's local VAD and Smart Turn processors commit the input audio.
 ## Run the Blueprint UI and Pipecat
 
 The [Nemotron Voice Agent Blueprint](https://github.com/NVIDIA-AI-Blueprints/nemotron-voice-agent)
-provides the browser UI and the Generic Assistant Pipecat pipeline. The
-temporary [companion Dynamo profile](https://github.com/ptarasiewiczNV/nemotron-voice-agent/tree/e33d9bb86016239a35fdae2d1360dd4d2019257e)
-adds OpenAI-compatible clients for this deployment. Access to that private fork
-is required until the companion change is upstreamed.
+provides the browser UI and the Generic Assistant Pipecat pipeline. A temporary
+companion Dynamo profile in the private `ptarasiewiczNV/nemotron-voice-agent`
+fork adds OpenAI-compatible clients for this deployment. Access to that fork is
+required until the companion change is upstreamed.
 
 There is no separate Pipecat command: the Blueprint Compose service runs both
 Pipecat and the UI. Run the following steps on the machine that has Kubernetes
