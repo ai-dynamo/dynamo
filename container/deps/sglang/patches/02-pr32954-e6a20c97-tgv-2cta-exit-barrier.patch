@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/gemm/cutedsl_bf16_gemm.py b/python/sglang/kernels/ops/gemm/cutedsl_bf16_gemm.py
-index f608be4fb7c4..3bd9a565815e 100644
+index ac8ddff9f..073935744 100644
 --- a/python/sglang/kernels/ops/gemm/cutedsl_bf16_gemm.py
 +++ b/python/sglang/kernels/ops/gemm/cutedsl_bf16_gemm.py
-@@ -490,6 +490,21 @@ def kernel(
+@@ -493,6 +493,21 @@ class TgvGemmCuteExtKernel:
                  d_layout,
              )
  

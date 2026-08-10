@@ -14,10 +14,10 @@ index 95c887636..7452d7d74 100644
  
  
 diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
-index 327b86a0f..3f0738e38 100644
+index c227cb0c9..3f393cbda 100644
 --- a/python/sglang/srt/model_executor/pool_configurator.py
 +++ b/python/sglang/srt/model_executor/pool_configurator.py
-@@ -173,10 +173,35 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
+@@ -177,11 +177,36 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                  and int(draft_num_layers) > 0
                  and int(num_layers) > 0
              ):
@@ -42,22 +42,23 @@ index 327b86a0f..3f0738e38 100644
 +                    * local_num_kv_heads
 +                    * (int(head_dim) + int(v_head_dim))
 +                    * int(kv_element_size)
-+                    * kvc.server_args.dcp_size
++                    * get_parallel().attn_dcp_size
 +                )
 +
                  self._cell_size = scale_kv_cell_size_per_token_for_dflash(
                      target_cell_size_per_token=self._cell_size,
                      target_num_layers=int(num_layers),
-                     draft_num_layers=int(draft_num_layers) * kvc.server_args.dcp_size,
+                     draft_num_layers=int(draft_num_layers)
+                     * get_parallel().attn_dcp_size,
 +                    draft_cell_size_per_token=draft_cell_size_per_token,
                  )
  
      def _compute_cell_size(self, kvc: KVCacheConfigurator, num_layers: int) -> int:
 diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
-index 58a3a11d5..82bcd6c77 100644
+index d8d94b1d4..cd8ff8d6d 100644
 --- a/python/sglang/srt/speculative/dflash_worker_v2.py
 +++ b/python/sglang/srt/speculative/dflash_worker_v2.py
-@@ -189,7 +189,7 @@ class DFlashWorkerV2(BaseSpecWorker):
+@@ -197,7 +197,7 @@ class DFlashWorkerV2(BaseSpecWorker):
              gpu_id=gpu_id,
              ps=replace(ps, pp_rank=0),
              nccl_port=nccl_port,
@@ -67,10 +68,10 @@ index 58a3a11d5..82bcd6c77 100644
          )
          self._draft_worker = bundle.draft_worker
 diff --git a/python/sglang/srt/speculative/draft_worker_common.py b/python/sglang/srt/speculative/draft_worker_common.py
-index 08a137b62..3631c07ea 100644
+index b393ce8d0..5aebc0ab9 100644
 --- a/python/sglang/srt/speculative/draft_worker_common.py
 +++ b/python/sglang/srt/speculative/draft_worker_common.py
-@@ -16,7 +16,6 @@ from sglang.srt.speculative.dflash_info import DFlashVerifyInput
+@@ -14,7 +14,6 @@ from sglang.srt.speculative.dflash_info import DFlashVerifyInput
  from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
  
  if TYPE_CHECKING:
@@ -78,7 +79,7 @@ index 08a137b62..3631c07ea 100644
      from sglang.srt.distributed.parallel_state_wrapper import ParallelState
      from sglang.srt.model_executor.model_runner import ModelRunner
  
-@@ -70,10 +69,11 @@ def build_draft_tp_worker(
+@@ -68,10 +67,11 @@ def build_draft_tp_worker(
      gpu_id: int,
      ps: ParallelState,
      nccl_port: int,
@@ -88,10 +89,10 @@ index 08a137b62..3631c07ea 100644
      attention_backend_override: Optional[str] = None,
  ) -> DraftWorkerBundle:
 +    target_model_config = target_model_runner.model_config
-     draft_server_args = deepcopy(server_args)
      # An override names a draft-specific backend the caller has already
      # validated (e.g. a self-drafting architecture); it skips the generic
-@@ -114,6 +114,20 @@ def build_draft_tp_worker(
+     # supported-backend fallback below.
+@@ -101,6 +101,20 @@ def build_draft_tp_worker(
  
      draft_model_runner = draft_worker.model_runner
      draft_worker.draft_runner = draft_model_runner
@@ -113,10 +114,10 @@ index 08a137b62..3631c07ea 100644
          draft_worker=draft_worker,
          draft_model_runner=draft_model_runner,
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-index 8207f2cbe..5d3e936e8 100644
+index fa74bd151..8a3c02d15 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-@@ -109,7 +109,7 @@ class DSparkWorkerV2(BaseSpecWorker):
+@@ -116,7 +116,7 @@ class DSparkWorkerV2(BaseSpecWorker):
                  gpu_id=gpu_id,
                  ps=replace(ps, pp_rank=0),
                  nccl_port=nccl_port,
