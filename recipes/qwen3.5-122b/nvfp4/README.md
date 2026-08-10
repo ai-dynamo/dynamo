@@ -13,7 +13,7 @@ full attention every 4th layer).
 ## Configurations
 
 Dynamo + vLLM deployment profiles for the agentic workload. This set covers
-**B200**; H200 profiles are tracked as a follow-up.
+**B200**.
 
 |                          | B200 aggregated agentic                     | B200 disaggregated agentic                   |
 | ------------------------ | ------------------------------------------- | -------------------------------------------- |
@@ -96,7 +96,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ### 4. Deploy the DGD
 
 ```bash
-SKU=b200 # H200 profiles to follow
+SKU=b200
 MODE=agg # or disagg
 kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 ```

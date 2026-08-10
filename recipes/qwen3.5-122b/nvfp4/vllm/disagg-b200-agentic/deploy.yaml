@@ -255,7 +255,7 @@ spec:
                 # transferred. Silent - no error, no failed transfer - but the decode
                 # worker then attends to zeros while GDN state survives, so output
                 # stays fluent but ignores the prompt. Measured on the H200 FP8
-                # sibling recipe: IFEval 91.31 -> 51.02, GPQA-Diamond 85.35 -> 19.19
+                # sibling recipe: IFEval 84.66 -> 51.02, GPQA-Diamond 83.84 -> 19.19
                 # (below random); ~36% of requests answered as if the prompt were
                 # empty. Upstream: vllm-project/vllm#42182, #37285. Fixed by #45357
                 # (vLLM 0.24.0) and #48481 (vLLM 0.26.0); no Dynamo release ships
