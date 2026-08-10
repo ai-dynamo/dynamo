@@ -902,13 +902,13 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
             (Some(threshold), _) => {
                 tracing::info!(
                     busy_threshold = threshold,
-                    "conditional_disagg prefill-load condition using --router-conditional-disagg-config {\"prefill_busy_threshold\": ...}"
+                    "conditional_disagg prefill-load condition using --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}}"
                 );
             }
             (None, Some(threshold)) => {
                 tracing::info!(
                     inherited_threshold = threshold,
-                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-config {\"prefill_busy_threshold\": ...} is unset"
+                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} is unset"
                 );
             }
             (None, None) => {
