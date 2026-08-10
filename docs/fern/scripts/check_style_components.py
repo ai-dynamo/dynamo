@@ -29,7 +29,14 @@ sync_site_css.py already applies this rule to main.css before mirroring it;
 this applies the same rule to the components that hold CSS directly.
 
 Usage: python3 check_style_components.py [files...]
-With no arguments, checks every docs/fern/components/*Styles.tsx.
+With no arguments, checks every docs/fern/components/*Styles.tsx plus the
+components named in EXTRA_TARGETS.
+
+Coverage is opt-in rather than every components/*.tsx because roughly twenty
+components hold a CSS literal and three of them (ModelEABuildCards, TagLookup,
+TerminalDemo) interpolate into it deliberately, which this check reads as a
+defect. Widening it properly needs a way to mark those as intentional; until
+then a component keeping its CSS outside a *Styles.tsx file has to be listed.
 """
 from __future__ import annotations
 
@@ -66,9 +73,17 @@ def check(path: Path) -> list[str]:
     return problems
 
 
+# Components that hold a CSS literal without being named *Styles.tsx. Keep in
+# step with the `files:` pattern of the check-style-components pre-commit hook.
+EXTRA_TARGETS = ("EcosystemPublications.tsx",)
+
+
 def main() -> int:
     args = [Path(a) for a in sys.argv[1:]]
-    targets = args or sorted((ROOT / "components").glob("*Styles.tsx"))
+    default = sorted((ROOT / "components").glob("*Styles.tsx")) + [
+        ROOT / "components" / name for name in EXTRA_TARGETS
+    ]
+    targets = args or default
     targets = [t for t in targets if t.suffix == ".tsx" and t.exists()]
 
     problems: list[str] = []
