@@ -111,9 +111,9 @@ related_benchmarks: []
 maintainer: null
 gaps:
 - aggregated is the recommended path on both SKUs. The disaggregated targets are a
-  functional reference rather than a throughput recommendation: at 90% KV-cache hit the
-  dedicated prefill worker emits no output tokens, and on H200 disaggregation also gives
-  up MTP
+  functional reference rather than a throughput recommendation, because at 90% KV-cache
+  hit the dedicated prefill worker emits no output tokens, and on H200 disaggregation
+  also gives up MTP
 - both disaggregated targets carry --no-async-scheduling on vLLM < 0.26.0, costing ~7% throughput
 - TP2 sharding is an H200 FP8 win only. On B200 NVFP4 it loses in both topologies, and on
   H200 disaggregated it reaches 294.8 tok/s/GPU but regresses IFEval 84.66 to 80.22, so
