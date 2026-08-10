@@ -158,6 +158,45 @@ struct MapBlockRemovedFixtureWithMedium {
     medium: Option<String>,
 }
 
+/// The empty-medium normalization must also cover legacy positional (tuple)
+/// events: an empty-string `medium` in the sequence slot decodes as absent and
+/// stays on the device tier. Covers store and remove.
+#[test]
+fn test_deserialize_legacy_sequence_empty_medium_normalizes_to_absent_device() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    let encoded_events = [
+        to_vec(&(
+            "BlockStored",
+            vec![BlockHashValue::Unsigned(11)],
+            Option::<BlockHashValue>::None,
+            vec![10u32, 11],
+            2usize,
+            Option::<u64>::None,
+            Some(String::new()),
+        ))
+        .unwrap(),
+        to_vec(&(
+            "BlockRemoved",
+            vec![BlockHashValue::Unsigned(11)],
+            Some(String::new()),
+        ))
+        .unwrap(),
+    ];
+
+    for encoded in encoded_events {
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+        assert_eq!(
+            event.medium(),
+            None,
+            "empty sequence medium must normalize to absent"
+        );
+        let placement = convert_placement(event, worker)
+            .expect("empty-medium legacy event must be indexed, not dropped");
+        assert_eq!(placement.placement.tier, StorageTier::Device);
+    }
+}
+
 #[test]
 fn test_deserialize_extra_keys_cache_namespace_fallback() {
     let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
