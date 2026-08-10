@@ -28,19 +28,27 @@ optimization.
 
 ## Category 1 — Deployment Topology and Fit
 
-First ask whether the deployment shape can efficiently serve the user workload. This is a screening decision, not an
-automatic topology experiment. Evaluate topology in this order:
+First ask whether the deployment shape can efficiently serve the user workload. Topology is a hypothesis category,
+not only a deploy-time fit check: a configuration that fits can still be the wrong shape for the operating point.
+Evaluate topology in this order:
 
 1. Compute the model, activation, and KV-memory fit and establish the minimum viable TP, PP, and EP.
-2. Prefer the smallest parallelism that fits with operating headroom, then use remaining fixed-budget GPUs for
-   replicas when the workload can benefit from them.
-3. Consider aggregated versus disaggregated serving only when workload shape, scale, or independent prefill/decode
+2. Compute the effective per-rank batch at the target concurrency: a data-parallel layout that leaves each rank a
+   trivial batch under-utilizes compute even though it fits.
+3. Prefer the smallest parallelism that fits with operating headroom and a useful per-rank batch at the target
+   concurrency, then use remaining fixed-budget GPUs for replicas when the workload can benefit from them.
+4. Consider aggregated versus disaggregated serving only when workload shape, scale, or independent prefill/decode
    objectives justify the transfer and coordination cost.
-4. For an existing disaggregated deployment, check prefill/decode allocation and rate matching before adding workers.
-5. Verify node placement and the required fast fabric when the selected topology crosses GPUs or nodes.
+5. For an existing disaggregated deployment, check prefill/decode allocation and rate matching before adding workers.
+6. Verify node placement and the required fast fabric when the selected topology crosses GPUs or nodes.
 
-Choose a topology hypothesis only when model sizing, Kubernetes or engine evidence, rate imbalance, transfer behavior,
-or same-regime history supports a structural mismatch. Consult the
+Choose a topology hypothesis when model-sizing arithmetic, per-rank batch at the target concurrency, Kubernetes or
+engine evidence, rate imbalance, transfer behavior, same-regime history, or a sibling recipe for the same model on
+other hardware supports a structural mismatch. Sibling recipes are hypothesis priors, not adoption evidence: even
+when their checkpoint or hardware is incompatible, their parallelism and serving-mode choices transfer as candidates.
+Rank candidate layouts cheaply (sizing arithmetic, projections, published same-model recipes) before spending a
+deployment on one, and revisit topology after baseline characterization and whenever the measured regime changes; an
+inherited layout is a candidate like any other, not a settled decision. Consult the
 [model-sizing guides](../model-sizing/classification.md) and, for disaggregated serving,
 [rate matching](../rate-matching/matching.md).
 
