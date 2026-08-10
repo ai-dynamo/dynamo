@@ -234,7 +234,7 @@ _MUST_NOT_IMPORT_DYNAMO = (
     "tests/utils/router_nvext.py",
     "tests/utils/verification.py",
     "tests/deploy/conftest.py",
-    "tests/deploy/test_deploy.py",
+    "tests/deploy/test_dgd.py",
     "tests/deploy/test_dynamocheckpoint.py",
 )
 
@@ -310,7 +310,7 @@ def test_deploy_test_modules_import_without_the_dynamo_package(tmp_path):
         f"import sys; sys.path.insert(0, {str(tmp_path)!r}); import block_dynamo\n"
         f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
         "import tests.deploy.conftest\n"
-        "import tests.deploy.test_deploy\n"
+        "import tests.deploy.test_dgd\n"
         "import tests.deploy.test_dynamocheckpoint\n"
         "import tests.utils.verification\n"
     )

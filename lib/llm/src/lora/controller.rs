@@ -19,7 +19,7 @@ use crate::lora::routing::mcf_allocator::{
 };
 use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use crate::lora::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
-use crate::lora::state_tracker::LoraStateTracker;
+use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
 use dynamo_runtime::protocols::EndpointId;
 
 #[derive(Debug, Clone)]
@@ -58,6 +58,8 @@ pub struct LoraController {
     allocator: Box<dyn LoraAllocator>,
     routing_table: LoraRoutingTable,
     state_tracker: LoraStateTracker,
+    observed: Arc<LoraObservedSnapshot>,
+    observed_incarnation: u64,
     load_estimator: Arc<LoadEstimator>,
     metrics_endpoint: String,
     published_allocation_metric_loras: HashSet<String>,
@@ -80,6 +82,8 @@ impl LoraController {
         load_estimator: Arc<LoadEstimator>,
     ) -> Self {
         let allocator = create_lora_allocator(config.algorithm);
+        let observed = state_tracker.snapshot();
+        let observed_incarnation = observed.incarnation();
         let mcf_solver = if config.algorithm == AllocationAlgorithmType::MinCostFlow {
             let params = McfSolveParams {
                 candidate_m: config.mcf.candidate_m,
@@ -98,6 +102,8 @@ impl LoraController {
             allocator,
             routing_table,
             state_tracker,
+            observed,
+            observed_incarnation,
             load_estimator,
             metrics_endpoint: "unscoped".to_string(),
             published_allocation_metric_loras: HashSet::new(),
@@ -239,11 +245,26 @@ impl LoraController {
 
     fn recompute_allocations(&mut self) {
         self.tick += 1;
+        let observed = self.state_tracker.snapshot();
+        let incarnation = observed.incarnation();
+        if incarnation != self.observed_incarnation {
+            if self.observed_incarnation != 0 {
+                self.routing_table.clear();
+                self.hysteresis.clear();
+                self.prev_assignment.clear();
+                self.prev_workers.clear();
+                self.prev_worker_capacities.clear();
+                self.prev_replica_counts.clear();
+                self.load_estimator.reset();
+            }
+            self.observed_incarnation = incarnation;
+        }
+        self.observed = observed;
 
-        // State-tracker iteration order is intentionally unspecified (DashMap). Keep worker input
+        // Observation iteration order is intentionally unspecified. Keep worker input
         // order stable so equal-cost MCF paths and capacity-aware per-LoRA allocation converge to
         // the same routing table across controllers and repeated runs.
-        let mut workers = self.state_tracker.list_workers();
+        let mut workers = self.observed.list_workers();
         workers.sort();
         if workers.is_empty() {
             // Cluster drained: every routing entry now points at gone workers. Leaving it would
@@ -254,7 +275,7 @@ impl LoraController {
             return;
         }
 
-        let total_slots = self.state_tracker.total_lora_slots() as usize;
+        let total_slots = self.observed.total_lora_slots() as usize;
         if total_slots == 0 {
             // Workers exist but advertise zero LoRA capacity. Backends only report LoRA slots when
             // LoRA serving is enabled/capable, so zero total slots means no live worker can accept
@@ -269,7 +290,7 @@ impl LoraController {
             let live: std::collections::HashSet<WorkerWithDpRank> =
                 workers.iter().copied().collect();
             for (name, cfg) in self.routing_table.snapshot_configs() {
-                let loaded = self.state_tracker.get_loaded_workers(&name);
+                let loaded = self.observed.get_loaded_workers(&name);
                 let warm: Vec<WorkerWithDpRank> = cfg
                     .replica_set
                     .iter()
@@ -298,7 +319,7 @@ impl LoraController {
             return;
         }
 
-        let worker_slot_usage = self.state_tracker.get_worker_slot_usage();
+        let worker_slot_usage = self.observed.get_worker_slot_usage();
         let loads = self.load_estimator.get_current_load();
         let total_load: usize = loads.values().sum();
 
@@ -313,7 +334,7 @@ impl LoraController {
 
         // Collect all known LoRAs (from state tracker + from load estimator)
         let mut seen: std::collections::HashSet<String> =
-            self.state_tracker.list_loras().into_iter().collect();
+            self.observed.list_loras().into_iter().collect();
         for lora_name in loads.keys() {
             seen.insert(lora_name.clone());
         }
@@ -398,7 +419,7 @@ impl LoraController {
         if !dropped_active.is_empty() {
             let dropped_set: std::collections::HashSet<&str> =
                 dropped_active.iter().copied().collect();
-            let caps = self.state_tracker.get_worker_capacities();
+            let caps = self.observed.get_worker_capacities();
             // Committed placements this tick, excluding the dropped LoRAs themselves (their entries
             // are stale and re-decided below).
             let mut projected: HashMap<WorkerWithDpRank, usize> = HashMap::new();
@@ -417,7 +438,7 @@ impl LoraController {
                     .get_config(name)
                     .map(|c| c.replica_set)
                     .unwrap_or_default();
-                let loaded = self.state_tracker.get_loaded_workers(name);
+                let loaded = self.observed.get_loaded_workers(name);
                 let warm: Vec<WorkerWithDpRank> = prior
                     .iter()
                     .copied()
@@ -541,7 +562,7 @@ impl LoraController {
             // that is full largely because of itself (e.g. cap=1) would be evicted and moved every
             // tick — defeating the sticky placement. Charging (below) still uses the undiscounted
             // shared residual so sibling LoRAs see true remaining capacity.
-            let own_loaded = self.state_tracker.get_loaded_workers(lora_name);
+            let own_loaded = self.observed.get_loaded_workers(lora_name);
             let mut eff_usage = residual_usage.clone();
             for w in &own_loaded {
                 if let Some(usage) = eff_usage.get_mut(w) {
@@ -644,7 +665,7 @@ impl LoraController {
         active_replica_counts: &HashMap<String, usize>,
     ) {
         let churn_weight = self.config.mcf.churn_weight_default;
-        let capacities = self.state_tracker.get_worker_capacities();
+        let capacities = self.observed.get_worker_capacities();
 
         // R3-7: reset churn/overflow gauges at tick start so a failed MCF solve does not leave
         // stale values from a prior successful tick; the success branch sets the actual diff.
@@ -824,7 +845,7 @@ impl LoraController {
                 // prefers a worker that still has a free slot and never overfills the same slot
                 // across multiple unplaced LoRAs within the tick. Mirrors the HRW `dropped_active`
                 // path so both algorithms place capacity-pressured LoRAs identically.
-                let caps = self.state_tracker.get_worker_capacities();
+                let caps = self.observed.get_worker_capacities();
                 let unplaced_set: HashSet<&str> = unplaced.iter().map(String::as_str).collect();
                 let mut projected: HashMap<WorkerWithDpRank, usize> = HashMap::new();
                 for (name, cfg) in self.routing_table.snapshot_configs() {
@@ -838,7 +859,7 @@ impl LoraController {
 
                 for lora_name in unplaced {
                     let is_active = active_set.contains(lora_name.as_str());
-                    let loaded = self.state_tracker.get_loaded_workers(&lora_name);
+                    let loaded = self.observed.get_loaded_workers(&lora_name);
                     let warm: Vec<WorkerWithDpRank> = self
                         .routing_table
                         .get_config(&lora_name)
@@ -1655,6 +1676,24 @@ mod tests {
             rt.get_config("lora-a").is_none(),
             "stale routing entry must be cleared after a full worker drain"
         );
+    }
+
+    #[test]
+    fn drain_and_repopulate_between_ticks_resets_stale_allocation_state() {
+        let (mut controller, st, le, rt) = setup_controller();
+        let worker = make_worker(1);
+        st.handle_mdc_addition(worker, &make_lora_info("old", 4));
+        le.increment_load("old");
+        controller.recompute_now();
+        assert!(rt.get_config("old").is_some());
+
+        st.handle_worker_removal(worker);
+        st.handle_mdc_addition(worker, &make_lora_info("new", 4));
+        controller.recompute_now();
+
+        assert!(rt.get_config("old").is_none());
+        assert!(rt.get_config("new").is_some());
+        assert!(le.get_current_load().is_empty());
     }
 
     #[test]

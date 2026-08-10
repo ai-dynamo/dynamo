@@ -16,12 +16,8 @@ import pytest
 from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
 from tests.deploy.conftest import SERVING_READY_TIMEOUT_S
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.inference_endpoint import InferenceEndpoint, wait_until_serving
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    ManagedDeployment,
-    _get_workspace_dir,
-)
 from tests.utils.payload_builder import deployment_smoke_chat_payload
 from tests.utils.verification import run_payloads
 

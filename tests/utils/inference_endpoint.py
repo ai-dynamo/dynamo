@@ -12,7 +12,7 @@ frontend (``http://localhost:<ephemeral>``), or a remote ingress
 
 Deployment mechanics (launching processes, applying DynamoGraphDeployment CRs,
 opening port-forwards) live in the backend-specific modules --
-``tests/utils/engine_process.py`` and ``tests/utils/managed_deployment.py``.
+``tests/utils/engine_process.py`` and ``tests/deploy/dgd_utils.py``.
 Both hand back an ``InferenceEndpoint``; neither is visible to a
 deployment-agnostic test.
 

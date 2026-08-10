@@ -2577,9 +2577,23 @@ class InstrumentedScheduler(AsyncScheduler):
         except ValueError:
             return False
 
+        eagle_cache_drop_tokens = self._bench_eagle_cache_drop_tokens()
+        if eagle_cache_drop_tokens and any(
+            kv_read_tokens > 0 and new_tokens <= eagle_cache_drop_tokens
+            for new_tokens, kv_read_tokens in zip(
+                new_token_lengths, kv_read_lengths, strict=True
+            )
+        ):
+            # EAGLE recomputes the last matched cache block. A request needs
+            # more than that block's tokens to reach the extra seeded block
+            # while preserving both benchmark axes.
+            return False
+
         prompt_lengths = [
             new_tokens + kv_read_tokens
-            for new_tokens, kv_read_tokens in zip(new_token_lengths, kv_read_lengths)
+            for new_tokens, kv_read_tokens in zip(
+                new_token_lengths, kv_read_lengths, strict=True
+            )
         ]
         max_model_len = self._bench_capacity_limit("max_model_len")
         if any(prompt_len + 1 > max_model_len for prompt_len in prompt_lengths):
@@ -2588,14 +2602,16 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_prefill_scheduled_tokens_per_req(prompt_len, kv_read_tokens)
             != new_tokens
             for prompt_len, kv_read_tokens, new_tokens in zip(
-                prompt_lengths, kv_read_lengths, new_token_lengths
+                prompt_lengths, kv_read_lengths, new_token_lengths, strict=True
             )
         ):
             return False
 
         required_blocks = sum(
             self._bench_prefill_blocks_per_req(prompt_len, kv_read_tokens)
-            for prompt_len, kv_read_tokens in zip(prompt_lengths, kv_read_lengths)
+            for prompt_len, kv_read_tokens in zip(
+                prompt_lengths, kv_read_lengths, strict=True
+            )
         )
         if total_kv_read_tokens > 0:
             seed_prompt_lengths = [
@@ -2766,7 +2782,13 @@ class InstrumentedScheduler(AsyncScheduler):
         kv_cache_manager = getattr(self, "kv_cache_manager", None)
         if self._bench_uses_per_group_cache_lookup():
             return 0
-        return self.block_size if getattr(kv_cache_manager, "use_eagle", False) else 0
+        if not getattr(kv_cache_manager, "use_eagle", False):
+            return 0
+        coordinator = getattr(kv_cache_manager, "coordinator", None)
+        if getattr(coordinator, "enable_partial_hash_hits", False):
+            # Hybrid align-mode cache lookup drops one fine-grained hash unit.
+            return self._bench_hash_block_size
+        return self.block_size
 
     def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
         # EAGLE/MTP deliberately drops the last matched cache block. Seed one
@@ -3013,7 +3035,7 @@ class InstrumentedScheduler(AsyncScheduler):
         allocation_failed = False
         try:
             for index, (prefix_tokens, cache_salt) in enumerate(
-                zip(prefix_lengths, cache_salts)
+                zip(prefix_lengths, cache_salts, strict=True)
             ):
                 req = Request(
                     request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
@@ -3575,7 +3597,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 prompt_lens=[
                     new_tokens + kv_read_tokens
                     for new_tokens, kv_read_tokens in zip(
-                        new_token_lengths, kv_read_lengths
+                        new_token_lengths, kv_read_lengths, strict=True
                     )
                 ],
                 max_tokens=1,

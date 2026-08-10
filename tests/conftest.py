@@ -238,6 +238,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "process/pod logs, scaling, fault injection) rather than only on the "
         "inference response",
     )
+    config.addinivalue_line(
+        "markers",
+        "token_budget_parity: compares native backend and Dynamo prompt/output "
+        "overflow behavior",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():

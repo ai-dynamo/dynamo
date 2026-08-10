@@ -44,8 +44,6 @@ The test hook lives in the TRT-LLM request handler path and adapts processors fo
 - **At worker startup** (`dynamo.trtllm.workers.llm_worker`), when the env hook is on, `engine_args["skip_tokenizer_init"]` is forced to `False`, overriding an explicit `skip_tokenizer_init=True`, so the processor is never starved of the tokenizer it needs to map text to token IDs.
 - **Per request** (`dynamo.trtllm.request_handlers.handler_base`), when the hook is on, the handler builds a `HelloWorldLogitsProcessor(self.engine.llm.tokenizer)`, adapts it for TRT-LLM via `create_trtllm_adapters` (which wraps each `BaseLogitsProcessor` in `TrtllmDynamoLogitsAdapter`), and assigns the result to `sampling_params.logits_processor`.
 
-vLLM and SGLang expose the same env hook through their own handler paths: vLLM loads a batch-level adapter class at engine init and activates it per request via `SamplingParams.extra_args` (see [vLLM Logits Processing](../../knowledge-base/modular-components/backends/vllm/logits-processing.md)); SGLang flips `--enable-custom-logit-processor` at startup and passes a serialized class spec + `custom_params` per request (see [SGLang Logits Processing](../../knowledge-base/modular-components/backends/sglang/logits-processing.md)). The public config-driven loader (when it lands) plugs in by resolving processors from CLI/config instead of from this env var; no engine code changes.
-
 ### Bring your own processor
 
 Implement a processor by conforming to `BaseLogitsProcessor` and modify logits in-place. For example, temperature scaling:

@@ -719,6 +719,13 @@ sglang_configs = {
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # The clips come from the image_server over plain http on localhost,
+            # which the URL policy rejects by default. This model is gated out of
+            # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
+            # applies the policy just like the NVDEC path already did -- so this
+            # opt-in is required here for the same reason as in the nvdec config
+            # above, not because the two tests differ.
+            "DYN_MM_ALLOW_INTERNAL": "1",
             # SGLang's video path decodes with decord; the shipped image omits it
             # as a media-codec carrier, so install it for this test only.
             "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"],
