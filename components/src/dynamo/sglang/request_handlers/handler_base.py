@@ -927,7 +927,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
-        self._validate_nvext_token_data(request, request_input)
+        self._validate_input_token_ids(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
@@ -998,14 +998,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         allowed_oov_ids: frozenset[int] = frozenset(),
     ) -> None:
         if not isinstance(token_ids, list):
-            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+            raise HttpError(400, "token input must resolve to a token ID list")
 
         max_input_token_id = self._max_input_token_id
         for index, token_id in enumerate(token_ids):
             if isinstance(token_id, bool) or not isinstance(token_id, int):
                 raise HttpError(
                     400,
-                    f"nvext.token_data[{index}] must be an integer token ID",
+                    f"token input[{index}] must be an integer token ID",
                 )
             # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
             if (
@@ -1013,21 +1013,26 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             ) and token_id not in allowed_oov_ids:
                 raise HttpError(400, f"Token id {token_id} is out of vocabulary")
 
-    def _validate_nvext_token_data(
+    def _validate_input_token_ids(
         self,
         request: Dict[str, Any],
-        token_ids: Any,
+        request_input: Any,
     ) -> None:
-        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
-        extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
-            return
-        nvext = extra_args.get("nvext")
-        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
+        """Reject out-of-vocabulary IDs on any client-supplied token input.
+
+        Token IDs reach the engine unchanged both through ``nvext.token_data``
+        and through the OpenAI ``prompt`` token-array forms of
+        ``/v1/completions``, which the frontend forwards without tokenizing.
+        Neither carries a marker distinguishing it from frontend-tokenized
+        input, so every resolved token list is validated. Text handed to
+        SGLang's own tokenizer cannot carry an out-of-vocabulary ID and is
+        skipped.
+        """
+        if self.use_sglang_tokenizer and isinstance(request_input, str):
             return
 
         self._validate_token_ids(
-            token_ids,
+            request_input,
             self._resolve_request_multimodal_token_ids(request),
         )
 

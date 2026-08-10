@@ -385,7 +385,7 @@ def test_nvext_token_data_rejects_marked_string_payload():
 
     with pytest.raises(
         HttpError,
-        match=r"nvext\.token_data must resolve to a token ID list",
+        match=r"token input must resolve to a token ID list",
     ) as error:
         handler._get_input_param(request)
 
@@ -431,11 +431,58 @@ def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
     assert error.value.code == 400
 
 
-def test_nvext_token_data_validation_skips_ordinary_token_input():
-    handler = _new_token_input_handler()
-    request = {"token_ids": [2**32 - 1]}
+@pytest.mark.parametrize("invalid_token_id", [151936, 2**32 - 1])
+def test_openai_prompt_token_array_rejects_out_of_vocabulary_token_id(
+    invalid_token_id,
+):
+    """``/v1/completions`` token arrays are client-supplied and untokenized.
 
-    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
+    The frontend forwards ``prompt: [...]`` verbatim without setting the
+    ``nvext.token_in`` marker, so validation must not be gated on that marker.
+    """
+    handler = _new_token_input_handler()
+    request = {"token_ids": [1, invalid_token_id]}
+
+    with pytest.raises(
+        HttpError,
+        match=rf"Token id {invalid_token_id} is out of vocabulary",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_openai_prompt_token_array_accepts_in_vocabulary_token_id():
+    handler = _new_token_input_handler()
+    request = {"token_ids": [1, 151935]}
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 151935]}
+
+
+def test_unmarked_multimodal_placeholder_token_is_accepted():
+    handler = _new_token_input_handler(maximum_input_token_id=31999)
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(),
+            model_config=SimpleNamespace(image_token_id=32000),
+        )
+    )
+    request = {
+        "token_ids": [1, 32000],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 32000]}
+
+
+def test_sglang_tokenizer_text_input_skips_token_validation():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+    handler._max_input_token_id = 151935
+    handler.input_param_manager = SimpleNamespace(
+        get_input_param=lambda request, use_tokenizer: "rendered prompt"
+    )
+
+    assert handler._get_input_param({"messages": []}) == {"prompt": "rendered prompt"}
 
 
 async def _stream(items):
