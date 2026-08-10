@@ -20,8 +20,9 @@ that a functional test could not see until it reached a p5/GB200 cluster:
 Each of those turns into a *silent* fallback to UCX at inference time, which is
 why these are hard assertions rather than warnings.
 
-Selected by the ``efa_image`` marker; the non-EFA image test jobs never collect
-them.
+Selected by the ``efa_image`` marker, from the nightly ``*-efa-test`` jobs. EFA
+changes are sparse, so nightly is the cadence that matches the risk; nothing
+else collects these.
 """
 
 import os
@@ -32,8 +33,7 @@ import pytest
 
 pytestmark = [
     pytest.mark.efa_image,
-    pytest.mark.pre_merge,
-    pytest.mark.post_merge,
+    pytest.mark.nightly,
     pytest.mark.unit,
     pytest.mark.gpu_0,
 ]

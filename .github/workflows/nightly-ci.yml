@@ -913,6 +913,79 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # EFA IMAGE TEST JOBS
+  #
+  # The -efa images are built here but nothing verified their EFA packaging.
+  # These jobs run only the efa_image checks (tests/container/test_efa_image.py):
+  # no GPU, no EFA device and no cluster, a few seconds per image. EFA changes
+  # are sparse, so nightly is the right cadence -- per-commit would spend far
+  # more than the risk warrants.
+  # ============================================================================
+
+  vllm-efa-test:
+    name: vllm-runtime-efa
+    needs: [vllm-efa-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: vllm-efa
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64", "arm64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: efa_image and gpu_0
+      run_gpu_tests: false
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  sglang-efa-test:
+    name: sglang-runtime-efa
+    needs: [sglang-efa-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: sglang-efa
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      target_tag_plain: ${{ needs.sglang-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64", "arm64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: efa_image and gpu_0
+      run_gpu_tests: false
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  trtllm-efa-test:
+    name: trtllm-runtime-efa
+    needs: [trtllm-efa-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: trtllm-efa
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: efa_image and gpu_0
+      run_gpu_tests: false
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  # ============================================================================
   # XPU TEST JOBS
   # ============================================================================
 

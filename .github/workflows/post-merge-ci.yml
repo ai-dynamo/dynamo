@@ -492,9 +492,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
-      # efa_image adds the EFA packaging checks (tests/container/test_efa_image.py),
-      # which are what makes this job differ from the non-EFA vllm-test.
-      cpu_only_test_markers: '(pre_merge or post_merge) and (vllm or efa_image) and gpu_0'
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
     secrets: inherit
 
@@ -562,25 +560,6 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
-  sglang-efa-test:
-    name: sglang-runtime-efa
-    needs: [sglang-efa-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      dd_env: post-merge
-      test_suite_name: sglang-efa
-      test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
-      target_tag_plain: ${{ needs.sglang-efa-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]'
-      run_cpu_only_tests: true
-      # efa_image adds the EFA packaging checks (tests/container/test_efa_image.py),
-      # which are what makes this job differ from the non-EFA sglang-test.
-      cpu_only_test_markers: '(pre_merge or post_merge) and (sglang or efa_image) and gpu_0'
-      run_gpu_tests: false
-    secrets: inherit
-
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build]
@@ -634,9 +613,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
-      # efa_image adds the EFA packaging checks (tests/container/test_efa_image.py),
-      # which are what makes this job differ from the non-EFA trtllm-test.
-      cpu_only_test_markers: '(pre_merge or post_merge) and (trtllm or efa_image) and gpu_0'
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       run_gpu_tests: false
     secrets: inherit
 
