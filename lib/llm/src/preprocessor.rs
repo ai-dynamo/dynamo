@@ -29,7 +29,7 @@ use dynamo_protocols::types::{
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
-use dynamo_runtime::config::is_truthy;
+use dynamo_runtime::config::{is_truthy, parse_bool_opt};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use either::Either;
 use futures::Stream;
@@ -708,13 +708,16 @@ impl OpenAIPreprocessor {
         })
     }
 
+    fn request_has_client_thinking_control(request: &NvCreateChatCompletionRequest) -> bool {
+        request.thinking.is_some()
+            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
+    }
+
     fn apply_default_thinking_mode_from_runtime_config(
         runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
         request: &mut NvCreateChatCompletionRequest,
     ) {
-        if request.thinking.is_some()
-            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
-        {
+        if Self::request_has_client_thinking_control(request) {
             return;
         }
 
@@ -762,14 +765,7 @@ impl OpenAIPreprocessor {
             return false;
         }
 
-        let is_guided_tool_choice = request.tool_choice().is_some_and(|tool_choice| {
-            match tool_choice.as_str() {
-                Some("required") => true,
-                Some(_) => false,
-                // The only supported non-string tool choice is a named function.
-                None => true,
-            }
-        });
+        let is_guided_tool_choice = Self::has_guided_tool_choice(request);
         let is_structured_response = Self::has_structured_response_format(request);
         let structured_response_requires_reasoning = is_structured_response
             && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
@@ -861,23 +857,79 @@ impl OpenAIPreprocessor {
         default_enabled
     }
 
+    #[cfg(test)]
     fn normalize_thinking_arg(
         request: &mut NvCreateChatCompletionRequest,
         reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
     ) {
-        let normalized = request
+        let thinking_control_from_client = Self::request_has_client_thinking_control(request);
+        Self::normalize_thinking_arg_with_source(
+            request,
+            reasoning_parser,
+            tool_call_parser,
+            thinking_control_from_client,
+        );
+    }
+
+    fn normalize_thinking_arg_with_source(
+        request: &mut NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+        thinking_control_from_client: bool,
+    ) {
+        let normalized = Self::normalize_thinking_aliases(request, reasoning_parser);
+
+        if Self::is_minimax_m3_family(reasoning_parser, tool_call_parser) {
+            Self::normalize_minimax_m3_thinking_mode(
+                request,
+                normalized,
+                thinking_control_from_client,
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+    }
+
+    fn normalize_thinking_aliases(
+        request: &NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+    ) -> Option<bool> {
+        request
             .chat_template_args
             .as_ref()
             .and_then(|args| {
-                // Match thinking_bool_from_args precedence: when both aliases
-                // are present, `thinking` wins and its normalized value is
-                // written back to both keys below.
-                for key in ["thinking", "enable_thinking"] {
+                // Normalize public aliases in array order: `thinking`,
+                // `enable_thinking`, then `thinking_mode`.
+                // Preserve "adaptive" as tri-state by returning None.
+                for key in ["thinking", "enable_thinking", "thinking_mode"] {
                     match args.get(key) {
-                        Some(serde_json::Value::Bool(_)) => {
+                        Some(serde_json::Value::Bool(b)) => {
+                            // `thinking_bool_from_args` ignores `thinking_mode`,
+                            // so read that bool directly.
+                            if key == "thinking_mode" {
+                                return Some(*b);
+                            }
                             return dynamo_renderer::thinking_bool_from_args(Some(args));
                         }
                         Some(serde_json::Value::String(value)) => {
+                            // Parse `thinking_mode` explicitly so
+                            // "enabled"/"disabled" and boolean spellings
+                            // behave predictably. Preserve unrecognized strings
+                            // such as "adaptive" or DeepSeek's "chat"/"thinking".
+                            if key == "thinking_mode" {
+                                if value.eq_ignore_ascii_case("enabled") {
+                                    return Some(true);
+                                }
+                                if value.eq_ignore_ascii_case("disabled") {
+                                    return Some(false);
+                                }
+                                if let Some(b) = parse_bool_opt(value) {
+                                    return Some(b);
+                                }
+                                return None;
+                            }
                             return Some(is_truthy(value));
                         }
                         Some(serde_json::Value::Number(value)) => {
@@ -892,8 +944,60 @@ impl OpenAIPreprocessor {
             })
             .or_else(|| {
                 matches!(reasoning_parser, Some("kimi_k25" | "kimi_k3" | "kimi-k3")).then_some(true)
-            });
+            })
+    }
 
+    fn normalize_minimax_m3_thinking_mode(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+        thinking_control_from_client: bool,
+    ) {
+        // MiniMax M3 defaults `thinking_mode` to "adaptive", which breaks
+        // constrained JSON/schema and forced-tool generation. If the client
+        // did not set thinking controls, force "disabled" for those requests.
+        let explicit_thinking_mode_is_adaptive = request
+            .chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("thinking_mode"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("adaptive"));
+        if !thinking_control_from_client && Self::has_minimax_m3_constrained_generation(request) {
+            let args = request.chat_template_args.get_or_insert_default();
+            args.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("disabled".to_string()),
+            );
+            args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            args.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+
+        let Some(normalized) = normalized else {
+            return;
+        };
+
+        // Canonicalize for M3 because its template only treats exact
+        // "disabled" as off. Preserve explicit "adaptive" as client intent.
+        if !explicit_thinking_mode_is_adaptive {
+            let args = request.chat_template_args.get_or_insert_default();
+            args.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String(
+                    if normalized { "enabled" } else { "disabled" }.to_string(),
+                ),
+            );
+        }
+    }
+
+    fn apply_normalized_thinking_aliases(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+    ) {
         let Some(normalized) = normalized else {
             return;
         };
@@ -903,6 +1007,39 @@ impl OpenAIPreprocessor {
             "enable_thinking".to_string(),
             serde_json::Value::Bool(normalized),
         );
+    }
+
+    /// True when the deployment renders MiniMax M3's `thinking_mode` template.
+    /// Either parser is sufficient, and tool-call aliases include `_nom`.
+    fn is_minimax_m3_family(
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+    ) -> bool {
+        matches!(reasoning_parser, Some("minimax_m3") | Some("minimax-m3"))
+            || matches!(
+                tool_call_parser,
+                Some("minimax_m3")
+                    | Some("minimax-m3")
+                    | Some("minimax_m3_nom")
+                    | Some("minimax-m3-nom")
+            )
+    }
+
+    fn has_minimax_m3_constrained_generation<R: OAIChatLikeRequest>(request: &R) -> bool {
+        Self::has_structured_response_format(request) || Self::has_guided_tool_choice(request)
+    }
+
+    /// True when `tool_choice` forces a tool call.
+    /// Shared by guided-output reasoning checks and the M3 default.
+    fn has_guided_tool_choice<R: OAIChatLikeRequest>(request: &R) -> bool {
+        request.tool_choice().is_some_and(|tool_choice| {
+            match tool_choice.as_str() {
+                Some("required") => true,
+                Some(_) => false,
+                // The only supported non-string tool choice is a named function.
+                None => true,
+            }
+        })
     }
 
     /// Apply Moonshot's named-tool exception for Kimi K3.
@@ -3359,12 +3496,70 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input and tracks what the jail emitted per choice.index
+        // so n > 1 is handled correctly and double-emit is avoided.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+            emitted_text: String,
+            recovered: bool,
+        }
+        // Named so the bool in the recoveries tuple is legible at each use site.
+        struct PendingRecovery {
+            choice_idx: u32,
+            tail: String,
+            tail_already_emitted: bool,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        // Token strings from the parser config so recovery matches the parser
+        // even if the defaults are ever overridden.
+        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_cfg.tool_call_start;
+        let glm47_end = glm47_cfg.tool_call_end;
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+        let glm47_start_jail = glm47_start.clone();
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            // Only retain from the last <tool_call> marker onward to bound
+            // memory on long responses.
+            if is_glm47 && let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
+                    {
+                        let state = cr.entry(choice.index).or_default();
+                        state.input_text.push_str(content);
+                        // Drop everything before the last marker to keep
+                        // the buffer small. Walk back to a char boundary
+                        // before draining so a multi-byte char split
+                        // across chunks never triggers a panic.
+                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
+                        {
+                            Some(pos) => pos,
+                            // No marker yet — keep enough tail to
+                            // catch a marker split across two chunks.
+                            None => state
+                                .input_text
+                                .len()
+                                .saturating_sub(glm47_start_jail.len() - 1),
+                        };
+                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
+                            keep_from -= 1;
+                        }
+                        state.input_text.drain(..keep_from);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3383,7 +3578,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -3395,7 +3590,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -3405,7 +3600,145 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete
+            // <tool_call> block. rfind skips complete blocks so earlier parsed
+            // calls are never duplicated. Recovered content WILL contain raw
+            // markup — callers that require "no tool tags in content" must
+            // filter on finish_reason=length.
+            //
+            // TODO: this recovery runs inside apply_tool_calling_jail, which
+            // the v2 path bypasses (use_parsers_v2 branch above). Adding
+            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+            // streaming recovery while aggregator.rs keeps running. At that
+            // point hoist this above the jail/v2 branch — it only needs
+            // buffered input text + finish_reason, both available there.
+            // Pass 1 (immutable): compute the recovery tail per choice and
+            // whether the jail already released it as content on this chunk.
+            // We collect into a Vec so we can release the immutable borrow on
+            // nv_chunk before mutating it in pass 2.
+            let recoveries: Vec<PendingRecovery> = if is_glm47 {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                nv_chunk
+                    .data
+                    .iter()
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| {
+                        let state = cr.entry(choice.index).or_default();
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
+                                &choice.delta.content
+                        {
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
+                            {
+                                Some(pos) => pos,
+                                None => state
+                                    .emitted_text
+                                    .len()
+                                    .saturating_sub(glm47_start.len() - 1),
+                            };
+                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
+                                keep_from -= 1;
+                            }
+                            state.emitted_text.drain(..keep_from);
+                        }
+                        if state.recovered
+                            || !matches!(
+                                choice.finish_reason,
+                                Some(dynamo_protocols::types::FinishReason::Length)
+                            )
+                        {
+                            return None;
+                        }
+                        let tail =
+                            state
+                                .input_text
+                                .rfind(glm47_start.as_str())
+                                .and_then(|pos| {
+                                    let t = &state.input_text[pos..];
+                                    if !t.contains(glm47_end.as_str()) {
+                                        Some(t.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })?;
+                        let tail_already_emitted = state.emitted_text.contains(&tail);
+                        state.recovered = true;
+                        Some(PendingRecovery {
+                            choice_idx: choice.index,
+                            tail,
+                            tail_already_emitted,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
+            for pr in &recoveries {
+                if !pr.tail_already_emitted {
+                    continue;
+                }
+                if let Some(ref mut data) = nv_chunk.data {
+                    for rc in data
+                        .inner
+                        .choices
+                        .iter_mut()
+                        .filter(|c| c.index == pr.choice_idx)
+                    {
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
+                    }
+                }
             }
+
+            // Pass 3: emit a recovery chunk per affected choice carrying just
+            // the truncated tail (marker onwards, no post-call prose).
+            let recovery_chunks: Vec<_> = recoveries
+                .into_iter()
+                .filter_map(|pr| {
+                    let PendingRecovery {
+                        choice_idx, tail, ..
+                    } = pr;
+                    tracing::warn!(
+                        choice_index = choice_idx,
+                        recovered_bytes = tail.len(),
+                        "glm47 streaming: partial <tool_call> emitted as content \
+                         on length finish"
+                    );
+                    let mut rec = nv_chunk.clone();
+                    rec.id = None;
+                    rec.event = None;
+                    rec.comment = None;
+                    rec.error = None;
+                    let rd = rec.data.as_mut()?;
+                    rd.inner.usage = None;
+                    rd.llm_metrics = None;
+                    rd.inner.choices.retain(|c| c.index == choice_idx);
+                    for rc in &mut rd.inner.choices {
+                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
+                        rc.delta.tool_calls = None;
+                        rc.finish_reason = None;
+                        rc.logprobs = None;
+                    }
+                    Some(rec)
+                })
+                .collect();
+
+            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
         })
     }
 
@@ -3996,10 +4329,13 @@ impl
         // Apply the deployment default before parser-specific normalization so
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
+        let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
         self.apply_default_thinking_mode(&mut request);
-        Self::normalize_thinking_arg(
+        Self::normalize_thinking_arg_with_source(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
+            self.tool_call_parser.as_deref(),
+            thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
 
@@ -5196,7 +5532,7 @@ mod tests {
             &runtime_config,
             &mut request,
         );
-        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
 
         let args = request.chat_template_args.as_ref().unwrap();
         assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
@@ -5910,7 +6246,7 @@ mod tests {
                     )]));
                 }
 
-                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
                 let args = request.chat_template_args.as_ref();
                 assert_eq!(
                     dynamo_renderer::thinking_bool_from_args(args),
@@ -5954,7 +6290,7 @@ mod tests {
                     "model": "moonshotai/Kimi-K3"
                 }))
                 .unwrap();
-            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
             assert_eq!(
                 dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
                 Some(true),
@@ -5972,7 +6308,11 @@ mod tests {
                 }
             }))
             .unwrap();
-        OpenAIPreprocessor::normalize_thinking_arg(&mut conflicting_request, Some("kimi_k25"));
+        OpenAIPreprocessor::normalize_thinking_arg(
+            &mut conflicting_request,
+            Some("kimi_k25"),
+            None,
+        );
         let args = conflicting_request.chat_template_args.as_ref().unwrap();
         assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(true)));
         assert_eq!(
@@ -6017,7 +6357,7 @@ mod tests {
                 .unwrap();
 
             request.normalize_reasoning_template_args().unwrap();
-            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
             OpenAIPreprocessor::normalize_kimi_k3_named_tool_choice(&mut request, Some(parser));
 
             let args = request.chat_template_args.as_ref().unwrap();
@@ -6065,6 +6405,431 @@ mod tests {
                 dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
                 Some(true),
                 "parser {parser:?} must retain its existing policy"
+            );
+        }
+    }
+
+    fn minimax_m3_request(body: serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut base = serde_json::json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let base_obj = base.as_object_mut().unwrap();
+        for (k, v) in body.as_object().unwrap() {
+            base_obj.insert(k.clone(), v.clone());
+        }
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_json_schema() {
+        for parser in ["minimax_m3", "minimax-m3"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "s", "schema": {"type": "object"}}
+                }
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled"))
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_tool_choice_required() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "tool_choice": "required"
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_named_tool_choice() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "tool_choice": {"type": "function", "function": {"name": "f"}}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_tool_call_only_deployment_gets_default() {
+        // Tool-call-only M3 deployments still render the M3 template.
+        // Guided-output requests therefore still need "adaptive" overridden.
+        for tool_call_parser in [
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                "tool_choice": "required"
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, None, Some(tool_call_parser));
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled")),
+                "tool_call_parser={tool_call_parser:?} + tool_choice=required with no reasoning parser must still default thinking_mode=disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_client_adaptive() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            },
+            "chat_template_kwargs": {"thinking_mode": "adaptive"}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("adaptive"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_bridges_thinking_bool_to_mode() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "chat_template_kwargs": {"thinking": true}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_bridges_enable_thinking_to_mode() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "chat_template_kwargs": {"enable_thinking": false}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_enabled_is_thinking_on() {
+        // `thinking_mode` strings must bypass `is_truthy`, which would map
+        // "enabled" to false. M3 inputs are canonicalized to exact values.
+        for value in ["enabled", "ENABLED", "Enabled"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking"),
+                Some(&serde_json::json!(true)),
+                "thinking_mode={value:?} must map to thinking=true"
+            );
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("enabled"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_disabled_is_thinking_off() {
+        for value in ["disabled", "DISABLED"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_canonicalizes_non_canonical_thinking_mode() {
+        // M3 only treats exact "disabled" as off.
+        // Canonicalize falsy aliases so `thinking=false` and the template gate agree.
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!("no"),
+            serde_json::json!("off"),
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value.clone()}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled")),
+                "input={value} must canonicalize to \"disabled\""
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        }
+
+        // Truthy non-canonical values must canonicalize to "enabled".
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!("true"),
+            serde_json::json!("yes"),
+            serde_json::json!("on"),
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value.clone()}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("enabled")),
+                "input={value} must canonicalize to \"enabled\""
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_deepseek_thinking_mode_words_preserved() {
+        // DeepSeek V3.1 uses `thinking_mode` values "chat" and "thinking".
+        // Preserve them verbatim without writing boolean aliases.
+        for value in ["thinking", "chat"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "deepseek/DeepSeek-V3.1",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"thinking_mode": value}
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v3_1"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode").and_then(|v| v.as_str()),
+                Some(value),
+                "DeepSeek {value:?} must survive verbatim"
+            );
+            assert!(
+                !args.contains_key("thinking"),
+                "no boolean coercion for DeepSeek {value:?}"
+            );
+            assert!(!args.contains_key("enable_thinking"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_not_written_for_non_m3_parsers() {
+        // Only M3-family templates use the "enabled"/"disabled" vocabulary.
+        // Other parsers may treat an injected value as out-of-vocabulary.
+        for parser in [
+            "deepseek_v3_1",
+            "deepseek_v3_2",
+            "minimax_m2",
+            "qwen3",
+            "kimi_k25",
+            "kimi_k3",
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"thinking": true}
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+            assert!(
+                !args.contains_key("thinking_mode"),
+                "parser {parser:?} must not receive an injected thinking_mode value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_kimi_or_else_does_not_write_thinking_mode() {
+        // Kimi parsers synthesize `Some(true)` with no client input.
+        // Write boolean aliases only; Kimi does not read `thinking_mode`.
+        for parser in ["kimi_k25", "kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert!(!args.contains_key("thinking_mode"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_leaves_plain_chat_untouched() {
+        let mut request = minimax_m3_request(serde_json::json!({}));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        assert!(request.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_non_m3_adaptive_is_no_op() {
+        // Preserve non-M3 `thinking_mode: "adaptive"` verbatim by leaving
+        // normalization as `None`.
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"thinking_mode": "adaptive"}
+            }))
+            .unwrap();
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("qwen3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("adaptive"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_operator_default_forces_m3_constrained_disabled() {
+        // Runtime defaults are operator policy, not client intent. When the
+        // client sends no thinking control, constrained M3 requests force
+        // "disabled" even if the operator default is "enabled" — otherwise
+        // the deployment default silently propagates a mode M3 cannot honor
+        // with a constrained decoder attached.
+        let runtime_config = runtime_config_with_default_thinking_mode("enabled");
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            }
+        }));
+        let thinking_control_from_client =
+            OpenAIPreprocessor::request_has_client_thinking_control(&request);
+        assert!(
+            !thinking_control_from_client,
+            "no chat_template_kwargs → not client intent"
+        );
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+        OpenAIPreprocessor::normalize_thinking_arg_with_source(
+            &mut request,
+            Some("minimax_m3"),
+            None,
+            thinking_control_from_client,
+        );
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_explicit_thinking_for_constrained() {
+        // Explicit client thinking intent is respected for constrained M3
+        // requests. The runtime attempts the combination even though the
+        // template's adaptive/enabled path is known to conflict with the
+        // constrained decoder — this is the client's opt-in, and returning
+        // possibly-degraded content is preferred to a hard reject at the
+        // API boundary (which would break provider-compatibility probes
+        // that expect the request to be attempted).
+        for (body, expected_mode, desc) in [
+            (
+                serde_json::json!({
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "s", "schema": {"type": "object"}}
+                    },
+                    "chat_template_kwargs": {"thinking_mode": "enabled"}
+                }),
+                "enabled",
+                "json_schema + explicit thinking_mode=enabled",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": "required",
+                    "chat_template_kwargs": {"thinking_mode": "adaptive"}
+                }),
+                "adaptive",
+                "required tool + explicit thinking_mode=adaptive",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": {"type": "function", "function": {"name": "f"}},
+                    "chat_template_kwargs": {"thinking": true}
+                }),
+                "enabled",
+                "named tool + explicit thinking=true",
+            ),
+        ] {
+            let mut request = minimax_m3_request(body);
+            let thinking_control_from_client =
+                OpenAIPreprocessor::request_has_client_thinking_control(&request);
+            assert!(
+                thinking_control_from_client,
+                "{desc} must be classified as client thinking intent"
+            );
+            OpenAIPreprocessor::normalize_thinking_arg_with_source(
+                &mut request,
+                Some("minimax_m3"),
+                None,
+                thinking_control_from_client,
+            );
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!(expected_mode)),
+                "{desc} must preserve explicit client thinking"
             );
         }
     }
