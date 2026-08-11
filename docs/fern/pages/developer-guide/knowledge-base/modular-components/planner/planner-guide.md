@@ -117,9 +117,9 @@ spec:
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
-| `min_endpoint` | int | `1` | Legacy shared endpoint floor and the endpoint floor for `agg` mode. Unset component-specific floors inherit it. May be `0` for scale-to-zero compatibility. |
-| `prefill_min_endpoint` | int or `null` | `null` | Prefill endpoint floor for `disagg` and `prefill` modes. Must be at least `1`. |
-| `decode_min_endpoint` | int or `null` | `null` | Decode endpoint floor for `disagg` and `decode` modes. Must be at least `1`. |
+| `min_endpoint` | int | `1` | Minimum endpoints for `agg` mode. In `disagg` mode, applies the same minimum to prefill and decode. May be `0` for scale-to-zero compatibility. |
+| `prefill_min_endpoint` | int or `null` | `null` | Minimum prefill endpoints for `disagg` and `prefill` modes. When set, replaces the prefill value from `min_endpoint`. Must be at least `1`. |
+| `decode_min_endpoint` | int or `null` | `null` | Minimum decode endpoints for `disagg` and `decode` modes. When set, replaces the decode value from `min_endpoint`. Must be at least `1`. |
 | `max_gpu_budget` | int | `8` | Maximum total GPUs the planner may allocate. |
 | `ttft_ms` | float | `500.0` | TTFT SLA target (ms) for scaling decisions. |
 | `itl_ms` | float | `50.0` | ITL SLA target (ms) for scaling decisions. |
@@ -175,7 +175,7 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 
 ### Runtime Minimum Endpoint API
 
-The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and the legacy `min_endpoint` field in aggregated mode. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
+The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
 
 In Kubernetes, port-forward to the Planner pod and patch the active mode's field:
 

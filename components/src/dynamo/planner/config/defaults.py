@@ -34,7 +34,9 @@ class BasePlannerDefaults:
     # See dynamo.planner.core.budget.proportional_clamp_pair for the
     # tolerance band semantics.
     min_gpu_budget = -1
-    min_endpoint = 1  # legacy shared floor for decode and prefill
+    # Minimum endpoints for agg, or the same minimum for prefill and decode
+    # in disagg. A role-specific value overrides it for that role.
+    min_endpoint = 1
     prefill_min_endpoint = None
     decode_min_endpoint = None
     # Localhost-only runtime configuration API (0 disables). It is

@@ -134,7 +134,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `prefill_min_endpoint` and `decode_min_endpoint` to values that avoid scaling below each component's steady-state traffic floor, or use the shared `min_endpoint` fallback. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
 
 ## Documentation
 
@@ -165,9 +165,9 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `ttft_ms` | `500.0` | Target Time To First Token (ms) |
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
 | `max_gpu_budget` | `8` | Maximum GPUs across all workers |
-| `min_endpoint` | `1` | Legacy shared replica floor and aggregated-mode floor |
-| `prefill_min_endpoint` | `null` | Prefill replica floor; inherits `min_endpoint` |
-| `decode_min_endpoint` | `null` | Decode replica floor; inherits `min_endpoint` |
+| `min_endpoint` | `1` | Replica floor for aggregated mode, or the same floor for prefill and decode in disaggregated mode |
+| `prefill_min_endpoint` | `null` | Prefill replica floor; replaces the prefill value from `min_endpoint` when set |
+| `decode_min_endpoint` | `null` | Decode replica floor; replaces the decode value from `min_endpoint` when set |
 | `decode_engine_num_gpu` | `null` | GPUs per decode engine; auto-detected from the deployment when unset |
 | `prefill_engine_num_gpu` | `null` | GPUs per prefill engine; auto-detected from the deployment when unset |
 | `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |

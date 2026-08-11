@@ -133,7 +133,7 @@ def test_all_fields_work():
     assert config.throughput_adjustment_interval_seconds == 60
 
 
-def test_component_min_endpoints_inherit_legacy_default():
+def test_min_endpoint_sets_both_component_minimums():
     config = PlannerConfig(namespace="test-ns", mode="disagg", min_endpoint=2)
 
     assert config.effective_prefill_min_endpoint == 2
@@ -185,13 +185,13 @@ def test_min_endpoint_and_control_port_ranges(field, value):
         PlannerConfig(namespace="test-ns", mode="disagg", **{field: value})
 
 
-def test_agg_active_min_endpoint_uses_legacy_field():
+def test_agg_active_min_endpoint_uses_min_endpoint_field():
     config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=5)
 
     assert config.active_min_endpoints() == (None, 5)
 
 
-def test_legacy_min_endpoint_allows_zero_for_scale_to_zero():
+def test_min_endpoint_allows_zero_for_scale_to_zero():
     agg_config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=0)
     disagg_config = PlannerConfig(namespace="test-ns", mode="disagg", min_endpoint=0)
 

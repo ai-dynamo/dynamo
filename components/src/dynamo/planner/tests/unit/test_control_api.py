@@ -94,7 +94,7 @@ async def test_disagg_get_and_partial_patch_are_mode_shaped_and_atomic():
 
 
 @pytest.mark.asyncio
-async def test_agg_runtime_patch_updates_legacy_min_endpoint():
+async def test_agg_runtime_patch_updates_min_endpoint():
     planner = _planner("agg", min_endpoint=2)
 
     assert await planner.patch_min_endpoints({"min_endpoint": 5}) == {

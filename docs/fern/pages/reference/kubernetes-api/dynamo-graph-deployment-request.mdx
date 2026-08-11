@@ -339,15 +339,15 @@ service.
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Legacy shared minimum number of engine endpoints. Component-specific minimums inherit this value when unset. Aggregated mode always uses this field. Must be nonnegative; use `0` for scale-to-zero compatibility.
+  Minimum engine endpoints for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. Must be nonnegative; use `0` for scale-to-zero compatibility.
 </ParamField>
 
 <ParamField path="prefill_min_endpoint" type="integer | null" default="null">
-  Minimum prefill endpoints. When unset, inherits `min_endpoint`. Supported in disaggregated and prefill-only modes. Must be at least `1` when set.
+  Minimum prefill endpoints in disaggregated and prefill-only modes. When set, replaces the prefill value supplied by `min_endpoint`. Must be at least `1`.
 </ParamField>
 
 <ParamField path="decode_min_endpoint" type="integer | null" default="null">
-  Minimum decode endpoints. When unset, inherits `min_endpoint`. Supported in disaggregated and decode-only modes. Aggregated mode uses `min_endpoint`. Must be at least `1` when set.
+  Minimum decode endpoints in disaggregated and decode-only modes. When set, replaces the decode value supplied by `min_endpoint`. Aggregated deployments use `min_endpoint`. Must be at least `1`.
 </ParamField>
 
 <ParamField path="decode_engine_num_gpu" type="integer" default="null">

@@ -107,9 +107,9 @@ Whatever target you choose, a few knobs bound what the Planner is allowed to do.
 
 | Field | Default | What it protects |
 |---|---|---|
-| `min_endpoint` | `1` | Legacy shared replica floor and the floor for aggregated mode. |
-| `prefill_min_endpoint` | `null` | Prefill replica floor for disaggregated or prefill-only mode; inherits `min_endpoint` when unset. |
-| `decode_min_endpoint` | `null` | Decode replica floor for disaggregated or decode-only mode; inherits `min_endpoint` when unset. |
+| `min_endpoint` | `1` | Replica floor for aggregated mode, or the same floor for prefill and decode in disaggregated mode. |
+| `prefill_min_endpoint` | `null` | Prefill replica floor for disaggregated or prefill-only mode; replaces the prefill value from `min_endpoint` when set. |
+| `decode_min_endpoint` | `null` | Decode replica floor for disaggregated or decode-only mode; replaces the decode value from `min_endpoint` when set. |
 | `max_gpu_budget` | `8` | Ceiling on total GPUs the Planner may allocate. Your cost cap — scaling never exceeds it. |
 | `load_scaling_down_sensitivity` | `80` | How eagerly load-based scaling removes replicas (0 = never, 100 = aggressive). Lower it to scale down less often. |
 

@@ -110,9 +110,9 @@ spec:
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | 基于吞吐量的扩缩容决策之间的秒数。 |
 | `throughput_metrics_source` | string | `frontend` | 用于吞吐量扩缩容的 Prometheus 流量来源：`frontend` 从公共 Frontend 读取 `dynamo_frontend_*` 指标；`router` 从 LocalRouter 读取 `dynamo_component_router_*` 指标。在 GlobalPlanner 部署中，为池本地 Planner 使用 `router`。 |
-| `min_endpoint` | int | `1` | 旧版共享端点下限，也是 `agg` 模式的端点下限。未设置的组件专用下限会继承该值。为兼容 scale-to-zero，可设置为 `0`。 |
-| `prefill_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `prefill` 模式的 prefill 端点下限。必须至少为 `1`。 |
-| `decode_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `decode` 模式的 decode 端点下限。必须至少为 `1`。 |
+| `min_endpoint` | int | `1` | `agg` 模式的最小端点数；在 `disagg` 模式中，将同一最小值同时应用于 prefill 和 decode。为兼容 scale-to-zero，可设置为 `0`。 |
+| `prefill_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `prefill` 模式的最小 prefill 端点数。设置后会替换 `min_endpoint` 提供的 prefill 值。必须至少为 `1`。 |
+| `decode_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `decode` 模式的最小 decode 端点数。设置后会替换 `min_endpoint` 提供的 decode 值。必须至少为 `1`。 |
 | `max_gpu_budget` | int | `8` | planner 可以分配的 GPU 总数上限。 |
 | `ttft_ms` | float | `500.0` | 用于扩缩容决策的 TTFT SLA 目标（毫秒）。 |
 | `itl_ms` | float | `50.0` | 用于扩缩容决策的 ITL SLA 目标（毫秒）。 |
@@ -168,7 +168,7 @@ KV hit rate 和 speculative decode accept length 是引擎/Router 运行时信�
 
 ### 运行时最小端点 API
 
-Planner 监听 `127.0.0.1:<control_api_port>`，并在 `/v1/min-endpoints` 支持 `GET` 和部分 `PATCH`。该 API 不提供认证，也不会通过 Kubernetes Service 暴露。分离模式使用 `prefill_min_endpoint` 和 `decode_min_endpoint`；单组件模式只使用当前组件对应的字段；聚合模式使用旧版 `min_endpoint` 字段。更新仅作用于当前进程，不会写回 Planner ConfigMap，并会在下一个 planner tick 生效。
+Planner 监听 `127.0.0.1:<control_api_port>`，并在 `/v1/min-endpoints` 支持 `GET` 和部分 `PATCH`。该 API 不提供认证，也不会通过 Kubernetes Service 暴露。分离模式使用 `prefill_min_endpoint` 和 `decode_min_endpoint`；单组件模式只使用当前组件对应的字段；聚合模式使用 `min_endpoint`。更新仅作用于当前进程，不会写回 Planner ConfigMap，并会在下一个 planner tick 生效。
 
 在 Kubernetes 中，先 port-forward 到 Planner pod，再修改当前模式对应的字段：
 

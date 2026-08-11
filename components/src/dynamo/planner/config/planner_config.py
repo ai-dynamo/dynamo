@@ -52,7 +52,11 @@ class MinimumEndpointConfig(Protocol):
 def resolve_min_endpoint(
     config: MinimumEndpointConfig, component: Literal["prefill", "decode"]
 ) -> int:
-    """Resolve a component floor with legacy ``min_endpoint`` inheritance."""
+    """Return the configured minimum for one planner role.
+
+    ``min_endpoint`` supplies both role values unless a role-specific value is
+    set.
+    """
 
     value = (
         config.prefill_min_endpoint
@@ -430,25 +434,25 @@ class PlannerConfig(BaseModel):
         default=SLAPlannerDefaults.min_endpoint,
         ge=0,
         description=(
-            "Legacy endpoint floor; 0 permits scale-to-zero. Component-specific "
-            "minimums inherit this value when unset. Aggregated mode always uses "
-            "this field."
+            "Minimum endpoints for aggregated mode. In disaggregated mode, this "
+            "value applies to both prefill and decode unless a role-specific "
+            "value is set. Must be nonnegative; 0 permits scale-to-zero."
         ),
     )
     prefill_min_endpoint: Optional[int] = Field(
         default=SLAPlannerDefaults.prefill_min_endpoint,
         ge=1,
         description=(
-            "Minimum prefill endpoints. When unset, inherits min_endpoint. "
-            "Supported in disagg and prefill modes."
+            "Minimum prefill endpoints in disagg and prefill modes. When set, "
+            "replaces the prefill value supplied by min_endpoint."
         ),
     )
     decode_min_endpoint: Optional[int] = Field(
         default=SLAPlannerDefaults.decode_min_endpoint,
         ge=1,
         description=(
-            "Minimum decode endpoints. When unset, inherits min_endpoint. "
-            "Supported in disagg and decode modes."
+            "Minimum decode endpoints in disagg and decode modes. When set, "
+            "replaces the decode value supplied by min_endpoint."
         ),
     )
     control_api_port: int = Field(
@@ -1078,13 +1082,13 @@ class PlannerConfig(BaseModel):
 
     @property
     def effective_prefill_min_endpoint(self) -> int:
-        """Resolved prefill floor after applying legacy inheritance."""
+        """Return the effective prefill endpoint minimum."""
 
         return resolve_min_endpoint(self, "prefill")
 
     @property
     def effective_decode_min_endpoint(self) -> int:
-        """Resolved decode floor after applying legacy inheritance."""
+        """Return the effective decode endpoint minimum."""
 
         return resolve_min_endpoint(self, "decode")
 

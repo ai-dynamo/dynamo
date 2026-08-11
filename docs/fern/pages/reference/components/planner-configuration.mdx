@@ -172,15 +172,15 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Legacy shared minimum number of engine endpoints (replicas). In disaggregated and single-component modes, an unset component-specific minimum inherits this value. Aggregated mode always uses this field. Must be nonnegative; use `0` for scale-to-zero compatibility.
+  Minimum engine endpoints (replicas) for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. Must be nonnegative; use `0` for scale-to-zero compatibility.
 </ParamField>
 
 <ParamField path="prefill_min_endpoint" type="integer" default="null">
-  Minimum prefill endpoints. When `null`, inherits `min_endpoint`. Supported in `disagg` and `prefill` modes. Must be at least `1` when set.
+  Minimum prefill endpoints in `disagg` and `prefill` modes. When set, replaces the prefill value supplied by `min_endpoint`. Must be at least `1`.
 </ParamField>
 
 <ParamField path="decode_min_endpoint" type="integer" default="null">
-  Minimum decode endpoints. When `null`, inherits `min_endpoint`. Supported in `disagg` and `decode` modes. Must be at least `1` when set.
+  Minimum decode endpoints in `disagg` and `decode` modes. When set, replaces the decode value supplied by `min_endpoint`. Must be at least `1`.
 </ParamField>
 
 The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget.
