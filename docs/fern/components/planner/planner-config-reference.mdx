@@ -298,7 +298,7 @@ These fields default from environment variables and are excluded from serialized
 </ParamField>
 
 <ParamField path="metric_pulling_prometheus_ca_bundle" type="string" default="env PROMETHEUS_CA_BUNDLE">
-  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. No-op unless SSL verification is enabled. Must point to an existing file when set.
+  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
 </ParamField>
 
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
