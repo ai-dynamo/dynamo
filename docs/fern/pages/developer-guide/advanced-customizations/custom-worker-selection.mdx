@@ -280,15 +280,15 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `request_blocks()` | Incoming prompt size in KV blocks |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
-| `agent_context()` | Optional agent-session metadata described below |
+| `session_context()` | Optional session metadata described below |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
 
-### Agent Context
+### Session Context
 
-`agent_context()` returns `None` for requests without agent-session metadata. When present, it provides the complete agent context received by worker selection:
+`session_context()` returns `None` when the request has no session metadata. This policy-facing view is separate from Dynamo's internal request protocol. When present, it provides:
 
 | Accessor | Meaning |
 |---|---|

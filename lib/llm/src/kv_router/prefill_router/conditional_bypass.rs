@@ -8,7 +8,7 @@ use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::{Context, SingleIn};
 
 use super::{InnerPrefillRouter, PrefillRouter};
-use crate::kv_router::to_worker_selection_agent_context;
+use crate::kv_router::to_worker_selection_session_context;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{
     extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -129,10 +129,10 @@ where
             .routing
             .as_ref()
             .and_then(|routing| routing.allowed_worker_ids.clone());
-        let agent_context = req
+        let session_context = req
             .agent_context
             .as_ref()
-            .map(to_worker_selection_agent_context);
+            .map(to_worker_selection_session_context);
         let request_pinned_worker = match resolve_request_decode_pin(req.routing.as_ref(), |id| {
             decode_router.unique_dp_rank_for_worker(id)
         }) {
@@ -185,7 +185,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class.clone(),
-                agent_context,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -365,7 +365,7 @@ where
                 policy_class,
                 req.agent_context
                     .as_ref()
-                    .map(to_worker_selection_agent_context),
+                    .map(to_worker_selection_session_context),
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,

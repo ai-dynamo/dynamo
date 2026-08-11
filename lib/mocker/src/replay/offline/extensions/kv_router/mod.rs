@@ -24,9 +24,8 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
-    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelectionAgentContext, WorkerSelector,
-    scheduling::TierOverlapBlocks,
+    SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -301,9 +300,10 @@ impl PendingRequest {
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
-            agent_context: self.session_id.clone().map(|session_id| {
-                WorkerSelectionAgentContext::new(session_id, None, None, None, None)
-            }),
+            session_context: self
+                .session_id
+                .clone()
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,

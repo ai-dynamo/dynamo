@@ -80,13 +80,11 @@ pub(crate) type WorkerSelectorFactory<Sel> = Arc<
     dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
 >;
 
-pub(crate) fn to_worker_selection_agent_context(
+pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
-) -> dynamo_kv_router::WorkerSelectionAgentContext {
+) -> dynamo_kv_router::SessionContext {
     use crate::protocols::common::extensions::{AgentContext, InputTrigger};
-    use dynamo_kv_router::{
-        WorkerSelectionAgentContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints,
-    };
+    use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
     // Keep this exhaustive so a new wire-level field must be handled here.
     let AgentContext {
@@ -101,7 +99,7 @@ pub(crate) fn to_worker_selection_agent_context(
         InputTrigger::ToolResult => WorkerSelectionInputTrigger::ToolResult,
         InputTrigger::Other => WorkerSelectionInputTrigger::Other,
     });
-    WorkerSelectionAgentContext::new(
+    SessionContext::new(
         session_id.clone(),
         parent_session_id.clone(),
         *session_final,
@@ -811,7 +809,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -830,7 +828,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                agent_context,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -861,7 +859,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -880,7 +878,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                agent_context,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -910,7 +908,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -1049,7 +1047,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            agent_context,
+            session_context,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1709,7 +1707,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_selection_receives_complete_agent_context() {
+    fn worker_selection_receives_complete_session_context() {
         use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
         use dynamo_kv_router::WorkerSelectionInputTrigger;
 
@@ -1723,7 +1721,7 @@ mod tests {
             input_trigger: Some(InputTrigger::ToolResult),
         };
 
-        let selection_context = to_worker_selection_agent_context(&context);
+        let selection_context = to_worker_selection_session_context(&context);
 
         assert_eq!(selection_context.session_id(), "child-session");
         assert_eq!(selection_context.parent_session_id(), Some("root-session"));

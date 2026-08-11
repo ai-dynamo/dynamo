@@ -13,7 +13,7 @@ use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, Worker
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{
-    KvSchedulerError, SchedulingRequest, WorkerSelectionAgentContext, WorkerSelectionPolicyError,
+    KvSchedulerError, SchedulingRequest, SessionContext, WorkerSelectionPolicyError,
 };
 
 pub struct WorkerSelectionContext<'a> {
@@ -161,9 +161,9 @@ impl WorkerSelectionContext<'_> {
         self.track_prefill_tokens
     }
 
-    /// Return the complete agent context supplied with this request.
-    pub fn agent_context(&self) -> Option<&WorkerSelectionAgentContext> {
-        self.request.agent_context.as_ref()
+    /// Return the complete session context supplied with this request.
+    pub fn session_context(&self) -> Option<&SessionContext> {
+        self.request.session_context.as_ref()
     }
 
     pub fn expected_output_tokens(&self) -> Option<u32> {
@@ -750,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_picker_receives_agent_metadata() {
+    fn custom_picker_receives_session_metadata() {
         struct ContextPicker;
 
         impl WorkerPicker for ContextPicker {
@@ -759,13 +759,13 @@ mod tests {
                 context: &WorkerSelectionContext<'_>,
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                let agent = context.agent_context().expect("agent context");
-                assert_eq!(agent.session_id(), "session-1");
-                assert_eq!(agent.parent_session_id(), Some("root"));
-                assert_eq!(agent.session_final(), Some(false));
-                assert!(agent.kv_hints().expect("KV hints").evict_session());
+                let session = context.session_context().expect("session context");
+                assert_eq!(session.session_id(), "session-1");
+                assert_eq!(session.parent_session_id(), Some("root"));
+                assert_eq!(session.session_final(), Some(false));
+                assert!(session.kv_hints().expect("KV hints").evict_session());
                 assert_eq!(
-                    agent.input_trigger(),
+                    session.input_trigger(),
                     Some(WorkerSelectionInputTrigger::ToolResult)
                 );
                 assert_eq!(context.expected_output_tokens(), Some(128));
@@ -777,7 +777,7 @@ mod tests {
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
         let mut request = base_request(16);
-        request.agent_context = Some(WorkerSelectionAgentContext::new(
+        request.session_context = Some(SessionContext::new(
             "session-1".into(),
             Some("root".into()),
             Some(false),

@@ -267,12 +267,12 @@ impl WorkerSelectionKvHints {
     }
 }
 
-/// Agent-session metadata supplied with a scheduling request.
+/// Session metadata supplied to a custom worker-selection policy.
 ///
-/// All values come from the request's agent context. Optional values remain
-/// absent when the caller did not supply them.
+/// The internal request protocol supplies these values. Optional values remain
+/// absent when the request does not include them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerSelectionAgentContext {
+pub struct SessionContext {
     session_id: String,
     parent_session_id: Option<String>,
     session_final: Option<bool>,
@@ -280,8 +280,8 @@ pub struct WorkerSelectionAgentContext {
     input_trigger: Option<WorkerSelectionInputTrigger>,
 }
 
-impl WorkerSelectionAgentContext {
-    /// Create the complete agent context passed to worker selection.
+impl SessionContext {
+    /// Create the complete session context passed to worker selection.
     pub fn new(
         session_id: String,
         parent_session_id: Option<String>,
@@ -342,7 +342,7 @@ pub struct ScheduleRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub agent_context: Option<WorkerSelectionAgentContext>,
+    pub session_context: Option<SessionContext>,
     pub overlap: OverlapSignals,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub retain_router_hint_chain: bool,
@@ -371,7 +371,7 @@ pub struct SchedulingRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub agent_context: Option<WorkerSelectionAgentContext>,
+    pub session_context: Option<SessionContext>,
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
@@ -543,7 +543,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            agent_context: None,
+            session_context: None,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks: HashMap::default(),

@@ -221,7 +221,7 @@ mod tests {
             priority_jump,
             strict_priority: 0,
             policy_class: None,
-            agent_context: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
