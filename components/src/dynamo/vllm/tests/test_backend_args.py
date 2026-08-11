@@ -10,6 +10,7 @@ need to add more tests to cover different code paths of DynamoVllmConfig.
 
 import argparse
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -209,6 +210,87 @@ class TestEmbeddingWorkerExclusivity:
         config.embedding_worker = False
         config.benchmark_mode = "agg"
         config._validate_embedding_worker_exclusivity()
+
+
+class TestClassifyWorkerExclusivity:
+    """--classify-worker mirrors the embedding-worker constraints (both are
+    pooling roles) and is additionally exclusive with --embedding-worker.
+    """
+
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        # Must not raise.
+        config._validate_classify_worker_exclusivity()
+
+    def test_embedding_worker_combination_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            config._validate_classify_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.enable_multimodal = True
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.benchmark_mode = "agg"
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_headless_combination_rejected(self):
+        """Headless returns from main.worker() before WorkerFactory.create(),
+        so the classify/pooling endpoint would never register — the process
+        would come up healthy and serve nothing."""
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.headless = True
+        with pytest.raises(ValueError, match="headless"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_enable_lora_combination_rejected(self):
+        """The pooling-family handler never forwards lora_request to
+        engine_client.encode(), so an adapter-targeted request would silently
+        run against the base model."""
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = SimpleNamespace(enable_lora=True)
+        with pytest.raises(ValueError, match="enable-lora"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_no_op_when_classify_worker_disabled(self):
+        config = create_config()
+        config.classify_worker = False
+        config.benchmark_mode = "agg"
+        config.headless = True
+        config._validate_classify_worker_exclusivity()
 
 
 class TestValidateCustomEncoder:
