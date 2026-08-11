@@ -9,7 +9,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
-MODULE_PATH = REPO_ROOT / "scripts/kustomize_matrix.py"
+MODULE_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
