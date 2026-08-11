@@ -100,6 +100,11 @@ SPDX-License-Identifier: Apache-2.0
   details.grp > summary:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
   details.grp .cnt{font-weight:400;font-size:11.5px;color:var(--muted);margin-left:auto}
   details.grp .body{padding:2px 14px 16px}
+  .todo{font-size:12.5px;background:var(--warningT);box-shadow:inset 0 0 0 1.5px var(--warning);
+    border-radius:7px;padding:11px 14px;margin:0 0 16px;color:var(--ink)}
+  .todo .tag{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:11px;
+    letter-spacing:.06em;text-transform:uppercase;margin-right:8px}
+  .todo .src{display:block;margin-top:7px;font-size:11px;color:var(--ink2)}
   .empty{font-size:12.5px;color:var(--ink2);background:var(--naT);border-left:2px solid var(--axis);
     padding:10px 13px;border-radius:0 6px 6px 0}
   .empty b{color:var(--ink)}
@@ -186,8 +191,13 @@ SPDX-License-Identifier: Apache-2.0
       </details>
 
       <details class="grp" open>
-        <summary>Unlinked benchmarks<span class="cnt">what exists in-tree today</span></summary>
+        <summary>Unlinked benchmarks<span class="cnt">⚠ 1 open question · what exists in-tree today</span></summary>
         <div class="body">
+          <div class="todo">
+            <span class="tag">⚠ TODO</span><b><code>perf.yaml</code> is structurally defined and semantically undefined.</b>
+            Its existence, location, filename, and auto-execution are all specified; its purpose is stated only as "AIPerf benchmark job."
+            <span class="src">Structure: <code>recipes/CONTRIBUTING.md:12</code> · auto-execution: <code>:23</code> · purpose: <code>recipes/README.md:105</code>, and <code>:62</code> makes its mere presence the definition of a benchmarked recipe.</span>
+          </div>
 
     <table>
       <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Status</th></tr></thead>
