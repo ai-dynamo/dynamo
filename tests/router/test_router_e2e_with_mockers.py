@@ -955,10 +955,10 @@ def test_router_decisions_router_aic(
     )
 
 
-async def _wait_for_frontend_to_commit_single_pd_role(
+async def _wait_for_frontend_to_commit_pd_roles(
     frontend_port: int,
     namespace: str,
-    worker_type: str,
+    worker_types: set[str],
     timeout: float = 30,
 ) -> None:
     readiness_url = f"http://localhost:{frontend_port}/v1/models/{MODEL_NAME}/ready"
@@ -972,13 +972,15 @@ async def _wait_for_frontend_to_commit_single_pd_role(
                     if response.status == 200:
                         body = await response.json()
                         last_response = body
-                        role = (
+                        roles = (
                             body.get("namespaces", {})
                             .get(namespace, {})
                             .get("worker_types", {})
-                            .get(worker_type, {})
                         )
-                        if role.get("workers", 0) == 1:
+                        if all(
+                            roles.get(worker_type, {}).get("workers", 0) == 1
+                            for worker_type in worker_types
+                        ):
                             return
                     else:
                         last_response = {
@@ -990,7 +992,7 @@ async def _wait_for_frontend_to_commit_single_pd_role(
             await asyncio.sleep(0.1)
 
     raise AssertionError(
-        f"Frontend did not commit the standalone {worker_type} WorkerSet within {timeout}s; "
+        f"Frontend did not commit WorkerSets for {sorted(worker_types)} within {timeout}s; "
         f"last response: {last_response}"
     )
 
@@ -1110,10 +1112,12 @@ def test_mocker_disagg_startup_lifecycle(
                     event_plane=None,
                 )[0]
 
-            if frontend is not None and len(workers) == 1:
+            # Let discovery commit every currently available role before the next
+            # transition or request observes the topology.
+            if frontend is not None and workers:
                 asyncio.run(
-                    _wait_for_frontend_to_commit_single_pd_role(
-                        frontend_port, namespace, next(iter(workers))
+                    _wait_for_frontend_to_commit_pd_roles(
+                        frontend_port, namespace, set(workers)
                     )
                 )
 
