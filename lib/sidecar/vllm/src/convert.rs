@@ -11,6 +11,7 @@ use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
+const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 pub(crate) fn build_generate_request(
     request: PreprocessedRequest,
@@ -38,12 +39,13 @@ pub(crate) fn build_generate_request(
         .unwrap_or(0);
     let cache_salt = routing
         .as_mut()
-        .and_then(|routing| routing.cache_namespace.take())
-        .or(request.mdc_sum);
+        .and_then(|routing| routing.cache_namespace.take());
 
     let sampling = request.sampling_options;
     let stop_conditions = request.stop_conditions;
-    let kv = build_kv_parameters(request.extra_args, request.prefill_result, cache_salt, mode)?;
+    let mut extra_args = request.extra_args;
+    consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
+    let kv = build_kv_parameters(extra_args, request.prefill_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
         request_id,
@@ -92,8 +94,69 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media: Vec::new(),
-        data_parallel_rank: None,
     })
+}
+
+pub(crate) fn data_parallel_rank(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+) -> Option<u32> {
+    request.routing.as_ref().and_then(|routing| {
+        if mode.is_prefill() {
+            routing.prefill_dp_rank.or(routing.dp_rank)
+        } else {
+            routing.dp_rank
+        }
+    })
+}
+
+fn consume_redundant_nvext(
+    extra_args: &mut Option<serde_json::Value>,
+    cache_namespace: Option<&str>,
+) -> Result<(), DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(());
+    };
+    let remove_nvext = {
+        let Some(serde_json::Value::Object(nvext)) = extra.get_mut("nvext") else {
+            return Ok(());
+        };
+        if let Some(value) = nvext.remove("cache_salt") {
+            let value = value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "extra_args.nvext.cache_salt must be a non-empty string",
+                    )
+                })?;
+            match cache_namespace {
+                Some(expected) if value == expected => {}
+                Some(expected) => {
+                    return Err(client::invalid_argument(format!(
+                        "extra_args.nvext.cache_salt `{value}` does not match routing.cache_namespace `{expected}`"
+                    )));
+                }
+                None => {
+                    return Err(client::invalid_argument(
+                        "extra_args.nvext.cache_salt requires routing.cache_namespace",
+                    ));
+                }
+            }
+        }
+        if let Some(token_in) = nvext.remove("token_in")
+            && token_in != serde_json::Value::Bool(true)
+        {
+            return Err(client::invalid_argument(
+                "extra_args.nvext.token_in must be true when present",
+            ));
+        }
+        nvext.is_empty()
+    };
+    if remove_nvext {
+        extra.remove("nvext");
+    }
+    Ok(())
 }
 
 fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
@@ -242,7 +305,9 @@ fn build_kv_parameters(
 
     Ok(pb::KvCacheParameters {
         bypass_prefix_cache,
-        cache_salt: cache_salt.unwrap_or_default(),
+        cache_salt: cache_salt
+            .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
+            .unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
         ec_transfer_params: None,
     })
@@ -323,15 +388,6 @@ fn validate_request(
     {
         return Err(client::invalid_argument(
             "LoRA request selection is not supported by vLLM gRPC v0.25.1",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
-    {
-        return Err(client::invalid_argument(
-            "KV-aware data-parallel routing is not supported by vLLM gRPC v0.25.1",
         ));
     }
     if request.bootstrap_info.is_some() {

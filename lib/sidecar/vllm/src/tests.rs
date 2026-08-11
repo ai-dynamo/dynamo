@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
     PreprocessedRequest, SamplingOptions, StopConditions,
@@ -31,6 +32,7 @@ use crate::proto as pb;
 #[derive(Clone, Default)]
 struct FakeVllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
+    data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
     reject: Arc<AtomicBool>,
@@ -72,6 +74,16 @@ impl pb::inference_server::Inference for FakeVllm {
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
+        let data_parallel_rank = request
+            .metadata()
+            .get("x-data-parallel-rank")
+            .map(|value| value.to_str().map(str::to_owned))
+            .transpose()
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.data_parallel_rank_metadata
+            .lock()
+            .await
+            .push(data_parallel_rank);
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
         if self.hang_before_headers.load(Ordering::SeqCst) {
@@ -214,7 +226,20 @@ impl pb::control_server::Control for FakeVllm {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         Ok(Response::new(pb::GetKvEventSourcesResponse {
-            sources: Vec::new(),
+            sources: (0..2)
+                .map(|rank| pb::KvEventSource {
+                    transport: "zmq".to_string(),
+                    endpoint: format!("tcp://*:{}", 20081 + rank),
+                    topic: String::new(),
+                    replay_endpoint: String::new(),
+                    data_parallel_rank: Some(rank),
+                    encoding: "msgpack".to_string(),
+                    schema_version: 1,
+                    buffer_steps: 0,
+                    hwm: 0,
+                    max_queue_size: 0,
+                })
+                .collect(),
         }))
     }
 }
@@ -240,8 +265,8 @@ fn server_info() -> pb::ServerInfo {
         parallelism: Some(pb::ParallelismInfo {
             tensor_parallel_size: 2,
             pipeline_parallel_size: 1,
-            data_parallel_size: 4,
-            data_parallel_rank: 2,
+            data_parallel_size: 2,
+            data_parallel_rank: 0,
             decode_context_parallel_size: 1,
         }),
         max_model_len: 8192,
@@ -249,7 +274,6 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
-        supports_explicit_data_parallel_rank: false,
     }
 }
 
@@ -488,8 +512,13 @@ fn request() -> PreprocessedRequest {
             prompt_logprobs: Some(1),
             ..Default::default()
         })
-        .mdc_sum(Some("cache-salt".to_string()))
+        .mdc_sum(Some("model-checksum".to_string()))
+        .routing(Some(RoutingHints {
+            cache_namespace: Some("cache-salt".to_string()),
+            ..Default::default()
+        }))
         .extra_args(Some(json!({
+            "nvext": {"cache_salt": "cache-salt", "token_in": true},
             "bypass_prefix_cache": true,
             "kv_transfer_params": {
                 "connector_data": {"values": [1, true, null]}
@@ -619,10 +648,40 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.total_kv_blocks, Some(4096));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
-    assert_eq!(registration.data_parallel_size, None);
-    assert_eq!(registration.data_parallel_start_rank, None);
+    assert_eq!(registration.data_parallel_size, Some(2));
+    assert_eq!(registration.data_parallel_start_rank, Some(0));
 
-    let outputs = collect(&engine, request()).await;
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.dp_rank())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([0, 1])
+    );
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq { topic, .. } if topic.is_empty()
+    )));
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| match source {
+                dynamo_backend_common::KvEventSource::Zmq { endpoint, .. } => endpoint.as_str(),
+                dynamo_backend_common::KvEventSource::Push { .. } => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        ["tcp://127.0.0.1:20081", "tcp://127.0.0.1:20082"]
+    );
+
+    let mut routed_request = serde_json::to_value(request()).expect("serialize request");
+    routed_request["routing"] = json!({"dp_rank": 1, "cache_salt": "cache-salt"});
+    let outputs = collect(
+        &engine,
+        serde_json::from_value(routed_request).expect("deserialize routed request"),
+    )
+    .await;
     assert_eq!(outputs.len(), 1);
     let terminal = &outputs[0];
     assert_eq!(terminal.token_ids, [42]);
@@ -638,6 +697,10 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let sent = requests.first().expect("recorded request");
     assert_eq!(sent.model, "served-model");
     assert_eq!(sent.priority, 0);
+    assert_eq!(
+        server.service.data_parallel_rank_metadata.lock().await[0],
+        Some("1".to_string())
+    );
     let sampling = sent.sampling.as_ref().unwrap();
     assert_eq!(
         (sampling.top_k, sampling.top_p, sampling.min_p),
@@ -664,7 +727,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert!(stopping.ignore_eos);
     let kv = sent.kv.as_ref().unwrap();
     assert!(kv.bypass_prefix_cache);
-    assert_eq!(kv.cache_salt, "cache-salt");
+    assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
     assert_eq!(
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
@@ -767,11 +830,14 @@ async fn pool_uses_each_configured_connection() {
 
     for index in 0..4 {
         let mut stream = client
-            .generate_stream(pb::GenerateRequest {
-                request_id: format!("request-{index}"),
-                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-                ..Default::default()
-            })
+            .generate_stream(
+                pb::GenerateRequest {
+                    request_id: format!("request-{index}"),
+                    prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+                    ..Default::default()
+                },
+                None,
+            )
             .await
             .expect("start stream");
         while stream.message().await.expect("message").is_some() {}
@@ -786,6 +852,15 @@ async fn pool_uses_each_configured_connection() {
         .map(SocketAddr::port)
         .collect();
     assert_eq!(ports.len(), 2);
+    assert!(
+        server
+            .service
+            .data_parallel_rank_metadata
+            .lock()
+            .await
+            .iter()
+            .all(Option::is_none)
+    );
 }
 
 #[tokio::test]
@@ -970,11 +1045,14 @@ async fn unsupported_features_fail_before_rpc_submission() {
     multimodal.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
     requests.push(multimodal);
 
-    for routing in [json!({"lora_name": "adapter"}), json!({"dp_rank": 1})] {
-        let mut value = serde_json::to_value(request()).expect("serialize request");
-        value["routing"] = routing;
-        requests.push(serde_json::from_value(value).expect("deserialize request"));
-    }
+    let mut lora_request = serde_json::to_value(request()).expect("serialize request");
+    lora_request["routing"] = json!({"lora_name": "adapter"});
+    requests.push(serde_json::from_value(lora_request).expect("deserialize request"));
+
+    let mut mismatched_cache_salt = request();
+    mismatched_cache_salt.extra_args.as_mut().unwrap()["nvext"]["cache_salt"] =
+        json!("different-cache-salt");
+    requests.push(mismatched_cache_salt);
 
     for unsupported in requests {
         let context = dynamo_backend_common::testing::mock_context();

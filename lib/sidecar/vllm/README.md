@@ -25,13 +25,13 @@ It is a standalone Rust executable.
 - Token and text requests through Dynamo preprocessing
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
+- Data-parallel rank routing and KV-event source discovery
 
-The initial protocol does not support multimodal input, LoRA, KV-aware data
-parallel routing, encode workers, beam search, or `n > 1`.
+The protocol does not support multimodal input, LoRA, encode workers, beam search, or `n > 1`.
 
 ## Run
 
-Start vLLM with its released gRPC listener:
+Start vLLM with its gRPC listener:
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
@@ -51,9 +51,9 @@ dynamo-vllm-sidecar \
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
 
-The sidecar discovers `model_id`, the served name, context length, KV capacity, and scheduler limits through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-Data-parallel registration is omitted because Control reports global topology, not the rank range hosted by the connected frontend.
+The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 
