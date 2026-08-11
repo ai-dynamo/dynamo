@@ -45,7 +45,24 @@ pub fn convert_event(
         return None;
     }
 
-    let storage_tier = StorageTier::from_kv_medium_or_default(medium);
+    // Fail closed on unrecognized media instead of silently indexing them on
+    // the device (G1) primary tree. vLLM 0.26.0 ships `FS` / `OBJ` (pre-#48123
+    // wire); those and any future medium strings are dropped, not misfiled. The
+    // normalizer's preprocess step classifies these as filtered first (so no
+    // event id is burned); this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess, mirroring the locality gate.
+    let storage_tier = match medium {
+        None => StorageTier::Device,
+        Some(medium) => match StorageTier::from_kv_medium(medium) {
+            Some(tier) => tier,
+            None => {
+                if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
+                    tracing::warn!(event_id, medium, "Dropping KV event with unknown medium");
+                }
+                return None;
+            }
+        },
+    };
 
     let dp_rank = worker.dp_rank;
     let event = match raw {
