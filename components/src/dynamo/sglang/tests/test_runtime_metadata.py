@@ -97,14 +97,17 @@ def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
     )
 
 
-def test_hicache_requires_reported_host_capacity():
-    assert (
-        get_hicache_native_offloading_capacity(
-            SimpleNamespace(hicache_write_policy="write_back"),
-            {"max_total_num_tokens": 100},
-        )
-        is None
-    )
+def test_hicache_derives_ratio_based_capacity():
+    assert get_hicache_native_offloading_capacity(
+        SimpleNamespace(
+            enable_hierarchical_cache=True,
+            hicache_size=0,
+            hicache_write_policy="write_back",
+            hicache_ratio=3.0,
+            page_size=16,
+        ),
+        {"max_total_num_tokens": 100},
+    ) == {"total_tokens": 304}
 
 
 @pytest.mark.parametrize(
