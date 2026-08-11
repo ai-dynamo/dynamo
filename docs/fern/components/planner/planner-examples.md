@@ -36,6 +36,7 @@ and OSL samples.
 For workloads with rapid changes, tune the Kalman filter:
 
 ```yaml
+optimization_target: sla  # Required: predictor tuning is inert without it
 load_predictor: kalman
 kalman_q_level: 2.0       # Higher = more responsive to level changes
 kalman_q_trend: 0.5       # Higher = trend changes faster
@@ -49,6 +50,7 @@ load_predictor_log1p: true  # Often helps with request-rate series
 For workloads with daily/weekly patterns:
 
 ```yaml
+optimization_target: sla  # Required: predictor tuning is inert without it
 load_predictor: prophet
 prophet_window_size: 100  # Larger window for seasonal detection
 load_predictor_log1p: true

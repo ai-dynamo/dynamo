@@ -108,9 +108,12 @@ cache-reuse behavior.
 
 The `nvext` protocol is enabled by default. To turn it off, set `DYN_DISABLE_FRONTEND_NVEXT` to a
 truthy value (`1`, `true`, `yes`, or `on`, case-insensitive). The frontend then drops
-`request.nvext` at handler entry, ignores the routing-override headers
-(`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-`x-dynamo-prefill-dp-rank`), and ignores the response-side `extra_fields` opt-in. The top-level
+`request.nvext` at handler entry and ignores every routing-override header, along with the
+response-side `extra_fields` opt-in. That includes `x-tenant-id`, which is what sets
+`cache_salt`, so per-tenant cache isolation stops applying: requests fall back to unsalted
+hashing and can share cache entries across tenants. It also includes the worker and rank
+overrides (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+`x-dynamo-prefill-dp-rank`) and their aliases. The top-level
 backend-compatibility field is not part of the NvExt protocol. Cache salt is an isolation key,
 not an authentication or authorization mechanism;
 gateways must still authenticate the tenant identity they place in `x-tenant-id`.
