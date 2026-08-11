@@ -46,16 +46,7 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord, WorkerLifecycle,
     WorkerPatchRequest, WorkerRequest,
 };
-
-pub(crate) type SelectionWorkerPolicyFactory = Box<
-    dyn for<'a> Fn(
-            &crate::config::KvRouterConfig,
-            &'static str,
-            crate::identity::RoutingPartitionRef<'a>,
-        ) -> WorkerSelectionPolicy
-        + Send
-        + Sync,
->;
+use crate::WorkerSelectionPolicyFactory;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -125,7 +116,7 @@ pub struct SelectionCore {
     entries: RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
-    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
@@ -207,7 +198,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
@@ -229,7 +220,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,

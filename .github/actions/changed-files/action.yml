@@ -7,6 +7,9 @@ inputs:
     required: true
 
 outputs:
+  api_docs:
+    description: 'Whether generated API documentation inputs changed'
+    value: ${{ steps.filter.outputs.api_docs_any_modified }}
   core:
     description: 'Whether core files changed'
     value: ${{ steps.filter.outputs.core_any_modified }}
@@ -70,6 +73,12 @@ outputs:
   docs:
     description: 'Whether docs files changed'
     value: ${{ steps.filter.outputs.docs_any_modified }}
+  examples:
+    description: 'Whether examples, recipes, or recipe validation helpers changed'
+    value: ${{ steps.filter.outputs.examples_any_modified }}
+  fern_components:
+    description: 'Whether Fern component sources changed'
+    value: ${{ steps.filter.outputs.fern_components_any_modified }}
   base_ref:
     description: 'PR target branch (baseRefName) for push-to-pull-request/N events; empty otherwise. Used for OSRB compliance-diff baseline selection.'
     value: ${{ steps.merge-base.outputs.base_ref }}
@@ -147,7 +156,10 @@ runs:
         echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
         echo ""
         echo "=== Filter Results ==="
+        echo "api_docs: ${{ steps.filter.outputs.api_docs_any_modified }}"
         echo "docs: ${{ steps.filter.outputs.docs_any_modified }}"
+        echo "examples: ${{ steps.filter.outputs.examples_any_modified }}"
+        echo "fern_components: ${{ steps.filter.outputs.fern_components_any_modified }}"
         echo "ci: ${{ steps.filter.outputs.ci_any_modified }}"
         echo "core: ${{ steps.filter.outputs.core_any_modified }}"
         echo "dev_images: ${{ steps.filter.outputs.dev_images_any_modified }}"
@@ -171,7 +183,9 @@ runs:
         echo "rust: ${{ steps.filter.outputs.rust_any_modified }}"
         echo ""
         echo "=== Files Matching Each Filter ==="
+        echo "api_docs: ${{ steps.filter.outputs.api_docs_all_modified_files }}"
         echo "docs: ${{ steps.filter.outputs.docs_all_modified_files }}"
+        echo "examples: ${{ steps.filter.outputs.examples_all_modified_files }}"
         echo "ci: ${{ steps.filter.outputs.ci_all_modified_files }}"
         echo "core: ${{ steps.filter.outputs.core_all_modified_files }}"
         echo "dev_images: ${{ steps.filter.outputs.dev_images_all_modified_files }}"
@@ -198,7 +212,7 @@ runs:
       shell: bash
       run: |
         # Combine all filter-specific files into one list
-        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.dev_images_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.snapshot_all_modified_files }} ${{ steps.filter.outputs.snapshot_vllm_all_modified_files }} ${{ steps.filter.outputs.snapshot_sglang_all_modified_files }} ${{ steps.filter.outputs.snapshot_trtllm_all_modified_files }} ${{ steps.filter.outputs.power_agent_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.dgdr_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.sidecar_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.sample_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.benchmarks_all_modified_files }} ${{ steps.filter.outputs.efa_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
+        COVERED_FILES=$(echo "${{ steps.filter.outputs.api_docs_all_modified_files }} ${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.dev_images_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.snapshot_all_modified_files }} ${{ steps.filter.outputs.snapshot_vllm_all_modified_files }} ${{ steps.filter.outputs.snapshot_sglang_all_modified_files }} ${{ steps.filter.outputs.snapshot_trtllm_all_modified_files }} ${{ steps.filter.outputs.power_agent_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.dgdr_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.sidecar_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.sample_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.benchmarks_all_modified_files }} ${{ steps.filter.outputs.efa_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
 
         # Get all modified files
         ALL_FILES=$(echo "${{ steps.filter.outputs.all_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)

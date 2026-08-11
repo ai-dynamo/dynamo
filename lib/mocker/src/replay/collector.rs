@@ -1766,6 +1766,7 @@ mod tests {
                     token_id: Some(10),
                     completed: false,
                     rejected: false,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
                 OutputSignal {
@@ -1773,6 +1774,7 @@ mod tests {
                     token_id: Some(11),
                     completed: false,
                     rejected: false,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
                 OutputSignal {
@@ -1780,6 +1782,7 @@ mod tests {
                     token_id: Some(12),
                     completed: true,
                     rejected: true,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
                 OutputSignal {
@@ -1787,6 +1790,7 @@ mod tests {
                     token_id: Some(20),
                     completed: true,
                     rejected: false,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
             ],

@@ -90,6 +90,9 @@ pub(crate) fn build_generate_request(
         kv: Some(kv),
         truncate_prompt_tokens: 0,
         priority,
+        session_id: None,
+        media: Vec::new(),
+        data_parallel_rank: None,
     })
 }
 
@@ -241,6 +244,7 @@ fn build_kv_parameters(
         bypass_prefix_cache,
         cache_salt: cache_salt.unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
+        ec_transfer_params: None,
     })
 }
 

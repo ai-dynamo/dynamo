@@ -92,6 +92,14 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
+# FlashInfer creates package-local cubin symlinks at runtime. Grant group 0
+# write access so arbitrary OpenShift UIDs can initialize the cubin cache.
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
+    if [ -d "$CUBINS_DIR" ]; then \
+        find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
+    fi
+
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
