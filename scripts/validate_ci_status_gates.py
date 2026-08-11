@@ -16,9 +16,13 @@ A job killed by its own `timeout-minutes` is reported as `cancelled`, not
 finished into a green required check. `failure` is just as wrong, and jq's
 `-e` flag is what turns a false result into a non-zero exit.
 
-This checks that every status-check job has a parseable allowlist and that
-the allowlist accepts only results that really mean nothing broke: `success`
-and `skipped` (jobs gated off by the changed-files filters).
+This checks that every status-check job runs such a gate and that its
+allowlist is exactly the results that really mean nothing broke: `success`
+and `skipped` (jobs gated off by the changed-files filters). Both directions
+matter. Accepting more lets a broken job through; accepting less fails a job
+the filters legitimately skipped. The allowlist is read only from an active
+`jq -e` call, so a gate that has been commented out or reduced to an `echo`
+is reported as missing rather than trusted.
 
 Usage:
     python3 validate_ci_status_gates.py [repo_root]
@@ -38,6 +42,33 @@ ACCEPTED_RESULTS = frozenset({"success", "skipped"})
 # The `[...]` literal the jq expression tests each job result against, e.g.
 # '["success", "skipped"] | any($result == .)'.
 ALLOWLIST = re.compile(r"(\[[^\[\]]*\])\s*\|\s*any\(\s*\$result\s*==\s*\.\s*\)")
+COMMENT_LINE = re.compile(r"(?m)^[ \t]*#.*$")
+# A `jq` call and its single-quoted program, plus the short flags in front of
+# it. Only `-e` makes a false result exit non-zero, so a gate without it
+# reports success no matter what the jobs did.
+JQ_CALL = re.compile(r"\bjq\b(?P<flags>(?:\s+-[^\s']+)*)\s+'(?P<program>[^']*)'")
+SHORT_FLAGS = re.compile(r"^-[A-Za-z]+$")
+NEEDS_CONTEXT = re.compile(r"toJson\(\s*needs\s*\)")
+
+
+def gate_allowlists(run):
+    """Allowlists belonging to real gates in one `run:` block.
+
+    An allowlist counts only where it can actually decide the job's exit
+    status: inside the program of a `jq -e` call, in a block that feeds it the
+    `needs` context. The same text sitting in a comment or echoed to stdout
+    gates nothing, and must not be mistaken for a gate that is missing.
+    """
+    text = COMMENT_LINE.sub("", run)
+    if not NEEDS_CONTEXT.search(text):
+        return []
+    allowlists = []
+    for call in JQ_CALL.finditer(text):
+        flags = call.group("flags").split()
+        if not any(SHORT_FLAGS.match(f) and "e" in f[1:] for f in flags):
+            continue
+        allowlists.extend(ALLOWLIST.findall(call.group("program")))
+    return allowlists
 
 
 def check_workflow(name, text, errors):
@@ -59,7 +90,7 @@ def check_workflow(name, text, errors):
         found += 1
         steps = job.get("steps") or []
         runs = [s.get("run", "") for s in steps if isinstance(s, dict)]
-        allowlists = [m for run in runs for m in ALLOWLIST.findall(run)]
+        allowlists = [m for run in runs for m in gate_allowlists(run)]
         if not allowlists:
             errors.append(
                 f"{name}: job '{job_id}' has no parseable jq result allowlist; "
@@ -72,8 +103,7 @@ def check_workflow(name, text, errors):
                 accepted = set(json.loads(raw))
             except json.JSONDecodeError:
                 errors.append(
-                    f"{name}: job '{job_id}' has an unreadable result "
-                    f"allowlist {raw}"
+                    f"{name}: job '{job_id}' has an unreadable result allowlist {raw}"
                 )
                 continue
             for result in sorted(accepted - ACCEPTED_RESULTS):
@@ -81,6 +111,15 @@ def check_workflow(name, text, errors):
                     f"{name}: job '{job_id}' accepts '{result}' as a passing "
                     f"result; only {', '.join(sorted(ACCEPTED_RESULTS))} mean "
                     f"the jobs it gates actually ran"
+                )
+            # The contract runs both ways: a gate that drops 'skipped' turns
+            # every job the changed-files filters legitimately gated off into
+            # a red required check.
+            for result in sorted(ACCEPTED_RESULTS - accepted):
+                errors.append(
+                    f"{name}: job '{job_id}' does not accept '{result}' as a "
+                    f"passing result; the allowlist must be exactly "
+                    f"{', '.join(sorted(ACCEPTED_RESULTS))}"
                 )
     return found
 
@@ -129,6 +168,47 @@ jobs:
 """,
             [],
         ),
+        (
+            "skipped dropped from the allowlist",
+            good.replace(', "skipped"', ""),
+            ["does not accept 'skipped'"],
+        ),
+        (
+            "gate commented out",
+            """
+jobs:
+  deploy-status-check:
+    steps:
+      - run: |
+          # echo '${{ toJson(needs) }}' | jq -e 'all(. as $result | ["success", "skipped"] | any($result == .))'
+          echo 'gate temporarily disabled'
+""",
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "gate printed but never run",
+            """
+jobs:
+  deploy-status-check:
+    steps:
+      - run: echo 'would check ${{ toJson(needs) }} against ["success", "skipped"] | any($result == .)'
+""",
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "jq without -e always exits 0",
+            good.replace("jq -e", "jq"),
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "a passive mention does not shadow the real gate",
+            good.replace(
+                "          # A comment above the gate must not hide it.\n",
+                '          echo \'cancelled is not in ["success", "cancelled"] '
+                "| any($result == .)'\n",
+            ),
+            [],
+        ),
     ]
 
     failures = []
@@ -136,7 +216,7 @@ jobs:
         errors = []
         check_workflow("test.yaml", text, errors)
         if len(errors) != len(expected) or not all(
-            fragment in error for fragment, error in zip(expected, errors)
+            fragment in error for fragment, error in zip(expected, errors, strict=True)
         ):
             failures.append(f"{label}: expected {expected}, got {errors}")
 
