@@ -660,8 +660,8 @@ jobs:
   # false (source archival temporarily disabled), so release branches do not emit
   # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
   # extract). A compliance failure fails the build. The independent audits retain
-  # native Syft JSON, CycloneDX, and the comparison report for 30 days on both
-  # main and release/*.*.* pushes.
+  # architecture-qualified native Syft JSON, CycloneDX, and the comparison
+  # report for 30 days on both main and release/*.*.* pushes.
   #
   # planner stays on the legacy shared-compliance scan until it migrates to
   # the inline system.

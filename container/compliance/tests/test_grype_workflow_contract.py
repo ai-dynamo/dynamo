@@ -101,3 +101,22 @@ def test_grype_archives_are_version_and_checksum_pinned() -> None:
     assert "grype_0.116.1_linux_${GRYPE_ARCH}.tar.gz" in action
     assert "0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d0587458" in action
     assert "a8d7504a149629324eb5f4ce3dc25dfd211bbfe047e64ee2bf7844b466c3d84d" in action
+
+
+def test_full_image_audit_archives_native_syft_for_both_architectures() -> None:
+    """The completeness audit must retain full native Syft data per arch."""
+    repository = Path(__file__).resolve().parents[3]
+    workflow = (repository / ".github/workflows/shared-compliance-audit.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "platform: [amd64, arm64]" in workflow
+    assert "prod-tester-arm-v2" in workflow
+    assert "${STEM}-${ARCH}.cdx.json" in workflow
+    assert '"*linux_${ARCH}*"' in workflow
+    assert "json=/tmp/syft-${ARCH}.syft.json" in workflow
+    assert (
+        "compliance-audit-${{ steps.resolve.outputs.image_tag }}-${{ matrix.platform }}"
+        in workflow
+    )
+    assert "/tmp/syft-${{ matrix.platform }}.syft.json" in workflow
