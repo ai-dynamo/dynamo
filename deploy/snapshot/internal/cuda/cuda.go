@@ -327,7 +327,7 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lock(ctx, pid, jobFile, log); err != nil {
+		if err := lockWithJobFile(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}

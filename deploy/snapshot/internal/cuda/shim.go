@@ -28,7 +28,14 @@ const (
 
 var cudaCheckpointHelperBinary = defaultCUDAHelperBinary
 
-func lock(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
+func lock(ctx context.Context, pid int, log logr.Logger) error {
+	return runAction(ctx, pid, actionLock, "", log)
+}
+
+func lockWithJobFile(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
+	if jobFile == "" {
+		return lock(ctx, pid, log)
+	}
 	return runActionWithJobFile(ctx, pid, actionLock, "", jobFile, log)
 }
 
