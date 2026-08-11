@@ -23,8 +23,9 @@ type Options struct {
 	Config          *configv1alpha1.OperatorConfiguration
 	RuntimeConfig   *commoncontroller.RuntimeConfig
 	OperatorVersion string
-	// DGDRDefaultImage overrides the DGDR webhook's derived default
-	// spec.image (dynamo-planner:<OperatorVersion>) when set.
+	// DGDRDefaultImage is the default DGDR profiler image, put into
+	// DGDR spec.image when unset; empty derives
+	// dynamo-planner:<OperatorVersion>.
 	DGDRDefaultImage  string
 	OperatorPrincipal string
 	Gate              features.Gate

@@ -193,7 +193,7 @@ func main() {
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
 	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
-		"Full image reference the DGDR webhook defaults spec.image to; empty derives dynamo-planner:<operator-version>")
+		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
 	opts := zap.Options{
 		Development: true,
 	}

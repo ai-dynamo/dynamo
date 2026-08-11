@@ -18,10 +18,10 @@ Third-party references are never touched; power-agent is excluded.
 Every rewrite requires exactly one match and raises otherwise, so a chart
 restructure breaks this step loudly instead of shipping stale references.
 
-The DGDR webhook's version-derived default image (dynamo-planner:<appVersion>)
-cannot exist for pre-release appVersions, so the platform rewrite also pins the
-operator's dgdrDefaultImage value (--dgdr-default-image) to the dated nightly
-planner image. rc charts retain the stale derived default.
+The default DGDR profiler image (put into DGDR spec.image when unset) is
+derived as dynamo-planner:<appVersion>, which cannot exist for pre-release
+appVersions -- so the platform rewrite pins the dgdrDefaultImage value to the
+dated nightly planner image. rc charts retain the stale derived default.
 """
 from __future__ import annotations
 
@@ -72,9 +72,9 @@ IMAGE_SITES: dict[str, list[tuple[str, str, str]]] = {
     ],
 }
 
-# platform only: pin the DGDR webhook's default profiler image to the dated
-# nightly planner — the version-derived default (dynamo-planner:<appVersion>)
-# cannot exist for pre-release chart versions.
+# platform only: pin the default DGDR profiler image (DGDR spec.image when
+# unset) to the dated nightly planner — the derived default
+# (dynamo-planner:<appVersion>) cannot exist for pre-release chart versions.
 DGDR_DEFAULT_IMAGE_SITE = (
     "deploy/helm/charts/platform/components/operator/values.yaml",
     "nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly",
