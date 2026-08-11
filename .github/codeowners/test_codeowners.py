@@ -338,12 +338,31 @@ class TestComputeResolution:
         with pytest.raises(SystemExit, match="keyword_rules is no longer supported"):
             compute_resolution(spec)
 
-    def test_legacy_advisory_block_is_rejected(self) -> None:
+    @pytest.mark.parametrize(
+        "value", [[{"glob": "docs/", "owners": ["docs"]}], [], None, False, {}]
+    )
+    def test_legacy_advisory_block_is_rejected(self, value: object) -> None:
         # Advisory routing is gone. A silently ignored block would read as
         # non-blocking routing that is in fact doing nothing at all.
+        # Keyed on presence, not truthiness: `advisory: []` is the shape the
+        # fixtures carried and `advisory: false` the shape areas.yaml did, so
+        # a truthiness check would wave through exactly the leftovers most
+        # likely to exist.
         spec = self._spec()
-        spec["advisory"] = [{"glob": "docs/", "owners": ["docs"]}]
+        spec["advisory"] = value
         with pytest.raises(SystemExit, match="advisory is no longer supported"):
+            compute_resolution(spec)
+
+    def test_legacy_advisory_on_shared_entry_is_rejected(self) -> None:
+        # shared: is where the migration message points, and it took the same
+        # {glob, owners} shape advisory did -- so pasting a block across is the
+        # natural move. Unguarded, the entry its author marked non-blocking
+        # becomes a blocking required approver.
+        spec = self._spec()
+        spec["shared"] = [
+            {"glob": "docs/design/", "owners": ["docs"], "advisory": True}
+        ]
+        with pytest.raises(SystemExit, match="stale 'advisory' key"):
             compute_resolution(spec)
 
     @pytest.mark.parametrize("flag", [True, False])
@@ -503,7 +522,6 @@ class TestEmissionIsTreeIndependent:
                 "keyword_rules": [],
                 "filetype_rules": [
                     {"pattern": "Dockerfile", "coowner": "ops"},
-                    {"pattern": "*.md", "coowner": "docs"},
                 ],
             },
         }

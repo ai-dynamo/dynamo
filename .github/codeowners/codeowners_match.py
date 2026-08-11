@@ -313,7 +313,11 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
     * ``shared``      -- passed through as declared.
-    * ``classify.filetype_rules`` -- each blocking rule becomes one stable
+    * ``advisory``    -- no longer supported. Every owner in CODEOWNERS blocks,
+      so a leftover ``advisory:`` block, an ``advisory`` key on a ``shared``
+      entry, or one on a filetype rule, is rejected rather than silently
+      ignored.
+    * ``classify.filetype_rules`` -- each rule becomes one stable
       row with the coowner as the sole owner (a single ``*Dockerfile*``
       line owns every Dockerfile at any depth unless a later explicit path
       override or shared rule applies).
@@ -345,10 +349,13 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     # actually doing nothing, and an ignored ``advisory`` key on a filetype
     # rule is worse still -- the rule would silently become a *blocking*
     # owner, the opposite of what its author asked for.
-    if spec.get("advisory"):
+    if "advisory" in spec:
         raise SystemExit(
             "areas.yaml: advisory is no longer supported; every owner in "
-            "CODEOWNERS blocks. Use shared entries, or drop the block"
+            "CODEOWNERS blocks. Drop the block, or move each entry to "
+            "shared: -- but list ALL intended owners there, since shared "
+            "rules are emitted last and win by last-match (a single-owner "
+            "shared entry REPLACES the current owner, it does not add one)"
         )
     advisory_filetype = [r for r in filetype_rules if "advisory" in r]
     if advisory_filetype:
@@ -359,6 +366,12 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         )
 
     spec_shared: list[SharedSpec] = spec.get("shared", []) or []
+    for s in spec_shared:
+        if "advisory" in s:
+            raise SystemExit(
+                f"areas.yaml: shared entry {s.get('glob')!r} carries a stale "
+                "'advisory' key; shared entries always block -- remove it"
+            )
 
     areas = [
         ResolvedArea(
@@ -369,7 +382,7 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         for a in raw_areas
     ]
 
-    # Blocking filetype rule -> one stable coowner-only row (bare pattern
+    # Filetype rule -> one stable coowner-only row (bare pattern
     # matches by basename at any depth per GitHub CODEOWNERS semantics).
     # The old "enclosing area + coowner" behavior required walking the
     # tree; if a specific subtree wants that co-ownership, declare it
