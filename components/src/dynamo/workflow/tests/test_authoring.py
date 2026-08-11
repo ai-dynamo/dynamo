@@ -87,15 +87,40 @@ def test_builds_fanout_workflow_from_declared_output_attributes():
     assert encoder_ref.to_dict() == {"stage": "encoder", "output": "embedding"}
 
 
-def test_json_is_deterministic_and_round_trips_unicode():
+def test_json_is_deterministic_and_round_trips() -> None:
     workflow = _workflow()
     encoded = workflow.to_json()
 
     assert encoded == workflow.to_json()
     assert WorkflowIR.from_json(encoded).to_dict() == workflow.to_dict()
-    assert WorkflowIR.from_json(
-        encoded.replace("vision-response", "视觉-workflow")
-    ).name == ("视觉-workflow")
+    assert (
+        WorkflowIR.from_json(encoded.replace("vision-response", "视觉-workflow")).name
+        == "视觉-workflow"
+    )
+
+
+def test_json_schema_keeps_complete_contracts_inline() -> None:
+    workflow = Workflow("echo-flow")
+    value = workflow.input("text", type="text")
+    echo = workflow.stage(
+        "echo",
+        StageContract(
+            id="echo-contract",
+            inputs={"text": ValueSpec(type="text")},
+            outputs={"text": ValueSpec(type="text")},
+        ),
+        text=value,
+    )
+    workflow.output("text", echo.text)
+
+    assert workflow.build().to_json() == (
+        '{"inputs":{"text":{"type":"text"}},"name":"echo-flow",'
+        '"outputs":{"text":{"output":"text","stage":"echo"}},'
+        '"schema":"dynamo.workflow.ir","stages":[{"contract":'
+        '{"id":"echo-contract","inputs":{"text":{"type":"text"}},'
+        '"outputs":{"text":{"type":"text"}}},"id":"echo",'
+        '"inputs":{"text":{"input":"text"}}}],"version":0}'
+    )
 
 
 def test_output_method_handles_attribute_collisions_and_invalid_names():
@@ -135,14 +160,22 @@ def test_contracts_are_deeply_immutable():
 @pytest.mark.parametrize(
     "spec",
     [
+        {"type": []},
         {"type": "meaning"},
         {"type": "text", "dtype": "float32"},
+        {"type": "tensor", "dtype": []},
         {"type": "tensor", "dtype": "fp8"},
+        {"type": "tensor", "shape": "dynamic"},
         {"type": "tensor", "shape": [-1, 4]},
+        {"type": "image", "mode": 123},
+        {"type": "image", "mode": float("nan")},
+        {"type": "image", "mode": "\ud800"},
         {"type": "object"},
+        {"type": "object", "class_id": 123},
+        {"type": "object", "class_id": "\ud800"},
     ],
 )
-def test_rejects_invalid_value_specs(spec):
+def test_rejects_invalid_value_specs(spec: dict[str, object]) -> None:
     with pytest.raises(WorkflowValidationError):
         ValueSpec.from_dict(spec)
 
@@ -187,6 +220,14 @@ def test_rejects_missing_inputs_and_conflicting_contract_ids():
         workflow.add_stage("second", conflicting, inputs={"value": first_stage.text})
 
 
+def test_parser_rejects_conflicting_inline_contracts() -> None:
+    data = _workflow().to_dict()
+    data["stages"][2]["contract"]["id"] = "classifier"
+
+    with pytest.raises(WorkflowValidationError, match="conflicting schemas"):
+        WorkflowIR.from_dict(data)
+
+
 def test_parser_rejects_unknown_fields_and_duplicate_json_keys():
     data = _workflow().to_dict()
     data["placement"] = {"gpu": 0}
@@ -194,6 +235,12 @@ def test_parser_rejects_unknown_fields_and_duplicate_json_keys():
         WorkflowIR.from_dict(data)
     with pytest.raises(WorkflowValidationError, match="duplicate JSON key"):
         WorkflowIR.from_json('{"schema":"one","schema":"two"}')
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_parser_rejects_non_finite_json_constants(constant: str) -> None:
+    with pytest.raises(WorkflowValidationError, match="non-finite JSON constant"):
+        WorkflowIR.from_json(_workflow().to_json().replace('"RGB"', constant))
 
 
 def test_parser_rejects_cycles_unreachable_and_dead_stages():
@@ -255,3 +302,12 @@ def test_parser_rejects_unknown_references_and_schema_version():
     malformed["stages"][0]["contract"]["outputs"]["embedding"]["extra"] = "x"
     with pytest.raises(WorkflowValidationError, match="unknown fields"):
         WorkflowIR.from_dict(malformed)
+
+
+@pytest.mark.parametrize("version", [False, 0.0])
+def test_parser_rejects_non_integer_version_zero(version: object) -> None:
+    data = _workflow().to_dict()
+    data["version"] = version
+
+    with pytest.raises(WorkflowValidationError, match="unsupported workflow version"):
+        WorkflowIR.from_dict(data)
