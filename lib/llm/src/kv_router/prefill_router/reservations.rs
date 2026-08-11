@@ -11,7 +11,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
     selector::WorkerSelector,
-    sequence::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION,
+    sequence::active_request_expiry_duration,
 };
 use parking_lot::Mutex;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -26,7 +26,6 @@ use crate::{
 };
 
 const PREFILL_SCHEDULER_ID_PREFIX: &str = "epp-prefill/";
-const ACTIVE_REQUEST_EXPIRY_ENV: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 const RESERVATION_EXPIRY_GRACE: Duration = Duration::from_secs(60);
 const CANCELLED_RESERVATION_RETENTION: Duration = Duration::from_secs(60);
 const RESERVATION_REAPER_INTERVAL: Duration = Duration::from_secs(30);
@@ -116,9 +115,10 @@ where
                     entry.remove();
                     BeginReservation::Cancelled
                 }
-                PrefillReservationEntry::Pending { .. } | PrefillReservationEntry::Active(_) => {
-                    BeginReservation::AlreadyExists
+                PrefillReservationEntry::Pending { cancellation } => {
+                    BeginReservation::Pending(cancellation.clone())
                 }
+                PrefillReservationEntry::Active(_) => BeginReservation::AlreadyExists,
             },
         }
     }
@@ -211,16 +211,12 @@ where
     }
 }
 
+fn reservation_retention_from_expiry(active_request_expiry: Duration) -> Duration {
+    active_request_expiry.saturating_add(RESERVATION_EXPIRY_GRACE)
+}
+
 fn reservation_retention() -> Duration {
-    let configured = std::env::var(ACTIVE_REQUEST_EXPIRY_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION);
-    configured
-        .max(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION)
-        .saturating_add(RESERVATION_EXPIRY_GRACE)
+    reservation_retention_from_expiry(active_request_expiry_duration())
 }
 
 fn scheduler_id(reservation_id: &str) -> String {
@@ -238,6 +234,37 @@ impl<Sel> PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    /// Register the pending state before potentially slow request preprocessing.
+    ///
+    /// Calling this repeatedly for the same in-flight booking is idempotent. A
+    /// cancellation that arrived first is observed here and never queues work.
+    pub fn begin_prefill_reservation(&self, reservation_id: &str) -> Result<()> {
+        if reservation_id.is_empty() {
+            anyhow::bail!("prefill reservation ID must not be empty");
+        }
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+        if self.binding.load_full().is_none() {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+
+        match self.reservations.begin(reservation_id) {
+            BeginReservation::Pending(_) => Ok(()),
+            BeginReservation::Cancelled => {
+                anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
+            }
+            BeginReservation::AlreadyExists => {
+                anyhow::bail!("prefill reservation {reservation_id:?} already exists")
+            }
+        }
+    }
+
+    /// Drop a pending reservation when preprocessing fails before scheduler admission.
+    pub fn abort_prefill_reservation(&self, reservation_id: &str) {
+        self.reservations.remove_pending(reservation_id);
+    }
+
     /// Atomically select and reserve a prefill worker for an externally dispatched request.
     ///
     /// The scheduler observes the booking before selecting the next request. The caller owns
@@ -258,19 +285,6 @@ where
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
-            return Err(anyhow::anyhow!(PrefillError::NotActivated));
-        }
-        let binding = self
-            .binding
-            .load_full()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
-
-        let InnerPrefillRouter::KvRouter(router) = &binding.router else {
-            return Err(anyhow::anyhow!(PrefillError::NotActivated));
-        };
-        let chooser = router.chooser.clone();
-        let scheduler_id = scheduler_id(reservation_id);
         let cancellation = match self.reservations.begin(reservation_id) {
             BeginReservation::Pending(cancellation) => cancellation,
             BeginReservation::Cancelled => {
@@ -280,6 +294,21 @@ where
                 anyhow::bail!("prefill reservation {reservation_id:?} already exists")
             }
         };
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            self.reservations.remove_pending(reservation_id);
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+        let Some(binding) = self.binding.load_full() else {
+            self.reservations.remove_pending(reservation_id);
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        };
+
+        let InnerPrefillRouter::KvRouter(router) = &binding.router else {
+            self.reservations.remove_pending(reservation_id);
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        };
+        let chooser = router.chooser.clone();
+        let scheduler_id = scheduler_id(reservation_id);
 
         let outcome = tokio::select! {
             biased;
@@ -620,6 +649,38 @@ mod tests {
             registry.begin("reservation-1"),
             BeginReservation::Pending(_)
         ));
+    }
+
+    #[test]
+    fn reservation_retention_preserves_short_and_long_expiry_overrides() {
+        assert_eq!(
+            reservation_retention_from_expiry(Duration::from_secs(30)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            reservation_retention_from_expiry(Duration::from_secs(3600)),
+            Duration::from_secs(3660)
+        );
+    }
+
+    #[test]
+    fn pre_registered_pending_reservation_survives_tombstone_reaping() {
+        let registry = PrefillReservationRegistry::<DefaultWorkerSelector>::default();
+        let BeginReservation::Pending(cancellation) = registry.begin("reservation-1") else {
+            panic!("expected pending reservation");
+        };
+
+        registry.cancel("reservation-1");
+        registry.remove_expired_cancellations(
+            Instant::now() + CANCELLED_RESERVATION_RETENTION + Duration::from_secs(1),
+            CANCELLED_RESERVATION_RETENTION,
+        );
+
+        assert!(cancellation.is_cancelled());
+        let BeginReservation::Pending(existing) = registry.begin("reservation-1") else {
+            panic!("expected pending reservation to remain registered");
+        };
+        assert!(existing.is_cancelled());
     }
 
     #[test]

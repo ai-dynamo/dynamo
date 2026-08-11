@@ -67,6 +67,9 @@ query_router_result_t create_routers(const char *namespace_c_str,
                                      bool enforce_disagg,
                                      RouterHandles **out_handle);
 
+query_router_result_t begin_prefill_reservation(RouterHandles *handle,
+                                               const char *reservation_id);
+
 query_router_result_t route_prefill_request_with_reservation(RouterHandles *handle,
                                                              const char *reservation_id,
                                                              const char *request_json,
@@ -442,6 +445,34 @@ func extractCacheNamespace(result *C.CRoutingResult) string {
 		return string(unsafe.Slice((*byte)(unsafe.Pointer(result.cache_namespace)), count))
 	}
 	return ""
+}
+
+// CallBeginPrefillReservation records a pending booking before the blocking
+// route call performs request preprocessing. It is fast and safe to call before
+// starting the reservation goroutine.
+func CallBeginPrefillReservation(reservationID string) error {
+	if reservationID == "" {
+		return fmt.Errorf("prefill reservation ID is required")
+	}
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+
+	rc := C.begin_prefill_reservation(router, cReservationID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("begin_prefill_reservation failed with code %d", rc)
+	}
+	return nil
 }
 
 // CallRoutePrefillRequestWithReservation atomically selects and books a prefill worker.
