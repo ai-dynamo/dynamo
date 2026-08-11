@@ -3076,7 +3076,6 @@ async fn responses(
         prompt_cache_key: request.inner.prompt_cache_key.clone(),
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
-        function_namespaces: Default::default(),
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();

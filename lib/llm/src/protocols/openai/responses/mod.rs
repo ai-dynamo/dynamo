@@ -3,7 +3,7 @@
 
 pub mod stream_converter;
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
@@ -1013,7 +1013,6 @@ pub struct ResponseParams {
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub safety_identifier: Option<String>,
-    pub(crate) function_namespaces: OnceLock<HashMap<String, Option<String>>>,
 }
 
 impl ResponseParams {
@@ -1025,38 +1024,28 @@ impl ResponseParams {
     }
 
     fn namespace_for_function(&self, name: &str) -> Option<String> {
-        self.function_namespaces
-            .get_or_init(|| {
-                let mut origins = HashMap::new();
-                for tool in self.tools.as_deref().unwrap_or_default() {
-                    match tool {
-                        Tool::Function(function) => {
-                            origins.insert(function.name.clone(), None);
-                        }
-                        Tool::Namespace(namespace) => {
-                            for tool in &namespace.tools {
-                                let NamespaceToolParamTool::Function(function) = tool else {
-                                    continue;
-                                };
-                                let origin = Some(namespace.name.clone());
-                                origins
-                                    .entry(function.name.clone())
-                                    .and_modify(|previous| {
-                                        if previous != &origin {
-                                            *previous = None;
-                                        }
-                                    })
-                                    .or_insert(origin);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                origins
-            })
-            .get(name)
-            .cloned()
-            .flatten()
+        let tools = self.tools.as_deref()?;
+        if tools
+            .iter()
+            .any(|tool| matches!(tool, Tool::Function(function) if function.name == name))
+        {
+            return None;
+        }
+
+        let mut namespaces = tools.iter().filter_map(|tool| {
+            let Tool::Namespace(namespace) = tool else {
+                return None;
+            };
+            namespace
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, NamespaceToolParamTool::Function(function) if function.name == name))
+                .then_some(namespace.name.as_str())
+        });
+        let namespace = namespaces.next()?;
+        namespaces
+            .all(|other_namespace| other_namespace == namespace)
+            .then(|| namespace.to_owned())
     }
 }
 
@@ -2834,14 +2823,11 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(params.function_namespaces.get().is_none());
-
         let response = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
             panic!("expected function call");
         };
         assert_eq!(call.namespace.as_deref(), Some("agents"));
-        assert!(params.function_namespaces.get().is_some());
     }
 
     #[test]

@@ -12,8 +12,8 @@ sequentially against one server:
    validator against zod schemas generated from the OpenAPI spec).
 2. `codex exec` smoke — forces the shell tool-call path through
    `/v1/responses`.
-3. Codex child-header check — sends explicit thread lineage through
-   `/v1/responses` and requires the exact trace context.
+3. `codex exec` subagent smoke — requires a real Codex child request through
+   `/v1/responses`.
 4. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
 5. `opencode run --command ...` smoke — forces an OpenCode subtask request
@@ -52,6 +52,7 @@ from tests.frontend.agent_smoke_inputs import (
     LIST_DIRECTORY_PROMPT,
     claude_subagent_definition,
     claude_subagent_prompt,
+    codex_subagent_prompt,
     write_codex_config,
     write_opencode_config,
 )
@@ -464,11 +465,10 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + Codex child-header check (up to 35s) + claude exec
-# (up to 180s) + optional Claude subagent probe (up to 45s) + opencode run (up
-# to 180s) + inter-suite health checks + teardown. 975s leaves 55s of headroom
-# beyond the listed ceilings without masking real hangs.
-@pytest.mark.timeout(975)
+# codex exec (up to 180s) + Codex child process (up to 210s) + claude
+# exec (up to 180s) + optional Claude subagent probe (up to 45s) + opencode run
+# (up to 180s) + inter-suite health checks + teardown.
+@pytest.mark.timeout(1095)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
 @pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
@@ -578,7 +578,16 @@ def test_frontend_api_surface_compliance(
         )
         _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
         _wait_for_frontend_healthy(frontend_port)
-        _run_codex_parent_header_check(frontend_port, request_trace_path)
+        codex_subagent_trace_start = _request_trace_line_count(request_trace_path)
+        write_codex_config(codex_home, frontend_port, enable_multi_agent=True)
+        _run_codex_subagent_smoke(
+            _codex_cli,
+            _node_bin,
+            codex_home,
+            agent_cwd,
+            request_trace_path,
+            codex_subagent_trace_start,
+        )
         _wait_for_frontend_healthy(frontend_port)
         claude_trace_start = _request_trace_line_count(request_trace_path)
         _run_claude_exec_smoke(
@@ -725,15 +734,13 @@ def _request_trace_line_count(path: Path) -> int:
     return len(_read_request_trace_lines(path))
 
 
-def _read_request_trace_records(path: Path) -> list[dict]:
-    return _parse_request_trace_records(_read_request_trace_lines(path))
-
-
 def _read_request_trace_records_since(path: Path, start_index: int) -> list[dict]:
     return _parse_request_trace_records(_read_request_trace_lines(path)[start_index:])
 
 
 @pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
 def test_request_trace_cursor_excludes_a_partial_prior_line(tmp_path: Path) -> None:
@@ -747,21 +754,38 @@ def test_request_trace_cursor_excludes_a_partial_prior_line(tmp_path: Path) -> N
     ]
 
 
+@pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_parent_context_requires_observed_parent_session() -> None:
+    records = [
+        {
+            "agent_context": {
+                "session_id": "child",
+                "parent_session_id": "unrelated",
+            }
+        }
+    ]
+    assert not _trace_contains_agent_parent_context(records)
+
+    records.insert(0, {"agent_context": {"session_id": "root"}})
+    records[1]["agent_context"]["parent_session_id"] = "root"
+    assert _trace_contains_agent_parent_context(records)
+
+
 def _assert_agent_context_in_trace(
     trace_path: Path,
     source_label: str,
     start_index: int,
     timeout_s: float = 30.0,
-    expected_session_id: str | None = None,
-    expected_parent_session_id: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
         last_records = _read_request_trace_records_since(trace_path, start_index)
-        if _trace_contains_agent_context(
-            last_records, expected_session_id, expected_parent_session_id
-        ):
+        if _trace_contains_agent_context(last_records):
             return
         time.sleep(0.2)
 
@@ -798,11 +822,7 @@ def _assert_agent_parent_context_in_trace(
     )
 
 
-def _trace_contains_agent_context(
-    records: list[dict],
-    expected_session_id: str | None = None,
-    expected_parent_session_id: str | None = None,
-) -> bool:
+def _trace_contains_agent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
@@ -811,18 +831,17 @@ def _trace_contains_agent_context(
         session_id = agent_context.get("session_id")
         if not session_id:
             continue
-        if expected_session_id is not None and session_id != expected_session_id:
-            continue
-        if (
-            expected_parent_session_id is not None
-            and agent_context.get("parent_session_id") != expected_parent_session_id
-        ):
-            continue
         return True
     return False
 
 
 def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
+    session_ids = {
+        agent_context["session_id"]
+        for record in records
+        if (agent_context := record.get("agent_context"))
+        and agent_context.get("session_id")
+    }
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
@@ -834,7 +853,7 @@ def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
         session_id = agent_context.get("session_id")
         if not session_id:
             continue
-        if parent_session_id == session_id:
+        if parent_session_id == session_id or parent_session_id not in session_ids:
             continue
         return True
     return False
@@ -975,33 +994,53 @@ def _run_codex_exec_smoke(
         )
 
 
-def _run_codex_parent_header_check(frontend_port: int, trace_path: Path) -> None:
-    """Send explicit Codex child headers and require their exact trace values."""
-    child_id = f"codex-child-{uuid.uuid4().hex}"
-    parent_id = f"codex-parent-{uuid.uuid4().hex}"
-    trace_start = _request_trace_line_count(trace_path)
-    response = requests.post(
-        f"http://localhost:{frontend_port}/v1/responses",
-        headers={
-            "Authorization": "Bearer sk-none",
-            "thread-id": child_id,
-            "x-codex-parent-thread-id": parent_id,
-        },
-        json={
-            "model": COMPLIANCE_MODEL,
-            "input": "Reply OK.",
-            "max_output_tokens": 1,
-        },
-        timeout=30,
+def _run_codex_subagent_smoke(
+    codex_cli: Path,
+    node_bin: Path,
+    codex_home: Path,
+    cwd: Path,
+    request_trace_path: Path,
+    trace_start_index: int,
+) -> None:
+    """Run a Codex subagent and require its emitted parent context."""
+    logger.info("Running Codex subagent smoke test against CODEX_HOME=%s", codex_home)
+    extra_env = {
+        "CODEX_HOME": str(codex_home),
+        "HOME": str(codex_home),
+        "LOCAL_API_KEY": "sk-none",
+    }
+    cmd = [
+        str(codex_cli),
+        "-m",
+        COMPLIANCE_MODEL,
+        "-c",
+        "model_provider=local",
+        "exec",
+        codex_subagent_prompt(),
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+    result = subprocess.run(
+        cmd,
+        env=_agent_subprocess_env(extra_env, path_prepend=[node_bin]),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
-    response.raise_for_status()
-    _assert_agent_context_in_trace(
-        trace_path,
-        "codex child headers",
-        trace_start,
-        timeout_s=5,
-        expected_session_id=child_id,
-        expected_parent_session_id=parent_id,
+    _attach_subprocess_log(
+        name="codex_subagent_smoke.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"codex subagent smoke failed (exit={result.returncode}).\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        )
+    _assert_agent_parent_context_in_trace(
+        request_trace_path, "codex subagent", trace_start_index
     )
 
 
