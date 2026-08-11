@@ -12,7 +12,8 @@ use crate::scheduling::types::SessionContext;
 pub struct PolicyQueueId(u64);
 
 impl PolicyQueueId {
-    pub(crate) fn new(value: u64) -> Self {
+    /// Create an identity for testing a queue policy outside the scheduler host.
+    pub fn new(value: u64) -> Self {
         Self(value)
     }
 
@@ -30,11 +31,8 @@ pub struct PolicyQueueWorker {
 }
 
 impl PolicyQueueWorker {
-    pub(crate) fn new(
-        worker: WorkerWithDpRank,
-        capacity_tokens: Option<usize>,
-        available: bool,
-    ) -> Self {
+    /// Create a worker snapshot for testing a queue policy outside the scheduler host.
+    pub fn new(worker: WorkerWithDpRank, capacity_tokens: Option<usize>, available: bool) -> Self {
         Self {
             worker,
             capacity_tokens,
