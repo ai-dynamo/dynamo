@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::common::extensions::AgentContext;
+use crate::protocols::common::extensions::{AgentCompaction, AgentContext, InputTrigger, KvHints};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
@@ -19,13 +19,41 @@ pub struct RequestTraceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_source: Option<RequestTraceEventSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_context: Option<AgentContext>,
+    pub agent_context: Option<RequestTraceAgentContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<RequestTraceMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<RequestTraceToolEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<RequestTracePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestTraceAgentContext {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_final: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AgentCompaction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<KvHints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_trigger: Option<InputTrigger>,
+}
+
+impl RequestTraceAgentContext {
+    pub(crate) fn new(agent_context: AgentContext, compaction: Option<AgentCompaction>) -> Self {
+        Self {
+            session_id: agent_context.session_id,
+            parent_session_id: agent_context.parent_session_id,
+            session_final: agent_context.session_final,
+            compaction,
+            kv_hints: agent_context.kv_hints,
+            input_trigger: agent_context.input_trigger,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,7 +306,7 @@ impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
             event_type: ingress.event_type,
             event_time_unix_ms: ingress.event_time_unix_ms,
             event_source: Some(RequestTraceEventSource::Harness),
-            agent_context: Some(AgentContext {
+            agent_context: Some(RequestTraceAgentContext {
                 session_id: ingress.session_id,
                 parent_session_id: ingress.parent_session_id,
                 session_final: None,

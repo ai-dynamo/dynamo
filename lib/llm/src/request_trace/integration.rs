@@ -210,7 +210,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::protocols::common::extensions::{AgentCompaction, AgentContext, InputTrigger};
+    use crate::protocols::common::extensions::{
+        AgentCompaction, AgentContext, CODEX_COMPACTION_CONTEXT_KEY, InputTrigger,
+    };
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
@@ -363,36 +365,37 @@ mod tests {
         let mut receiver = BUS.subscribe();
         let tracker = Arc::new(RequestTracker::new());
         let dropped = Arc::new(AtomicBool::new(false));
-        let state = RequestEndTraceState {
-            agent: Some(AgentContextTraceState {
-                agent_context: AgentContext {
-                    session_id: "root".to_string(),
-                    parent_session_id: None,
-                    session_final: None,
-                    compaction: Some(AgentCompaction {
-                        trigger: Some("manual".to_string()),
-                        reason: Some("user_requested".to_string()),
-                        implementation: Some("responses_compact".to_string()),
-                        phase: Some("standalone_turn".to_string()),
-                        strategy: Some("memento".to_string()),
-                    }),
-                    kv_hints: None,
-                    input_trigger: Some(InputTrigger::ToolResult),
-                },
-                request_model: "test-model".to_string(),
-                request_tracker: Some(tracker.clone()),
-                x_request_id: Some("llm-call-1".to_string()),
-                finish_reason_metadata: SharedFinishReasonMetadata::default(),
-            }),
-            request: RequestTraceRequestEndState {
-                request_tracker: tracker.clone(),
-                replay_metrics: Arc::new(RequestReplayMetrics {
-                    trace_block_size: 2,
-                    input_length: 2,
-                    input_sequence_hashes: vec![11],
-                }),
+        let mut request = preprocessed_request(SamplingOptions::default());
+        request.agent_context = Some(AgentContext {
+            session_id: "root".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            kv_hints: None,
+            input_trigger: Some(InputTrigger::ToolResult),
+        });
+        let mut context = Context::new(());
+        context.insert(
+            CODEX_COMPACTION_CONTEXT_KEY,
+            AgentCompaction {
+                trigger: Some("manual".to_string()),
+                reason: Some("user_requested".to_string()),
+                implementation: Some("responses_compact".to_string()),
+                phase: Some("standalone_turn".to_string()),
+                strategy: Some("memento".to_string()),
             },
-        };
+        );
+        context.insert(
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+            "llm-call-1".to_string(),
+        );
+        let state = build_request_end_trace_state_for_policy(
+            &request,
+            &Some(tracker.clone()),
+            &context,
+            2,
+            true,
+        )
+        .unwrap();
         let stream = TrackerDropStream {
             tracker,
             dropped: dropped.clone(),
@@ -438,7 +441,7 @@ mod tests {
                 .as_ref()
                 .expect("replay metrics")
                 .input_length,
-            2
+            3
         );
     }
 
@@ -452,7 +455,6 @@ mod tests {
             session_id: "root".to_string(),
             parent_session_id: None,
             session_final: None,
-            compaction: None,
             kv_hints: None,
             input_trigger: None,
         });

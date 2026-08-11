@@ -15,15 +15,16 @@ use parking_lot::Mutex;
 
 use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
-use crate::protocols::common::extensions::AgentContext;
+use crate::protocols::common::extensions::{AgentCompaction, CODEX_COMPACTION_CONTEXT_KEY};
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 use crate::request_trace::{
-    DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics, RequestTraceMetrics,
-    RequestTraceWorkerInfo, ToolCallMetadata, tool_relay::ToolEventRelay,
+    DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics,
+    RequestTraceAgentContext, RequestTraceMetrics, RequestTraceWorkerInfo, ToolCallMetadata,
+    tool_relay::ToolEventRelay,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -234,7 +235,7 @@ pub(crate) fn request_metrics(
 
 #[derive(Clone)]
 pub(crate) struct AgentContextTraceState {
-    pub agent_context: AgentContext,
+    pub agent_context: RequestTraceAgentContext,
     pub request_model: String,
     pub request_tracker: Option<Arc<RequestTracker>>,
     pub x_request_id: Option<String>,
@@ -246,7 +247,12 @@ pub(crate) fn build_agent_context_trace_state(
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
 ) -> Option<AgentContextTraceState> {
-    let agent_context = common_request.agent_context.clone()?;
+    let compaction = context
+        .get::<AgentCompaction>(CODEX_COMPACTION_CONTEXT_KEY)
+        .ok()
+        .map(|compaction| compaction.as_ref().clone());
+    let agent_context =
+        RequestTraceAgentContext::new(common_request.agent_context.clone()?, compaction);
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
         .and_then(|c| c.x_request_id)
         .or_else(|| {
@@ -357,7 +363,7 @@ fn snapshot_finish_reason_metadata(
 pub(crate) fn request_metrics_from_agent_state(
     trace_state: AgentContextTraceState,
     request_id: String,
-) -> (AgentContext, RequestTraceMetrics) {
+) -> (RequestTraceAgentContext, RequestTraceMetrics) {
     let AgentContextTraceState {
         agent_context,
         request_model,
@@ -523,7 +529,6 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 mod tests {
     use std::{thread, time::Duration};
 
-    use crate::protocols::common::extensions::AgentContext;
     use crate::protocols::common::{
         self,
         timing::{RequestTracker, WORKER_TYPE_DECODE},
@@ -544,6 +549,7 @@ mod tests {
         record_chat_finish_reason_metadata, record_completion_finish_reason_metadata,
         request_metrics, request_metrics_from_agent_state,
     };
+    use crate::request_trace::RequestTraceAgentContext;
 
     #[test]
     fn test_request_metrics_from_tracker() {
@@ -631,7 +637,7 @@ mod tests {
         );
 
         let trace_state = AgentContextTraceState {
-            agent_context: AgentContext {
+            agent_context: RequestTraceAgentContext {
                 session_id: "run-finish:agent".to_string(),
                 parent_session_id: None,
                 session_final: None,
@@ -750,7 +756,7 @@ mod tests {
         );
 
         let trace_state = AgentContextTraceState {
-            agent_context: AgentContext {
+            agent_context: RequestTraceAgentContext {
                 session_id: "run-completion-finish:agent".to_string(),
                 parent_session_id: None,
                 session_final: None,

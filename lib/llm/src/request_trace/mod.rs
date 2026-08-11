@@ -41,9 +41,9 @@ pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
-    RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,
-    RequestTraceRecord, RequestTraceSchema, RequestTraceToolEvent, RequestTraceToolEventIngress,
-    RequestTraceToolStatus, RequestTraceWorkerInfo, ToolCallMetadata,
+    RequestTraceAgentContext, RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics,
+    RequestTracePayload, RequestTraceRecord, RequestTraceSchema, RequestTraceToolEvent,
+    RequestTraceToolEventIngress, RequestTraceToolStatus, RequestTraceWorkerInfo, ToolCallMetadata,
 };
 
 static BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();

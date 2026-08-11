@@ -4,9 +4,9 @@
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::timing::RequestTracker;
 use crate::request_trace::RequestReplayMetrics;
+use crate::request_trace::RequestTraceAgentContext;
 use crate::request_trace::RequestTraceEventSource;
 use crate::request_trace::RequestTracePayload;
 
@@ -95,7 +95,7 @@ pub(crate) fn emit_request_end(
 }
 
 pub(crate) fn emit_agent_request_end(
-    agent_context: AgentContext,
+    agent_context: RequestTraceAgentContext,
     mut request: RequestTraceMetrics,
 ) {
     sanitize_request(&mut request);
@@ -236,7 +236,7 @@ mod tests {
             event_type: RequestTraceEventType::ToolEnd,
             event_time_unix_ms: 2_000,
             event_source: Some(RequestTraceEventSource::Harness),
-            agent_context: Some(AgentContext {
+            agent_context: Some(RequestTraceAgentContext {
                 session_id: "root".to_string(),
                 parent_session_id: None,
                 session_final: None,

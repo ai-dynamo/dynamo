@@ -70,7 +70,6 @@ fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
-    let compaction = codex_compaction_header_value(headers);
 
     if let Some(session_id) = header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
@@ -78,7 +77,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
                 .filter(|parent_session_id| parent_session_id != &session_id),
             session_id,
             session_final,
-            compaction,
+            compaction: None,
         });
     }
 
@@ -101,6 +100,9 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
                 (mapping.infer_parent_from_session_for_child && session_id != root_session_id)
                     .then(|| root_session_id.clone())
             });
+        let compaction = (mapping.root_session_header == HEADER_CODEX_THREAD_ID)
+            .then(|| codex_compaction_header_value(headers))
+            .flatten();
 
         return Some(AgentContextHeaderValues {
             session_id,
