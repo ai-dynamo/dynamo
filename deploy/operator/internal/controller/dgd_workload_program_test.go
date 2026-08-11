@@ -29,7 +29,6 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -92,14 +91,6 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, grove.scalingAdapters)
 				assert.NotNil(t, grove.topology)
 			}
-			t.Log("Verify the DisaggregatedSet program dependencies")
-			if ds, ok := got.(*disaggregatedSetProgram); ok {
-				assert.NotNil(t, ds.sharedResources)
-				assert.NotNil(t, ds.rollout)
-				assert.NotNil(t, ds.restart)
-				assert.NotNil(t, ds.workloads)
-				assert.NotNil(t, ds.scalingAdapters)
-			}
 		})
 	}
 }
@@ -146,49 +137,21 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
 }
 
-func TestComponentFallbackPreservesEligibilityConditionOnError(t *testing.T) {
-	reconcileErr := errors.New("worker hash update failed")
-	dgd := newEnvtestDSHappyPathDGD("fallback-error")
-	dgd.Namespace = testNamespace
+func TestDisaggregatedSetUnsupportedIntentIsSticky(t *testing.T) {
+	dgd := newEnvtestDSHappyPathDGD("unsupported-intent")
 	dgd.Generation = 7
-	hashes, err := desiredWorkerHashes(dgd)
-	require.NoError(t, err)
-	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-	require.NoError(t, err)
-	require.NotEqual(t, legacyHash, hashes.v2)
-	dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] = legacyHash
-
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-		WithObjects(dgd).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
-				return reconcileErr
-			},
-		}).
-		Build()
-	operatorConfig := &configv1alpha1.OperatorConfiguration{}
-	operatorConfig.Namespace.Restricted = dgd.Namespace
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client:      kubeClient,
-		Recorder:    record.NewFakeRecorder(10),
-		Config:      operatorConfig,
-		RBACManager: &MockRBACManager{},
-		RuntimeConfig: &commonController.RuntimeConfig{
-			Gate: features.Gates{LWS: true},
-		},
-	}
-	program := reconciler.newComponentProgram()
-	program.disaggregatedSetFallbackReason = "DisaggregatedSet workload pathway is disabled"
+	program := &disaggregatedSetProgram{unsupportedReason: "component uses scalingAdapter"}
 
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
-	require.ErrorIs(t, err, reconcileErr)
+	require.NoError(t, err)
 	condition := meta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, "FallbackToComponentProgram", condition.Reason)
+	assert.Equal(t, "UnsupportedIntent", condition.Reason)
 	assert.Equal(t, int64(7), condition.ObservedGeneration)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	assert.Equal(t, int64(7), result.Status.ObservedGeneration)
+	assert.Contains(t, meta.FindStatusCondition(result.Status.Conditions, "Ready").Message, "scalingAdapter")
 	assert.Len(t, result.Events, 1)
 }
 

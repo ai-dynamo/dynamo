@@ -573,6 +573,22 @@ func isDisaggregatedSetServiceSelector(service *corev1.Service) bool {
 		service.Spec.Selector[disaggregatedsetv1.RevisionLabelKey] != ""
 }
 
+func setDesiredDisaggregatedSetServiceSelector(
+	service *corev1.Service,
+	existingService *corev1.Service,
+	hasExistingService bool,
+	setName string,
+	roleName string,
+	revision string,
+	targetReady bool,
+) {
+	if targetReady || !hasExistingService {
+		setDisaggregatedSetServiceSelector(service, setName, roleName, revision)
+		return
+	}
+	service.Spec.Selector = maps.Clone(existingService.Spec.Selector)
+}
+
 // buildDisaggregatedSetRole reuses the shared DCD workload renderer.
 func (r *disaggregatedSetWorkloadsReconciler) buildDisaggregatedSetRole(
 	ctx context.Context,
@@ -641,13 +657,15 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResou
 			if err != nil || deleted || targetRevision == "" {
 				return service, deleted, err
 			}
-			if targetReady {
-				setDisaggregatedSetServiceSelector(service, disaggregatedSetName(dgd), selection.componentToRole[componentName], targetRevision)
-			} else if existingServiceErr == nil && isDisaggregatedSetServiceSelector(existingService) {
-				service.Spec.Selector = maps.Clone(existingService.Spec.Selector)
-			} else {
-				setDisaggregatedSetServiceSelector(service, disaggregatedSetName(dgd), selection.componentToRole[componentName], targetRevision)
-			}
+			setDesiredDisaggregatedSetServiceSelector(
+				service,
+				existingService,
+				existingServiceErr == nil,
+				disaggregatedSetName(dgd),
+				selection.componentToRole[componentName],
+				targetRevision,
+				targetReady,
+			)
 			return service, false, nil
 		})
 		if err != nil {
@@ -904,7 +922,7 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteDisaggregatedSetIfExists(
 ) error {
 	ds := newDisaggregatedSetObject()
 	key := types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}
-	if err := r.Get(ctx, key, ds); err != nil {
+	if err := r.reader.Get(ctx, key, ds); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -1029,7 +1047,7 @@ func (r *disaggregatedSetWorkloadsReconciler) restoreDisaggregatedSetServiceOwne
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
 	ds := newDisaggregatedSetObject()
-	if err := r.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds); err != nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -1285,11 +1303,6 @@ func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	ds *unstructured.Unstructured,
 	selection disaggregatedSetSelection,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
-	if len(disaggregatedSetRoleStatuses(ds)) > 0 && disaggregatedSetStatusHasObservation(ds) {
-		ready, reason, statuses := checkDisaggregatedSetReadiness(ds, selection)
-		return ready, reason, statuses, nil
-	}
-
 	children := &leaderworkersetv1.LeaderWorkerSetList{}
 	if err := r.List(ctx, children, client.InNamespace(ds.GetNamespace()), client.MatchingLabels{
 		disaggregatedsetv1.SetNameLabelKey: ds.GetName(),
@@ -1313,6 +1326,16 @@ func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 			continue
 		}
 		targetByRole[roleName] = child
+	}
+	if len(disaggregatedSetRoleStatuses(ds)) > 0 && disaggregatedSetStatusHasObservation(ds) {
+		ready, reason, statuses := checkDisaggregatedSetReadiness(ds, selection)
+		if !ready {
+			return ready, reason, statuses, nil
+		}
+		if reasons := removedDisaggregatedSetChildLWSNotReadyReasons(selection, childrenByRole); len(reasons) > 0 {
+			return false, strings.Join(reasons, "; "), statuses, nil
+		}
+		return true, reason, statuses, nil
 	}
 	ready, reason, statuses := checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
 	return ready, reason, statuses, nil
@@ -1366,11 +1389,45 @@ func checkDisaggregatedSetChildLWSReadiness(
 			}
 		}
 	}
+
+	notReadyReasons = append(notReadyReasons, removedDisaggregatedSetChildLWSNotReadyReasons(selection, childrenByRole)...)
 	if len(notReadyReasons) > 0 {
 		sort.Strings(notReadyReasons)
 		return false, strings.Join(notReadyReasons, "; "), statuses
 	}
 	return true, "All DisaggregatedSet child LeaderWorkerSets are ready", statuses
+}
+
+func removedDisaggregatedSetChildLWSNotReadyReasons(
+	selection disaggregatedSetSelection,
+	childrenByRole map[string][]*leaderworkersetv1.LeaderWorkerSet,
+) []string {
+	targetRoles := make(map[string]struct{}, len(selection.componentToRole))
+	for _, roleName := range selection.componentToRole {
+		targetRoles[roleName] = struct{}{}
+	}
+	notReadyReasons := []string{}
+	for roleName, children := range childrenByRole {
+		if _, selected := targetRoles[roleName]; selected {
+			continue
+		}
+		sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
+		for _, child := range children {
+			if ptr.Deref(child.Spec.Replicas, 1) == 0 &&
+				child.Status.Replicas == 0 &&
+				child.Status.UpdatedReplicas == 0 &&
+				child.Status.ReadyReplicas == 0 {
+				continue
+			}
+			notReadyReasons = append(notReadyReasons, fmt.Sprintf(
+				"removed role %q child LeaderWorkerSet %q has not scaled to zero",
+				roleName,
+				child.Name,
+			))
+		}
+	}
+	sort.Strings(notReadyReasons)
+	return notReadyReasons
 }
 
 func disaggregatedSetStatusObserved(ds *unstructured.Unstructured) (bool, string) {

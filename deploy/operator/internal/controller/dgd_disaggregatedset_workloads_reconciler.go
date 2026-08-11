@@ -32,6 +32,7 @@ import (
 
 type disaggregatedSetWorkloadsReconciler struct {
 	client.Client
+	reader                   client.Reader
 	Config                   *configv1alpha1.OperatorConfiguration
 	RuntimeConfig            *commoncontroller.RuntimeConfig
 	Recorder                 record.EventRecorder
@@ -51,7 +52,7 @@ type disaggregatedSetCompatibilityCleanup struct {
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
-	return newDisaggregatedSetWorkloadsReconciler(
+	workloads := newDisaggregatedSetWorkloadsReconciler(
 		r.Client,
 		r.Recorder,
 		r.Config,
@@ -59,6 +60,10 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler
 		r.DockerSecretRetriever,
 		rollout,
 	)
+	if r.APIReader != nil {
+		workloads.reader = r.APIReader
+	}
+	return workloads
 }
 
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetCompatibilityCleanup(
@@ -99,6 +104,7 @@ func newDisaggregatedSetWorkloadsReconciler(
 	componentWorkloads := newComponentWorkloadsReconciler(k8sClient, recorder, rollout)
 	return &disaggregatedSetWorkloadsReconciler{
 		Client:                   k8sClient,
+		reader:                   k8sClient,
 		Config:                   config,
 		RuntimeConfig:            runtimeConfig,
 		Recorder:                 recorder,

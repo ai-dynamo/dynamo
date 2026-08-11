@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -141,7 +142,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
 		legacyDCDs := ownedEnvtestCutoverDCDs(ctx, current)
 		Expect(legacyDCDs).To(HaveLen(2))
-		serviceUIDs := createComponentServices(ctx, dcdReconciler, legacyDCDs)
+		serviceUIDs := createComponentServices(ctx, dcdReconciler, legacyDCDs, false)
 
 		By("enabling DisaggregatedSet and keeping DCD services while DS is pending")
 		markEnvtestCutoverDCDsReady(ctx, current)
@@ -213,8 +214,14 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			Expect(owner).NotTo(BeNil())
 			Expect(owner.Kind).To(Equal(dynamoGraphDeploymentKind))
 		}
-		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs)
+		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs, false)
+		for name := range serviceUIDs {
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
+			Expect(isDisaggregatedSetServiceSelector(service)).To(BeTrue(), "pending DCDs must not take traffic from the ready DisaggregatedSet")
+		}
 		markEnvtestCutoverDCDsReady(ctx, current)
+		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs, true)
 
 		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
@@ -226,6 +233,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			fallbackDCDNames[dcd.Name] = struct{}{}
 			service := &corev1.Service{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dynamo.NormalizeKubeResourceName(dcd.Name), Namespace: current.Namespace}, service)).To(Succeed())
+			Expect(isDisaggregatedSetServiceSelector(service)).To(BeFalse(), "ready DCDs must take over the Service before the DisaggregatedSet is deleted")
 			owner := metav1.GetControllerOf(service)
 			Expect(owner).NotTo(BeNil())
 			Expect(owner.Kind).To(Equal("DynamoComponentDeployment"))
@@ -273,7 +281,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 
 		replacementDCDs := ownedEnvtestCutoverDCDs(ctx, current)
 		Expect(replacementDCDs).To(HaveLen(2))
-		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs)
+		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs, false)
 
 		modelServiceName := dynamo.GenerateServiceName("shared-missing-model")
 		modelService := &corev1.Service{}
@@ -301,7 +309,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(replacementDCDNames).To(HaveKey(modelOwner.Name))
 	})
 
-	It("keeps the DisaggregatedSet until fallback workloads are ready", func() {
+	It("keeps the selected DisaggregatedSet when later intent is unsupported", func() {
 		ctx := context.Background()
 		dgd := newEnvtestDSHappyPathDGD("demo-ds-fallback-gating")
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
@@ -319,17 +327,16 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		current.Spec.Components[0].ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
-		By("reconciling the fallback and keeping the DisaggregatedSet while DCDs are pending")
+		By("reporting unsupported intent without switching workload pathways")
 		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
-		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(HaveLen(2))
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateFailed))
+		eligibility := apiMeta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
+		Expect(eligibility).NotTo(BeNil())
+		Expect(eligibility.Status).To(Equal(metav1.ConditionFalse))
+		Expect(eligibility.Reason).To(Equal("UnsupportedIntent"))
+		Expect(eligibility.Message).To(ContainSubstring("scalingAdapter"))
+		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(BeEmpty())
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
-
-		By("deleting the DisaggregatedSet only after the fallback workloads are ready")
-		markEnvtestCutoverDCDsReady(ctx, current)
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
 	})
 })
 
@@ -414,11 +421,13 @@ func createComponentServices(
 	ctx context.Context,
 	dcdReconciler *DynamoComponentDeploymentReconciler,
 	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+	targetReady bool,
 ) map[string]types.UID {
 	serviceUIDs := map[string]types.UID{}
 	for i := range dcds {
 		_, err := dcdReconciler.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
 			dynamoComponentDeployment: &dcds[i],
+			serviceTargetReady:        targetReady,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		service := &corev1.Service{}
