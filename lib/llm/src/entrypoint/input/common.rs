@@ -12,7 +12,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
-    kv_router::indexer::try_build_cache_indexer,
+    kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
         EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
     },
@@ -21,10 +21,7 @@ use crate::{
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::{
-        llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
-        preprocessor::MultimodalData,
-    },
+    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     session_affinity::{
         AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
@@ -52,40 +49,6 @@ use dynamo_runtime::{
     },
 };
 use std::sync::Arc;
-
-fn multimodal_cache_key_from_url(url: &str) -> String {
-    blake3::hash(url.as_bytes()).to_hex().to_string()
-}
-
-fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
-    let Some(items) = request
-        .multi_modal_data
-        .as_ref()
-        .and_then(|media| media.get("image_url"))
-    else {
-        return Vec::new();
-    };
-
-    let mut keys = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
-            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(descriptor) => {
-                if let Some(key) = descriptor.content_hash_key() {
-                    keys.push(key.to_string());
-                }
-            }
-            // Opaque UUIDs are not content-derived routing keys. UUID-only
-            // reuse intentionally relies on text-prefix routing and affinity
-            // to the worker that owns the processor/embedding cache entry.
-            MultimodalData::UuidOnly(_) => {}
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
-}
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
