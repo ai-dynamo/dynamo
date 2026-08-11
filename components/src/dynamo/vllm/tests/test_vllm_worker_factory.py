@@ -45,6 +45,7 @@ def _make_config(**overrides) -> Mock:
         # optional gpu_memory_service package (absent in some test images).
         "gms_shadow_mode": False,
         "realtime": False,
+        "classify_worker": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -670,6 +671,7 @@ class TestCreate:
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_realtime_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_classify_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
@@ -762,6 +764,17 @@ class TestCreate:
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
+    async def test_classify_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        config = _make_config(classify_worker=True)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_classify_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(enable_multimodal=True)
         runtime = Mock()
@@ -790,6 +803,81 @@ class TestCreate:
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
         )
+
+
+@pytest.mark.asyncio
+async def test_classify_worker_registers_classify_and_pooling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "worker-1"
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    vllm_config = Mock(model_config=Mock())
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        None,
+    )
+    register_model = AsyncMock()
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.ClassifyWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        Mock(return_value=Mock()),
+    )
+
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    config = _make_config(
+        classify_worker=True,
+        namespace="dynamo",
+        component="worker",
+        endpoint="generate",
+        served_model_name="model",
+        model="model",
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_classify_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        shutdown_endpoints,
+    )
+
+    register_model.assert_awaited_once()
+    register_args = register_model.await_args.args
+    registered_model_type = register_args[1]
+    assert register_args[0] == ModelInput.Text
+    assert registered_model_type.supports_classify()
+    assert registered_model_type.supports_pooling()
+    assert not registered_model_type.supports_embedding()
+    assert register_args[2:] == (
+        endpoint,
+        config,
+        engine_client,
+        vllm_config,
+    )
+    assert register_model.await_args.kwargs == {
+        "worker_type": WorkerType.Aggregated,
+        "needs": [],
+    }
+    assert shutdown_endpoints == [endpoint]
+    handler.cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio
