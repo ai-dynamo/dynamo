@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k3-sglang-gb300-agg-agentic
+  labels:
+    app.kubernetes.io/name: kimi-k3-sglang-gb300-agg-agentic
+    app.kubernetes.io/part-of: dynamo
+    engine: sglang
+    hardware: gb300
+    mode: aggregate
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-kimi-k3-dev.1
+              imagePullPolicy: Always
+              command: [python3, -m, dynamo.frontend]
+              args:
+                - --http-port
+                - "8000"
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --router-min-initial-workers
+                - "1"
+                - --dyn-chat-processor
+                - sglang
+                - --model-name
+                - moonshotai/Kimi-K3
+                - --model-path
+                - moonshotai/Kimi-K3
+                - --trust-remote-code
+              env:
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              ports:
+                - name: http
+                  containerPort: 8000
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  ephemeral-storage: 16Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  ephemeral-storage: 16Gi
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    - name: SglangWorker
+      type: worker
+      replicas: 3
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-GB300
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-kimi-k3-dev.1
+              imagePullPolicy: Always
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --model-path
+                - moonshotai/Kimi-K3
+                - --served-model-name
+                - moonshotai/Kimi-K3
+                - --trust-remote-code
+                - --tp-size
+                - "8"
+                - --dcp-size
+                - "8"
+                - --context-length
+                - "1048576"
+                - --max-running-requests
+                - "64"
+                - --mem-fraction-static
+                - "0.92"
+                - --kv-cache-dtype
+                - fp8_e4m3
+                - --weight-loader-prefetch-checkpoints
+                - --enable-multimodal
+                - --dyn-reasoning-parser
+                - kimi_k3
+                - --dyn-tool-call-parser
+                - kimi_k3
+                - --speculative-algorithm
+                - DSPARK
+                - --speculative-draft-model-path
+                - RadixArk/Kimi-K3-DSpark
+                - --speculative-dspark-block-size
+                - "7"
+                - --enable-linear-replayssm-spec
+                - --enable-nccl-nvls
+                - --enable-metrics
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+              env:
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2
+                  value: "1"
+                - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
+                  value: "1"
+                # Synthetic DSPARK acceptance length for performance benchmarking.
+                - name: SGLANG_SIMULATE_ACC_LEN
+                  value: "4.05"
+                - name: SGLANG_SIMULATE_ACC_METHOD
+                  value: match-expected
+              ports:
+                - name: system
+                  containerPort: 9090
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "64"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "8"
+                limits:
+                  cpu: "64"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "8"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                failureThreshold: 60
+                periodSeconds: 30
+                timeoutSeconds: 5
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache

@@ -50,6 +50,9 @@ spec:
         nodeCount: 2
       sharedMemorySize: 200Gi
       podTemplate:
+        metadata:
+          labels:
+            mnnvl-group: kimi-k3-agg
         spec:
           affinity:
             nodeAffinity:
@@ -60,6 +63,12 @@ spec:
                         operator: In
                         values:
                           - NVIDIA-GB300
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      mnnvl-group: kimi-k3-agg
+                  topologyKey: nvidia.com/gpu.clique
           resourceClaims:
             - name: compute-domain-channel
               resourceClaimTemplateName: kimi-k3-compute-domain-channel
