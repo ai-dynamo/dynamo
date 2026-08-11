@@ -748,8 +748,9 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-config",
     description: "Configuration management",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-config/1.3.0",
-    tags: [{ label: "cargo add dynamo-config@1.3.0", clipboard: "cargo add dynamo-config@1.3.0" }],
+    // Not republished for 1.3.0; crates.io tops out at 1.2.1.
+    href: "https://crates.io/crates/dynamo-config/1.2.1",
+    tags: [{ label: "cargo add dynamo-config@1.2.1", clipboard: "cargo add dynamo-config@1.2.1" }],
   },
   {
     category: "crate",
