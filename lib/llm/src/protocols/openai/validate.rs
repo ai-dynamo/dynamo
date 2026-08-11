@@ -22,8 +22,6 @@ pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
 pub const MIN_TOP_P: f32 = 0.0;
 /// Maximum allowed value for OpenAI's `top_p` sampling option
 pub const MAX_TOP_P: f32 = 1.0;
-/// Allowed range of values for OpenAI's `top_p` sampling option
-pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
 /// Minimum allowed value for `min_p`
 pub const MIN_MIN_P: f32 = 0.0;
