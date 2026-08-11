@@ -1,23 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Load scorer and lowest-cost picker for the `least-busy` policy.
+//! Stacked scorers and lowest-cost picker.
 
 use dynamo_kv_router::{
     WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
+    WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
-/// Scores each candidate by its current number of active requests.
-pub(crate) struct LeastBusyScorer;
+pub(crate) struct ActiveRequestsScorer;
 
-impl WorkerScorer for LeastBusyScorer {
-    /// Requests load inputs for the active-request count.
+impl WorkerScorer for ActiveRequestsScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
 
-    /// Returns the active-request count as a lower-is-better cost.
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
@@ -30,7 +27,6 @@ impl WorkerScorer for LeastBusyScorer {
     }
 }
 
-/// Scores each candidate by the request blocks that are not in device memory.
 pub(crate) struct UncachedBlocksScorer;
 
 impl WorkerScorer for UncachedBlocksScorer {
@@ -50,37 +46,14 @@ impl WorkerScorer for UncachedBlocksScorer {
     }
 }
 
-/// Uses device affinity for tool results and total cost for other requests.
-pub(crate) struct RequestAwarePicker;
+pub(crate) struct LowestCostPicker;
 
-impl WorkerPicker for RequestAwarePicker {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE
-    }
-
+impl WorkerPicker for LowestCostPicker {
     fn pick(
         &mut self,
-        context: &WorkerSelectionContext<'_>,
+        _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        if context
-            .session_context()
-            .and_then(|session| session.input_trigger())
-            == Some(WorkerSelectionInputTrigger::ToolResult)
-        {
-            return input
-                .cache()
-                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?
-                .iter()
-                .enumerate()
-                .max_by(|(_, left), (_, right)| {
-                    left.device_overlap_blocks()
-                        .total_cmp(&right.device_overlap_blocks())
-                })
-                .map(|(row, _)| row)
-                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"));
-        }
-
         input
             .candidates()
             .iter()

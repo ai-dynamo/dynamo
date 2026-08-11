@@ -2470,24 +2470,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-example-basic"
-version = "1.4.0"
-dependencies = [
- "dynamo-kv-router",
- "serde",
-]
-
-[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.4.0"
 dependencies = [
- "dynamo-custom-policy-example-basic",
- "dynamo-custom-policy-example-disaggregated",
+ "dynamo-custom-policy-example-disagg-filter-score-pick",
+ "dynamo-custom-policy-example-simple-filter-score-pick",
+ "dynamo-custom-policy-example-simple-stacked-score-pick",
  "dynamo-kv-router",
 ]
 
 [[package]]
-name = "dynamo-custom-policy-example-disaggregated"
+name = "dynamo-custom-policy-example-disagg-filter-score-pick"
 version = "1.4.0"
 dependencies = [
  "dynamo-kv-router",
@@ -2503,6 +2496,22 @@ dependencies = [
  "dynamo-ext-proc",
  "dynamo-kv-router",
  "tokio",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-simple-filter-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-simple-stacked-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
 ]
 
 [[package]]

@@ -14,9 +14,9 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
-    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, KvRouterConfig,
-    SchedulingRequest, WorkerCandidate, WorkerFilter, WorkerLoadProjection, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerFilter,
+    WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
 };
 use rustc_hash::FxHashMap;
 
@@ -56,6 +56,54 @@ impl WorkerFilter for KeepAllFilter {
         _candidate: &WorkerCandidate,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(true)
+    }
+}
+
+struct BenchScorer;
+
+impl WorkerScorer for BenchScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::ROUTING
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        let cache = candidate
+            .cache()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+        let load = candidate
+            .load()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+        let routing = candidate
+            .routing()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("routing input unavailable"))?;
+        let uncached_blocks =
+            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+        let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+            + load.decode_cost_blocks()
+            + load.active_requests() as f64;
+        Ok((uncached_blocks + load_blocks) * routing.preferred_taint_multiplier().unwrap_or(1.0))
+    }
+}
+
+struct LowestCostPicker;
+
+impl WorkerPicker for LowestCostPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        input
+            .candidates()
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+            .map(|(row, _)| row)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
 }
 
@@ -157,86 +205,74 @@ fn worker_selection(c: &mut Criterion) {
 fn custom_worker_selection(c: &mut Criterion) {
     const WORKER_COUNT: usize = 10_000;
 
-    for (scenario, overlap_score_credit_decay) in
-        [("direct", 0.0), ("filtered_prefill_baseline", 1.0)]
-    {
-        for temperature in [0.0, 0.7] {
-            let (workers, request) = fixture(WORKER_COUNT);
-            let config = KvRouterConfig {
-                router_temperature: temperature,
-                overlap_score_credit_decay,
-                ..Default::default()
-            };
-            let default = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
-            let custom_no_filter = WorkerSelectionPolicy::new(
-                config.clone(),
-                "prefill",
-                vec![Box::new(DefaultWorkerScorer::new(
-                    config.clone(),
-                    "prefill",
-                ))],
-                Box::new(DefaultWorkerPicker::new(temperature)),
-            );
-            let custom_keep_all_filter = WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
-                "prefill",
-                vec![Box::new(KeepAllFilter)],
-                vec![Box::new(DefaultWorkerScorer::new(config, "prefill"))],
-                Box::new(DefaultWorkerPicker::new(temperature)),
-            );
-            let mut group = c.benchmark_group(format!(
-                "custom_worker_selection/{scenario}/temperature_{temperature}/10_000"
-            ));
-            group.warm_up_time(Duration::from_secs(2));
-            group.measurement_time(Duration::from_secs(5));
-            group.sample_size(50);
-            group.throughput(Throughput::Elements(WORKER_COUNT as u64));
+    let (workers, request) = fixture(WORKER_COUNT);
+    let config = KvRouterConfig {
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let default = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
+    let custom_no_filter = WorkerSelectionPolicy::new(
+        config.clone(),
+        "prefill",
+        vec![Box::new(BenchScorer)],
+        Box::new(LowestCostPicker),
+    );
+    let custom_keep_all_filter = WorkerSelectionPolicy::new_with_filters(
+        config,
+        "prefill",
+        vec![Box::new(KeepAllFilter)],
+        vec![Box::new(BenchScorer)],
+        Box::new(LowestCostPicker),
+    );
+    let mut group = c.benchmark_group("custom_worker_selection/10_000");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+    group.throughput(Throughput::Elements(WORKER_COUNT as u64));
 
-            group.bench_function("default", |b| {
-                b.iter(|| {
-                    black_box(
-                        default
-                            .select_worker(
-                                black_box(&workers),
-                                black_box(&request),
-                                request.eligibility(),
-                                black_box(16),
-                            )
-                            .unwrap(),
+    group.bench_function("default", |b| {
+        b.iter(|| {
+            black_box(
+                default
+                    .select_worker(
+                        black_box(&workers),
+                        black_box(&request),
+                        request.eligibility(),
+                        black_box(16),
                     )
-                })
-            });
-            group.bench_function("custom_no_filter", |b| {
-                b.iter(|| {
-                    black_box(
-                        custom_no_filter
-                            .select_worker(
-                                black_box(&workers),
-                                black_box(&request),
-                                request.eligibility(),
-                                black_box(16),
-                            )
-                            .unwrap(),
+                    .unwrap(),
+            )
+        })
+    });
+    group.bench_function("custom_no_filter", |b| {
+        b.iter(|| {
+            black_box(
+                custom_no_filter
+                    .select_worker(
+                        black_box(&workers),
+                        black_box(&request),
+                        request.eligibility(),
+                        black_box(16),
                     )
-                })
-            });
-            group.bench_function("custom_keep_all_filter", |b| {
-                b.iter(|| {
-                    black_box(
-                        custom_keep_all_filter
-                            .select_worker(
-                                black_box(&workers),
-                                black_box(&request),
-                                request.eligibility(),
-                                black_box(16),
-                            )
-                            .unwrap(),
+                    .unwrap(),
+            )
+        })
+    });
+    group.bench_function("custom_keep_all_filter", |b| {
+        b.iter(|| {
+            black_box(
+                custom_keep_all_filter
+                    .select_worker(
+                        black_box(&workers),
+                        black_box(&request),
+                        request.eligibility(),
+                        black_box(16),
                     )
-                })
-            });
-            group.finish();
-        }
-    }
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
 }
 
 criterion_group!(benches, worker_selection, custom_worker_selection);

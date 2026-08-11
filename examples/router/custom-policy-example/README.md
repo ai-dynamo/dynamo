@@ -24,12 +24,17 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 
 | Crate | Use it for |
 |---|---|
-| `basic` | An optional device-overlap filter, multiple scorers, and one picker work for every worker type |
-| `disaggregated` | Prefill and decode workers need different components |
+| `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
+| `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
+| `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 | `catalog` | You need to register policy types for configuration |
 | `epp` | Worker selection runs in a standalone EPP |
 
-The basic policy can require a minimum device-resident overlap, then adds an active-request cost and an uncached-request cost for every remaining worker. Its picker normally chooses the lowest total cost, but tool-result turns choose the worker with the most device overlap through `session_context().input_trigger()`. The disaggregated policy scores active prefill work plus uncached request blocks for prefill workers, and projected decode blocks for decode workers. Both own their picker implementation.
+The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+
+The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Prefill and decode workers then use separate scorers and pickers.
+
+The `simple-stacked-score-pick` policy has no custom filter. It adds active-request and uncached-request costs before its picker selects the lowest total.
 
 ## 1. Create the Policy Crate
 
@@ -41,21 +46,32 @@ dynamo-kv-router = { path = "/work/dynamo/lib/kv-router", features = ["standalon
 serde = { version = "1", features = ["derive"] }
 ```
 
-A policy that lives in the Dynamo workspace can use the workspace dependencies shown in [`basic/Cargo.toml`](basic/Cargo.toml).
+A policy that lives in the Dynamo workspace can use the workspace dependencies shown in [`simple-filter-score-pick/Cargo.toml`](simple-filter-score-pick/Cargo.toml).
 
 ## 2. Implement the Filter, Scorers, and Picker
 
 A filter receives one host-eligible worker and returns whether to keep it. Use filters for hard requirements. A scorer receives one kept worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
 
-The [basic policy](basic/src/lib.rs) is the shortest complete implementation, and its [filter](basic/src/filter.rs) shows how to request and use raw device-overlap data. The [disaggregated policy](disaggregated/src/lib.rs) shows how one factory selects different component types from `worker_type`.
+The [filter-score-pick policy](simple-filter-score-pick/src/lib.rs) is the shortest complete implementation. Its [filter](simple-filter-score-pick/src/filter.rs) uses raw device-overlap data. The [disaggregated policy](disagg-filter-score-pick/src/lib.rs) creates the complete flow for both worker types.
 
-A policy can apply multiple scorers to every candidate. Dynamo calls them in order and adds their costs before the picker runs. The basic policy composes two scorers:
+The [stacked policy](simple-stacked-score-pick/src/lib.rs) shows why scorers use a `Vec`. The `Vec` stores an ordered stack. Each `Box<dyn WorkerScorer>` can hold a different scorer type:
 
 ```rust
-vec![Box::new(LeastBusyScorer), Box::new(UncachedBlocksScorer)]
+let scorers: Vec<Box<dyn WorkerScorer>> = vec![
+    Box::new(ActiveRequestsScorer),
+    Box::new(UncachedBlocksScorer),
+];
 ```
 
-For example, a worker with an active-request cost of `3` and an uncached-request cost of `5` reaches the picker with a total cost of `8`.
+Dynamo calls the scorers in order and adds their costs. A cost of `3` plus a cost of `5` gives the picker a total cost of `8`.
+
+The `simple-filter-score-pick` example exercises one of each policy stage:
+
+```text
+host eligibility -> MinimumDeviceOverlapFilter -> ActiveRequestsScorer -> RequestAwarePicker
+```
+
+The `disagg-filter-score-pick` factory creates the same three stages for prefill and decode worker sets. Its scorer and picker types differ by worker type.
 
 Declare each optional input group that a component reads:
 
@@ -77,30 +93,54 @@ Keep these rules in every filter, scorer, and picker:
 
 ## 3. Parse Parameters and Build the Factory
 
-The provider runs at startup. Parse all parameters there and reject unknown fields:
+The registry calls the provider once at startup for the selected policy instance. The provider parses and validates the YAML parameters. It then returns a factory that captures the validated values:
 
 ```rust
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Parameters {}
+struct Parameters {
+    min_device_overlap_blocks: f64,
+}
 
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-    let _: Parameters = parameters.deserialize()?;
+    let parameters: Parameters = parameters.deserialize()?;
+    if !parameters.min_device_overlap_blocks.is_finite()
+        || parameters.min_device_overlap_blocks < 0.0
+    {
+        return Err(WorkerSelectionPolicyProviderError::new(
+            "min_device_overlap_blocks must be a finite non-negative number",
+        ));
+    }
+    let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
+    Ok(Arc::new(move |config, worker_type, _partition| {
+        let filters: Vec<Box<dyn WorkerFilter>> = vec![
+            Box::new(MinimumDeviceOverlapFilter {
+                min_device_overlap_blocks,
+            }),
+        ];
+
+        WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type,
-            vec![Box::new(LeastBusyScorer)],
-            Box::new(LowestCostPicker),
+            filters,
+            vec![Box::new(ActiveRequestsScorer)],
+            Box::new(RequestAwarePicker),
         )
     }))
 }
 ```
 
-Dynamo calls the returned factory once per routing partition. Use `worker_type` to choose prefill, decode, or standalone `select` behavior. Use the partition identity for distinct model or routing-group state.
+The provider and factory have different lifetimes:
+
+1. The registry matches the YAML `type` to a provider.
+2. The provider parses one named instance and returns one shared factory.
+3. Dynamo calls the factory once for each model and routing-group partition.
+4. Each factory call creates a new filter, scorer, and picker set for that partition.
+
+The factory also receives `worker_type`. The Python frontend supplies `prefill` or `decode`. A standalone EPP supplies `select`. Use the partition value when models or routing groups need separate policy state.
 
 ## 4. Register the Policy Type
 
@@ -110,7 +150,7 @@ Expose one registration function from the policy crate:
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("least-busy", Arc::new(provider))
+    registry.register("simple-filter-score-pick", Arc::new(provider))
 }
 ```
 
@@ -124,17 +164,22 @@ Create a YAML file outside the source tree:
 
 ```yaml
 worker_selection:
-  default: disaggregated-load
+  default: simple-filter-score-pick
   instances:
-    - name: least-busy
-      type: least-busy
-      parameters: {}
-    - name: cache-affinity
-      type: least-busy
+    - name: simple-filter-score-pick
+      type: simple-filter-score-pick
+      parameters:
+        min_device_overlap_blocks: 0
+    - name: filter-score-pick-cache-affinity
+      type: simple-filter-score-pick
       parameters:
         min_device_overlap_blocks: 8
-    - name: disaggregated-load
-      type: disaggregated-load
+    - name: disagg-filter-score-pick
+      type: disagg-filter-score-pick
+      parameters:
+        min_device_overlap_blocks: 0
+    - name: simple-stacked-score-pick
+      type: simple-stacked-score-pick
       parameters: {}
 ```
 
@@ -146,7 +191,7 @@ worker_selection:
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.
 
-The optional `min_device_overlap_blocks` parameter is a hard filter. If every host-eligible worker is below the threshold, Dynamo returns HTTP 503.
+The `min_device_overlap_blocks` parameter is a hard filter. A value of `0` keeps cold workers for a smoke test. If every worker is below a positive threshold, Dynamo returns HTTP 503.
 
 ## 6. Build and Test
 
@@ -154,8 +199,9 @@ Run these commands from the Dynamo repository root:
 
 ```bash
 cargo test \
-  -p dynamo-custom-policy-example-basic \
-  -p dynamo-custom-policy-example-disaggregated \
+  -p dynamo-custom-policy-example-simple-filter-score-pick \
+  -p dynamo-custom-policy-example-disagg-filter-score-pick \
+  -p dynamo-custom-policy-example-simple-stacked-score-pick \
   -p dynamo-custom-policy-example-catalog
 cargo build -p dynamo-custom-policy-example-epp
 ```
@@ -207,7 +253,7 @@ Run the binary in standalone mode:
 ```bash
 DYN_EPP_MODE=standalone \
 DYN_ROUTER_POLICY_CONFIG=/path/to/worker-selection.yaml \
-DYN_ROUTER_WORKER_SELECTION_POLICY=least-busy \
+DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
   cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
@@ -225,3 +271,96 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 - Benchmark stateful or input-heavy policies at the expected worker count.
 
 The [custom routing API reference](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) lists the available context and worker signals.
+
+## Try the Policies End to End With Mocker
+
+Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
+
+Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a Policy Instance](#5-configure-a-policy-instance).
+
+### Aggregated Policy
+
+In the first terminal, start the frontend with the `simple-filter-score-pick` policy:
+
+```bash
+DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config /tmp/worker-selection.yaml \
+  --discovery-backend file \
+  --http-port 8000
+```
+
+In the second terminal, start two aggregated Mocker workers:
+
+```bash
+python -m dynamo.mocker \
+  --model-path Qwen/Qwen3-0.6B \
+  --discovery-backend file \
+  --num-workers 2
+```
+
+In the third terminal, send a request:
+
+```bash
+curl localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 32
+  }'
+```
+
+A response confirms that the linked provider created the policy and selected a Mocker worker. The frontend log records the selected worker and its policy cost as `logit`.
+
+Keep the Mocker process active to try `simple-stacked-score-pick`. Stop the frontend and restart it with:
+
+```bash
+DYN_ROUTER_WORKER_SELECTION_POLICY=simple-stacked-score-pick \
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config /tmp/worker-selection.yaml \
+  --discovery-backend file \
+  --http-port 8000
+```
+
+Send the same request. This time, `logit` is the sum of the active-request and uncached-request costs.
+
+### Disaggregated Policy
+
+Stop the frontend and Mocker processes. Start the frontend with the disaggregated policy:
+
+```bash
+DYN_ROUTER_WORKER_SELECTION_POLICY=disagg-filter-score-pick \
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config /tmp/worker-selection.yaml \
+  --discovery-backend file \
+  --http-port 8000
+```
+
+In the second terminal, start two prefill Mocker workers:
+
+```bash
+python -m dynamo.mocker \
+  --model-path Qwen/Qwen3-0.6B \
+  --discovery-backend file \
+  --disaggregation-mode prefill \
+  --bootstrap-ports 50100,50101 \
+  --num-workers 2
+```
+
+`--bootstrap-ports` takes a comma-separated port for each prefill worker.
+
+In the third terminal, start two decode Mocker workers:
+
+```bash
+python -m dynamo.mocker \
+  --model-path Qwen/Qwen3-0.6B \
+  --discovery-backend file \
+  --disaggregation-mode decode \
+  --num-workers 2
+```
+
+Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
