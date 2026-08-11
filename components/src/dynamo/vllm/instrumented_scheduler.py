@@ -1602,8 +1602,8 @@ class InstrumentedScheduler(AsyncScheduler):
                     )
                 # This frame does not advance scheduler request state and must
                 # not create AsyncScheduler output placeholders. The map is a
-                # worker-side residency signal only; update_from_output clears
-                # it before normal scheduler output processing.
+                # worker-side residency signal only; update_from_output passes
+                # a sanitized copy into normal scheduler output processing.
                 return empty
 
         return self._schedule_and_record_time(throttle_prefills)
@@ -1666,6 +1666,7 @@ class InstrumentedScheduler(AsyncScheduler):
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
+        scheduler_update_output = scheduler_output
         if (
             scheduler_output.total_num_scheduled_tokens == 0
             and scheduler_output.num_scheduled_tokens
@@ -1674,8 +1675,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 raise RuntimeError(
                     "zero-token benchmark retention output contains positive work"
                 )
-            scheduler_output.num_scheduled_tokens = {}
-        result = super().update_from_output(scheduler_output, model_runner_output)
+            scheduler_update_output = replace(scheduler_output, num_scheduled_tokens={})
+        result = super().update_from_output(
+            scheduler_update_output, model_runner_output
+        )
 
         if scheduler_output.total_num_scheduled_tokens > 0:
             t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
@@ -1697,7 +1700,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 scheduled=scheduled,
             )
             self._publish_or_record_metrics(metrics)
-            self._bench_advance_decode_stage_after_output()
+            if is_benchmark_point:
+                self._bench_advance_decode_stage_after_output()
         else:
             self._last_update_time = 0.0
 

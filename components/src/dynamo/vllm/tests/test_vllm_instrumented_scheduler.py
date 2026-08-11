@@ -1335,18 +1335,16 @@ def test_decode_sweep_empty_frame_no_connector_leaves_metadata_none():
     stub._update_after_schedule.assert_not_called()
 
 
-def test_decode_retention_map_is_cleared_before_parent_output_update(monkeypatch):
+def test_decode_retention_map_is_sanitized_without_mutating_original(monkeypatch):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_active = True
     stub._last_update_time = 1.0
     stub._cleanup_finished = MagicMock()
-    output = SimpleNamespace(
-        total_num_scheduled_tokens=0,
-        num_scheduled_tokens={"__bench_0": 0},
-        finished_req_ids=set(),
-    )
+    output = instrumented_scheduler_module.SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = {"__bench_0": 0}
 
     def parent_update(_self, scheduler_output, _model_runner_output):
+        assert scheduler_output is not output
         assert scheduler_output.num_scheduled_tokens == {}
         return "parent-result"
 
@@ -1359,8 +1357,39 @@ def test_decode_retention_map_is_cleared_before_parent_output_update(monkeypatch
     result = InstrumentedScheduler._update_from_output(stub, output, object())
 
     assert result == "parent-result"
+    assert output.num_scheduled_tokens == {"__bench_0": 0}
     assert stub._last_update_time == 0.0
     stub._cleanup_finished.assert_called_once_with(output)
+
+
+def test_non_benchmark_output_does_not_advance_decode_stage(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_decode_stage = _DecodePointStage.ADMITTING
+    stub._bench_current_point = BenchmarkPoint(point_type="decode")
+    stub._schedule_times = deque([1.0])
+    stub._last_update_time = 0.0
+    stub._extract_scheduled = MagicMock(
+        return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1
+        )
+    )
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._extract_metrics = MagicMock(return_value="metrics")
+    stub._publish_or_record_metrics = MagicMock()
+    stub._cleanup_finished = MagicMock()
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        MagicMock(return_value="parent-result"),
+    )
+
+    output = SimpleNamespace(total_num_scheduled_tokens=1)
+    result = InstrumentedScheduler._update_from_output(stub, output, object())
+
+    assert result == "parent-result"
+    assert stub._bench_decode_stage == _DecodePointStage.ADMITTING
 
 
 def test_decode_retention_map_rejects_positive_work(monkeypatch):
