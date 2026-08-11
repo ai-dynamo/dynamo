@@ -83,7 +83,7 @@ pub(crate) type WorkerSelectorFactory<Sel> = Arc<
 pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
 ) -> dynamo_kv_router::SessionContext {
-    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
     use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
     // Keep this exhaustive so a new wire-level field must be handled here.
@@ -103,9 +103,10 @@ pub(crate) fn to_worker_selection_session_context(
         session_id.clone(),
         parent_session_id.clone(),
         *session_final,
-        kv_hints
-            .as_ref()
-            .map(|hints| WorkerSelectionKvHints::new(hints.evict_session)),
+        kv_hints.as_ref().map(|hints| {
+            let KvHints { evict_session } = hints;
+            WorkerSelectionKvHints::new(*evict_session)
+        }),
         input_trigger,
     )
 }
