@@ -89,6 +89,20 @@ SPDX-License-Identifier: Apache-2.0
   .cad-auto{background:var(--goodT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--good)}
   .cad-partial{background:var(--warningT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--warning)}
   .cad-manual{background:var(--criticalT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--critical)}
+  details.grp{border:1px solid var(--ring);border-radius:8px;margin:0 0 10px;background:var(--surface)}
+  details.grp[open]{border-color:var(--axis)}
+  details.grp > summary{cursor:pointer;list-style:none;padding:11px 14px;font-size:13px;font-weight:700;
+    color:var(--ink);display:flex;align-items:center;gap:9px;border-radius:7px}
+  details.grp > summary::-webkit-details-marker{display:none}
+  details.grp > summary::before{content:"▸";color:var(--muted);font-size:11px;transition:transform .12s}
+  details.grp[open] > summary::before{transform:rotate(90deg)}
+  details.grp > summary:hover{color:var(--ink)}
+  details.grp > summary:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+  details.grp .cnt{font-weight:400;font-size:11.5px;color:var(--muted);margin-left:auto}
+  details.grp .body{padding:2px 14px 16px}
+  .empty{font-size:12.5px;color:var(--ink2);background:var(--naT);border-left:2px solid var(--axis);
+    padding:10px 13px;border-radius:0 6px 6px 0}
+  .empty b{color:var(--ink)}
   .seealso{margin:0 0 16px;font-size:12.5px;background:var(--naT);border-left:2px solid var(--flowaccent,var(--axis));
     padding:9px 13px;border-radius:0 6px 6px 0;color:var(--ink2)}
   .seealso a{color:var(--ink);font-weight:600;text-decoration:underline;text-underline-offset:2px}
@@ -139,6 +153,24 @@ SPDX-License-Identifier: Apache-2.0
       <div class="tierhead" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px">Tier 1 — End-to-end</h2><span class="pill">Primary · headline numbers</span> <span class="cadence cad-manual">✕ On demand only</span></div>
 
     <p class="lede">Answers: what is the system doing now, and where does the time go?</p>
+      <details class="grp">
+        <summary>Official benchmarks<span class="cnt">none catalogued</span></summary>
+        <div class="body">
+          <div class="empty"><b>Not yet catalogued.</b> Third-party or standardised suites where the harness, the workload, and the success metrics are all fixed externally, and Dynamo is plugged in as the system under test. The distinguishing property is that none of the three is ours to choose — so the result is comparable across systems, and the only variable is Dynamo itself.</div>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Customer / use-case focused benchmarks<span class="cnt">none catalogued</span></summary>
+        <div class="body">
+          <div class="empty"><b>Not yet catalogued.</b> Benchmarks built to demonstrate a specific feature, or to match the workload of a particular deployment. The harness is ours, and the workload is chosen to make the feature's effect visible — which means the result is meaningful for that use case and not directly comparable to anything else. Each needs its assumed input distribution recorded, or it cannot be told apart from a tuned demo.</div>
+        </div>
+      </details>
+
+      <details class="grp" open>
+        <summary>Unlinked benchmarks<span class="cnt">what exists in-tree today</span></summary>
+        <div class="body">
+
     <table>
       <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Status</th></tr></thead>
       <tbody>
@@ -160,8 +192,11 @@ kubectl apply -f &lt;model&gt;/&lt;framework&gt;/&lt;mode&gt;/perf.yaml  -n $NAM
 aiperf profile --model &lt;model&gt; --url http://localhost:8000 \
   --endpoint-type chat --streaming --concurrency 10 --request-count 100</pre>
     </div>
-      </div>
-    <div class="tpanel" id="tpanel-t2" role="tabpanel">
+              </div>
+      </details>
+    </div>
+
+<div class="tpanel" id="tpanel-t2" role="tabpanel">
       <div class="tierhead" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px">Tier 2 — Subsystem</h2><span class="pill">Ceiling · isolation</span> <span class="cadence cad-partial">▲ Functional in CI · timing on demand</span></div>
 
     <p class="lede">Answers: what is this part capable of, independent of what currently constrains it?</p>
