@@ -237,7 +237,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
-# mount namespace at /tmp/snapshot-binaries during restore (internal/injection).
+# mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
 # The placeholder ships none of this. nsrestore redirects all three lookup
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
@@ -248,12 +248,18 @@ COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /sna
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 
-# ip and iptables are forked by criu during network-namespace restore; tar by
-# runtime.ApplyRootfsDiff. All three resolve through PATH inside the namespace.
-RUN cp -L "$(command -v ip)" "$(command -v iptables)" "$(command -v tar)" /snapshot-binaries/ \
-    && chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
-                /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
-                /snapshot-binaries/ip /snapshot-binaries/iptables /snapshot-binaries/tar
+# Network binaries needed during restore:
+#   ip  — address/route restore (criu/net.c)
+#   nft — network lock/unlock (CRIU is configured with --network-lock nftables,
+#         which uses nft instead of the iptables ecosystem; avoids needing all
+#         six iptables/ip6tables variant names and the libxtables dlopen plugins)
+#   tar — used by runtime.ApplyRootfsDiff
+# All resolve through PATH inside the namespace.
+RUN set -eu; \
+    cp -L "$(command -v ip)" "$(command -v nft)" "$(command -v tar)" /snapshot-binaries/; \
+    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
+             /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/ip /snapshot-binaries/nft /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
 #
@@ -261,13 +267,32 @@ RUN cp -L "$(command -v ip)" "$(command -v iptables)" "$(command -v tar)" /snaps
 # deliberately excluded: the kernel reads PT_INTERP before LD_LIBRARY_PATH
 # applies, so the loader always comes from the placeholder, and glibc's loader
 # and libc are version-locked — pairing them across builds breaks at exec.
+# Also excluded: libmvec, libutil, libanl, libnsl, libthread_db — same glibc
+# version-lock; libm matches only when followed by '.' or '-', not libmvec.
 # libcuda/libnvidia are excluded because they are injected by the NVIDIA
 # container runtime and must match the host driver.
-RUN for f in /snapshot-binaries/* /snapshot-binaries/criu-plugins/*.so; do \
-      [ -f "$f" ] && ldd "$f" 2>/dev/null | awk '/=> \//{print $3}'; \
+RUN set -eu; \
+    command -v ldd >/dev/null || { echo "ERROR: ldd missing in builder" >&2; exit 1; }; \
+    for f in /snapshot-binaries/* /snapshot-binaries/criu-plugins/*.so; do \
+      [ -f "$f" ] || continue; \
+      ldd "$f" 2>/dev/null | awk '/=> \//{print $3}'; \
     done | sort -u \
-    | grep -Ev '/(ld-linux|libc|libm|libdl|libpthread|librt|libresolv|libcuda|libnvidia)[.-]' \
+    | grep -Ev '/(ld-linux|libc|libm|libmvec|libdl|libpthread|librt|libresolv|libutil|libanl|libnsl|libthread_db|libcuda|libnvidia)[.-]' \
     | xargs -r -I{} cp -Ln {} /snapshot-binaries/lib/
+
+# Post-condition: verify each key binary resolves cleanly against the bundle's
+# lib/. The closure step above uses xargs -r which exits 0 on empty input, so
+# a silent ldd failure leaves lib/ empty; asserting here catches that.
+RUN set -eu; \
+    for f in /snapshot-binaries/criu /snapshot-binaries/ip /snapshot-binaries/nft \
+             /snapshot-binaries/tar /snapshot-binaries/criu-plugins/*.so; do \
+      [ -f "$f" ] || continue; \
+      if LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" 2>&1 | grep -q 'not found'; then \
+        echo "ERROR: unresolved shared libraries in $f:" >&2; \
+        LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" >&2; \
+        exit 1; \
+      fi; \
+    done
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
@@ -404,9 +429,22 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # (entrypoint/cmd), running as root so the agent can restore into it. It ships
 # NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
 # their shared libraries, and the criu plugins are all bind-mounted on demand
-# from the agent's /snapshot-binaries bundle at restore time (internal/injection).
+# from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
 # The mount destination is created by the ns-bind-mount helper inside this
 # namespace, so nothing needs pre-provisioning here.
+#
+# Two constraints follow from that and must hold for every BASE_IMAGE:
+#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
+#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
+#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
+#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
+#     restore with "version 'GLIBC_2.38' not found".
+#   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
+#
+# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
+# When used, the source workload image must have cuda-checkpoint at the same
+# path as it runs from — CRIU restores file-backed mappings by path, not via
+# PATH search — and so must this placeholder image (same BASE_IMAGE).
 #
 # Dynamo backend entrypoints run a restore standby path when the operator
 # injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the

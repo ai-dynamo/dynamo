@@ -78,10 +78,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if cleanupErr := mp.Unmount(cleanupCtx); cleanupErr != nil {
+			// Deliberately not promoted to retErr. The controller treats any
+			// error from Restore as a failed restore and SIGKILLs the placeholder,
+			// so surfacing a cleanup failure here would destroy a workload that
+			// already restored successfully. Log it and let the pod continue.
 			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
-			if retErr == nil {
-				retErr = fmt.Errorf("unmount agent bundle: %w", cleanupErr)
-			}
 		}
 	}()
 
@@ -245,6 +246,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
+	bundleDir := filepath.Dir(nsRestorePath)
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
@@ -252,6 +254,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		"-m", "-u", "-i", "-n", "-p",
 		"--", nsRestorePath,
 		"--checkpoint-path", checkpointPath,
+		"--bundle-dir", bundleDir,
 	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
@@ -262,12 +265,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
-	if ldPath := os.Getenv("LD_LIBRARY_PATH"); ldPath != "" {
-		args = append(args, "--inherited-ld-path", ldPath)
-	}
-	if path := os.Getenv("PATH"); path != "" {
-		args = append(args, "--inherited-path", path)
-	}
+	// LD_LIBRARY_PATH and PATH are not passed as flags: cmd.Env = os.Environ()
+	// below already inherits the agent's env into nsrestore, so useInjectedBundle
+	// reads them directly. Routing them through argv would expose them in
+	// /proc/<pid>/cmdline to any process in the container's PID namespace.
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.

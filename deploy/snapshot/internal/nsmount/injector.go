@@ -7,12 +7,15 @@ package nsmount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -47,15 +50,30 @@ type NSMounter struct {
 }
 
 // New returns an NSMounter backed by the ns-bind-mount binary at its default
-// location. It errors if the helper binary is missing, so a misconfigured
-// node fails at startup rather than at the first mount.
-// Requires Linux 5.12+ (mount_setattr; open_tree/move_mount need only 5.2).
+// location. It errors if the helper binary is missing or if the kernel does not
+// support mount_setattr (Linux 5.12+), so a misconfigured node fails at agent
+// startup rather than at first restore.
 func New(src, dst string, log logr.Logger) (*NSMounter, error) {
+	if err := probeKernelMountAPI(); err != nil {
+		return nil, err
+	}
 	m, err := newExecMounter(defaultBinaryPath, log)
 	if err != nil {
 		return nil, err
 	}
 	return newWithMounter(src, dst, m, log)
+}
+
+// probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
+// It calls mount_setattr with an invalid fd; EBADF means the syscall exists,
+// ENOSYS means the kernel is too old.
+func probeKernelMountAPI() error {
+	err := unix.MountSetattr(-1, "", 0, nil)
+	if errors.Is(err, syscall.ENOSYS) {
+		return fmt.Errorf("ns-bind-mount requires Linux 5.12+ (mount_setattr): kernel does not support it")
+	}
+	// Any other errno (EBADF, EINVAL, EPERM) means the syscall is present.
+	return nil
 }
 
 // newWithMounter is the test seam: it takes an arbitrary mounter so tests can

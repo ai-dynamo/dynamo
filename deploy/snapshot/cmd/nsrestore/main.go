@@ -23,15 +23,13 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
-	inheritedLDPath := flag.String("inherited-ld-path", "", "agent's LD_LIBRARY_PATH to prepend to the bundle lib path (empty = bundle only)")
-	inheritedPath := flag.String("inherited-path", "", "agent's PATH to append after the bundle dir (empty = bundle only)")
 	flag.Parse()
 
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
 
-	if err := useInjectedBundle(*bundleDir, *inheritedLDPath, *inheritedPath); err != nil {
+	if err := useInjectedBundle(*bundleDir); err != nil {
 		fatal(log, err, "failed to point lookups at the injected bundle")
 	}
 
@@ -63,24 +61,28 @@ func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{})
 
 // useInjectedBundle points every binary and library lookup at the agent bundle
 // mounted into this namespace. The placeholder ships no restore tooling, so
-// criu, its shared libraries, and the binaries criu forks (ip, iptables) must
-// all resolve from the bundle.
+// criu, its shared libraries, and the binaries criu forks (ip, iptables-restore)
+// must all resolve from the bundle.
 //
 // These are set on nsrestore's own environment rather than per-command: criu is
-// launched by go-criu, and criu in turn forks ip/iptables, so neither child is
-// reachable through an exec.Cmd we control. Both inherit this environment.
+// launched by go-criu, and criu in turn forks ip/iptables-restore, so neither
+// child is reachable through an exec.Cmd we control. Both inherit this environment.
 // nsrestore itself is a static binary, so LD_LIBRARY_PATH does not affect it.
-func useInjectedBundle(bundleDir, inheritedLDPath, inheritedPATH string) error {
+//
+// The inherited PATH and LD_LIBRARY_PATH are read from the process environment
+// directly — they arrive via the inherited env from the agent (execNSRestore sets
+// cmd.Env = os.Environ()), so no flags are needed to pass them through argv.
+func useInjectedBundle(bundleDir string) error {
 	libDir := filepath.Join(bundleDir, "lib")
-	if inheritedLDPath != "" {
-		libDir += ":" + inheritedLDPath
+	if inherited := os.Getenv("LD_LIBRARY_PATH"); inherited != "" {
+		libDir += ":" + inherited
 	}
 	if err := os.Setenv("LD_LIBRARY_PATH", libDir); err != nil {
 		return err
 	}
 	newPATH := bundleDir
-	if inheritedPATH != "" {
-		newPATH = bundleDir + ":" + inheritedPATH
+	if inherited := os.Getenv("PATH"); inherited != "" {
+		newPATH = bundleDir + ":" + inherited
 	}
 	if err := os.Setenv("PATH", newPATH); err != nil {
 		return err

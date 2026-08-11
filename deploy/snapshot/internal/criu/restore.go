@@ -129,6 +129,12 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 	criuOpts.EvasiveDevices = proto.Bool(settings.EvasiveDevices)
 	criuOpts.ForceIrmap = proto.Bool(settings.ForceIrmap)
 
+	// Use nftables for network lock/unlock. The iptables mode (CRIU default)
+	// requires six binary names (iptables-restore, ip6tables-restore, …) and
+	// the libxtables dlopen plugins which ldd cannot detect at bundle-build time.
+	// nftables only needs the single `nft` binary and has no dlopen dependencies.
+	criuOpts.NetworkLock = criurpc.CriuNetworkLockMethod_NFTABLES.Enum()
+
 	if cgroupRoot != "" && shouldSetCgroupRoot(criuOpts.GetManageCgroupsMode()) {
 		criuOpts.CgRoot = []*criurpc.CgroupRoot{
 			{Path: proto.String(cgroupRoot)},
@@ -197,7 +203,13 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 // its plugins at the injected path.
 func rewriteCRIULibDir(existingConfigFile *string, workDir, criuBundleDir string) (string, error) {
 	if workDir == "" {
-		return "", fmt.Errorf("rewriteCRIULibDir: workDir is required")
+		// Older checkpoints may not have a WorkDir in their manifest. Fall back
+		// to a temp dir so the libdir override can still be written.
+		tmp, err := os.MkdirTemp("", "criu-restore-conf-*")
+		if err != nil {
+			return "", fmt.Errorf("rewriteCRIULibDir: no workDir and failed to create temp dir: %w", err)
+		}
+		workDir = tmp
 	}
 
 	var baseConf string
@@ -244,7 +256,10 @@ func overrideLibDir(conf, libDir string) string {
 }
 
 func isLibDirLine(line string) bool {
-	return strings.HasPrefix(strings.TrimSpace(line), "libdir ")
+	// CRIU's config parser (criu/config.c) accepts both space and tab as the
+	// key/value separator, so match both to avoid a duplicate libdir directive.
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "libdir ") || strings.HasPrefix(trimmed, "libdir\t")
 }
 
 func closeFiles(files []*os.File) {
