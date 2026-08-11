@@ -14,6 +14,7 @@ from dynamo.common.backend.logprobs import (
     build_sglang_logprob_kwargs,
     extract_from_completion_output,
     extract_from_sglang_meta,
+    extract_openai_completion_prompt_logprobs,
     extract_prompt_logprobs_from_completion_output,
     extract_prompt_logprobs_from_sglang_meta,
     parse_logprob_options,
@@ -321,6 +322,33 @@ def test_prompt_logprobs_sglang_handles_missing_decoded_token():
     assert payload[1] == {"9": {"logprob": -0.7}}
 
 
+def test_openai_completion_prompt_logprobs_preserve_sglang_legacy_shape():
+    class _Tokenizer:
+        def batch_decode(self, token_ids):
+            return [f"token-{token_id[0]}" for token_id in token_ids]
+
+    payload = extract_openai_completion_prompt_logprobs(
+        {
+            "input_token_logprobs": [(None, 1, None), (-0.2, 2, " b")],
+            "input_top_logprobs": [
+                None,
+                [(-0.2, 2, " b"), (-1.2, 3, " c"), (-2.2, 4, None)],
+            ],
+        },
+        tokenizer=_Tokenizer(),
+    )
+
+    assert payload == {
+        "tokens": ["token-1", " b"],
+        "token_logprobs": [None, -0.2],
+        "top_logprobs": [
+            None,
+            {" b": -0.2, " c": -1.2, "token-4": -2.2},
+        ],
+        "text_offset": [0, 0],
+    }
+
+
 # ---------------------------------------------------------------------------
 # build_sglang_logprob_kwargs
 # ---------------------------------------------------------------------------
@@ -333,7 +361,10 @@ def test_sglang_kwargs_empty_when_no_options():
 def test_sglang_kwargs_logprobs_zero_allowed_without_gate():
     # The default gate forbids logprobs >= 1; logprobs=0 always works.
     kwargs = build_sglang_logprob_kwargs({"logprobs": 0}, allow_top_logprobs=False)
-    assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
+    assert kwargs == {
+        "return_logprob": True,
+        "top_logprobs_num": 0,
+    }
 
 
 def test_sglang_kwargs_top_logprobs_rejected_without_gate():
@@ -343,7 +374,10 @@ def test_sglang_kwargs_top_logprobs_rejected_without_gate():
 
 def test_sglang_kwargs_top_logprobs_allowed_with_gate():
     kwargs = build_sglang_logprob_kwargs({"logprobs": 2}, allow_top_logprobs=True)
-    assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
+    assert kwargs == {
+        "return_logprob": True,
+        "top_logprobs_num": 2,
+    }
 
 
 def test_sglang_kwargs_prompt_logprobs_sets_start_len_zero():

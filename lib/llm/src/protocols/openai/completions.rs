@@ -428,7 +428,9 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
         self.common.prompt_logprobs.or_else(|| {
             self.inner
                 .echo
-                .and_then(|echo| if echo { Some(1) } else { None })
+                .filter(|echo| *echo)
+                .and(self.inner.logprobs)
+                .map(|logprobs| logprobs as u32)
         })
     }
 
@@ -543,11 +545,12 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_logprobs_propagates() {
+    fn test_echo_uses_requested_logprob_depth_for_prompt_logprobs() {
         let request_json = json!({
             "model": "test-model",
             "prompt": [1, 2, 3],
-            "prompt_logprobs": 3
+            "echo": true,
+            "logprobs": 3
         });
         let request: NvCreateCompletionRequest =
             serde_json::from_value(request_json).expect("Failed to deserialize request");
@@ -556,6 +559,26 @@ mod tests {
             .extract_output_options()
             .expect("Failed to extract output options");
         assert_eq!(output_options.prompt_logprobs, Some(3));
+    }
+
+    #[test]
+    fn test_sglang_compatible_logprob_depth_validation() {
+        for depth in [6, 21, u8::MAX] {
+            let accepted: NvCreateCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "prompt": "test",
+                "logprobs": depth
+            }))
+            .expect("deserialize accepted depth");
+            ValidateRequest::validate(&accepted).expect("SGLang-compatible depth must validate");
+        }
+
+        let too_large = serde_json::from_value::<NvCreateCompletionRequest>(json!({
+            "model": "test-model",
+            "prompt": "test",
+            "logprobs": 256
+        }));
+        assert!(too_large.is_err());
     }
 
     #[test]

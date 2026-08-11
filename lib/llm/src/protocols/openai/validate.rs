@@ -61,7 +61,7 @@ pub const MAX_TOP_LOGPROBS: u8 = 20;
 /// Minimum allowed value for `logprobs` in completion requests
 pub const MIN_LOGPROBS: u8 = 0;
 /// Maximum allowed value for `logprobs` in completion requests
-pub const MAX_LOGPROBS: u8 = 5;
+pub const MAX_LOGPROBS: u8 = u8::MAX;
 
 /// Minimum allowed value for `n` (number of choices)
 pub const MIN_N: u8 = 1;

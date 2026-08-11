@@ -657,14 +657,21 @@ def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
         {"output_options": {"logprobs": 0}}
     )
 
-    assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
+    assert kwargs == {
+        "return_logprob": True,
+        "top_logprobs_num": 0,
+    }
 
 
-def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+def test_build_logprob_kwargs_forwards_requested_top_logprob_depth():
+    kwargs = DecodeWorkerHandler._build_logprob_kwargs(
+        {"output_options": {"logprobs": 2}}
+    )
 
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
+    assert kwargs == {
+        "return_logprob": True,
+        "top_logprobs_num": 2,
+    }
 
 
 def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
@@ -674,7 +681,10 @@ def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch)
         {"output_options": {"logprobs": 2}}
     )
 
-    assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
+    assert kwargs == {
+        "return_logprob": True,
+        "top_logprobs_num": 2,
+    }
 
 
 def test_extract_logprobs_formats_top_tokens_as_token_ids():
@@ -903,6 +913,41 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
     assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_handles_incremental_sglang_logprobs():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.1, 101, "a")],
+                        },
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [102],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "output_token_logprobs": [(-0.2, 102, "b")],
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2]]
 
 
 @pytest.mark.asyncio
