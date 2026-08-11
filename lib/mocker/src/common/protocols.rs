@@ -1745,7 +1745,7 @@ mod tests {
         });
         payload["max_model_len"] = serde_json::json!(args.max_model_len);
         payload["g1_backend"] = serde_json::json!(args.g1_backend);
-        payload["aic_systems_path"] = serde_json::json!("/tmp/aic-systems");
+        payload["aic_systems_path"] = serde_json::json!("/opt/aic-systems");
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
@@ -1756,7 +1756,7 @@ mod tests {
         assert_eq!(restored.g1_backend, Some(G1Backend::Native));
         assert_eq!(
             restored.aic_systems_path.as_deref(),
-            Some("/tmp/aic-systems")
+            Some("/opt/aic-systems")
         );
         assert_eq!(
             restored.kv_transfer_timing_mode,
