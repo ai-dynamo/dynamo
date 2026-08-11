@@ -116,6 +116,16 @@ DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
 LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
   "$build/lifecycle_test" owner-importer-success
 
+for scenario in \
+  multicast-success multicast-rollback multicast-abort \
+  multicast-importer-response-failure multicast-binding-response-failure \
+  mnnvl-multicast-teardown; do
+  DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+  DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+  LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+    "$build/lifecycle_test" "$scenario"
+done
+
 DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
 DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
 LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
