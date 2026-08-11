@@ -22,17 +22,19 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type disaggregatedSetProgram struct {
-	sharedResources *dgdSharedResourcesReconciler
-	rollout         *dgdWorkerRolloutReconciler
-	restart         *dgdRestartReconciler
-	workloads       *disaggregatedSetWorkloadsReconciler
-	scalingAdapters *dgdScalingAdaptersReconciler
+	sharedResources   *dgdSharedResourcesReconciler
+	rollout           *dgdWorkerRolloutReconciler
+	restart           *dgdRestartReconciler
+	workloads         *disaggregatedSetWorkloadsReconciler
+	scalingAdapters   *dgdScalingAdaptersReconciler
+	unsupportedReason string
 }
 
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggregatedSetProgram {
@@ -70,6 +72,29 @@ func (p *disaggregatedSetProgram) Reconcile(
 		}
 		programResult.Fail(req.DGD.Generation, reason, retErr)
 	}()
+	if p.unsupportedReason != "" {
+		changed := setDisaggregatedSetEligibilityCondition(
+			&programResult,
+			req.DGD.Generation,
+			metav1.ConditionFalse,
+			"UnsupportedIntent",
+			p.unsupportedReason,
+		)
+		if changed {
+			programResult.Eventf(
+				corev1.EventTypeWarning,
+				"DisaggregatedSetUnsupported",
+				"DisaggregatedSet request cannot be reconciled: %s",
+				p.unsupportedReason,
+			)
+		}
+		programResult.applyReconcileResult(req.DGD.Generation, ReconcileResult{
+			State:   nvidiacomv1beta1.DGDStateFailed,
+			Reason:  "disaggregated_set_intent_unsupported",
+			Message: Message(p.unsupportedReason),
+		})
+		return programResult, nil
+	}
 
 	setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionTrue, "Selected", "DisaggregatedSet pathway selected")
 

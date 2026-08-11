@@ -78,10 +78,10 @@ Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It
 Dynamo uses an ordered routing decision for multinode deployments:
 
 1. **Grove:** selected when Grove is available and `nvidia.com/enable-grove` is not `"false"`.
-2. **DisaggregatedSet:** considered only when Grove was not selected and the DGD sets `nvidia.com/enable-disaggregatedset: "true"`. The DS API and requested role configuration must also be supported.
+2. **DisaggregatedSet:** selected when Grove was not selected and the DGD sets `nvidia.com/enable-disaggregatedset: "true"`. Unsupported API or role requirements are reported through `DisaggregatedSetEligible=False` without silently changing pathways.
 3. **Standard DCD pathway:** used when neither Grove nor DS is selected. Multinode components on this pathway require LWS and Volcano.
 
-Grove and DS are not mutually exclusive features. Grove has higher routing priority, while DS requires explicit opt-in. Installing the DS API alone does not move existing DGDs to DS.
+Grove and DS are not mutually exclusive features. Grove has higher priority during initial routing, while DS requires explicit opt-in. Installing another provider does not move an existing DS deployment; remove the DS annotation to select a different pathway.
 
 #### Scheduler Integration:
 - **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:

@@ -25,20 +25,18 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type componentProgram struct {
-	sharedResources                *dgdSharedResourcesReconciler
-	rollout                        *dgdWorkerRolloutReconciler
-	restart                        *dgdRestartReconciler
-	restartProgress                *componentRestartProgressResolver
-	workloads                      *componentWorkloadsReconciler
-	scalingAdapters                *dgdScalingAdaptersReconciler
-	legacyCleanup                  *disaggregatedSetCompatibilityCleanup
-	disaggregatedSetFallbackReason string
-	lwsEnabled                     bool
+	sharedResources *dgdSharedResourcesReconciler
+	rollout         *dgdWorkerRolloutReconciler
+	restart         *dgdRestartReconciler
+	restartProgress *componentRestartProgressResolver
+	workloads       *componentWorkloadsReconciler
+	scalingAdapters *dgdScalingAdaptersReconciler
+	legacyCleanup   *disaggregatedSetCompatibilityCleanup
+	lwsEnabled      bool
 }
 
 // newComponentProgram wires the DCD pathway at the DGD composition root.
@@ -88,24 +86,6 @@ func (p *componentProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
-
-	if p.disaggregatedSetFallbackReason != "" {
-		changed := setDisaggregatedSetEligibilityCondition(
-			&programResult,
-			req.DGD.Generation,
-			metav1.ConditionFalse,
-			"FallbackToComponentProgram",
-			p.disaggregatedSetFallbackReason,
-		)
-		if changed {
-			programResult.Eventf(
-				corev1.EventTypeWarning,
-				"DisaggregatedSetFallback",
-				"DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s",
-				p.disaggregatedSetFallbackReason,
-			)
-		}
-	}
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
 	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
@@ -160,9 +140,7 @@ func (p *componentProgram) Reconcile(
 		if err := p.legacyCleanup.Reconcile(ctx, req.DGD); err != nil {
 			return programResult, err
 		}
-		if p.disaggregatedSetFallbackReason == "" {
-			apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, "DisaggregatedSetEligible")
-		}
+		apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, "DisaggregatedSetEligible")
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)

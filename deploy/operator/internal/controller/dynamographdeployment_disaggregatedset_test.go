@@ -6,6 +6,8 @@
 package controller
 
 import (
+	"context"
+	"maps"
 	"strings"
 	"testing"
 
@@ -20,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -129,6 +132,73 @@ func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {
 	}, service.Spec.Selector)
 }
 
+func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
+	existingDCDSelector := map[string]string{consts.KubeLabelDynamoSelector: "demo-prefill"}
+	existingDSSelector := map[string]string{
+		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
+		disaggregatedsetv1.RoleLabelKey:     "prefill",
+		disaggregatedsetv1.RevisionLabelKey: "old12345",
+	}
+	tests := []struct {
+		name        string
+		hasExisting bool
+		targetReady bool
+		existing    map[string]string
+		want        map[string]string
+	}{
+		{
+			name:        "DCD selector remains active while the first DS revision is pending",
+			hasExisting: true,
+			existing:    existingDCDSelector,
+			want:        existingDCDSelector,
+		},
+		{
+			name:        "old DS revision remains active while the target revision is pending",
+			hasExisting: true,
+			existing:    existingDSSelector,
+			want:        existingDSSelector,
+		},
+		{
+			name: "a new service selects the target revision immediately",
+			want: map[string]string{
+				disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
+				disaggregatedsetv1.RoleLabelKey:     "prefill",
+				disaggregatedsetv1.RevisionLabelKey: "new12345",
+			},
+		},
+		{
+			name:        "a ready target replaces the active selector",
+			hasExisting: true,
+			targetReady: true,
+			existing:    existingDCDSelector,
+			want: map[string]string{
+				disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
+				disaggregatedsetv1.RoleLabelKey:     "prefill",
+				disaggregatedsetv1.RevisionLabelKey: "new12345",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &corev1.Service{}
+			existing := &corev1.Service{Spec: corev1.ServiceSpec{Selector: maps.Clone(tt.existing)}}
+
+			setDesiredDisaggregatedSetServiceSelector(
+				service,
+				existing,
+				tt.hasExisting,
+				"demo-ds",
+				"prefill",
+				"new12345",
+				tt.targetReady,
+			)
+
+			require.Equal(t, tt.want, service.Spec.Selector)
+		})
+	}
+}
+
 func TestDisaggregatedSetCleanupUsesAPICapabilityWhenSelectionIsDisabled(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
@@ -160,8 +230,9 @@ func TestDisaggregatedSetCleanupUsesAPICapabilityWhenSelectionIsDisabled(t *test
 	ds.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, dcd, service, ds).Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client:   k8sClient,
-		Recorder: record.NewFakeRecorder(10),
+		Client:    &staleDisaggregatedSetClient{Client: k8sClient},
+		APIReader: k8sClient,
+		Recorder:  record.NewFakeRecorder(10),
 		RuntimeConfig: &commoncontroller.RuntimeConfig{
 			Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
 		},
@@ -173,6 +244,25 @@ func TestDisaggregatedSetCleanupUsesAPICapabilityWhenSelectionIsDisabled(t *test
 	require.True(t, metav1.IsControlledBy(persistedService, dcd))
 	err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(ds), newDisaggregatedSetObject())
 	require.True(t, apierrors.IsNotFound(err))
+}
+
+type staleDisaggregatedSetClient struct {
+	client.Client
+}
+
+func (c *staleDisaggregatedSetClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	obj client.Object,
+	opts ...client.GetOption,
+) error {
+	if obj.GetObjectKind().GroupVersionKind() == disaggregatedSetGVK {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group:    disaggregatedSetGVK.Group,
+			Resource: "disaggregatedsets",
+		}, key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 func TestSelectDisaggregatedSetComponents(t *testing.T) {
@@ -300,6 +390,96 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 	}
 	ready, _, _ = checkDisaggregatedSetReadiness(ds, selection)
 	require.True(t, ready)
+}
+
+func TestCheckDisaggregatedSetChildLWSReadinessWaitsForRemovedRoles(t *testing.T) {
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	}
+	readyChild := func(name string) *leaderworkersetv1.LeaderWorkerSet {
+		return &leaderworkersetv1.LeaderWorkerSet{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1},
+			Spec:       leaderworkersetv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](1)},
+			Status: leaderworkersetv1.LeaderWorkerSetStatus{
+				ObservedGeneration: 1,
+				Replicas:           1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+			},
+		}
+	}
+	prefill := readyChild("demo-prefill-target")
+	decode := readyChild("demo-decode-target")
+	removed := readyChild("demo-legacy-worker-old")
+	targetByRole := map[string]*leaderworkersetv1.LeaderWorkerSet{
+		"prefill": prefill,
+		"decode":  decode,
+	}
+	childrenByRole := map[string][]*leaderworkersetv1.LeaderWorkerSet{
+		"prefill":       {prefill},
+		"decode":        {decode},
+		"legacy-worker": {removed},
+	}
+
+	t.Log("a removed role with live replicas keeps the DisaggregatedSet unready")
+	ready, reason, _ := checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
+	require.False(t, ready)
+	require.Contains(t, reason, removed.Name)
+
+	t.Log("the target becomes ready after the removed role is fully drained")
+	removed.Spec.Replicas = ptr.To[int32](0)
+	removed.Status.Replicas = 0
+	removed.Status.UpdatedReplicas = 0
+	removed.Status.ReadyReplicas = 0
+	ready, _, _ = checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
+	require.True(t, ready)
+}
+
+func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T) {
+	ds := newDisaggregatedSetObject()
+	ds.SetName("demo")
+	ds.SetNamespace(testNamespace)
+	ds.SetUID("demo-uid")
+	ds.SetGeneration(2)
+	ds.Object["status"] = map[string]any{
+		"observedGeneration": int64(2),
+		"roleStatuses": []any{
+			map[string]any{"name": "prefill", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
+			map[string]any{"name": "decode", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
+		},
+	}
+	removed := &leaderworkersetv1.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-old-legacy-worker",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				disaggregatedsetv1.SetNameLabelKey: "demo",
+				disaggregatedsetv1.RoleLabelKey:    "legacy-worker",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: disaggregatedsetv1.GroupVersion.String(),
+				Kind:       "DisaggregatedSet",
+				Name:       ds.GetName(),
+				UID:        ds.GetUID(),
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec:   leaderworkersetv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](1)},
+		Status: leaderworkersetv1.LeaderWorkerSetStatus{Replicas: 1, ReadyReplicas: 1},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+	workloads := &disaggregatedSetWorkloadsReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(removed).Build()}
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	}
+
+	ready, reason, _, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, removed.Name)
 }
 
 func TestDisaggregatedSetPredicatesObserveRoutingMetadata(t *testing.T) {

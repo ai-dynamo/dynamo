@@ -111,16 +111,15 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
-	if err != nil {
-		return ReconcileResult{}, err
-	}
-
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
 		dgd,
 		syncedPodCliqueSet,
 	)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment, readiness.Ready)
 	if err != nil {
 		return ReconcileResult{}, err
 	}

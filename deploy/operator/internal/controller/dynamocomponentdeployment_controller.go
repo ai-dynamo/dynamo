@@ -231,6 +231,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// create or update api-server service
 	serviceModified, err := r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
 		dynamoComponentDeployment: dynamoComponentDeployment,
+		serviceTargetReady:        componentReconcileResult.status == metav1.ConditionTrue,
 	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
@@ -695,7 +696,21 @@ func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoCo
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt generateResourceOption) (bool, error) {
 	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(ctx, opt)
+		service, deleted, err := r.generateService(ctx, opt)
+		if err != nil || deleted || service == nil || opt.serviceTargetReady {
+			return service, deleted, err
+		}
+		existing := &corev1.Service{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(service), existing); err != nil {
+			if k8serrors.IsNotFound(err) {
+				return service, false, nil
+			}
+			return nil, false, fmt.Errorf("failed to get existing Service before selector cutover: %w", err)
+		}
+		if isDisaggregatedSetServiceSelector(existing) {
+			service.Spec.Selector = maps.Clone(existing.Spec.Selector)
+		}
+		return service, false, nil
 	})
 	if err != nil {
 		return false, err
@@ -870,6 +885,7 @@ func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]
 
 type generateResourceOption struct {
 	dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment
+	serviceTargetReady        bool
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {

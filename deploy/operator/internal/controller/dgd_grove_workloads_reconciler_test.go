@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -550,4 +551,41 @@ func newUnstructuredGrovePodCliqueSet() *unstructured.Unstructured {
 	object.SetAPIVersion(provideroverride.GroveAPIVersion)
 	object.SetKind(provideroverride.TargetPodCliqueSet)
 	return object
+}
+
+func TestGroveServiceWaitsForReadyWorkloadBeforeDisaggregatedSetCutover(t *testing.T) {
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+			},
+		},
+	})
+	component := &dgd.Spec.Components[0]
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name:      dynamo.GetDCDResourceName(dgd, component.ComponentName, ""),
+		Namespace: dgd.Namespace,
+	}}
+	setDisaggregatedSetServiceSelector(service, "graph", "frontend", "old12345")
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd, service).
+		Build()
+	reconciler := newGroveStableResourcesReconciler(
+		kubeClient,
+		record.NewFakeRecorder(10),
+		&configv1alpha1.OperatorConfiguration{},
+	)
+
+	_, err := reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false, false)
+	require.NoError(t, err)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(service), service))
+	require.True(t, isDisaggregatedSetServiceSelector(service))
+
+	_, err = reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false, true)
+	require.NoError(t, err)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(service), service))
+	require.False(t, isDisaggregatedSetServiceSelector(service))
 }
