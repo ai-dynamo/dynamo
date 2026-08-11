@@ -21,11 +21,11 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
 | `docs` | Nothing (classification only) |
 | `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
-| `examples` | Nothing (classification only) |
+| `examples` | Recipe Kustomize generation and unit checks |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `docs`, `examples`, `ignore`, and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks.
+> **Note:** `docs`, `ignore`, and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks.
 
 ## Fixing "Uncovered Files" Errors
 
@@ -37,7 +37,7 @@ ERROR: The following files are not covered by any CI filter
 Add patterns to `filters.yaml`:
 
 1. **New source files** → Add to `core` or relevant backend filter
-2. **New examples/recipes** → Add to `examples`
+2. **New examples, recipes, and recipe validation helpers** → Add to `examples`
 3. **Documentation** → Add to `docs`
 4. **Config files that don't need CI** → Add to `ignore`
 
