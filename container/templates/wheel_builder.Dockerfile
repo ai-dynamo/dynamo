@@ -596,6 +596,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
+# Complete the root Cargo workspace after the expensive runtime build. Planner
+# wheel metadata and optional source archival both validate every member.
+COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
+COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+
 {% if target == "planner" %}
 # AI Simulate is a separate, architecture-specific Python distribution used by
 # the planner image. Build it after the Dynamo wheels so Python-only changes do

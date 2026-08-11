@@ -119,6 +119,37 @@ def test_aisimulate_builds_a_planner_local_native_runtime_wheel():
     assert "aisimulate-*" not in release_workflow
 
 
+def test_runtime_wheel_context_covers_every_root_workspace_member():
+    root = Path(__file__).resolve().parents[2]
+    repo_root = root.parent
+    workspace = tomllib.loads((repo_root / "Cargo.toml").read_text())
+    wheel_builder = (
+        repo_root / "container/templates/wheel_builder.Dockerfile"
+    ).read_text()
+
+    runtime_stage = wheel_builder.split(
+        "FROM wheel_builder_base AS runtime_wheel_builder", 1
+    )[1]
+    shared_context = runtime_stage.split('{% if target == "planner" %}', 1)[0]
+    copied_roots = {
+        source.rstrip("/")
+        for line in shared_context.splitlines()
+        if line.startswith("COPY ")
+        for source in line.split()[1:-1]
+        if source.endswith("/") and not source.startswith("--from=")
+    }
+
+    missing = [
+        member
+        for member in workspace["workspace"]["members"]
+        if not any(
+            member == copied_root or member.startswith(f"{copied_root}/")
+            for copied_root in copied_roots
+        )
+    ]
+    assert not missing, f"Runtime wheel context omits workspace members: {missing}"
+
+
 def test_profiler_does_not_publish_or_reexport_sweeper():
     assert importlib.util.find_spec("dynamo.profiler.sweeper") is None
     subprocess.run(
