@@ -130,8 +130,9 @@ Before generating a hypothesis, determine whether a broad or narrow knob adjustm
 - Return to exploration when a narrow change is invalid, inconclusive, within the measured noise floor of the
   active benchmark series, reverses the expected direction, or reveals a different limiting regime.
 
-Maintain one persistent search-calibration ledger for the engagement instead of regenerating a scan for every
-hypothesis. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
+Maintain one persistent search-calibration ledger for the engagement at
+`EXP_ROOT/analysis/search-calibration.md` instead of regenerating a scan for every
+hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
 (a topology adoption, new variance data, an answered ask). The ledger explicitly covers:
 
 1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
@@ -243,7 +244,8 @@ distinct categories, including AIPerf profiler data, but keep each entry concise
 official documentation that supplied a constraint or recommendation.
 
 Include relevant same-series history and tuning-hierarchy decisions without reproducing every rejected option. Treat
-cross-series results as context only. Classify an absolute change of `0.5%` or less as noise. A clear, substantial,
+cross-series results as context only. Classify an absolute change at or below the measured noise floor of the active
+benchmark series (per `comparison-uncertainty.md`) as noise. A clear, substantial,
 plausible improvement may be supported by one valid run; do not require a repeat or confidence intervals solely to
 support it. Preserve an `inconclusive` analysis when the evidence cannot support the direction or magnitude. Always
 include the search calibration, even for `no-proposal` or `blocked`, so the next iteration does not forget unexplored

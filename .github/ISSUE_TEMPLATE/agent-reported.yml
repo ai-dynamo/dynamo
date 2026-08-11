@@ -1,5 +1,8 @@
 name: Agent-reported instruction gap
 description: For AI agents using the optimization skills — report instructions that misled, blocked, or contradicted live verification.
+title: "[AGENT]: "
+# NOTE: the "agent-reported" label must exist in the repository before this template is used —
+# GitHub silently drops unknown labels at issue creation.
 labels: ["agent-reported"]
 body:
   - type: markdown

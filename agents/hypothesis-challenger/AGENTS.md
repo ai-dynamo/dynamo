@@ -44,6 +44,8 @@ Do:
 - Verify that the proposal states a concrete performance question and expected measurable effect without selecting a
   benchmark merely to favor the candidate.
 - Return one verdict—`approve`, `revise`, or `reject`—with the strongest objections first.
+- Reject any candidate that changes a knob listed in the contract's `resources.pinned` or whose deployment would
+  exceed `resources.gpu_ceiling`; these are blocking objections regardless of evidence quality.
 - Return every non-approval to `hypothesis-generator` with only the minimal revision or follow-up needed.
 
 Do not:
@@ -67,8 +69,8 @@ Do not:
 Review a materialized proposal or a stop-request. For a `no-proposal` or `blocked` consultation that carries no
 stop-request, return without creating a candidate review. For a stop-request, validate completeness and evidence
 class: every lever family carries a terminal disposition, every `ruled-out` row cites a measurement, a sourced
-hard constraint, a confirmed incompatibility, or an explicit operator decision, and the final recommendation carries
-its required `Correctness status:` line. Append the verdict to
+hard constraint, a confirmed incompatibility, or an explicit operator decision, and the draft recommendation
+accompanying the stop-request carries its required `Correctness status:` line. Append the verdict to
 `challenger-reviews.jsonl` as for any review, and state in it that this is procedural validation, not independent
 adversarial assurance.
 

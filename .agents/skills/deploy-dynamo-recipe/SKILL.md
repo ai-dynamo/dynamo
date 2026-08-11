@@ -102,7 +102,8 @@ Review the assigned DGD and any support manifests explicitly included in the han
 - GPU requests, node selectors, tolerations, and GPU SKU expectations
 
 Stop before mutation if required namespace, CRDs, PVC prerequisites, secret names, storage class, images, or GPU
-capacity are missing.
+capacity are missing. Also verify before mutation that the assigned manifest changes no knob listed in the
+contract's `resources.pinned` and that total concurrent GPU holdings stay within `resources.gpu_ceiling`.
 
 When checking GPU capacity, count every pod that is bound to a node (`spec.nodeName` set) and not in a terminal phase
 (`Succeeded`/`Failed`) as holding its full GPU request. Do not filter on `phase == Running`: pods in

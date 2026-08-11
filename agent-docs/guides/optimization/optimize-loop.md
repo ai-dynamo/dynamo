@@ -149,10 +149,16 @@ one of:
   with them. Enter `PARKED_ON_ASKS` (a pause, not a stop) only when pending asks are the only remaining work, and
   record how deployed resources are held and when they scale down;
 - a **stop-request**: the search-calibration record in a terminal state, meaning every lever family is `tested`,
-  `asked` and answered, `ruled-out`, or `deferred`. A `ruled-out` row must cite a measurement, a sourced hard
+  `asked` and answered, `ruled-out`, or `deferred`. Prepare the Finalize artifacts (section 7), including the
+  recommendation's `Correctness status:` line, BEFORE submitting the stop-request — the stop-request references the
+  draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
   constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
   does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. Hand the
   stop-request to `hypothesis-challenger` for evidence-class validation.
+
+While a stop-request awaits challenger validation and operator grant (`STOP_REQUESTED`), continue confirmatory
+runs, cleanup, and any still-testable work; launch no new candidate families. If the challenger or operator returns
+objections, re-enter `ACTIVE`.
 
 Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), the authorized budget is exhausted
 (`BUDGET_STOP`), or access is lost and cannot be restored. Never stop because a report exists.
