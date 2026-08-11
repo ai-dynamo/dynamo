@@ -107,15 +107,59 @@ repos:
       language: system
       files: ^docs/fern/scripts/check_asset_paths\.py$
     - id: check-style-components
-      name: Check *Styles.tsx CSS template literals
+      name: Check component CSS template literals
       entry: python3 docs/fern/scripts/check_style_components.py
       language: system
-      files: ^docs/fern/(components/.*Styles\.tsx|scripts/check_style_components\.py)$
+      # ReleaseSupportMatrix and FeatureInteractions hold large CSS template
+      # literals under a name the *Styles.tsx convention misses, and a stray
+      # backtick there breaks the Fern build the same way. Named rather than
+      # matching every component: the check forbids interpolation, which is
+      # correct for a pure CSS literal and wrong for ordinary TSX, and a
+      # components/.*\.tsx pattern fails on FeatureHeatmap, ModelEABuildCards
+      # and TerminalDemo, all of which interpolate legitimately.
+      files: ^docs/fern/(components/(.*Styles|ReleaseSupportMatrix|FeatureInteractions)\.tsx|scripts/check_style_components\.py)$
+    - id: check-agent-twins
+      name: Check component-rendered data has an agent-readable twin
+      entry: python3 docs/fern/scripts/check_agent_twins.py
+      language: system
+      # releases.data.ts is the reason this runs at all: it is where a new
+      # release appears, and the twin then has to carry it. It is .ts, not
+      # .tsx, so a components/*.tsx pattern misses it entirely. Component
+      # files matter for the undeclared-component tripwire, and the page list
+      # here has to stay in step with IN_SCOPE in check_agent_twins.py --
+      # a page it governs but this pattern misses is ungated, and a rename
+      # of one throws the script's hard-fail onto an unrelated PR later.
+      files: ^docs/fern/(components/releases\.data\.ts|components/.*\.tsx|pages/reference/general/(compatibility|release-artifacts|model-early-access-builds)\.mdx|scripts/check_agent_twins\.py)$
+      pass_filenames: false
+    - id: check-agent-twins-selftest
+      name: Self-test the agent-twin matcher
+      entry: python3 docs/fern/scripts/check_agent_twins.py --test
+      language: system
+      files: ^docs/fern/scripts/check_agent_twins\.py$
+      pass_filenames: false
     - id: check-published-styles-selftest
       name: Self-test the published-styles regex helpers
       entry: python3 docs/fern/scripts/check_published_styles.py --test
       language: system
       files: ^docs/fern/scripts/check_published_styles\.py$
+      pass_filenames: false
+    - id: gen-llms-tables
+      name: Test the generated docs tables (gen_llms_tables.py)
+      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py
+      language: python
+      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
+      pass_filenames: false
+      additional_dependencies:
+        - pytest
+    - id: gen-llms-tables-check
+      name: Check the generated docs tables are current
+      entry: python3 docs/fern/scripts/gen_llms_tables.py --check
+      language: system
+      # The hook above proves the generator works; this one proves it was
+      # run. Without it, editing releases.data.ts and forgetting to
+      # regenerate leaves releases.json and every generated span stale,
+      # with nothing else in the repo checking.
+      files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx|assets/releases(-atom\.xml|\.json))$
       pass_filenames: false
     - id: check-component-imports
       name: Check Fern components trigger no rolldown bundling

@@ -76,7 +76,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     try:
         if hasattr(relay, "stats") and hasattr(relay, "snapshot"):
             endpoint_tasks.append(
-                asyncio.create_task(
+                asyncio.ensure_future(
                     runtime.endpoint(
                         f"{namespace}.{diagnostics_component}.stats"
                     ).serve_endpoint(
@@ -87,7 +87,7 @@ async def worker(runtime: DistributedRuntime) -> None:
                 )
             )
             endpoint_tasks.append(
-                asyncio.create_task(
+                asyncio.ensure_future(
                     runtime.endpoint(
                         f"{namespace}.{diagnostics_component}.snapshot"
                     ).serve_endpoint(
@@ -103,7 +103,7 @@ async def worker(runtime: DistributedRuntime) -> None:
                 "enable the ckf-diagnostics Cargo feature to expose them"
             )
         endpoint_tasks.append(
-            asyncio.create_task(
+            asyncio.ensure_future(
                 runtime.endpoint(
                     f"{namespace}.{diagnostics_component}.health"
                 ).serve_endpoint(

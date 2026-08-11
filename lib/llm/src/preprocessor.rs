@@ -3359,12 +3359,70 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input and tracks what the jail emitted per choice.index
+        // so n > 1 is handled correctly and double-emit is avoided.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+            emitted_text: String,
+            recovered: bool,
+        }
+        // Named so the bool in the recoveries tuple is legible at each use site.
+        struct PendingRecovery {
+            choice_idx: u32,
+            tail: String,
+            tail_already_emitted: bool,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        // Token strings from the parser config so recovery matches the parser
+        // even if the defaults are ever overridden.
+        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_cfg.tool_call_start;
+        let glm47_end = glm47_cfg.tool_call_end;
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+        let glm47_start_jail = glm47_start.clone();
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            // Only retain from the last <tool_call> marker onward to bound
+            // memory on long responses.
+            if is_glm47 && let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
+                    {
+                        let state = cr.entry(choice.index).or_default();
+                        state.input_text.push_str(content);
+                        // Drop everything before the last marker to keep
+                        // the buffer small. Walk back to a char boundary
+                        // before draining so a multi-byte char split
+                        // across chunks never triggers a panic.
+                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
+                        {
+                            Some(pos) => pos,
+                            // No marker yet — keep enough tail to
+                            // catch a marker split across two chunks.
+                            None => state
+                                .input_text
+                                .len()
+                                .saturating_sub(glm47_start_jail.len() - 1),
+                        };
+                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
+                            keep_from -= 1;
+                        }
+                        state.input_text.drain(..keep_from);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3383,7 +3441,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -3395,7 +3453,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -3405,7 +3463,145 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete
+            // <tool_call> block. rfind skips complete blocks so earlier parsed
+            // calls are never duplicated. Recovered content WILL contain raw
+            // markup — callers that require "no tool tags in content" must
+            // filter on finish_reason=length.
+            //
+            // TODO: this recovery runs inside apply_tool_calling_jail, which
+            // the v2 path bypasses (use_parsers_v2 branch above). Adding
+            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+            // streaming recovery while aggregator.rs keeps running. At that
+            // point hoist this above the jail/v2 branch — it only needs
+            // buffered input text + finish_reason, both available there.
+            // Pass 1 (immutable): compute the recovery tail per choice and
+            // whether the jail already released it as content on this chunk.
+            // We collect into a Vec so we can release the immutable borrow on
+            // nv_chunk before mutating it in pass 2.
+            let recoveries: Vec<PendingRecovery> = if is_glm47 {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                nv_chunk
+                    .data
+                    .iter()
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| {
+                        let state = cr.entry(choice.index).or_default();
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
+                                &choice.delta.content
+                        {
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
+                            {
+                                Some(pos) => pos,
+                                None => state
+                                    .emitted_text
+                                    .len()
+                                    .saturating_sub(glm47_start.len() - 1),
+                            };
+                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
+                                keep_from -= 1;
+                            }
+                            state.emitted_text.drain(..keep_from);
+                        }
+                        if state.recovered
+                            || !matches!(
+                                choice.finish_reason,
+                                Some(dynamo_protocols::types::FinishReason::Length)
+                            )
+                        {
+                            return None;
+                        }
+                        let tail =
+                            state
+                                .input_text
+                                .rfind(glm47_start.as_str())
+                                .and_then(|pos| {
+                                    let t = &state.input_text[pos..];
+                                    if !t.contains(glm47_end.as_str()) {
+                                        Some(t.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })?;
+                        let tail_already_emitted = state.emitted_text.contains(&tail);
+                        state.recovered = true;
+                        Some(PendingRecovery {
+                            choice_idx: choice.index,
+                            tail,
+                            tail_already_emitted,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
+            for pr in &recoveries {
+                if !pr.tail_already_emitted {
+                    continue;
+                }
+                if let Some(ref mut data) = nv_chunk.data {
+                    for rc in data
+                        .inner
+                        .choices
+                        .iter_mut()
+                        .filter(|c| c.index == pr.choice_idx)
+                    {
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
+                    }
+                }
             }
+
+            // Pass 3: emit a recovery chunk per affected choice carrying just
+            // the truncated tail (marker onwards, no post-call prose).
+            let recovery_chunks: Vec<_> = recoveries
+                .into_iter()
+                .filter_map(|pr| {
+                    let PendingRecovery {
+                        choice_idx, tail, ..
+                    } = pr;
+                    tracing::warn!(
+                        choice_index = choice_idx,
+                        recovered_bytes = tail.len(),
+                        "glm47 streaming: partial <tool_call> emitted as content \
+                         on length finish"
+                    );
+                    let mut rec = nv_chunk.clone();
+                    rec.id = None;
+                    rec.event = None;
+                    rec.comment = None;
+                    rec.error = None;
+                    let rd = rec.data.as_mut()?;
+                    rd.inner.usage = None;
+                    rd.llm_metrics = None;
+                    rd.inner.choices.retain(|c| c.index == choice_idx);
+                    for rc in &mut rd.inner.choices {
+                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
+                        rc.delta.tool_calls = None;
+                        rc.finish_reason = None;
+                        rc.logprobs = None;
+                    }
+                    Some(rec)
+                })
+                .collect();
+
+            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
         })
     }
 
