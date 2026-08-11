@@ -1445,24 +1445,35 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
             }
-        # Mirror vLLM's EPLB gate exactly (vllm/config/parallel.py, verified against
-        # v0.26.0): startup rejects enable_eplb -- which elastic EP requires -- unless
-        # tensor_parallel_size * prefill_context_parallel_size * data_parallel_size > 1.
-        # pipeline_parallel_size is deliberately excluded, matching upstream. Enforcing
-        # the same product keeps a scale request from driving a live engine into a
-        # topology its own startup would refuse. prefill_context_parallel_size is absent
-        # on engines that predate PCP; treat that as 1 (no prefill-context parallelism).
         parallel_config = self.engine_client.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
+        # vLLM's elastic EP does not model prefill-context parallelism: it sizes the EP
+        # world as data_parallel_size * tensor_parallel_size (vllm/distributed/elastic_ep/
+        # elastic_execute.py), and ParallelConfig rejects prefill_context_parallel_size > 1
+        # together with data_parallel_size > 1 ("PCP does not support data parallelism
+        # yet"). A PCP>1 engine can therefore only run at DP=1, where a scale is a no-op,
+        # so reject rather than admit a target elastic EP cannot honor. Absent on engines
+        # that predate PCP -> treat as 1.
         pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
-        if tp_size * pcp_size * new_dp_size <= 1:
+        if pcp_size > 1:
             return {
                 "status": "error",
                 "message": (
-                    "tensor_parallel_size * prefill_context_parallel_size * "
-                    "new_data_parallel_size must be > 1 when elastic EP/ePLB is enabled, "
-                    f"but got tensor_parallel_size={tp_size}, "
-                    f"prefill_context_parallel_size={pcp_size}, "
+                    "elastic EP scaling is not supported when "
+                    f"prefill_context_parallel_size > 1 (got {pcp_size}); vLLM sizes the "
+                    "EP world as data_parallel_size * tensor_parallel_size and does not "
+                    "support prefill-context parallelism alongside data parallelism"
+                ),
+            }
+        # EPLB requires an EP world larger than a single rank. Elastic EP sizes that world
+        # as tensor_parallel_size * data_parallel_size, so reject a target that collapses
+        # it to one rank (mirrors vLLM's EPLB startup floor for the PCP==1 case).
+        if tp_size * new_dp_size <= 1:
+            return {
+                "status": "error",
+                "message": (
+                    "tensor_parallel_size * new_data_parallel_size must be > 1 when "
+                    f"elastic EP/ePLB is enabled, but got tensor_parallel_size={tp_size}, "
                     f"new_data_parallel_size={new_dp_size}"
                 ),
             }

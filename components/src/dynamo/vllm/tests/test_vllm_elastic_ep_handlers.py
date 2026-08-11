@@ -140,15 +140,16 @@ async def test_dp_two_allowed_at_tp_one(stub_ray):
     handler.engine_client.scale_elastic_ep.assert_awaited_once_with(2)
 
 
+@pytest.mark.parametrize("size", [1, 2])
 @pytest.mark.asyncio
-async def test_dp_one_allowed_when_prefill_context_parallelism_widens_the_group(
-    stub_ray,
-):
-    """vLLM folds prefill_context_parallel_size into the EPLB product: TP=1,
-    PCP=2 still leaves two EP ranks at dp=1, so the request is admitted."""
+async def test_prefill_context_parallelism_is_rejected(size):
+    """vLLM's elastic EP sizes the EP world as data_parallel_size * tensor_parallel_size
+    (excluding PCP) and forbids PCP>1 with DP>1, so a PCP>1 engine cannot be scaled --
+    reject instead of admitting a topology elastic EP does not model."""
     handler = _make_handler(tensor_parallel_size=1, prefill_context_parallel_size=2)
 
-    result = await handler.scale_elastic_ep({"new_data_parallel_size": 1})
+    result = await handler.scale_elastic_ep({"new_data_parallel_size": size})
 
-    assert result["status"] == "ok"
-    handler.engine_client.scale_elastic_ep.assert_awaited_once_with(1)
+    assert result["status"] == "error"
+    assert "prefill_context_parallel_size" in result["message"]
+    handler.engine_client.scale_elastic_ep.assert_not_awaited()
