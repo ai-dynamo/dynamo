@@ -155,8 +155,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
 	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
-	// `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled here because
-	// `enabled` defaults to false (unlike v1beta1, where mere presence enables it).
+	// `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+	// `enabled` defaults to false.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 

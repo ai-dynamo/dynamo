@@ -136,26 +136,28 @@ kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"re
 By default, no DGDSA is created for services, allowing direct replica management via the DGD. To enable autoscaling via HPA, KEDA, or Planner, explicitly enable the scaling adapter:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-agg
 spec:
-  services:
-    Frontend:
-      replicas: 2        # ← No DGDSA by default, direct edits allowed
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 2          # No DGDSA by default, direct replica edits allowed
+      # ...podTemplate omitted for brevity
 
-    decode:
+    - name: decode
+      type: decode
       replicas: 1
-      scalingAdapter:
-        enabled: true    # ← DGDSA created, managed via adapter
+      scalingAdapter: {}   # DGDSA created, managed via adapter
+      # ...podTemplate omitted for brevity
 ```
 
 > [!NOTE]
-> In the `nvidia.com/v1alpha1` API shown here, `scalingAdapter` has an `enabled` flag that defaults to
-> `false`: opting in requires `scalingAdapter: {enabled: true}`, and a bare `scalingAdapter: {}` is
-> **disabled** and creates no DGDSA. This differs from the stored `nvidia.com/v1beta1` API, where
-> `scalingAdapter` is a marker whose mere presence (`scalingAdapter: {}`) enables the adapter.
+> In `nvidia.com/v1beta1`, `scalingAdapter` is a marker: including it — even as the empty object
+> `scalingAdapter: {}` — creates the DGDSA. Omit the field to keep direct replica management.
 
 **When to enable DGDSA:**
 - You want to use HPA, KEDA, or Planner for autoscaling

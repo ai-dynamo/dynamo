@@ -259,8 +259,7 @@ type FailoverSpec struct {
 // external autoscalers (HPA, KEDA, Planner) can drive scaling via the Scale subresource.
 //
 // Enable it with `scalingAdapter: {enabled: true}`. Because `enabled` defaults to false, a
-// bare `scalingAdapter: {}` is disabled here -- unlike v1beta1, where the empty marker
-// `scalingAdapter: {}` alone enables the adapter.
+// bare `scalingAdapter: {}` is disabled.
 type ScalingAdapter struct {
 	// Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and
 	// owns the replicas field. When false (the default), no DGDSA is created and replicas are
