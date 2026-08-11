@@ -67,11 +67,6 @@ query_router_result_t create_routers(const char *namespace_c_str,
                                      bool enforce_disagg,
                                      RouterHandles **out_handle);
 
-query_router_result_t route_prefill_request(RouterHandles *handle,
-                                            const char *request_json,
-                                            const char *pods_json,
-                                            CRoutingResult *out_result);
-
 query_router_result_t route_prefill_request_with_reservation(RouterHandles *handle,
                                                              const char *reservation_id,
                                                              const char *request_json,
@@ -445,49 +440,6 @@ func extractCacheNamespace(result *C.CRoutingResult) string {
 		return string(unsafe.Slice((*byte)(unsafe.Pointer(result.cache_namespace)), count))
 	}
 	return ""
-}
-
-// CallRoutePrefillRequest routes a request to the best prefill worker.
-// It tokenizes the request and queries only the prefill router.
-func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResult, error) {
-	if !routerInitialized {
-		return nil, fmt.Errorf("dynamo router not initialized")
-	}
-
-	routerHandlesMutex.RLock()
-	router := routerHandles
-	routerHandlesMutex.RUnlock()
-	if router == nil {
-		return nil, fmt.Errorf("dynamo router handles not created")
-	}
-
-	cRequestJSON := C.CString(requestJSON)
-	defer C.free(unsafe.Pointer(cRequestJSON))
-
-	var cPodsJSON *C.char
-	if podsJSON != "" {
-		cPodsJSON = C.CString(podsJSON)
-		defer C.free(unsafe.Pointer(cPodsJSON))
-	}
-
-	var result C.CRoutingResult
-	rc := C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
-	if rc != C.QUERY_ROUTER_OK {
-		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
-	}
-
-	tokens := extractTokenData(&result)
-	cacheNamespace := extractCacheNamespace(&result)
-	workerID := uint64(result.prefill_worker_id)
-	dpRank := uint32(result.prefill_dp_rank)
-	C.free_routing_result(&result)
-
-	return &RoutingResult{
-		WorkerID:       workerID,
-		DpRank:         dpRank,
-		TokenData:      tokens,
-		CacheNamespace: cacheNamespace,
-	}, nil
 }
 
 // CallRoutePrefillRequestWithReservation atomically selects and books a prefill worker.
