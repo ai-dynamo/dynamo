@@ -212,6 +212,32 @@ pub(super) fn selection_weights(
     }
 }
 
+/// Emit one candidate scoring row, stamped with the identity every such row must carry.
+///
+/// These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue` spawns
+/// without the caller's request span, so the logging layer cannot attach `x_request_id`/`trace_id`
+/// to them. Each row therefore carries its own identity: `request_id` is the same value
+/// `[ROUTING] Best` logs, and `worker_type` separates the prefill-pool and decode-pool decisions
+/// that interleave into one log. Together they let the candidates of a single routing decision be
+/// grouped by id in one hop rather than by fragile line adjacency.
+///
+/// Scoring branches must emit through this macro rather than calling `tracing::debug!` directly, so
+/// that a new branch inherits the fields instead of having to remember them. A branch that emitted
+/// a bare `tracing::debug!` is exactly how these fields were lost once before; the
+/// `every_scoring_row_carries_request_identity` test below is the backstop for the next time.
+///
+/// This expands to `tracing::debug!`, so the field values are still evaluated inside the macro and
+/// cost nothing when DEBUG is disabled — the same property the hand-written rows relied on.
+macro_rules! scoring_row {
+    ($context:expr, $worker_type:expr, $($arg:tt)*) => {
+        tracing::debug!(
+            request_id = $context.request_id,
+            worker_type = $worker_type,
+            $($arg)*
+        )
+    };
+}
+
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     fn worker_logit(
         &self,
@@ -266,12 +292,9 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             let overlap_adjusted_decode_blocks =
                 (decode_cost_blocks - overlap_credit_blocks).max(0.0);
             let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
-            // Stamped for the same reason as the two rows below: this row is emitted from the
-            // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
-            // it, and this branch returns early without reaching them.
-            tracing::debug!(
-                request_id = context.request_id,
-                worker_type = self.worker_type,
+            scoring_row!(
+                context,
+                self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
                  = max(0, {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}) + {active_request_cost_blocks:.3}",
@@ -285,16 +308,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
-        // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
-        // spawns without the caller's request span, so the logging layer cannot attach
-        // `x_request_id`/`trace_id` to them. Stamp the identity the row needs to be self-joining:
-        // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
-        // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
-        // inside the macro so they cost nothing when DEBUG is disabled.
         if cache.shared_beyond_device_blocks > 0 {
-            tracing::debug!(
-                request_id = context.request_id,
-                worker_type = self.worker_type,
+            scoring_row!(
+                context,
+                self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -309,9 +326,9 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 prefill_load_scale = weights.prefill_load_scale
             );
         } else {
-            tracing::debug!(
-                request_id = context.request_id,
-                worker_type = self.worker_type,
+            scoring_row!(
+                context,
+                self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
@@ -593,6 +610,65 @@ mod tests {
     use crate::protocols::SharedCacheHits;
     use crate::scheduling::{OverlapSignals, ScheduleMode};
 
+    /// One captured candidate scoring row.
+    #[derive(Debug, Default)]
+    struct CapturedRow {
+        message: String,
+        request_id: Option<String>,
+        worker_type: Option<String>,
+    }
+
+    impl tracing::field::Visit for CapturedRow {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "request_id" => self.request_id = Some(value.to_owned()),
+                "worker_type" => self.worker_type = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    /// Collects every scoring row emitted while it is the active subscriber.
+    struct CaptureLayer {
+        rows: std::sync::Arc<std::sync::Mutex<Vec<CapturedRow>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut row = CapturedRow::default();
+            event.record(&mut row);
+            // Every candidate scoring row shares this prefix, whichever formula produced it.
+            if row.message.contains("for worker_id=") {
+                self.rows.lock().unwrap().push(row);
+            }
+        }
+    }
+
+    /// Run `body` with DEBUG capture active and return the scoring rows it emitted.
+    fn capture_scoring_rows(body: impl FnOnce()) -> Vec<CapturedRow> {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let rows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(CaptureLayer { rows: rows.clone() });
+        tracing::subscriber::with_default(subscriber, body);
+        std::sync::Arc::try_unwrap(rows)
+            .unwrap()
+            .into_inner()
+            .unwrap()
+    }
+
     fn worker_logit(
         selector: &DefaultWorkerSelector,
         request: &SchedulingRequest,
@@ -615,6 +691,158 @@ mod tests {
                 &input.row(worker, None, WorkerInputs::ALL),
                 "test",
             )
+    }
+
+    /// Every candidate scoring row must carry `request_id` and `worker_type`, whichever scoring
+    /// branch produced it, so that the candidates of one routing decision can be grouped by id
+    /// instead of by line adjacency.
+    ///
+    /// This is a regression test for a real drift: the decode-affinity branch was added in
+    /// parallel with the change that stamped the other two rows, and merged without the fields.
+    /// Because it `return`s early it bypassed the stamped rows entirely, and because its predicate
+    /// reads the *configured* `overlap_score_credit` rather than any measured overlap, every
+    /// decision on an affected deployment emitted unstamped rows. Nothing in CI noticed, because
+    /// no test asserted on these fields. This test is that assertion — it drives all three
+    /// branches and fails if any of them drops the identity, including a branch added later that
+    /// bypasses `scoring_row!`.
+    #[test]
+    fn every_scoring_row_carries_request_identity() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+
+        // Branch 1: decode affinity. Requires worker_type=decode, prefill tracking off, and a
+        // positive configured overlap credit — the exact shape that lost its identity fields.
+        let decode_affinity = || {
+            let mut request = base_request(64);
+            request.track_prefill_tokens = false;
+            request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+            let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
+            worker_logit(
+                &selector,
+                &request,
+                worker,
+                16,
+                LogitWeights {
+                    overlap_score_credit: 1.0,
+                    overlap_score_credit_decay: 0.0,
+                    prefill_load_scale: 1.0,
+                    shared_cache_multiplier: 0.0,
+                },
+            );
+        };
+
+        // Branch 2: shared cache hits beyond this worker's device prefix.
+        let shared_beyond = || {
+            let mut request = base_request(4);
+            request.overlap.tier_overlap_blocks.device.insert(worker, 0);
+            #[allow(clippy::single_range_in_vec_init)]
+            let hits = SharedCacheHits::from_ranges(vec![0..4]);
+            request.shared_cache_hits = Some(hits);
+            let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "prefill");
+            worker_logit(
+                &selector,
+                &request,
+                worker,
+                1,
+                LogitWeights {
+                    overlap_score_credit: 1.0,
+                    overlap_score_credit_decay: 0.0,
+                    prefill_load_scale: 1.0,
+                    shared_cache_multiplier: 1.0,
+                },
+            );
+        };
+
+        // Branch 3: the ordinary prefill-cost formula.
+        let plain = || {
+            let request = base_request(64);
+            let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "prefill");
+            worker_logit(
+                &selector,
+                &request,
+                worker,
+                16,
+                LogitWeights {
+                    overlap_score_credit: 1.0,
+                    overlap_score_credit_decay: 0.0,
+                    prefill_load_scale: 1.0,
+                    shared_cache_multiplier: 0.0,
+                },
+            );
+        };
+
+        for (branch, body) in [
+            (
+                "decode affinity",
+                Box::new(decode_affinity) as Box<dyn Fn()>,
+            ),
+            ("shared beyond device", Box::new(shared_beyond)),
+            ("plain prefill cost", Box::new(plain)),
+        ] {
+            let rows = capture_scoring_rows(body);
+            assert!(
+                !rows.is_empty(),
+                "{branch}: expected at least one scoring row; the branch may no longer be reachable \
+                 with this setup, which would make this test vacuous"
+            );
+            for row in &rows {
+                assert_eq!(
+                    row.request_id.as_deref(),
+                    Some("test"),
+                    "{branch}: scoring row is missing request_id: {}",
+                    row.message
+                );
+                assert!(
+                    row.worker_type.is_some(),
+                    "{branch}: scoring row is missing worker_type: {}",
+                    row.message
+                );
+            }
+        }
+    }
+
+    /// The decode-affinity branch is reachable at all only because the disaggregated decode pool
+    /// forces `overlap_score_credit` to zero elsewhere. Assert the predicate keys off the
+    /// *configured* credit and not any measured overlap, so the "every decision is affected"
+    /// property this row's identity fields exist for stays true and understood.
+    #[test]
+    fn decode_affinity_branch_fires_without_any_measured_overlap() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        // Deliberately no device overlap at all.
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
+        let rows = capture_scoring_rows(|| {
+            worker_logit(
+                &selector,
+                &request,
+                worker,
+                16,
+                LogitWeights {
+                    overlap_score_credit: 1.0,
+                    overlap_score_credit_decay: 0.0,
+                    prefill_load_scale: 1.0,
+                    shared_cache_multiplier: 0.0,
+                },
+            );
+        });
+
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .message
+                .contains("max(0, decode_blocks - overlap_credit_blocks)"),
+            "expected the decode-affinity formula even with zero measured overlap, got: {}",
+            rows[0].message
+        );
+        assert_eq!(rows[0].request_id.as_deref(), Some("test"));
+        assert_eq!(rows[0].worker_type.as_deref(), Some("decode"));
     }
 
     #[test]

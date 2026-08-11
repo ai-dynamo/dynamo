@@ -638,6 +638,16 @@ fn build_decode_router_override(
     // credit. Conditional disagg leaves this unset so the base router
     // `overlap_score_credit` applies, unless the request already had an
     // explicit override.
+    //
+    // This also decides whether the decode pool takes the decode-affinity scoring branch in
+    // `DefaultWorkerScorer::worker_logit`, whose predicate is
+    // `worker_type == "decode" && !track_prefill_tokens && overlap_score_credit > 0.0`.
+    // `track_prefill_tokens` is forced false just below, and the pool is `decode`, so this
+    // credit is the only remaining condition: forcing it to zero keeps the decode pool out of
+    // that branch, and leaving it unset puts every conditional-disagg decode decision into it.
+    // Scoring rows there are emitted through `scoring_row!` and carry request identity like any
+    // other, so this is a routing choice rather than an observability one — but it is the reason
+    // the branch is reachable outside aggregated deployments at all.
     if !allow_decode_overlap_affinity {
         override_config.overlap_score_credit = Some(0.0);
     }
