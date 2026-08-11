@@ -955,10 +955,10 @@ def test_router_decisions_router_aic(
     )
 
 
-async def _wait_for_frontend_to_commit_pd_roles(
+async def _wait_for_frontend_to_commit_single_pd_role(
     frontend_port: int,
     namespace: str,
-    worker_types: set[str],
+    worker_type: str,
     timeout: float = 30,
 ) -> None:
     readiness_url = f"http://localhost:{frontend_port}/v1/models/{MODEL_NAME}/ready"
@@ -972,15 +972,13 @@ async def _wait_for_frontend_to_commit_pd_roles(
                     if response.status == 200:
                         body = await response.json()
                         last_response = body
-                        roles = (
+                        role = (
                             body.get("namespaces", {})
                             .get(namespace, {})
                             .get("worker_types", {})
+                            .get(worker_type, {})
                         )
-                        if all(
-                            roles.get(worker_type, {}).get("workers", 0) == 1
-                            for worker_type in worker_types
-                        ):
+                        if role.get("workers", 0) == 1:
                             return
                     else:
                         last_response = {
@@ -992,13 +990,14 @@ async def _wait_for_frontend_to_commit_pd_roles(
             await asyncio.sleep(0.1)
 
     raise AssertionError(
-        f"Frontend did not commit WorkerSets for {sorted(worker_types)} within {timeout}s; "
+        f"Frontend did not commit the standalone {worker_type} WorkerSet within {timeout}s; "
         f"last response: {last_response}"
     )
 
 
-async def _wait_for_disagg_worker_ids(
+async def _wait_for_expected_disagg_worker_ids(
     frontend_port: int,
+    expected_worker_ids: dict[str, int],
     timeout: float = 60,
 ) -> dict[str, int]:
     payload = {
@@ -1040,7 +1039,12 @@ async def _wait_for_disagg_worker_ids(
             last_worker_ids = worker_ids
             prefill_worker_id = worker_ids["prefill_worker_id"]
             decode_worker_id = worker_ids["decode_worker_id"]
-            if prefill_worker_id is not None and decode_worker_id is not None:
+            if (
+                prefill_worker_id is not None
+                and decode_worker_id is not None
+                and prefill_worker_id == expected_worker_ids["prefill_worker_id"]
+                and decode_worker_id == expected_worker_ids["decode_worker_id"]
+            ):
                 return {
                     "prefill_worker_id": prefill_worker_id,
                     "decode_worker_id": decode_worker_id,
@@ -1048,8 +1052,8 @@ async def _wait_for_disagg_worker_ids(
             await asyncio.sleep(0.25)
 
     raise AssertionError(
-        f"P/D routing did not become active within {timeout}s; last worker IDs: "
-        f"{last_worker_ids}"
+        f"P/D routing did not converge within {timeout}s; expected worker IDs: "
+        f"{expected_worker_ids}; last worker IDs: {last_worker_ids}"
     )
 
 
@@ -1112,17 +1116,21 @@ def test_mocker_disagg_startup_lifecycle(
                     event_plane=None,
                 )[0]
 
-            # Let discovery commit every currently available role before the next
-            # transition or request observes the topology.
-            if frontend is not None and workers:
+            if frontend is not None and len(workers) == 1:
                 asyncio.run(
-                    _wait_for_frontend_to_commit_pd_roles(
-                        frontend_port, namespace, set(workers)
+                    _wait_for_frontend_to_commit_single_pd_role(
+                        frontend_port, namespace, next(iter(workers))
                     )
                 )
 
         assert frontend is not None
-        actual_worker_ids = asyncio.run(_wait_for_disagg_worker_ids(frontend_port))
+        expected_attribution = {
+            "prefill_worker_id": expected_worker_ids["prefill"],
+            "decode_worker_id": expected_worker_ids["decode"],
+        }
+        actual_worker_ids = asyncio.run(
+            _wait_for_expected_disagg_worker_ids(frontend_port, expected_attribution)
+        )
 
     assert actual_worker_ids["prefill_worker_id"] == expected_worker_ids["prefill"]
     assert actual_worker_ids["decode_worker_id"] == expected_worker_ids["decode"]
