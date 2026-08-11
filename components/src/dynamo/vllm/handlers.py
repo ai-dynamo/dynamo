@@ -1495,6 +1495,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             try:
                 await _scale_engine(new_dp_size)
+            except EngineDeadError as dead_err:
+                # vLLM raises EngineDeadError when the engine core is gone. There
+                # is nothing to roll back and no in-process recovery is possible,
+                # so report unrecoverable and let the worker restart rather than
+                # attempting a rollback that cannot succeed and would only mask a
+                # dead engine as a recovered one.
+                logger.error(
+                    "[ElasticEP] Engine died during scale to dp=%s: %s",
+                    new_dp_size,
+                    dead_err,
+                )
+                return {
+                    "status": "error",
+                    "recoverable": False,
+                    "message": (
+                        f"scale to dp={new_dp_size} failed: the engine core is "
+                        f"dead ({dead_err}); the worker must be restarted"
+                    ),
+                }
             except Exception as grow_err:
                 logger.error(
                     "[ElasticEP] Scaling to dp=%s failed: %s", new_dp_size, grow_err

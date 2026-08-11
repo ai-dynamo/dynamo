@@ -34,6 +34,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.vllm.handlers import BaseWorkerHandler
 
@@ -58,11 +59,12 @@ class _FakeVllmEngine:
     ``fail_sizes`` raise instead of completing.
     """
 
-    def __init__(self, prev_dp: int, fail_sizes=()):
+    def __init__(self, prev_dp: int, fail_sizes=(), dead_sizes=()):
         self.vllm_config = SimpleNamespace(
             parallel_config=SimpleNamespace(data_parallel_size=prev_dp)
         )
         self._fail_sizes = list(fail_sizes)
+        self._dead_sizes = list(dead_sizes)  # sizes that raise EngineDeadError
         self.calls: list[int] = []  # every requested size, in order
         self.real_reconfigures: list[int] = []  # sizes that did real work
 
@@ -72,6 +74,8 @@ class _FakeVllmEngine:
             # vLLM guard: no reconfigure, recorded size unchanged.
             return
         self.real_reconfigures.append(size)
+        if size in self._dead_sizes:
+            raise EngineDeadError()
         if size in self._fail_sizes:
             raise RuntimeError(f"reconfigure to {size} failed")
         # Only advance the recorded size on success, exactly like vLLM.
@@ -173,6 +177,22 @@ def test_failed_rollback_reports_unrecoverable(monkeypatch):
     # The rollback was actually attempted (a real reconfigure), not skipped.
     assert engine.calls == [3, 2]
     assert engine.real_reconfigures == [3, 2]
+
+
+def test_engine_dead_error_is_fatal_and_skips_rollback(monkeypatch):
+    _install_ray_stub(monkeypatch)
+    # vLLM raises EngineDeadError when the engine core is gone. A dead engine
+    # cannot be reconfigured, so the handler must report unrecoverable and must
+    # NOT attempt a rollback (which would only mask the dead engine).
+    engine = _FakeVllmEngine(prev_dp=2, dead_sizes=[3])
+
+    result = _run(engine, {"new_data_parallel_size": 3})
+
+    assert result["status"] == "error"
+    assert result["recoverable"] is False
+    assert "restart" in result["message"].lower()
+    # only the failed grow reached the engine -- no rollback call
+    assert engine.calls == [3]
 
 
 def test_missing_field_is_rejected(monkeypatch):
