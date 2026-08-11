@@ -655,11 +655,13 @@ impl LocalKvIndexer {
         };
 
         // NOTE: This is intentionally not an atomic cross-tier snapshot. Watermark N is captured
-        // only after events through N have been enqueued. Each physical index dump request is its
-        // own FIFO barrier, so every returned tier is at least N but may include a different suffix
-        // after N. Recovery replays the complete tail after N; ownership mutations converge under
-        // duplicate replay. Do not add a global application lock merely to align snapshot times.
-        // Any tier dump failure fails this complete response; the recovery cursor must not advance.
+        // only after events through N have been enqueued. The primary drains its accepted mutation
+        // channels before dumping; each lower tier handles its dump request behind prior mutations
+        // on every FIFO lane. Every returned tier is therefore at least N but may include a
+        // different suffix after N. Recovery replays the complete tail after N, and ownership
+        // mutations converge under duplicate replay. Do not add a global application lock merely
+        // to align snapshot times. Any tier dump failure fails this complete response; the recovery
+        // cursor must not advance.
         let mut events = indexer.dump_events().await?;
         for (tier, lower_tier) in lower_tiers {
             let tier_events = lower_tier.dump_events().await?;

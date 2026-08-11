@@ -342,6 +342,12 @@ impl KvIndexer {
                             }
 
                             Some(dump_req) = dump_rx.recv() => {
+                                // NOTE: Dump requests use a separate channel from mutations, so the
+                                // actor may observe one while already-accepted mutations are still
+                                // queued. Drain them before reading the tree to guarantee the snapshot
+                                // is at least as advanced as its advertised recovery watermark.
+                                // Including later queued mutations is allowed because recovery replays
+                                // the complete tail.
                                 drain_pending_mutations(
                                     &mut trie,
                                     PendingMutationReceivers {

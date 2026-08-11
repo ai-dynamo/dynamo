@@ -67,14 +67,13 @@ impl Indexer {
                 lower_tier,
             } => {
                 if is_clear {
-                    if targets_primary {
-                        if let Err(error) = primary
+                    if targets_primary
+                        && let Err(error) = primary
                             .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
                             .await
-                        {
-                            tracing::warn!(%error, "Failed to reset primary residency");
-                            return;
-                        }
+                    {
+                        tracing::warn!(%error, "Failed to reset primary residency");
+                        return;
                     }
                     for indexer in lower_tier.all() {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
@@ -96,11 +95,11 @@ impl Indexer {
                 lower_tier,
             } => {
                 if is_clear {
-                    if targets_primary {
-                        if let Err(error) = primary.apply_event_and_wait(event.clone()).await {
-                            tracing::warn!(%error, "Failed to reset primary residency");
-                            return;
-                        }
+                    if targets_primary
+                        && let Err(error) = primary.apply_event_and_wait(event.clone()).await
+                    {
+                        tracing::warn!(%error, "Failed to reset primary residency");
+                        return;
                     }
                     for indexer in lower_tier.all() {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
