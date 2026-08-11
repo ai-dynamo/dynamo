@@ -759,6 +759,7 @@ class HandlerBase(BaseGenerativeHandler):
                     disagg_request_id=get_compatible_global_disagg_request_id(
                         self.disagg_machine_id
                     ),
+                    conversation_id=session_id_from_request(request),
                 )
 
             # Ensure disagg_request_id is set even when using
