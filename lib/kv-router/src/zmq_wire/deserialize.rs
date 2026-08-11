@@ -113,7 +113,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
-                let medium = medium.unwrap_or(None);
+                let medium = normalize_medium(medium.unwrap_or(None));
                 let lora_name = lora_name.unwrap_or(None);
                 let extra_keys = extra_keys.unwrap_or(None);
                 let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
@@ -141,7 +141,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
             Some("BlockRemoved") => {
                 let block_hashes =
                     block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
-                let medium = medium.unwrap_or(None);
+                let medium = normalize_medium(medium.unwrap_or(None));
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium,
@@ -187,7 +187,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
                 // Position 5 was lora_id in older formats; consume and discard for compat.
                 let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
-                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
@@ -236,7 +236,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_hashes: Vec<BlockHashValue> = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
-                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
                 let mut metadata = KvCacheEventMetadata::default();
 
                 for _ in 0..3 {
@@ -272,6 +272,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
             )),
         }
     }
+}
+
+/// vLLM omits `medium` for device (GPU) events; treat an empty string the same
+/// as an absent field so an unset medium stays on the default device tier
+/// instead of failing closed as an unknown medium. Mirrors the empty-string
+/// normalization applied to `cache_salt`.
+fn normalize_medium(medium: Option<String>) -> Option<String> {
+    medium.filter(|value| !value.is_empty())
 }
 
 fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
