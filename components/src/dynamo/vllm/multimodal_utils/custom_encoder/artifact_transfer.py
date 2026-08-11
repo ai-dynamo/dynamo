@@ -40,7 +40,7 @@ def create_custom_encoder_artifact_sender(
         return NixlWriteEmbeddingSender()
     if mode is EmbeddingTransferMode.NIXL_READ:
         return NixlReadEmbeddingSender(
-            enable_progress_thread=True, completion_poll_ms=1
+            enable_progress_thread=False, completion_poll_ms=1
         )
     raise ValueError(f"Invalid embedding transfer mode: {mode}")
 
