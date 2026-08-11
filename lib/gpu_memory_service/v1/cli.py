@@ -12,6 +12,7 @@ from threading import Event
 
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.v1 import device as device_identity
+from gpu_memory_service.v1.checkpoint import GMSCheckpointLifecycle
 from gpu_memory_service.v1.device import get_socket_path
 from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 
@@ -56,11 +57,22 @@ def main(argv: list[str] | None = None) -> None:
     vmm = get_vmm()
     gpu_uuid = device_identity.get_device_uuid(args.device)
     with ExitStack() as stack:
+        checkpoint_lifecycle = GMSCheckpointLifecycle()
+        managers = {
+            domain: GMSServerMemoryManager(
+                gpu_uuid,
+                vmm,
+                args.device,
+                checkpoint_lifecycle=checkpoint_lifecycle,
+            )
+            for domain in _DOMAINS
+        }
+        checkpoint_lifecycle.bind_domains(managers)
         servers = [
             stack.enter_context(
                 GMSRPCServer(
                     get_socket_path(args.device, domain),
-                    GMSServerMemoryManager(gpu_uuid, vmm, args.device),
+                    managers[domain],
                 )
             )
             for domain in _DOMAINS
