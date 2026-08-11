@@ -617,11 +617,14 @@ jobs:
       # Nightly: package platform + snapshot at the dated pre-release version
       # and dual-push to NGC staging (ChartMuseum + OCI). Values are rewritten
       # in the workspace only, onto the *-nightly repos at this run's tag.
-      # Fail-soft per chart via the copy step's *_staged flags; infrastructure
-      # failures still fail the step.
+      # Fail-soft per chart via the copy step's *_staged flags; fully fail-soft
+      # overall (continue-on-error): a helm outage marks the step red but never
+      # blocks the GitLab trigger, so containers/wheels still publish — charts
+      # just skip registration that night (staged_helm stays empty).
       - name: Package and push nightly Helm charts to NGC
         id: nightly_helm_push
         if: env.NIGHTLY == 'true'
+        continue-on-error: true
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           # OCI mirror of the same staging namespace.
@@ -814,7 +817,7 @@ jobs:
               echo "- Skipped (image not staged this run): \`${NIGHTLY_SKIPPED_HELM}\`" >> $GITHUB_STEP_SUMMARY
             fi
             if [[ -z "${NIGHTLY_STAGED_HELM}${NIGHTLY_SKIPPED_HELM}" ]]; then
-              echo "- None (helm step did not run)" >> $GITHUB_STEP_SUMMARY
+              echo "- None (helm step failed or did not run — see its log)" >> $GITHUB_STEP_SUMMARY
             fi
           fi
           if [[ "${NIGHTLY}" != "true" ]]; then
