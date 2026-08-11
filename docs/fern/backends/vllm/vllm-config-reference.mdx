@@ -239,8 +239,8 @@ These flags control the self-benchmark sweep that runs on startup before the wor
   Environment variable: `DYN_BENCHMARK_OUTPUT_PATH`
 </ParamField>
 
-<ParamField path="--benchmark-timeout" type="integer" default="300">
-  Maximum seconds to wait for the benchmark to complete. Worker startup fails if this limit is exceeded.
+<ParamField path="--benchmark-timeout" type="integer" default="900">
+  Soft limit, in seconds, for the self-benchmark. Reaching it does not fail worker startup: the iteration being measured finishes, the partial results collected so far are returned, and engine startup continues. A bounded cleanup grace still fails closed if no result is written at all. Must be positive.
 
   Environment variable: `DYN_BENCHMARK_TIMEOUT`
 </ParamField>
@@ -248,6 +248,12 @@ These flags control the self-benchmark sweep that runs on startup before the wor
 ## Deprecated
 
 These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
+
+The five `--benchmark-*-granularity` flags below are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
+
+<Warning>
+With `--benchmark-mode` set and no points file, passing a legacy flag together with its replacement raises a `ValueError` at startup, for example `cannot combine --benchmark-decode-length-granularity with --decode-max-kv-read-token-samples`, and likewise for each of the other pairs. Migrate to the replacement rather than setting both. All five are ignored when `--benchmark-points-file` is set.
+</Warning>
 
 <ParamField path="--benchmark-prefill-granularity" type="integer" default="null" deprecated={true}>
   **Deprecated** — use `--prefill-max-new-token-samples`. Legacy values are translated to the new sampling limit.
