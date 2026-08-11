@@ -36,7 +36,9 @@ is expensive, so do not collect repetitions only to produce confidence intervals
   measure: on a shared cluster they may never exist, and an empirical noise floor measured under real occupancy is
   the decision floor. Reserve isolation requests for the finalist's confirmatory absolutes, and when isolation is
   unavailable even then, report the finalist with occupancy labeled as a limitation rather than blocking the
-  engagement.
+  engagement. A neighbour transition during a measurement invalidates that run only when the run's own time-series
+  shows a corresponding performance shift; otherwise record the transition and keep the run — on a shared cluster
+  transitions are constant, and a rule that discards every affected run converges to no eligible runs at all.
 - Cache-state policy for reuse-heavy workloads: reset caches between points and rank candidates on cold, identical
   content (comparability), but before promising an absolute number — a floor-pick or a fleet projection — on a
   workload with substantial prefix reuse, confirm the finalist once at warm steady state. A cold, short window
