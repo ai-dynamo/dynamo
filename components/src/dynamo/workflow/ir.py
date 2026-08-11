@@ -289,6 +289,7 @@ class WorkflowIR:
         separators = None if indent is not None else (",", ":")
         return json.dumps(
             self.to_dict(),
+            allow_nan=False,
             ensure_ascii=False,
             indent=indent,
             separators=separators,
@@ -311,10 +312,13 @@ class WorkflowIR:
             raise WorkflowValidationError(
                 f"unsupported workflow schema {data['schema']!r}"
             )
-        if data["version"] != WORKFLOW_VERSION:
-            raise WorkflowValidationError(
-                f"unsupported workflow version {data['version']!r}"
-            )
+        version = data["version"]
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != WORKFLOW_VERSION
+        ):
+            raise WorkflowValidationError(f"unsupported workflow version {version!r}")
         inputs = data["inputs"]
         stages = data["stages"]
         outputs = data["outputs"]
@@ -331,7 +335,7 @@ class WorkflowIR:
 
     @classmethod
     def from_json(cls, value: str) -> "WorkflowIR":
-        """Parse JSON while rejecting duplicate object keys."""
+        """Parse strict JSON while rejecting duplicate object keys."""
 
         def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             result: dict[str, Any] = {}
@@ -341,8 +345,17 @@ class WorkflowIR:
                 result[key] = item
             return result
 
+        def reject_non_finite(constant: str) -> None:
+            raise WorkflowValidationError(
+                f"non-finite JSON constant {constant!r} is not supported"
+            )
+
         try:
-            data = json.loads(value, object_pairs_hook=reject_duplicates)
+            data = json.loads(
+                value,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=reject_non_finite,
+            )
         except json.JSONDecodeError as error:
             raise WorkflowValidationError(
                 f"invalid workflow JSON: {error.msg}"
