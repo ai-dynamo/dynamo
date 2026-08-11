@@ -97,7 +97,9 @@ permissions:
   contents: read
 
 env:
-  REGISTRY_IMAGE: ai-dynamo/dynamo
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
 
 jobs:
   # ============================================================================
@@ -262,8 +264,6 @@ jobs:
       VLLM_EFA_BUILD_RESULT: ${{ inputs.vllm_efa_build_result }}
       SGLANG_EFA_BUILD_RESULT: ${{ inputs.sglang_efa_build_result }}
       TRTLLM_EFA_BUILD_RESULT: ${{ inputs.trtllm_efa_build_result }}
-      REGISTRY_IMAGE: ai-dynamo/dynamo
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -284,9 +284,7 @@ jobs:
 
       - name: Login to ECR
         run: |
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
       - name: Login to NGC
         env:
@@ -307,9 +305,6 @@ jobs:
 
           SUCCESSFUL_COPIES=()
           FAILED_COPIES=()
-
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
           # Nightly builds push ECR tags with a `-nightly` suffix so a missing
           # or failed nightly build can't fall through to the post-merge image
@@ -364,7 +359,7 @@ jobs:
               STABLE_NAME="${FRAMEWORK}-runtime"
             fi
 
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime${NIGHTLY_TAG_SUFFIX}"
+            SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-${FRAMEWORK}-runtime${NIGHTLY_TAG_SUFFIX}"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
 
@@ -403,45 +398,45 @@ jobs:
             echo "=== EFA Runtime Images ==="
 
             # vllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa"
+            SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-vllm-runtime-efa"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
             copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
             # sglang EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa"
+            SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-sglang-runtime-efa"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
             copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
 
             # trtllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa"
+            SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-trtllm-runtime-efa"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
             copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
             # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
             echo ""
             echo "=== Frontend Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+            SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-frontend"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
 
             # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
             echo ""
             echo "=== Operator Image ==="
-            OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
+            OPERATOR_SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-operator"
             OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
             copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
             # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
             echo ""
             echo "=== Planner Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+            SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-dynamo-planner"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
 
             # ---- Snapshot image ----
             echo ""
             echo "=== Snapshot Image ==="
-            SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+            SNAPSHOT_SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-snapshot-agent"
             SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
             copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
           else
@@ -492,7 +487,7 @@ jobs:
                 return 1
               fi
             }
-            ECR_BASE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}"
+            ECR_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
             NGC_BASE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo"
 
             OPERATOR_STAGED=false
@@ -723,8 +718,6 @@ jobs:
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
       VERSION: ${{ needs.prepare-release.outputs.version }}
       RC_NUMBER: ${{ needs.prepare-release.outputs.rc_number }}
-      REGISTRY_IMAGE: ai-dynamo/dynamo
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - name: Setup crane
         env:
@@ -740,24 +733,20 @@ jobs:
 
       - name: Login to ECR
         run: |
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | crane auth login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | crane auth login --username AWS --password-stdin "${ECR_REGISTRY}"
 
       - name: Extract wheels from dynamo-runtime image
         id: extract
         run: |
           set -euo pipefail
 
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
           # Nightly suffix ensures a failed nightly cannot fall through to
           # the stable image.
           NIGHTLY_TAG_SUFFIX=""
           if [ "${NIGHTLY}" = "true" ]; then
             NIGHTLY_TAG_SUFFIX="-nightly"
           fi
-          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime${NIGHTLY_TAG_SUFFIX}"
+          ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-dynamo-runtime${NIGHTLY_TAG_SUFFIX}"
 
           STAGE="${RUNNER_TEMP}/wheels"
           mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"

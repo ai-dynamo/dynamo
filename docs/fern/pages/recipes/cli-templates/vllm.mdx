@@ -36,8 +36,7 @@ The default model is `Qwen/Qwen3-0.6B`.
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 | `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
 
-**Command-line flags:** `--model` sets the model identifier or path; `--unified` uses the unified
-backend entry point.
+**Command-line flags:** `--model` sets the model identifier or path.
 
 **Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
 
@@ -443,8 +442,7 @@ Run the worker command on the second node:
 <AccordionGroup>
 <Accordion title="Dedicated Prefill and Decode Workers">
 
-Runs prefill and decode in separate vLLM workers and transfers KV cache through NIXL. Use
-`--unified` to exercise the unified worker entry point with the same topology.
+Runs prefill and decode in separate vLLM workers and transfers KV cache through NIXL.
 
 The default model is `Qwen/Qwen3-0.6B`.
 
@@ -455,8 +453,6 @@ The default model is `Qwen/Qwen3-0.6B`.
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 | `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
 | `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
-
-**Command-line flags:** `--unified` uses the unified backend entry point.
 
 ```bash
 ./launch/disagg.sh

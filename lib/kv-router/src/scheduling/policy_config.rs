@@ -9,6 +9,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
+use super::worker_selection_config::RawWorkerSelectionConfig;
+pub use super::worker_selection_config::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -164,6 +166,7 @@ impl PolicyProfile {
 pub struct RouterPolicyConfig {
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
+    worker_selection: Option<WorkerSelectionConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -206,6 +209,16 @@ impl RouterPolicyConfig {
             .cloned()
             .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy))
     }
+
+    /// Returns the process-wide worker-selection policy configuration, if present.
+    pub fn worker_selection(&self) -> Option<&WorkerSelectionConfig> {
+        self.worker_selection.as_ref()
+    }
+
+    /// Whether this document configures queue policy profiles.
+    pub fn has_routing_profiles(&self) -> bool {
+        self.root.is_some() || !self.models.is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,6 +232,8 @@ struct RawRouterPolicyConfig {
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
+    #[serde(default)]
+    worker_selection: Option<RawWorkerSelectionConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -257,14 +272,22 @@ impl RawRouterPolicyConfig {
             models.insert(model_name, resolved);
         }
 
-        if root.is_none() && models.is_empty() {
+        let worker_selection = match self.worker_selection {
+            Some(config) => Some(config.resolve()?),
+            None => None,
+        };
+
+        if root.is_none() && models.is_empty() && worker_selection.is_none() {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile or at least one model profile"
-                    .to_string(),
+                "router policy config must define a root profile, at least one model profile, or worker_selection".to_string(),
             ));
         }
 
-        Ok(RouterPolicyConfig { root, models })
+        Ok(RouterPolicyConfig {
+            root,
+            models,
+            worker_selection,
+        })
     }
 }
 
@@ -553,7 +576,7 @@ fn resolve_uncached_isl_buckets(
     })
 }
 
-fn validate_identifier(
+pub(super) fn validate_identifier(
     name: &str,
     kind: &str,
     location: &str,
@@ -574,6 +597,72 @@ fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_selection_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  default: example
+  instances:
+    - name: example
+      type: example-policy
+      parameters:
+        score_weight: 1.0
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.default_instance(), Some("example"));
+        let instance = selection.instance("example").unwrap();
+        assert_eq!(instance.policy_type(), "example-policy");
+        assert!(matches!(
+            instance.parameters(),
+            serde_yaml::Value::Mapping(_)
+        ));
+        assert_eq!(
+            config
+                .resolve_profile(None, Some(2.0), RouterQueuePolicy::Wspt)
+                .default_class()
+                .queue_policy,
+            RouterQueuePolicy::Wspt
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_worker_selection_config() {
+        for yaml in [
+            r#"
+worker_selection: {}
+"#,
+            r#"
+worker_selection:
+  default: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  instances:
+    - name: default
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  instances:
+    - name: alpha
+      type: alpha
+      parameters: 1
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
+    }
 
     #[test]
     fn model_profile_replaces_root_and_unmatched_model_uses_root() {

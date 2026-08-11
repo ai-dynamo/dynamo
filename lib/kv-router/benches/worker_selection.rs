@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Default worker-selection scaling benchmark.
+//! Worker-selection scaling benchmark for built-in and custom policies.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench worker_selection`
 
@@ -14,7 +14,9 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
-    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerLoadProjection, WorkerSelector,
+    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, KvRouterConfig,
+    SchedulingRequest, WorkerCandidate, WorkerFilter, WorkerLoadProjection, WorkerSelectionContext,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
 };
 use rustc_hash::FxHashMap;
 
@@ -42,6 +44,18 @@ impl WorkerConfigLike for BenchWorkerConfig {
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
+    }
+}
+
+struct KeepAllFilter;
+
+impl WorkerFilter for KeepAllFilter {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(true)
     }
 }
 
@@ -88,6 +102,8 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
             effective_overlap_blocks,
             effective_cached_tokens,
         },
+        router_hint_candidates: None,
+        retain_router_hint_chain: false,
         shared_cache_hits: None,
         worker_loads,
         resp_tx: None,
@@ -138,5 +154,90 @@ fn worker_selection(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, worker_selection);
+fn custom_worker_selection(c: &mut Criterion) {
+    const WORKER_COUNT: usize = 10_000;
+
+    for (scenario, overlap_score_credit_decay) in
+        [("direct", 0.0), ("filtered_prefill_baseline", 1.0)]
+    {
+        for temperature in [0.0, 0.7] {
+            let (workers, request) = fixture(WORKER_COUNT);
+            let config = KvRouterConfig {
+                router_temperature: temperature,
+                overlap_score_credit_decay,
+                ..Default::default()
+            };
+            let default = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
+            let custom_no_filter = WorkerSelectionPolicy::new(
+                config.clone(),
+                "prefill",
+                vec![Box::new(DefaultWorkerScorer::new(
+                    config.clone(),
+                    "prefill",
+                ))],
+                Box::new(DefaultWorkerPicker::new(temperature)),
+            );
+            let custom_keep_all_filter = WorkerSelectionPolicy::new_with_filters(
+                config.clone(),
+                "prefill",
+                vec![Box::new(KeepAllFilter)],
+                vec![Box::new(DefaultWorkerScorer::new(config, "prefill"))],
+                Box::new(DefaultWorkerPicker::new(temperature)),
+            );
+            let mut group = c.benchmark_group(format!(
+                "custom_worker_selection/{scenario}/temperature_{temperature}/10_000"
+            ));
+            group.warm_up_time(Duration::from_secs(2));
+            group.measurement_time(Duration::from_secs(5));
+            group.sample_size(50);
+            group.throughput(Throughput::Elements(WORKER_COUNT as u64));
+
+            group.bench_function("default", |b| {
+                b.iter(|| {
+                    black_box(
+                        default
+                            .select_worker(
+                                black_box(&workers),
+                                black_box(&request),
+                                request.eligibility(),
+                                black_box(16),
+                            )
+                            .unwrap(),
+                    )
+                })
+            });
+            group.bench_function("custom_no_filter", |b| {
+                b.iter(|| {
+                    black_box(
+                        custom_no_filter
+                            .select_worker(
+                                black_box(&workers),
+                                black_box(&request),
+                                request.eligibility(),
+                                black_box(16),
+                            )
+                            .unwrap(),
+                    )
+                })
+            });
+            group.bench_function("custom_keep_all_filter", |b| {
+                b.iter(|| {
+                    black_box(
+                        custom_keep_all_filter
+                            .select_worker(
+                                black_box(&workers),
+                                black_box(&request),
+                                request.eligibility(),
+                                black_box(16),
+                            )
+                            .unwrap(),
+                    )
+                })
+            });
+            group.finish();
+        }
+    }
+}
+
+criterion_group!(benches, worker_selection, custom_worker_selection);
 criterion_main!(benches);

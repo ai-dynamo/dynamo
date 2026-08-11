@@ -6,6 +6,8 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+use std::sync::Arc;
+
 mod active_set;
 pub(crate) mod cleanup;
 pub mod conditional_disagg;
@@ -15,6 +17,7 @@ pub mod identity;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;
+pub mod router_hint;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;
@@ -67,6 +70,21 @@ pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
-pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
-pub use selector::{DefaultWorkerSelector, WorkerSelector};
+pub use scheduling::{
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
+    WorkerSelectionPolicyError,
+};
+pub use selector::{
+    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, ScoredWorkerCandidate,
+    WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicy, WorkerSelector,
+};
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+
+/// Factory that creates one worker-selection policy per routing partition.
+pub type WorkerSelectionPolicyFactory = Arc<
+    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
+        + Send
+        + Sync,
+>;

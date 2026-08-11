@@ -25,7 +25,11 @@ from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # This file builds a real tokenizer at module scope; declare the model so
+    # Registers the tokenizer in the session predownload manifest (tests/conftest.py)
+    # so it stays fetchable after a worker's predownload test flips HF_HUB_OFFLINE.
+    pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
 ]

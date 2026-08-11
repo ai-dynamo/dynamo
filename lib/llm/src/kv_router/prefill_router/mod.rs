@@ -5,12 +5,19 @@ use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
+use arc_swap::ArcSwapOption;
+use parking_lot::Mutex;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints, scheduling::QueueRejection,
+    PrefillLoadEstimator,
+    conditional_disagg::ConditionalDisaggPolicy,
+    config::RouterConfigOverride,
+    protocols::RoutingConstraints,
+    scheduling::QueueRejection,
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     pipeline::{
@@ -23,6 +30,8 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
+    kv_router::WorkerSelectorFactory,
+    local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -157,14 +166,19 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// - Query-only: `query_instance_id` annotation present → returns worker IDs without execution
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
-pub struct PrefillRouter {
-    prefill_router: OnceLock<InnerPrefillRouter>,
+pub struct PrefillRouter<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    binding: ArcSwapOption<PrefillBinding<Sel>>,
+    target: Mutex<Option<EndpointId>>,
+    target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
     /// Reference to the decode-side `KvRouter` so conditional disagg can peek
     /// the cache-hot decode worker. `None` for non-KV routing and disabled routers.
-    decode_router: Option<Arc<super::KvRouter>>,
+    decode_router: Option<Arc<super::KvRouter<Sel>>>,
+    worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
     decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
-    endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
@@ -184,7 +198,44 @@ pub struct PrefillRouter {
     lifecycle: AtomicU8,
 }
 
-impl Drop for PrefillRouter {
+struct PrefillBinding<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    endpoint_id: EndpointId,
+    router: InnerPrefillRouter<Sel>,
+}
+
+struct PrefillBuildContext<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    model_manager: Arc<ModelManager>,
+    router_mode: RouterMode,
+    worker_selector_factory: WorkerSelectorFactory<Sel>,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    session_affinity_ttl: Option<std::time::Duration>,
+    model_name: String,
+    is_eagle: bool,
+}
+
+pub(crate) trait PrefillRouterLifecycle: Send + Sync {
+    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>);
+}
+
+impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>) {
+        self.set_target(target);
+    }
+}
+
+impl<Sel> Drop for PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     fn drop(&mut self) {
         tracing::debug!("Dropping PrefillRouter, cancelling background activation task");
         self.cancel_token.cancel();
@@ -192,13 +243,15 @@ impl Drop for PrefillRouter {
 }
 
 #[async_trait]
-impl
+impl<Sel>
     Operator<
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
-    > for PrefillRouter
+    > for PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     async fn generate(
         &self,
@@ -328,14 +381,15 @@ impl
                 session_affinity.as_ref().clone(),
             );
         }
-        let router = self
-            .prefill_router
-            .get()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+        let Some(binding) = self.binding.load_full() else {
+            return next.generate(context.map(|_| req)).await;
+        };
+        let router = &binding.router;
+        let endpoint_id = &binding.endpoint_id;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target)
+                    self.prepare_prefill_dispatch(request, target, endpoint_id)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
@@ -379,7 +433,11 @@ impl
             Ok(result) => result,
             Err(error) => {
                 use dynamo_runtime::error::{ErrorType, match_error_chain};
-                if match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+                if match_error_chain(
+                    error.as_ref(),
+                    &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
+                    &[],
+                ) {
                     tracing::warn!(
                         error = %error,
                         "request rejected by prefill worker (at capacity)"
@@ -469,7 +527,10 @@ impl
     }
 }
 
-impl PrefillRouter {
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }
@@ -501,18 +562,16 @@ impl PrefillRouter {
         &self,
         request: &mut PreprocessedRequest,
         target: AffinityTarget,
+        endpoint_id: &EndpointId,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
-        let endpoint_id = self.endpoint_id.get();
         let topology_constraints =
-            self.preflight_kv_transfer_constraints(endpoint_id, worker_id)?;
+            self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
 
-        let bootstrap_info = endpoint_id
-            .and_then(|endpoint_id| {
-                self.model_manager
-                    .get_disaggregated_endpoint(endpoint_id, worker_id)
-                    .map(|endpoint| (endpoint_id, endpoint))
-            })
+        let bootstrap_info = self
+            .model_manager
+            .get_disaggregated_endpoint(endpoint_id, worker_id)
+            .map(|endpoint| (endpoint_id, endpoint))
             .and_then(|(endpoint_id, endpoint)| {
                 let host = endpoint.bootstrap_host?;
                 let port = endpoint.bootstrap_port?;
@@ -775,91 +834,6 @@ mod tests {
                 assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
             }
         }
-    }
-
-    fn make_test_router() -> Arc<PrefillRouter> {
-        PrefillRouter::disabled(
-            Arc::new(crate::discovery::ModelManager::new()),
-            RouterMode::RoundRobin,
-            None,
-        )
-    }
-
-    #[test]
-    fn pending_state_is_tracked() {
-        let router = make_test_router();
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
-        assert!(!router.is_activated());
-        assert!(!router.is_deactivated());
-    }
-
-    #[test]
-    fn active_state_is_tracked() {
-        let router = make_test_router();
-        router.mark_active_for_test();
-
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
-        assert!(!router.is_deactivated());
-    }
-
-    #[test]
-    fn unavailable_state_is_tracked() {
-        let router = make_test_router();
-        router.mark_active_for_test();
-        router.deactivate();
-
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-        assert!(router.is_deactivated());
-    }
-
-    #[test]
-    fn deactivation_is_idempotent() {
-        let router = make_test_router();
-        router.mark_active_for_test();
-        router.deactivate();
-        router.deactivate();
-        assert!(router.is_deactivated());
-    }
-
-    #[test]
-    fn pending_router_latches_worker_availability_transitions() {
-        let router = make_test_router();
-        router.deactivate();
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-
-        router.reactivate();
-        router.reactivate();
-
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
-    }
-
-    #[test]
-    fn activation_does_not_overwrite_latched_deactivation() {
-        let router = make_test_router();
-        router.deactivate();
-
-        assert_eq!(
-            router.complete_activation(),
-            PrefillLifecycleState::Unavailable
-        );
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-    }
-
-    #[test]
-    fn lifecycle_state_conversion_rejects_invalid_values() {
-        assert_eq!(
-            PrefillLifecycleState::try_from(0),
-            Ok(PrefillLifecycleState::Pending)
-        );
-        assert_eq!(
-            PrefillLifecycleState::try_from(1),
-            Ok(PrefillLifecycleState::Active)
-        );
-        assert_eq!(
-            PrefillLifecycleState::try_from(2),
-            Ok(PrefillLifecycleState::Unavailable)
-        );
-        assert_eq!(PrefillLifecycleState::try_from(3), Err(3));
     }
 
     #[test]

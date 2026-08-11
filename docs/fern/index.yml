@@ -59,14 +59,11 @@ tabs:
 navigation:
   - tab: home
     layout:
+      # Sole entry: the landing page sets `layout: page`, which drops the
+      # sidebar. The Slack and Community Calendar links that used to sit here
+      # are the two community cards in the hero, so they were duplicated.
       - page: Welcome
         path: pages/home/index.mdx
-      - link: Join Slack
-        href: http://ai-dynamo.org/slack
-        target: _blank
-      - link: Community Calendar
-        href: https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20
-        target: _blank
 
   # ==================== Kubernetes Guide ====================
   - tab: kubernetes-guide
@@ -465,6 +462,9 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
+          - page: Nemotron-3.5-Lightning
+            path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
+            slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra
             path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
             slug: nemotron-3-ultra
@@ -718,28 +718,36 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/overview.md
-                  - section: Spica (Experimental)
-                    slug: spica
+                  - section: Sweeper (Experimental)
+                    slug: sweeper
                     collapsed: true
                     contents:
                       - page: Overview
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md
-                      - page: Search Flow
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-flow.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md
+                      - page: Quickstart
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/quickstart.md
+                      - page: Tutorial
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/tutorial.md
+                      - page: Architecture
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/architecture.md
+                      - page: Configuration
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md
                       - page: Optimization Goals
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/optimization-goals.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md
                       - page: Traffic
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/traffic.md
-                      - page: Search Space
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-space.md
-                      - page: Unrolled Samples
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/unrolled-samples.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md
+                      - page: Results
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/results.md
+                      - page: Sweep Configuration Providers
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/sweep-config-provider.md
+                      - page: Dynamo Integration
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md
                       - page: GLM-5-FP8 Pareto Sweep
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/glm-5-fp8-pareto-sweep.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/glm-5-fp8-pareto-sweep.md
                       - page: Planner Goodput-per-GPU Sweep
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/planner-goodput-per-gpu-sweep.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/planner-goodput-per-gpu-sweep.md
                       - page: Router End-to-End Latency Sweep
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/router-end-to-end-latency-sweep.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/router-end-to-end-latency-sweep.md
               - section: KVBM
                 collapsed: true
                 contents:
@@ -765,8 +773,6 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
                       - page: Chat Processor
                         path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md
-                      - page: Logits Processing
-                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/logits-processing.md
                       - page: Disaggregation
                         path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/disaggregation.md
                       - page: HiCache
@@ -803,8 +809,6 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md
                       - page: Chat Processor
                         path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md
-                      - page: Logits Processing
-                        path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/logits-processing.md
                       - page: KV Cache Offloading
                         path: pages/developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md
                       - page: Native KV Offloading
@@ -873,6 +877,8 @@ navigation:
         contents:
           - page: Building from Source
             path: pages/developer-guide/advanced-customizations/building-from-source.md
+          - page: Write Custom Routing Strategies
+            path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: pages/developer-guide/advanced-customizations/custom-vision-encoders.md
@@ -946,15 +952,7 @@ navigation:
       - page: Compatibility
         path: pages/reference/general/compatibility.mdx
         slug: compatibility
-      - page: Examples
-        path: pages/reference/general/examples.md
-        slug: examples
-      - page: Release Artifacts
-        path: pages/reference/general/release-artifacts.mdx
-        slug: release-artifacts
-      - page: Nightly Release Info
-        path: pages/reference/general/nightly-release-info.md
-        slug: nightly-release-info
+
       - section: Releases
         slug: releases
         path: pages/reference/general/releases/release-history.mdx
@@ -976,12 +974,7 @@ navigation:
             path: pages/reference/general/releases/known-issues.mdx
           - page: Deprecations
             path: pages/reference/general/releases/deprecations.mdx
-      - page: Model Early Access Builds
-        path: pages/reference/general/model-early-access-builds.mdx
-        slug: model-early-access-builds
-      - page: Glossary
-        path: pages/reference/general/glossary.md
-        slug: glossary
+
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
@@ -989,9 +982,88 @@ navigation:
         slug: releases-data
         hidden: true
 
+      - page: Release Artifacts
+        path: pages/reference/general/release-artifacts.mdx
+        slug: release-artifacts
+
+      - page: Nightly Releases
+        path: pages/reference/general/nightly-releases.md
+        slug: nightly-releases
+
+      - page: Model Early Access Builds
+        path: pages/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
+
+      - page: Examples
+        path: pages/reference/general/examples.md
+        slug: examples
+
+      # ==================== API Reference ====================
+      # docs/fern/scripts/gen_python_api.py generates the Python landing page
+      # and one deterministic MDX per curated module. Each per-module page is a
+      # visible sibling of the Python landing, so opening the section exposes
+      # every published module. Python and Kubernetes both collapse: leaving
+      # Python open stood eleven 'dynamo.*' rows beside a one-line Kubernetes
+      # section, which read as an oversight once the two became peers.
+      #
+      # Python API and Rust API sit at the top level as siblings of Kubernetes
+      # API, so the three language surfaces read as peers. Their slugs stay
+      # nested under 'api/' even though the nav no longer is: Fern derives URLs
+      # from the nav, and every published /reference/api/... URL -- including
+      # the twenty anchored redirects in docs.yml that carry the retired
+      # NIXL Connect class pages -- would otherwise move.
+      - page: API Reference
+        path: pages/reference/api/README.mdx
+        slug: api
+
+      - section: Python API
+        icon: fa-brands fa-python
+        path: pages/reference/api/python/README.mdx
+        slug: api/python
+        collapsed: true
+        contents:
+          - page: dynamo._core
+            path: pages/reference/api/python/_core.mdx
+            slug: _core
+          - page: dynamo.runtime
+            path: pages/reference/api/python/runtime.mdx
+            slug: runtime
+          - page: dynamo.llm
+            path: pages/reference/api/python/llm.mdx
+            slug: llm
+          - page: dynamo.frontend
+            path: pages/reference/api/python/frontend.mdx
+            slug: frontend
+          - page: dynamo.common
+            path: pages/reference/api/python/common.mdx
+            slug: common
+          - page: dynamo.health_check
+            path: pages/reference/api/python/health_check.mdx
+            slug: health_check
+          - page: dynamo.logits_processing
+            path: pages/reference/api/python/logits_processing.mdx
+            slug: logits_processing
+          - page: dynamo.planner
+            path: pages/reference/api/python/planner.mdx
+            slug: planner
+          - page: dynamo.router
+            path: pages/reference/api/python/router.mdx
+            slug: router
+          - page: dynamo.mocker
+            path: pages/reference/api/python/mocker.mdx
+            slug: mocker
+          - page: dynamo.nixl_connect
+            path: pages/reference/api/python/nixl_connect.mdx
+            slug: nixl_connect
+
+      - page: Rust API
+        icon: fa-brands fa-rust
+        path: pages/reference/api/rust/README.mdx
+        slug: api/rust
+
       - section: Kubernetes API
         icon: fa-brands fa-kubernetes
-        slug: kubernetes-api
+        slug: api/kubernetes
         collapsed: true
         contents:
           - page: DynamoGraphDeployment
@@ -1089,33 +1161,30 @@ navigation:
         contents:
           - page: Overview
             path: pages/reference/nixl-connect/overview.mdx
-          - page: Connector
-            path: pages/reference/nixl-connect/connector.mdx
-          - page: Device
-            path: pages/reference/nixl-connect/device.mdx
-          - page: Device Kind
-            path: pages/reference/nixl-connect/device-kind.mdx
-          - page: Descriptor
-            path: pages/reference/nixl-connect/descriptor.mdx
-          - page: Read Operation
-            path: pages/reference/nixl-connect/read-operation.mdx
-          - page: Write Operation
-            path: pages/reference/nixl-connect/write-operation.mdx
-          - page: Readable Operation
-            path: pages/reference/nixl-connect/readable-operation.mdx
-          - page: Writable Operation
-            path: pages/reference/nixl-connect/writable-operation.mdx
-          - page: Operation Status
-            path: pages/reference/nixl-connect/operation-status.mdx
-          - page: RDMA Metadata
-            path: pages/reference/nixl-connect/rdma-metadata.mdx
+
+      - page: Glossary
+        path: pages/reference/general/glossary.md
+        slug: glossary
 
   - tab: blog
     layout:
-      - page: Latest
+      # Three siblings at the top of the tab: the partner list, the papers, and
+      # the team's own writing.
+      - page: External publications
+        path: pages/blog/external-publications.mdx
+        slug: external-publications
+
+      - page: Research publications
+        path: pages/blog/research-publications.mdx
+        slug: research-publications
+
+      # "Latest" is no longer its own sidebar entry. The page it pointed at is
+      # this section's overview instead, so the page is not orphaned and every
+      # URL is unchanged: the section keeps `slug: digest`, so the overview
+      # stays at /dynamo/dev/digest and each article at
+      # /dynamo/dev/digest/<slug>.
+      - section: Dynamo blogs
         path: pages/blog/latest.mdx
-        slug: digest
-      - section: "2026"
         slug: digest
         collapsed: open-by-default
         contents:

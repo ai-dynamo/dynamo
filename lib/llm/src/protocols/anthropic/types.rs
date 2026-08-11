@@ -111,7 +111,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         }
 
         // Convert tools
-        let tools = req.tools.as_ref().map(|t| convert_anthropic_tools(t));
+        let tools = req
+            .tools
+            .as_deref()
+            .map(convert_anthropic_tools)
+            .transpose()?;
 
         // Convert tool_choice
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
@@ -119,6 +123,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
+            .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
@@ -465,22 +470,17 @@ fn convert_assistant_blocks(
 }
 
 /// Convert Anthropic tools to ChatCompletionTools.
-fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
+fn convert_anthropic_tools(
+    tools: &[AnthropicTool],
+) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
     tools
         .iter()
-        .filter_map(|tool| {
-            // Server tools (web_search, bash, etc.) don't have input_schema
-            // and can't be meaningfully converted to OpenAI function tools.
-            // They are backend-specific and handled separately.
-            let schema = tool.input_schema.clone().or_else(|| {
-                tracing::debug!(
-                    tool_name = %tool.name,
-                    tool_type = ?tool.tool_type,
-                    "Skipping server tool in OpenAI conversion (no input_schema)"
-                );
-                None
+        .enumerate()
+        .map(|(tool_index, tool)| {
+            let schema = tool.input_schema.clone().ok_or_else(|| {
+                anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
-            Some(ChatCompletionTool {
+            Ok(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: tool.name.clone(),
@@ -549,6 +549,11 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
     }
 }
 
+/// Generate an Anthropic-native `tool_use` id.
+pub(super) fn new_tool_use_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().simple())
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -577,8 +582,14 @@ pub fn chat_completion_to_anthropic_response(
             for tc in tool_calls {
                 let input: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                let emitted_id = new_tool_use_id();
+                tracing::debug!(
+                    backend_id = %tc.id,
+                    emitted_id = %emitted_id,
+                    "minting Anthropic tool_use id"
+                );
                 content.push(AnthropicResponseContentBlock::ToolUse {
-                    id: tc.id,
+                    id: emitted_id,
                     name: tc.function.name,
                     input,
                 });
@@ -935,6 +946,12 @@ mod tests {
             container: None,
             output_config: None,
         };
+
+        let mut empty_req = req.clone();
+        empty_req.stop_sequences = Some(vec![]);
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.stop.is_none());
+        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.stop.is_some());

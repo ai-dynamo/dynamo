@@ -85,6 +85,14 @@ impl PoolingEmbedDType {
             Self::Fp8E5m2 => "fp8_e5m2",
         }
     }
+
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::Float32 => 4,
+            Self::Float16 | Self::Bfloat16 => 2,
+            Self::Fp8E4m3 | Self::Fp8E5m2 => 1,
+        }
+    }
 }
 
 /// Byte order used for base64 and binary pooling responses.

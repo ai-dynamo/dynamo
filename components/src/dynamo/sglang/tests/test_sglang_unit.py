@@ -17,6 +17,7 @@ from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -58,7 +59,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.core,
-    pytest.mark.gpu_1,  # needs sglang & GPU packages installed but does not actually use GPU
+    pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,
 ]
@@ -67,13 +68,44 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
-def test_configured_engine_route_cannot_replace_built_in_route():
+@pytest.fixture(autouse=True)
+def _cpu_engine_when_no_accelerator(monkeypatch):
+    """Honor the file's gpu_0 contract on hosts with no accelerator.
+
+    Many tests here run parse_args, and SGLang's ServerArgs.__post_init__
+    auto-detects a device only when --device is not given; on a host with no
+    accelerator the detection walks every platform and ends in
+    NotImplementedError (get_device -> SRTPlatform(unknown), verified on the
+    amd64 image with the GPU masked). SGLANG_USE_CPU_ENGINE=1 is SGLang's
+    public knob that makes the detection return "cpu". Set it only when CUDA
+    is absent so GPU hosts keep exercising the real detection path, and clear
+    the lru_caches on both probes so a worker that cached the no-env result
+    while running another file's tests cannot poison this one (and vice
+    versa on teardown, via the second clear).
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        yield
+        return
+    from sglang.srt.utils import common as _sgl_common
+
+    monkeypatch.setenv("SGLANG_USE_CPU_ENGINE", "1")
+    _sgl_common.is_cpu.cache_clear()
+    _sgl_common.get_device.cache_clear()
+    yield
+    _sgl_common.is_cpu.cache_clear()
+    _sgl_common.get_device.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "reserved_path", ["control/start_profile", "update/model_taints"]
+)
+def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     handler = object.__new__(DecodeWorkerHandler)
     handler.engine = SimpleNamespace(custom_method=lambda: None)
     handler.config = SimpleNamespace(
-        dynamo_args=SimpleNamespace(
-            engine_routes=["control/start_profile=custom_method"]
-        )
+        dynamo_args=SimpleNamespace(engine_routes=[f"{reserved_path}=custom_method"])
     )
 
     registered_routes = []
@@ -85,13 +117,43 @@ def test_configured_engine_route_cannot_replace_built_in_route():
     with pytest.raises(
         ValueError,
         match=(
-            "Configured SGLang engine route /engine/control/start_profile "
-            "collides with a built-in route"
+            rf"Configured SGLang engine route /engine/{reserved_path} "
+            r"collides with a built-in route"
         ),
     ):
         handler.register_engine_routes(Runtime())
 
     assert registered_routes == []
+
+
+def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.generate_endpoint = object()
+    handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
+
+    registered_routes = []
+    taint_route_endpoints = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    runtime = Runtime()
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.register_model_taint_route",
+        lambda candidate_runtime, endpoint: taint_route_endpoints.append(
+            (candidate_runtime, endpoint)
+        ),
+    )
+
+    handler.register_engine_routes(runtime)
+
+    assert taint_route_endpoints == [(runtime, handler.generate_endpoint)]
+    assert {path for path, _ in registered_routes} >= {
+        "control/start_profile",
+        "control/stop_profile",
+    }
 
 
 def _make_sglang_config(**overrides):
@@ -855,27 +917,23 @@ async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
 
 
 @pytest.mark.parametrize(
-    ("overrides", "role", "fpm_trace_relay_supported"),
+    ("overrides", "role"),
     [
-        ({}, "unified backend", False),
-        ({"embedding_worker": True}, "embedding", True),
-        ({"multimodal_encode_worker": True}, "dedicated multimodal", True),
-        ({"multimodal_worker": True}, "dedicated multimodal", True),
-        ({"image_diffusion_worker": True}, "image diffusion", True),
-        ({"video_generation_worker": True}, "video generation", True),
+        ({"embedding_worker": True}, "embedding"),
+        ({"multimodal_encode_worker": True}, "dedicated multimodal"),
+        ({"multimodal_worker": True}, "dedicated multimodal"),
+        ({"image_diffusion_worker": True}, "image diffusion"),
+        ({"video_generation_worker": True}, "video generation"),
     ],
 )
 def test_trace_does_not_activate_fpm_without_relay(
-    monkeypatch, caplog, overrides, role, fpm_trace_relay_supported
+    monkeypatch, caplog, overrides, role
 ):
     monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
     dynamo_config = _make_sglang_config(fpm_trace=True, **overrides)
 
     with caplog.at_level(logging.WARNING):
-        source = _forward_pass_metrics_source(
-            dynamo_config,
-            fpm_trace_relay_supported=fpm_trace_relay_supported,
-        )
+        source = _forward_pass_metrics_source(dynamo_config)
 
     assert source is None
     assert f"SGLang {role} workers do not create a Dynamo FPM relay" in caplog.text
@@ -886,10 +944,7 @@ def test_explicit_port_preserves_legacy_activation_without_relay(monkeypatch, ca
     dynamo_config = _make_sglang_config(embedding_worker=True, fpm_trace=True)
 
     with caplog.at_level(logging.WARNING):
-        source = _forward_pass_metrics_source(
-            dynamo_config,
-            fpm_trace_relay_supported=False,
-        )
+        source = _forward_pass_metrics_source(dynamo_config)
 
     assert source == "DYN_FORWARDPASS_METRIC_PORT"
     assert "do not create a Dynamo FPM relay" not in caplog.text
@@ -1015,12 +1070,15 @@ async def test_disagg_config_preserves_bootstrap_port(tmp_path, mock_sglang_cli)
 
 
 @pytest.mark.asyncio
-async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capfd):
+async def test_disagg_config_rejects_dynamo_keys(
+    tmp_path, mock_sglang_cli, capfd, monkeypatch
+):
     """Disagg config should only accept SGLang-native keys."""
     config_path = tmp_path / "disagg.yaml"
     config_path.write_text(
         yaml.safe_dump({"prefill": {"store-kv": "mem"}}), encoding="utf-8"
     )
+    monkeypatch.setattr(sglang_args.tempfile, "tempdir", str(tmp_path))
 
     mock_sglang_cli(
         "--model",
@@ -1036,6 +1094,7 @@ async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capf
 
     out, err = capfd.readouterr()
     assert "unrecognized arguments: --store-kv mem" in err
+    assert not list(tmp_path.glob("dynamo_config_*.yaml"))
 
 
 def test_disagg_health_check_payload_includes_bootstrap_info():
@@ -1125,7 +1184,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
     async def fake_register_model(*args, **kwargs):
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
 
     server_args = SimpleNamespace(
@@ -1174,7 +1233,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         if args[3].startswith("s3://"):
             raise AssertionError("object-storage path used as a normal model_path")
 
-    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
 
     server_args = SimpleNamespace(
@@ -1252,6 +1311,9 @@ async def test_lora_registration_model_type_gate(
     model_type follows parse_endpoint_types and worker_type follows the serving
     mode.
     """
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
     from unittest.mock import AsyncMock, MagicMock
 
     from dynamo.sglang.request_handlers import handler_base
@@ -1263,6 +1325,18 @@ async def test_lora_registration_model_type_gate(
     async def fake_register_llm(**kw):
         captured.update(kw)
 
+    lora_runtime_config = SimpleNamespace(
+        runtime_data={
+            "token_budget": (
+                '{"combined_limit":4096,"reject_prompt_overflow":true,'
+                '"reject_total_overflow":true}'
+            )
+        }
+    )
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return lora_runtime_config
+
     # Fake LoRA manager that returns a successful download.
     fake_lora_manager = MagicMock()
     fake_lora_manager.download_lora = AsyncMock(
@@ -1272,6 +1346,7 @@ async def test_lora_registration_model_type_gate(
     monkeypatch.setattr(handler_base, "register_llm", fake_register_llm)
     monkeypatch.setattr(handler_base, "get_lora_manager", lambda: fake_lora_manager)
     monkeypatch.setattr(handler_base, "lora_name_to_id", lambda name: 12345)
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
 
     # Fake SGLang engine — only the LoRA load path is exercised.
     fake_load_result = SimpleNamespace(success=True, error_message=None)
@@ -1319,3 +1394,5 @@ async def test_lora_registration_model_type_gate(
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
     assert captured["kv_cache_block_size"] == 32
+    assert captured["runtime_config"] is lora_runtime_config
+    assert "token_budget" in captured["runtime_config"].runtime_data

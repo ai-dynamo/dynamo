@@ -4,9 +4,11 @@
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::{Context, SingleIn};
 
 use super::{InnerPrefillRouter, PrefillRouter};
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{
     extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
     llm_backend::PreprocessedRequest,
@@ -57,7 +59,10 @@ fn decode_gate_allows_bypass(
     policy_says_bypass && (!decode_gate_configured || matches!(decode_busy, Some(false)))
 }
 
-impl PrefillRouter {
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     /// Peek the decode router to see which decode worker would be picked, then
     /// consult the configured conditional-disagg policy.
     pub(super) async fn select_decode_worker_for_conditional_disagg(
@@ -298,8 +303,8 @@ impl PrefillRouter {
         session_affinity: Option<&SessionAffinityId>,
     ) -> Option<bool> {
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
-        let prefill_router = self.prefill_router.get()?;
-        let router = match prefill_router {
+        let binding = self.binding.load_full()?;
+        let router = match &binding.router {
             InnerPrefillRouter::KvRouter(router) => router,
             InnerPrefillRouter::SimpleRouter(_) => return None,
         };
