@@ -3,37 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Point the Helm charts at this nightly run's staged images, in place.
 
-Invoked by release.yml's nightly helm step in the runner workspace, right
-before `helm dep build` + `helm package`. rc/GA releases record chart versions
-and image tags on their release branch; nightly has no release branch, so the
+Run by release.yml's nightly helm step right before `helm dep build` +
+`helm package`. Nightly has no release branch to record a bump on, so the
 rewrite is ephemeral: checkout at the source SHA, mutate, package, discard.
 
-Per selected chart token this rewrites:
-  platform:
-    - deploy/helm/charts/platform/Chart.yaml: top-level version, plus the
-      dynamo-operator file:// dependency pin -- the pin is exact, so it must
-      move in lockstep with the subchart version or `helm dep build` fails
-      its constraint check.
-    - deploy/helm/charts/platform/components/operator/Chart.yaml: version AND
-      appVersion. `helm package --app-version` stamps only the top-level
-      chart; the subchart's appVersion feeds the operator image-tag default
-      (`tag: ""` falls through to .Chart.AppVersion) and the
-      `--operator-version` arg (semver-validated at operator startup), so it
-      must be rewritten in source before `helm dep build` packs the subchart.
-    - values.yaml (platform and subchart copies): the operator image
-      repository is renamed to its -nightly NGC repo and the tag pinned to
-      this run's dated tag -- exactly the image the copy step staged.
-  snapshot:
-    - deploy/helm/charts/snapshot/Chart.yaml: version and appVersion.
-    - values.yaml: snapshot-agent repository -> snapshot-agent-nightly, tag
-      pinned (that tag is a hard literal with no appVersion fallback).
-
-Third-party references (nats, etcd, busybox, kai-scheduler, grove) are never
-touched. power-agent is excluded: no release path publishes its image.
+Per chart token: Chart.yaml versions -- including the platform->dynamo-operator
+exact dependency pin (must move in lockstep) and the operator subchart's
+appVersion (`helm package --app-version` stamps only the top-level chart; the
+subchart's feeds the image-tag default and `--operator-version`) -- plus
+values.yaml image sites renamed to the *-nightly NGC repos at this run's dated
+tag. Third-party references are never touched; power-agent is excluded.
 
 Every rewrite requires exactly one match and raises otherwise, so a chart
-restructure breaks this step loudly instead of publishing a chart that points
-at a stale or missing image.
+restructure breaks this step loudly instead of shipping stale references.
 """
 from __future__ import annotations
 
@@ -42,9 +24,7 @@ import re
 import sys
 from pathlib import Path
 
-# (helm token) -> Chart.yaml files carrying the chart version. The operator
-# subchart rides the "platform" token, mirroring the release-branch bump
-# tooling's HELM_CHART_TARGETS.
+# token -> Chart.yaml files; the operator subchart rides the platform token.
 CHART_TARGETS: dict[str, list[str]] = {
     "platform": [
         "deploy/helm/charts/platform/Chart.yaml",
@@ -55,10 +35,7 @@ CHART_TARGETS: dict[str, list[str]] = {
     ],
 }
 
-# (helm token) -> first-party image sites in values.yaml:
-# (path, repository as written in the file, nightly repository to write).
-# The subchart values are rewritten too so the defaults are correct when the
-# operator chart is consumed directly.
+# token -> (values.yaml path, repository in the file, nightly repository).
 IMAGE_SITES: dict[str, list[tuple[str, str, str]]] = {
     "platform": [
         (
@@ -89,9 +66,7 @@ _TAG_HOP = r"(?:(?![^\n]*repository:)[^\n]*\n)*?"
 def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
     text = path.read_text()
 
-    # Top-level version/appVersion (line-start anchored, so dependency and
-    # kubeVersion lines never match). The platform chart has no appVersion
-    # line -- `helm package --app-version` injects it at package time.
+    # Top-level version/appVersion, line-start anchored (platform has no appVersion).
     top = re.compile(
         r'^(?P<pre>(?:appVersion|version)\s*:\s*)(?P<q>"?)[^"\n]*(?P=q)(?P<post>\s*)$',
         re.MULTILINE,
@@ -103,8 +78,7 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
     if n_top == 0:
         raise RuntimeError(f"no top-level version/appVersion in {path}")
 
-    # dynamo-operator (file:// subchart) exact pin. Hop bounded to the entry so
-    # it can't reach the nats/etcd/kai/grove pins, which stay untouched.
+    # dynamo-operator exact pin; hop bounded so third-party pins stay untouched.
     dep = re.compile(
         r"(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n"
         r"(?:(?!\s*-\s)[^\n]*\n)*?"
@@ -123,10 +97,8 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
 
 
 def set_image_site(path: Path, current_repo: str, nightly_repo: str, tag: str) -> None:
-    # Rename the repository and pin the tag in one bounded match, so they can
-    # never come from different image blocks. `\2` (the closing quote backref)
-    # right after the repo also stops the pattern matching a repo that merely
-    # starts with `current_repo`.
+    # One bounded match renames the repo and pins its tag together; the quote
+    # backref `\2` also stops prefix matches (e.g. repo + "-nightly").
     pat = re.compile(
         r"(repository:\s*)(\"?)"
         + re.escape(current_repo)

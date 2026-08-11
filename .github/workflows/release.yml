@@ -192,12 +192,9 @@ jobs:
             # the bare date+sha (e.g. 20260520-abc1234).
             NGC_VERSION_TAG="${DATE_UTC}-${SHORT_SHA}"
             WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
-            # SemVer pre-release, so a nightly chart always sorts below the
-            # train's rc (-dev < -rc) and GA. The sha keeps same-day re-runs at
-            # a new commit unique on the immutable ChartMuseum registry; its
-            # `g` prefix (git-describe convention) keeps an all-digit sha with
-            # a leading zero from producing an invalid SemVer numeric
-            # identifier that helm would refuse to package.
+            # SemVer pre-release: sorts below the train's rc and GA. The sha
+            # keeps same-day re-runs unique on immutable ChartMuseum; its `g`
+            # prefix keeps an all-digit sha from being invalid SemVer.
             HELM_CHART_VERSION="${BASE_VERSION}-dev.${DATE_UTC}.g${SHORT_SHA}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
@@ -261,6 +258,9 @@ jobs:
     environment: automated-release
     outputs:
       failed_copy_count: ${{ steps.copy_images.outputs.failed_count }}
+      # Nightly only: chart:version pairs the helm step pushed (empty on rc
+      # runs); forwarded to GitLab for registration at the true chart version.
+      staged_helm: ${{ steps.nightly_helm_push.outputs.staged_helm }}
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
@@ -614,23 +614,17 @@ jobs:
 
           helm repo remove "${REPO_ALIAS}"
 
-      # Nightly analog of the step above: package the platform and snapshot
-      # charts at the dated pre-release version and dual-push them to NGC
-      # staging -- ChartMuseum and OCI. Chart-internal references are rewritten
-      # in the runner workspace only (nightly has no release branch to record a
-      # bump on): image repositories move to the *-nightly repos at this run's
-      # dated tag, i.e. exactly the images the copy step staged above.
-      # Fail-soft per chart: a chart whose optional image build did not stage
-      # tonight is skipped with a warning (mirroring stage_optional), so a
-      # published chart can never reference a missing image; infrastructure
-      # failures (auth, registry down, rewrite mismatch) still fail the step.
+      # Nightly: package platform + snapshot at the dated pre-release version
+      # and dual-push to NGC staging (ChartMuseum + OCI). Values are rewritten
+      # in the workspace only, onto the *-nightly repos at this run's tag.
+      # Fail-soft per chart via the copy step's *_staged flags; infrastructure
+      # failures still fail the step.
       - name: Package and push nightly Helm charts to NGC
         id: nightly_helm_push
         if: env.NIGHTLY == 'true'
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
-          # OCI mirror of the same staging namespace, so consumers can
-          # `helm pull oci://...` without a repo add.
+          # OCI mirror of the same staging namespace.
           NGC_HELM_OCI_REPO: oci://nvcr.io/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
           NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
@@ -641,10 +635,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Gate each chart on whether its (fail-soft) image actually staged
-          # tonight. platform deploys kubernetes-operator-nightly, snapshot
-          # deploys snapshot-agent-nightly; the other staged flags don't feed
-          # any chart.
+          # Publish a chart only if its image staged tonight.
           CHARTS=""
           SKIPPED_HELM=""
           if [[ "${OPERATOR_STAGED}" == "true" ]]; then
@@ -681,9 +672,7 @@ jobs:
             --password-stdin \
             "${NGC_HELM_REPO}" > /dev/null 2>&1
 
-          # The job's `docker login nvcr.io` writes ~/.docker/config.json,
-          # which helm does not read for OCI pushes -- log the helm registry
-          # client in explicitly.
+          # helm does not read docker's login for OCI pushes.
           echo "${NGC_TOKEN}" | helm registry login nvcr.io \
             --username "${NGC_USERNAME}" --password-stdin
 
@@ -708,15 +697,12 @@ jobs:
               "${CHART_DIR}"
             CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
 
-            # OCI first: OCI tags are mutable (a same-SHA workflow re-run
-            # overwrites the identical bytes harmlessly) while ChartMuseum
-            # 409s on an existing version -- this order keeps the step
-            # re-runnable.
+            # OCI first: mutable, so same-SHA re-runs overwrite harmlessly;
+            # ChartMuseum 409s on duplicates.
             echo "Pushing ${CHART_FILE} to NGC OCI registry..."
             helm push "${CHART_FILE}" "${NGC_HELM_OCI_REPO}"
 
-            # ChartMuseum is immutable; skip when this exact chart version is
-            # already indexed so a same-SHA re-run stays green.
+            # Skip cm-push if already indexed so same-SHA re-runs stay green.
             SEARCH_OUT=$(helm search repo "${REPO_ALIAS}/${CHART_NAME}" \
                 --version "${HELM_CHART_VERSION}" -o yaml)
             if grep -qF "version: ${HELM_CHART_VERSION}" <<< "${SEARCH_OUT}"; then
@@ -1158,6 +1144,8 @@ jobs:
           COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
           NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
+          # chart:version pairs pushed by the nightly helm step.
+          STAGED_HELM:          ${{ needs.release-publish.outputs.staged_helm }}
           # Forwarded so the GitLab pipeline can reply on the same thread.
           SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
           SLACK_CHANNEL_ID:     ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
@@ -1173,6 +1161,10 @@ jobs:
             PIPELINE_TYPE="security"
             RELEASE_TYPE="nightly"
             ARTIFACTS="wheel,container"
+            # helm only when charts were actually pushed (fail-soft).
+            if [ -n "${STAGED_HELM}" ]; then
+              ARTIFACTS="${ARTIFACTS},helm"
+            fi
             NIGHTLY_TAG="${NGC_VERSION_TAG}"
             RC_TAG=""
           else
@@ -1207,6 +1199,7 @@ jobs:
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
             --form "variables[ARTIFACTS]=${ARTIFACTS}" \
+            --form "variables[STAGED_HELM]=${STAGED_HELM}" \
             --form "variables[ENABLE_PULSE_SCAN]=true" \
             --form "variables[ENABLE_WHEEL_SCAN]=true" \
             --form "variables[ENABLE_SONARQUBE]=true" \
