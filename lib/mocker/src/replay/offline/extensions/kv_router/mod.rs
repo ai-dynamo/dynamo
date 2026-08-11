@@ -24,7 +24,7 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
-    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
+    SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
     TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
@@ -300,7 +300,10 @@ impl PendingRequest {
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
-            session_id: self.session_id.clone(),
+            session_context: self
+                .session_id
+                .clone()
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1174,7 +1177,13 @@ mod tests {
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
-        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+        assert_eq!(
+            scheduling_request
+                .session_context
+                .as_ref()
+                .map(|context| context.session_id()),
+            Some("session-a")
+        );
     }
 
     #[test]

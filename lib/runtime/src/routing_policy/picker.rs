@@ -3,8 +3,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rand::Rng;
-
 use super::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
     RoutePolicy, RouteTarget,
@@ -132,7 +130,7 @@ struct RandomSamples;
 impl SampleSource for RandomSamples {
     #[inline(always)]
     fn index(&mut self, upper: usize) -> usize {
-        rand::rng().random::<u64>() as usize % upper
+        fastrand::usize(..upper)
     }
 }
 
@@ -142,7 +140,7 @@ fn random_decision(candidates: CandidateView<'_>) -> Option<RouteDecision> {
     if upper == 0 {
         return None;
     }
-    let index = rand::rng().random::<u64>() as usize % upper;
+    let index = fastrand::usize(..upper);
     let target = match candidates {
         CandidateView::Workers(workers) => RouteTarget::worker(workers[index]),
         CandidateView::DeviceAware(candidates) => candidates[index].target,

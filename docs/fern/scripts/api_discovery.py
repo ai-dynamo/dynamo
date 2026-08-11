@@ -223,6 +223,12 @@ def discover_module(loader: GriffeLoader, spec: tuple[str, str, str]) -> Module:
     griffe_mod = loader.load(name)
     if not isinstance(griffe_mod, GriffeModule):
         raise TypeError(f"expected Module for {name}, got {type(griffe_mod)}")
+    # ``qualname`` breaks ties between same-named symbols re-exported from
+    # different submodules (``dynamo.frontend.prepost`` vs
+    # ``dynamo.frontend.sglang_prepost`` both expose
+    # ``build_tool_call_guided_decoding``). Without it the pair falls back to
+    # griffe's member iteration order, which reshuffles the pages between runs
+    # and fails --check with no underlying source change.
     symbols = tuple(
         sorted(
             _collect_symbols(name, griffe_mod),

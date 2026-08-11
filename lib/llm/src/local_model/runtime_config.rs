@@ -150,6 +150,19 @@ pub struct DisaggregatedEndpoint {
     pub bootstrap_port: Option<u16>,
 }
 
+/// Controls how historical `function.arguments` are serialized before being
+/// passed to the MiniJinja chat template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallArgumentsFormat {
+    /// Preserve arguments as a raw JSON string (default, backward-compatible).
+    #[default]
+    JsonString,
+    /// Parse arguments into a JSON object before rendering.  Required for
+    /// templates that iterate over key-value pairs (e.g. GLM-5.2).
+    JsonObject,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
 /// Runtime-resolved metadata published by a worker after its engine starts.
@@ -172,6 +185,15 @@ pub struct ModelRuntimeConfig {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Controls how historical `function.arguments` are presented to the MiniJinja
+    /// chat template.  `JsonString` (default) preserves the raw JSON string, which
+    /// is backward-compatible with all models.  `JsonObject` normalizes the string
+    /// to a parsed object before rendering; required for models whose template
+    /// iterates over argument key-value pairs (e.g. GLM-5.2).
+    /// Also set to `JsonObject` automatically when `tool_call_parser` is `"glm47"`.
+    #[serde(default)]
+    pub tool_call_arguments_format: ToolCallArgumentsFormat,
 
     /// Frontend tokenizer backend override. When unset, direct Rust callers can still use
     /// `DYN_TOKENIZER`; when set, this explicit value wins over process environment.
@@ -309,6 +331,7 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
@@ -936,7 +959,8 @@ mod tests {
             "max_num_seqs": 32,
             "max_num_batched_tokens": null,
             "tool_call_parser": null,
-            "reasoning_parser": null
+            "reasoning_parser": null,
+            "tool_call_arguments_format": "json_string"
         }"#;
 
         let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();
