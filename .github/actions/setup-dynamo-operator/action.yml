@@ -124,6 +124,9 @@ runs:
           BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          while [[ "${BRANCH_SANITIZED}" =~ [^[:alnum:]]$ ]]; do
+            BRANCH_SANITIZED="${BRANCH_SANITIZED%?}"
+          done
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
           echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
