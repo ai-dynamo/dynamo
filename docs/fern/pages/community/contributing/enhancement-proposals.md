@@ -33,9 +33,9 @@ A DEP is required when a change:
 - affects backend integration contracts
 
 Anything smaller does not need one. A change over 100 core lines needs a
-[Contribution Request](contribution-flow.mdx), which is a different instrument: a CR is permission to
-build, where a DEP is agreement on the design, so an architectural change needs both and the CR links
-the DEP.
+[Contribution Request](contribution-flow.mdx). A CR is permission to build, where a DEP is agreement
+on the design. An architectural change needs the DEP, not both: agreeing the design settles whether
+the work is wanted.
 
 If you are unsure, open a Contribution Request and ask. Being told a DEP is unnecessary costs you an
 afternoon, and writing one nobody needed costs a week.
