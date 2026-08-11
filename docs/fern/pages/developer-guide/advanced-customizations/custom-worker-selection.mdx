@@ -85,9 +85,11 @@ cargo add \
 ```
 
 </Step>
-<Step title="Implement an optional filter">
+<Step title="Filter workers">
 
-Use a filter only for a hard requirement. This example keeps workers with at least the configured number of device-resident overlap blocks:
+A filter answers a hard yes-or-no question about one worker that already passed Dynamo's eligibility checks. Return `true` to keep the worker or `false` to remove it. Use a filter only when the worker must not receive the request; use a scorer for preferences.
+
+This filter keeps workers with at least the configured number of device-resident overlap blocks:
 
 ```rust
 use dynamo_kv_router::{
@@ -117,12 +119,16 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
 }
 ```
 
-Pass filters to `WorkerSelectionPolicy::new_with_filters`. Use `WorkerSelectionPolicy::new` when the policy has no filters.
+Dynamo runs filters in declaration order before scoring. A worker must pass every configured filter. If no workers remain, selection returns an error.
+
+Pass filters to `WorkerSelectionPolicy::new_with_filters`. If the policy has no hard requirement, omit filters and use `WorkerSelectionPolicy::new`.
 
 </Step>
-<Step title="Implement the scorer">
+<Step title="Score workers">
 
-Declare only the input groups that each scorer reads. This example gives prefill and decode workers different cost models:
+A scorer expresses a preference without excluding a worker. It returns one finite cost for one worker. Lower total cost is better by convention.
+
+This scorer uses the current number of active requests as its cost:
 
 ```rust
 use dynamo_kv_router::{
@@ -130,35 +136,9 @@ use dynamo_kv_router::{
     WorkerSelectionPolicyError,
 };
 
-struct PrefillCostScorer;
+struct ActiveRequestsScorer;
 
-impl WorkerScorer for PrefillCostScorer {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
-    }
-
-    fn score(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let active_prefill_blocks =
-            load.active_prefill_tokens() as f64 / context.block_size() as f64;
-        let uncached_request_blocks =
-            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-        Ok(active_prefill_blocks + uncached_request_blocks)
-    }
-}
-
-struct DecodeCostScorer;
-
-impl WorkerScorer for DecodeCostScorer {
+impl WorkerScorer for ActiveRequestsScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
@@ -171,17 +151,19 @@ impl WorkerScorer for DecodeCostScorer {
         let load = candidate
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        Ok(load.decode_cost_blocks())
+        Ok(load.active_requests() as f64)
     }
 }
 ```
 
-A policy can compose multiple scorers. Dynamo calls them in declaration order and rejects a non-finite contribution or total.
+A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
 
 </Step>
-<Step title="Implement the picker">
+<Step title="Pick a worker">
 
-A picker returns an index into `WorkerInputView::candidates()`. Candidate order is unspecified, so inspect explicit values:
+A picker makes the final choice after filtering and scoring. It sees every remaining worker and its total cost, then returns one row index. Most policies pick the lowest cost, but a picker can instead sample, break ties, or use policy-local state.
+
+This picker selects the lowest-cost row:
 
 ```rust
 use dynamo_kv_router::{
@@ -207,12 +189,12 @@ impl WorkerPicker for LowestCostPicker {
 }
 ```
 
-The host rejects an out-of-range index before accounting or reservation.
+Candidate order is unspecified, so inspect explicit values instead of relying on row order. Dynamo rejects an out-of-range index before accounting or reservation.
 
 </Step>
 <Step title="Parse parameters and create the factory">
 
-The provider runs once at startup. Parse all parameters there and reject unknown fields:
+The provider runs once at startup. Parse and validate all parameters there, then capture the validated values in the factory:
 
 ```rust
 use std::sync::Arc;
@@ -221,25 +203,36 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
     WorkerSelectionPolicyProviderError,
 };
-use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Parameters {}
+struct Parameters {
+    min_device_overlap_blocks: f64,
+}
 
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-    let _: Parameters = parameters.deserialize()?;
+    let parameters: Parameters = parameters.deserialize()?;
+    if !parameters.min_device_overlap_blocks.is_finite()
+        || parameters.min_device_overlap_blocks < 0.0
+    {
+        return Err(WorkerSelectionPolicyProviderError::new(
+            "min_device_overlap_blocks must be a finite non-negative number",
+        ));
+    }
+    let minimum_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(|config, worker_type, _partition| {
-        let scorers: Vec<Box<dyn WorkerScorer>> = match worker_type {
-            "decode" => vec![Box::new(DecodeCostScorer)],
-            _ => vec![Box::new(PrefillCostScorer)],
-        };
-        WorkerSelectionPolicy::new(
+    Ok(Arc::new(move |config, worker_type, _partition| {
+        let filters: Vec<Box<dyn WorkerFilter>> = vec![
+            Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
+        ];
+        let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
+        WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type,
+            filters,
             scorers,
             Box::new(LowestCostPicker),
         )
@@ -289,7 +282,8 @@ worker_selection:
   instances:
     - name: least-busy
       type: least-busy
-      parameters: {}
+      parameters:
+        min_device_overlap_blocks: 0
 ```
 
 The `type` selects a registered provider. The `name` identifies one configured instance. `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides `worker_selection.default` by instance name. Set the override to `default` to select Dynamo's built-in policy.
