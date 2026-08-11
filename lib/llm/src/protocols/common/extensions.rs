@@ -105,7 +105,8 @@ pub struct AgentContext {
 
     /// Causal trigger that produced the request, derived from inbound request content.
     #[builder(default, setter(strip_option))]
-    // TODO: Make required after the two-release compatibility window.
+    // Optional for v1.2/v1.3 payloads during the v1.4/v1.5 N-2 window.
+    // TODO(v1.6): Make required after v1.3 falls outside the N-2 window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_trigger: Option<InputTrigger>,
 }

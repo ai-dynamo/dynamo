@@ -203,19 +203,6 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
 Use the repository's [`dynamo-agent-harness` skill](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-agent-harness) when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
 
-Start a persistent Codex session:
-
-```bash
-.agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
-  --harness codex \
-  --base-url http://localhost:8000 \
-  --model zai-org/GLM-4.7-Flash \
-  --cwd "$PWD" \
-  --capability verify
-```
-
-After the command emits a `ready` JSON record, write one prompt object per line to the same process. Send `{"close":true}` to stop the session.
-
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
 ## See Also

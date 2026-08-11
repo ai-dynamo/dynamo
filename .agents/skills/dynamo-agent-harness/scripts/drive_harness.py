@@ -245,7 +245,15 @@ async def prompt(conn: Any, client: HarnessClient, session_id: str, text: str) -
     result = await conn.prompt(session_id=session_id, prompt=[text_block(text)])
     response = client.response()
     if not response:
-        raise RuntimeError("agent returned no text response")
+        emit(
+            {
+                "type": "error",
+                "session_id": session_id,
+                "ok": False,
+                "error": "agent returned no text response",
+            }
+        )
+        return
     output: dict[str, Any] = {
         "type": "response",
         "session_id": session_id,
