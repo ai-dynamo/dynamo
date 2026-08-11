@@ -37,6 +37,8 @@ TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV
 | `DEFAULT` | Uses the backend named by the first of `TRTLLM_USE_NIXL_KVCACHE`, `TRTLLM_USE_UCX_KVCACHE`, `TRTLLM_USE_MOONCAKE_KVCACHE`, or `TRTLLM_USE_MPI_KVCACHE` that is set to `1`. Uses NIXL when none of them is set. |
 | `UCX`, `NIXL`, `MOONCAKE`, or `MPI` | Uses that backend and ignores the environment variables above. |
 
+The precedence above matches TensorRT-LLM 1.3.0rc22; check `CacheTransceiverConfig._resolve_default_backend` in `tensorrt_llm/llmapi/llm_args.py`.
+
 ## AWS EFA
 
 On AWS, UCX uses the **SRD (Scalable Reliable Datagram)** transport over EFA devices. NIXL discovers EFA `rdmap*` devices automatically through UCX — no NIXL-level configuration changes are needed.
