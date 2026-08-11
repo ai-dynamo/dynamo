@@ -531,7 +531,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates); err != nil {
+	if err := registerWebhookHandlers(
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
+	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
