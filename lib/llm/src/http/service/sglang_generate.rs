@@ -103,8 +103,23 @@ pub fn router(state: Arc<service_v2::State>, path: Option<String>) -> (Vec<Route
 fn error_response(code: StatusCode, message: String) -> Response {
     (code, Json(generate_error(message))).into_response()
 }
-fn stream_error(error: SanitizedError) -> String {
-    serde_json::to_string(&generate_error(error.to_string())).expect("serializable error")
+fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+    let (error_type, message) = if super::metrics::request_was_rejected(error) {
+        (ErrorType::Overload, SanitizedError::Overloaded.to_string())
+    } else if super::metrics::request_was_unavailable(error) {
+        (
+            ErrorType::Unavailable,
+            SanitizedError::Unavailable.to_string(),
+        )
+    } else if let Some(error) = find_invalid_argument_in_chain(error) {
+        (ErrorType::Validation, error.message().to_string())
+    } else if super::metrics::request_was_cancelled(error) {
+        (ErrorType::Cancelled, SanitizedError::Cancelled.to_string())
+    } else {
+        (ErrorType::Internal, SanitizedError::Internal.to_string())
+    };
+    let body = serde_json::to_string(&generate_error(message)).expect("serializable error");
+    (error_type, body)
 }
 
 fn adapt_openai_error(response: super::openai::ErrorResponse) -> Response {
@@ -450,11 +465,47 @@ mod tests {
 
     #[test]
     fn streaming_errors_use_sglang_shape() {
-        let error: serde_json::Value =
-            serde_json::from_str(&stream_error(SanitizedError::Internal)).unwrap();
+        let error = anyhow::anyhow!("backend failure");
+        let (error_type, body) = stream_error(error.as_ref());
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error_type, ErrorType::Internal);
         assert_eq!(
             error,
             serde_json::json!({"error": {"message": "Internal server error"}})
         );
+    }
+
+    #[test]
+    fn streaming_errors_preserve_typed_classification() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+        for (dynamo_type, expected_type, expected_message) in [
+            (
+                DynamoErrorType::InvalidArgument,
+                ErrorType::Validation,
+                "invalid sampling parameters",
+            ),
+            (
+                DynamoErrorType::Unavailable,
+                ErrorType::Unavailable,
+                "Service temporarily unavailable",
+            ),
+            (
+                DynamoErrorType::Cancelled,
+                ErrorType::Cancelled,
+                "Request cancelled",
+            ),
+        ] {
+            let error = DynamoError::builder()
+                .error_type(dynamo_type)
+                .message("invalid sampling parameters")
+                .build();
+            let error = axum::Error::new(error);
+            let (error_type, body) = stream_error(&error);
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+            assert_eq!(error_type, expected_type);
+            assert_eq!(body["error"]["message"], expected_message);
+        }
     }
 }

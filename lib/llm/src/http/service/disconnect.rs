@@ -183,15 +183,19 @@ async fn connection_monitor(
     }
 }
 
-fn openai_stream_error(error: SanitizedError) -> String {
-    serde_json::json!({
+type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
+
+fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+    let error = SanitizedError::Internal;
+    let body = serde_json::json!({
         "error": {
             "message": error.to_string(),
             "type": error.openai_type_slug(),
             "code": error.status().as_u16(),
         }
     })
-    .to_string()
+    .to_string();
+    (ErrorType::Internal, body)
 }
 
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
@@ -225,7 +229,7 @@ pub(crate) fn monitor_for_disconnects_with_error(
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    error_formatter: fn(SanitizedError) -> String,
+    error_formatter: StreamErrorFormatter,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_and_error(
         stream,
@@ -261,7 +265,7 @@ fn monitor_for_disconnects_with_timeout_and_error(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    error_formatter: fn(SanitizedError) -> String,
+    error_formatter: StreamErrorFormatter,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -290,17 +294,15 @@ fn monitor_for_disconnects_with_timeout_and_error(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
+                            let (error_type, error_body) = error_formatter(&err);
+                            inflight_guard.mark_error(error_type);
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
                             tracing::error!("Streaming error: {err}");
-                            // Render the sanitized terminal error in the caller's protocol.
-                            let error = SanitizedError::Internal;
-                            yield Event::default().data(error_formatter(error));
+                            yield Event::default().data(error_body);
                             yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;

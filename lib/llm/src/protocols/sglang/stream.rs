@@ -8,8 +8,8 @@
 //! future support should carry that opaque metadata to decode and merge it into
 //! the native stream without teaching this frontend the SGLang schema.
 
-use anyhow::Result;
 use async_stream::try_stream;
+use dynamo_runtime::error::DynamoError;
 use futures::{Stream, StreamExt, pin_mut};
 use serde_json::Value;
 
@@ -23,18 +23,17 @@ impl SglangGenerateStream {
     /// layer supplies SSE framing and `[DONE]`.
     pub(crate) fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
-    ) -> impl Stream<Item = Result<Value>> {
+    ) -> impl Stream<Item = Result<Value, DynamoError>> {
         try_stream! {
             pin_mut!(stream);
             while let Some(delta) = stream.next().await {
-                let delta = delta.ok().map_err(anyhow::Error::msg)?;
-                let Some(output) = delta.data else {
+                let Some(output) = delta.into_data()? else {
                     continue;
                 };
                 let response = output
                     .engine_data
                     .and_then(|mut data| data.as_object_mut()?.remove("sglang_response"))
-                    .ok_or_else(|| anyhow::anyhow!("missing opaque SGLang response"))?;
+                    .ok_or_else(|| DynamoError::msg("missing opaque SGLang response"))?;
                 yield response;
             }
         }
@@ -73,7 +72,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .collect::<Result<_>>()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
         assert_eq!(values, [native_response]);
@@ -94,5 +93,30 @@ mod tests {
                 .to_string()
                 .contains("missing opaque SGLang response")
         );
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_stream_errors() {
+        use dynamo_runtime::error::ErrorType;
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message("invalid sampling parameters")
+            .build();
+        let stream = futures::stream::iter([Annotated::<LLMEngineOutput> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        }]);
+
+        let output = SglangGenerateStream::from_annotated_stream(stream);
+        pin_mut!(output);
+
+        let error = output.next().await.unwrap().unwrap_err();
+
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(error.message(), "invalid sampling parameters");
     }
 }
