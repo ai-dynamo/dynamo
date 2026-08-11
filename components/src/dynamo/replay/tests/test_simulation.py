@@ -337,9 +337,9 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             supports_disaggregated_attention_dp=False,
         ):
             seen["version"] = replay_spec_api_version
-            seen["supports_disaggregated_attention_dp"] = (
-                supports_disaggregated_attention_dp
-            )
+            seen[
+                "supports_disaggregated_attention_dp"
+            ] = supports_disaggregated_attention_dp
             self.replay_spec_api_version = replay_spec_api_version
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks

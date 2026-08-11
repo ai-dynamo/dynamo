@@ -1233,7 +1233,10 @@ where
             .as_ref()
             .map(|_| Observation::stored_hashes(&effects.engine_events))
             .unwrap_or_default();
-        self.apply_decode_observations(effects.engine_events, KvIngestBoundary::SchedulerCommand)?;
+        self.apply_auxiliary_decode_observations(
+            effects.engine_events,
+            KvIngestBoundary::SchedulerCommand,
+        )?;
         self.flow.finish_destination_reservation(
             uuid,
             worker_idx,
@@ -1520,7 +1523,7 @@ where
                     .as_ref()
                     .map(|_| Observation::stored_hashes(&effects.engine_events))
                     .unwrap_or_default();
-                self.apply_decode_observations(
+                self.apply_auxiliary_decode_observations(
                     effects.engine_events,
                     KvIngestBoundary::SchedulerCommand,
                 )?;
@@ -1616,7 +1619,7 @@ where
                     self.now_ms,
                 )?;
                 let outcome = command_cleanup_outcome(effects.result)?;
-                self.apply_decode_observations(
+                self.apply_auxiliary_decode_observations(
                     effects.engine_events,
                     KvIngestBoundary::SchedulerCommand,
                 )?;
@@ -1811,7 +1814,28 @@ where
         events: Observation::Batch,
         boundary: KvIngestBoundary,
     ) -> Result<()> {
-        if let Some(event_count) = Observation::kv_ingest_event_count(&events) {
+        self.apply_decode_observations_inner(events, boundary, true)
+    }
+
+    /// Preserve canonical-v1 evidence, which historically excluded empty decode
+    /// command and pass-start batches, while still notifying placement policies.
+    fn apply_auxiliary_decode_observations(
+        &mut self,
+        events: Observation::Batch,
+        boundary: KvIngestBoundary,
+    ) -> Result<()> {
+        self.apply_decode_observations_inner(events, boundary, false)
+    }
+
+    fn apply_decode_observations_inner(
+        &mut self,
+        events: Observation::Batch,
+        boundary: KvIngestBoundary,
+        record_empty_batch: bool,
+    ) -> Result<()> {
+        if let Some(event_count) = Observation::kv_ingest_event_count(&events)
+            && (record_empty_batch || event_count > 0)
+        {
             self.evidence.record_kv_ingest(
                 WorkerPool::Decode,
                 boundary,
@@ -2153,7 +2177,10 @@ where
                 pressure.event,
             );
         }
-        self.apply_decode_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
+        self.apply_auxiliary_decode_observations(
+            effects.pass_start_events,
+            KvIngestBoundary::PassStart,
+        )?;
         for payload in effects.immediate_completions {
             self.process_worker_completion_payload(payload)?;
         }

@@ -142,12 +142,13 @@ fn common_agg_runtime_captures_requests_outputs_and_the_same_report() {
                     output.token_id.is_some(),
                     output.completed,
                     output.rejected,
+                    output.cached_tokens,
                 )
             })
             .collect::<Vec<_>>(),
         vec![
-            (12.0, true, true, false, false),
-            (14.0, true, true, true, false),
+            (12.0, true, true, false, false, Some(0)),
+            (14.0, true, true, true, false, None),
         ]
     );
 }

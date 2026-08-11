@@ -200,7 +200,7 @@ impl KvReplayRouter {
         let slots = replay_slots(args, &workers_with_configs);
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
-        let selector = replay_selector(&config);
+        let selector = replay_selector(&config)?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;

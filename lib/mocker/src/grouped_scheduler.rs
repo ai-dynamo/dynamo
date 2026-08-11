@@ -316,7 +316,11 @@ fn create_grouped_scheduler_from_components(
     {
         let local_dp_rank = local_dp_rank as u32;
         let external_dp_rank = rank_identity.dp_rank;
-        let (request_tx, request_rx) = mpsc::channel(control_capacity);
+        // Preserve the historical public scheduler facade as an unbounded
+        // compatibility lane. The bridge still forwards requests into the
+        // grouped engine's bounded command lane, where production
+        // backpressure and ordering are enforced.
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
         let (command_tx, command_rx) = mpsc::channel(control_capacity);
         let (cancellation_tx, cancellation_rx) = mpsc::channel(control_capacity);
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(control_capacity);
@@ -397,7 +401,7 @@ impl Drop for CompatibilityCancelGuard {
 }
 
 struct FixedRankSchedulerHandle {
-    request_tx: mpsc::Sender<DirectRequest>,
+    request_tx: mpsc::UnboundedSender<DirectRequest>,
     command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     lifecycle_rx: Option<mpsc::Receiver<SchedulerLifecycleEvent>>,
@@ -406,7 +410,11 @@ struct FixedRankSchedulerHandle {
 }
 
 impl SchedulerHandle for FixedRankSchedulerHandle {
-    fn request_sender(&self) -> mpsc::Sender<DirectRequest> {
+    fn receive(&self, request: DirectRequest) {
+        let _ = self.request_tx.send(request);
+    }
+
+    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
         self.request_tx.clone()
     }
 
@@ -454,7 +462,7 @@ struct RankBridgeContext {
 }
 
 async fn run_rank_control_bridge(
-    mut request_rx: mpsc::Receiver<DirectRequest>,
+    mut request_rx: mpsc::UnboundedReceiver<DirectRequest>,
     mut command_rx: mpsc::Receiver<SchedulerCommandEnvelope>,
     bridge: RankBridgeContext,
 ) -> Result<()> {

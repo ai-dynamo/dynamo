@@ -109,6 +109,7 @@ impl CompatibilityState {
                     self.args.kv_bytes_per_token,
                 )
             }),
+            cached_tokens: output.cached_tokens,
         }
     }
 

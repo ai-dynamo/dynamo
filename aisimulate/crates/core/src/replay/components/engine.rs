@@ -792,6 +792,7 @@ fn lower_completion<Observation: ReplayEngineObservation>(
                 completed: output.completed,
                 rejected: output.rejected,
                 handoff_delay_ms: None,
+                cached_tokens: output.cached_tokens,
             })
             .collect(),
         lifecycle_events: effects.lifecycle_events,

@@ -124,6 +124,10 @@ pub(crate) struct OutputSignal {
     pub(crate) rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) handoff_delay_ms: Option<f64>,
+    /// Prompt tokens served from KV cache at first admission. Present only on
+    /// the request's first output signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cached_tokens: Option<usize>,
 }
 
 /// Replay-neutral forward-pass observation consumed by scaling policies.

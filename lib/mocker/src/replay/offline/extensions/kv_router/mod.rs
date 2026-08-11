@@ -546,7 +546,7 @@ impl OfflineReplayRouter {
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed);
+        let selector = replay_selector_with_seed(&config, selector_seed)?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;

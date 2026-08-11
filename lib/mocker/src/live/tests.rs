@@ -103,6 +103,11 @@ async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     })
     .await
     .expect("request should complete");
+    // The ordered output lane acknowledges terminal delivery before the
+    // grouped pass dispatcher publishes its completion metrics. Wait for the
+    // whole boundary so the assertion below observes the same semantic point
+    // as the historical single-rank live boundary.
+    engine.drain_completion_boundary().await.unwrap();
     wait_for_idle(engine).await;
 }
 
