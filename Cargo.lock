@@ -2549,7 +2549,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
- "tonic-health",
+ "tonic-health 0.13.1",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3026,11 +3026,13 @@ dependencies = [
 name = "dynamo-sidecar-common"
 version = "1.4.0"
 dependencies = [
+ "async-trait",
  "clap",
  "dynamo-backend-common",
  "futures",
  "tokio",
  "tonic 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "url",
 ]
@@ -3116,11 +3118,11 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-vllm-sidecar",
  "futures",
- "prost-types 0.13.5",
+ "prost-types 0.14.3",
  "tokio",
  "tokio-stream",
- "tonic 0.13.1",
- "tonic-health",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3137,16 +3139,16 @@ dependencies = [
  "dynamo-backend-common",
  "dynamo-sidecar-common",
  "futures",
- "prost 0.13.5",
- "prost-types 0.13.5",
+ "prost-types 0.14.3",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tonic-health",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
  "tracing",
+ "vllm-project_vllm_community_neoeinstein-prost",
+ "vllm-project_vllm_community_neoeinstein-tonic",
 ]
 
 [[package]]
@@ -9913,6 +9915,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tonic-health"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+dependencies = [
+ "prost 0.14.3",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.14.6",
+ "tonic-prost",
+]
+
+[[package]]
 name = "tonic-prost"
 version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10743,6 +10758,27 @@ name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
+
+[[package]]
+name = "vllm-project_vllm_community_neoeinstein-prost"
+version = "0.5.0-00000000000000-7726adbdafb3.2"
+source = "registry+sparse+https://buf.build/gen/cargo/"
+checksum = "0f83f6ba9c6750bc44f1bfac07dde88cb781385b1bd3919baba244d0dbd4089d"
+dependencies = [
+ "prost 0.14.3",
+ "prost-types 0.14.3",
+]
+
+[[package]]
+name = "vllm-project_vllm_community_neoeinstein-tonic"
+version = "0.5.0-00000000000000-7726adbdafb3.4"
+source = "registry+sparse+https://buf.build/gen/cargo/"
+checksum = "350ca64b22b0397d015661ee1958f16af5f6ec7c54a984b0a9b653fb4cdd44f3"
+dependencies = [
+ "tonic 0.14.6",
+ "tonic-prost",
+ "vllm-project_vllm_community_neoeinstein-prost",
+]
 
 [[package]]
 name = "vsimd"

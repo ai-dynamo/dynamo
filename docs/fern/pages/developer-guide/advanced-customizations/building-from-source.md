@@ -34,6 +34,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
+The workspace lockfile includes generated vLLM SDKs from the Buf Schema Registry, so Cargo requires [BSR authentication](https://buf.build/docs/bsr/generated-sdks/cargo/) for any workspace build:
+
+```bash
+export BUF_TOKEN="your-buf-token"
+cargo login --registry buf "Bearer ${BUF_TOKEN}"
+```
+
 ## 3. Create a Python Virtual Environment
 
 Install [uv](https://docs.astral.sh/uv/#installation) if you don't have it:

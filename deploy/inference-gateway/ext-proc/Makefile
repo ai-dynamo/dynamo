@@ -26,6 +26,7 @@ endif
 MULTIARCH_PLATFORMS ?= linux/amd64,linux/arm64
 DOCKER_PROXY ?=
 EXTRA_BUILD_ARGS ?=
+BUF_SECRET_ARGS = $(if $(BUF_TOKEN),--secret id=buf_token,env=BUF_TOKEN,$(error BUF_TOKEN is required for Cargo access to the Buf registry))
 
 # sccache configuration (CI only)
 USE_SCCACHE ?=
@@ -88,7 +89,7 @@ image-build: ## Build the Docker image
 		--build-context dynamo=$(DYNAMO_DIR) \
 		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
 		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
-		$(EXTRA_BUILD_ARGS) $(PUSH) $(LOAD) .
+		$(BUF_SECRET_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) $(LOAD) .
 
 .PHONY: image-push
 image-push: PUSH=--push ## Build and push the Docker image
@@ -124,7 +125,7 @@ image-multiarch: ## Build multi-arch image (requires --push)
 		--build-context dynamo=$(DYNAMO_DIR) \
 		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
 		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
-		$(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) .
+		$(BUF_SECRET_ARGS) $(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) .
 
 .PHONY: image-multiarch-push
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image

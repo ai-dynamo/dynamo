@@ -5,6 +5,7 @@
 # scheduler in the `LLMEngine` contract from `dynamo-backend-common`.
 #
 #   docker compose up --build
+#   (requires BUF_TOKEN in the shell environment)
 #   curl http://localhost:8000/v1/chat/completions \
 #       -H 'Content-Type: application/json' \
 #       -d '{"model": "mocker-model",
@@ -64,6 +65,8 @@ services:
     build:
       context: ../../../..
       dockerfile: lib/backend-common/examples/mocker/Dockerfile.frontend
+      secrets:
+        - buf_token
     command: ["--http-port", "8000"]
     environment:
       - NATS_SERVER=nats://nats-server:4222
@@ -88,6 +91,8 @@ services:
       # Build context is the workspace root so cargo can see all crates.
       context: ../../../..
       dockerfile: lib/backend-common/examples/mocker/Dockerfile
+      secrets:
+        - buf_token
     # --model-path points at a real HF repo so the frontend can load a
     # tokenizer + chat template. The engine still emits mocked token
     # IDs (no weights needed); Qwen3-0.6B is just a small, openly
@@ -123,3 +128,7 @@ services:
 
 volumes:
   huggingface-cache:
+
+secrets:
+  buf_token:
+    environment: BUF_TOKEN

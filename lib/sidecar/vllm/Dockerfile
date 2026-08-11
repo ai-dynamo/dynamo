@@ -9,7 +9,8 @@
 # deploy/agg.yaml).
 #
 # Build from the repository root (the workspace is needed to compile the crate):
-#   docker build -f lib/sidecar/vllm/Dockerfile -t dynamo-vllm-sidecar:1.3.0 .
+#   docker build --secret id=buf_token,env=BUF_TOKEN \
+#     -f lib/sidecar/vllm/Dockerfile -t dynamo-vllm-sidecar:1.3.0 .
 
 # ---- builder ----------------------------------------------------------------
 # Pinned to the workspace toolchain (rust-toolchain.toml: 1.96.1).
@@ -35,7 +36,9 @@ COPY . .
 # Build only the sidecar binary; --locked pins the checked-in Cargo.lock. There
 # is no dependency-cache layer, so a source change recompiles deps — acceptable
 # for this occasional image build.
-RUN cargo build --release --locked -p dynamo-vllm-sidecar \
+RUN --mount=type=secret,id=buf_token,required=true \
+    CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" \
+    cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar
 
 # ---- runtime (minimal) ------------------------------------------------------

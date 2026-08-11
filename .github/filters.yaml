@@ -327,9 +327,6 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
-  # Sidecar protobuf contracts are compiled by crate build scripts and need the
-  # same workspace checks as sidecar Rust sources.
-  - 'lib/sidecar/**/*.proto'
 
 benchmarks:
   - 'benchmarks/**'

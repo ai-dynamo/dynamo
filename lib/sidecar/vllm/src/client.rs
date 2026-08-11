@@ -5,14 +5,16 @@ use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
 use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPoolV14, GrpcEndpoint, GrpcTransportConfig,
 };
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::metadata::MetadataValue;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::{
+    engine_shutdown, invalid_argument, status_to_dynamo_v14 as status_to_dynamo,
+};
 
 use crate::proto as pb;
 
@@ -21,7 +23,7 @@ pub(crate) const INFERENCE_SERVICE: &str = "vllm.Inference";
 const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
 
 pub(crate) struct VllmClient {
-    pool: GrpcChannelPool,
+    pool: GrpcChannelPoolV14,
 }
 
 impl VllmClient {
@@ -32,7 +34,7 @@ impl VllmClient {
     ) -> Result<Self, DynamoError> {
         let pool = timeout_at(
             startup_deadline,
-            GrpcChannelPool::connect("vLLM", endpoint, transport),
+            GrpcChannelPoolV14::connect("vLLM", endpoint, transport),
         )
         .await
         .map_err(|_| {

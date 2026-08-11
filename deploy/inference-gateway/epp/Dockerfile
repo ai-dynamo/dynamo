@@ -88,10 +88,12 @@ COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/e
 # git caches are content-addressed (safe to persist); no target/ mount --
 # sccache caches compilations in S3 where stale artifacts can't be linked
 # against newer source.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=shared \
+RUN --mount=type=secret,id=buf_token,required=true \
+    --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=shared \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH},sharing=shared \
     --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" && \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-epp-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \

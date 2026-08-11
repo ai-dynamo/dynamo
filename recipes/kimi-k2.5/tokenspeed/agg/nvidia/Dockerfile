@@ -105,9 +105,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 FROM build_tools AS wheel_builder
 WORKDIR /workspace/dynamo
 COPY . /workspace/dynamo
-RUN --mount=type=cache,target=/root/.cargo/registry \
+RUN --mount=type=secret,id=buf_token,required=true \
+    --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     set -eux; \
+    export CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)"; \
     cd /workspace/dynamo/lib/bindings/python; \
     maturin build --release -o /tmp/dynamo-dist
 

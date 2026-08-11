@@ -186,6 +186,8 @@ on:
         required: false
       HF_TOKEN:
         required: false
+      BUF_TOKEN:
+        required: true
     outputs:
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
@@ -370,6 +372,7 @@ jobs:
           IMAGE_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
         timeout-minutes: 60
         run: |
           set -x
@@ -500,6 +503,7 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          buf_token: ${{ secrets.BUF_TOKEN }}
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
@@ -606,6 +610,7 @@ jobs:
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           sccache_region: ${{ vars.AWS_DEFAULT_REGION }}
+          buf_token: ${{ secrets.BUF_TOKEN }}
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}

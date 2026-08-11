@@ -16,7 +16,9 @@ dynamo-backend-common = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
+tonic-v14 = { package = "tonic", version = "0.14.1" }
 tracing = { workspace = true }
 url = { workspace = true }

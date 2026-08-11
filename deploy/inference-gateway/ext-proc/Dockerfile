@@ -72,10 +72,12 @@ COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 
 # Build the binary
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
+RUN --mount=type=secret,id=buf_token,required=true \
+    --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
     --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" && \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-rust-epp-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \

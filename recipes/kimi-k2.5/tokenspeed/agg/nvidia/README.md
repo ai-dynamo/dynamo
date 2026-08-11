@@ -57,12 +57,12 @@ update the `image:` fields in [`deploy.yaml`](deploy.yaml).
 
 ### 1. Build the Dynamo+TokenSpeed image
 
-The build context must be the **Dynamo repo root** (the Dockerfile `COPY`s the source
-tree in to build the Dynamo Python wheel via `maturin`).
+The build context must be the **Dynamo repo root** (the Dockerfile `COPY`s the source tree in to build the Dynamo Python wheel via `maturin`). Export a Buf Schema Registry token as `BUF_TOKEN` before building.
 
 ```bash
 # From the repo root.
 docker build \
+  --secret id=buf_token,env=BUF_TOKEN \
   -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
   --target dev \
   -t <your-registry>/dynamo-tokenspeed:dev \

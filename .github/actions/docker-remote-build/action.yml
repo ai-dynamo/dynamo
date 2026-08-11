@@ -25,6 +25,9 @@ inputs:
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
     required: false
+  buf_token:
+    description: 'Buf Schema Registry token'
+    required: true
   no_cache:
     description: 'Disable Docker build cache'
     required: false
@@ -66,6 +69,7 @@ runs:
       env:
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
+        BUF_TOKEN: ${{ inputs.buf_token }}
         PLATFORM: ${{ inputs.platform }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
@@ -137,6 +141,12 @@ runs:
         # AWS_ROLE_ARN. We pass the token file and role ARN to BuildKit so sccache
         # can authenticate via STS AssumeRoleWithWebIdentity -- no static keys needed.
         SECRET_ARGS=""
+        if [ -n "${BUF_TOKEN:-}" ]; then
+          SECRET_ARGS+=" --secret id=buf_token,env=BUF_TOKEN"
+        else
+          echo "::error::BUF_TOKEN is required for Cargo access to the Buf registry"
+          exit 1
+        fi
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
           TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
           if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
