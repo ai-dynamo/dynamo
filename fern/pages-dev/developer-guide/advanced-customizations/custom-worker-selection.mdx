@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Write Custom Routing Strategies
-subtitle: Link Rust scorers and pickers into the Dynamo frontend or EPP
+subtitle: Link Rust filters, scorers, and pickers into the Dynamo frontend or EPP
 ---
 
 <Warning>
-**Experimental.** A custom worker-selection policy controls how Dynamo scores eligible workers and selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
+**Experimental.** A custom worker-selection policy controls how Dynamo filters and scores eligible workers, then selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
 </Warning>
 
 The [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) contains the complete source and commands for both integration paths.
@@ -15,7 +15,7 @@ The [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/exampl
 
 A custom routing strategy has four parts:
 
-1. A policy crate defines one or more scorers and one picker.
+1. A policy crate defines filters, scorers, and one picker.
 2. A catalog crate registers each policy type under a unique name.
 3. The router policy configuration selects a named policy instance and supplies its parameters.
 4. The Python frontend or Endpoint Picker Provider (EPP) links the catalog into its binary.
@@ -24,15 +24,15 @@ The catalog is a compile-time extension point. Dynamo does not load policy libra
 
 At startup, Dynamo reads the selected policy instance and asks its provider to parse the parameter map. The provider returns a factory after validation succeeds. Invalid parameters, unknown types, and duplicate registrations stop startup.
 
-Dynamo calls the factory once for each routing partition. The factory receives the router configuration, worker type, and partition identity. It can build different scorer and picker combinations for prefill and decode workers.
+Dynamo calls the factory once for each routing partition. The factory receives the router configuration, worker type, and partition identity. It can build different filter, scorer, and picker combinations for prefill and decode workers.
 
-For each request, Dynamo first applies its built-in worker eligibility rules. The custom scorers assign finite costs to the remaining workers. The picker returns one row from that scored candidate set, then Dynamo reserves and routes to that worker.
+For each request, Dynamo first applies its built-in worker eligibility rules. Custom filters can exclude the remaining workers. The custom scorers assign finite costs to workers that remain. The picker returns one row from that scored candidate set, then Dynamo reserves and routes to that worker.
 
 ## Example Policies
 
 The example catalog registers two policy types:
 
-- A basic policy that scores active requests for every worker type.
+- A basic policy that can require a minimum effective cache overlap, then scores active requests for every worker type.
 - A disaggregated policy with separate prefill and decode scorers and pickers.
 
 In the Python frontend, the disaggregated factory selects its components from `worker_type`:
@@ -42,7 +42,9 @@ In the Python frontend, the disaggregated factory selects its components from `w
 | Prefill | Active prefill tokens | Select the lowest total cost |
 | Decode | Projected decode blocks | Select the lowest total cost |
 
-Both policies request only the `LOAD` signal group. A policy can also request cache or routing signals when its scorer or picker uses them.
+The `least-busy` policy requests `LOAD` by default. Set a positive `min_effective_overlap_blocks` value to also request `CACHE` and reject workers below that threshold. The `disaggregated-load` policy requests only `LOAD`.
+
+The cache-overlap filter is a hard requirement. If no eligible worker meets the threshold, Dynamo returns HTTP 503.
 
 ## Register and Configure a Policy
 
@@ -62,7 +64,7 @@ cargo init --lib --name acme-routing-policy "$POLICY_DIR/policy"
 cargo init --lib --name acme-routing-catalog "$POLICY_DIR/catalog"
 ```
 
-The policy crate contains the scorer, picker, provider, and factory. The catalog registers one or more policy crates.
+The policy crate contains filters, scorers, a picker, provider, and factory. The catalog registers one or more policy crates.
 
 </Step>
 <Step title="Add the dependencies" id="add-the-dependencies">
@@ -96,21 +98,25 @@ cargo add \
 These paths are build inputs. The policy can remain in its own repository, but it must compile against the Dynamo revision used by the host binary.
 
 </Step>
-<Step title="Write the scorer and picker" id="write-the-scorer-and-picker">
+<Step title="Write filters, scorers, and a picker" id="write-filters-scorers-and-picker">
 
-Implement `WorkerScorer` for each cost that the policy measures. `score` receives the request-wide context and one eligible worker. Return a finite cost where lower values are better.
+Implement `WorkerFilter` to exclude an eligible worker. `keep` receives the request context and one candidate. Return `true` to keep it. For each candidate, Dynamo runs filters in declaration order before any scorer. Every filter receives the union of signal groups requested by the policy's filters.
 
-A policy can combine multiple scorers. Dynamo calls each scorer for every eligible worker and adds their costs.
+Implement `WorkerScorer` for each cost that the policy measures. `score` receives the request-wide context and one kept worker. Return a finite cost where lower values are better.
+
+A policy can combine multiple scorers. Dynamo calls each scorer in declaration order for every kept worker and adds their costs.
 
 Implement `WorkerPicker` to choose one row after scoring. `WorkerInputView::candidates()` contains each worker identity and its total cost. Return the index of the selected row.
 
-Candidate order is unspecified. Inspect the worker, cost, or another signal instead of relying on the first row.
+Candidate row order and callback order across different candidates are unspecified. Inspect the worker, cost, or another signal instead of relying on the first row or on filters and scorers being interleaved.
 
-The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows one scorer and picker. The `disaggregated` crate in the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) shows separate implementations for prefill and decode workers.
+Dynamo normally sends a kept candidate directly to the scorers. If the built-in scorer needs the minimum active prefill load across a filtered set, Dynamo buffers the kept candidates, computes that baseline during filtering, and then scores them in a second pass. Policies that do not need this filtered aggregate do not buffer candidates.
+
+The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows an optional cache-overlap filter, scorer, and picker. The `disaggregated` crate in the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) shows separate implementations for prefill and decode workers.
 
 ### Available Signals
 
-Request context and worker identity are always available. Optional per-worker signals are calculated only when a scorer or picker requests their group.
+Request context and worker identity are always available. Optional per-worker signals are calculated only when a filter, scorer, or picker requests their group.
 
 | Source | Available values | Meaning |
 |---|---|---|
@@ -133,7 +139,7 @@ Declare optional inputs with `required_worker_inputs`. Use `WorkerInputs::NONE` 
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `ROUTING` | `preferred_taint_multiplier()` | Cost multiplier from the request's preferred routing constraints, when applicable |
 
-Read scorer inputs through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker receives aligned arrays through `WorkerInputView`. Each component must declare every group that it reads.
+Read filter and scorer inputs through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker receives aligned arrays through `WorkerInputView`. Each component must declare every group that it reads.
 
 </Step>
 <Step title="Add the provider and factory" id="add-the-provider-and-factory">
@@ -142,7 +148,7 @@ Define the policy parameter type and reject unknown fields. The provider parses 
 
 Dynamo calls the factory once for each routing partition. The factory receives the router configuration, partition identity, and `worker_type`.
 
-Build a `WorkerSelectionPolicy` from the scorers and picker. Branch on `worker_type` when prefill and decode workers need different behavior.
+Build a `WorkerSelectionPolicy` from the filters, scorers, and picker. Branch on `worker_type` when prefill and decode workers need different behavior.
 
 </Step>
 <Step title="Register the policy" id="register-the-policy">
@@ -254,8 +260,8 @@ cargo run --release
 
 - Return finite scorer costs. Dynamo rejects non-finite contributions and totals.
 - Return a row from `WorkerInputView::candidates()`. Dynamo validates the index before reservation and accounting.
-- Declare every signal a scorer or picker reads with `required_worker_inputs`. Request only the signals you use.
+- Declare every signal a filter, scorer, or picker reads with `required_worker_inputs`. Request only the signals you use.
 - Treat candidate row order as unspecified. Use worker identity or another explicit signal if tie behavior matters.
-- Keep blocking I/O and panics out of `score` and `pick`. Both run in Dynamo's scheduler queue actor.
+- Keep blocking I/O and panics out of `keep`, `score`, and `pick`. All run in Dynamo's scheduler queue actor.
 
 For the built-in cost model, see [Routing Concepts](../knowledge-base/modular-components/router/routing-concepts.md). For the full standalone EPP deployment, see [Using GAIE with vanilla vLLM](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx).

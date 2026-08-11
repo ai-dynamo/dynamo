@@ -20,7 +20,7 @@ Before authoring a DGD, make sure you have:
 - A **HuggingFace token** for gated or rate-limited models (you create the Secret in step 1).
 - New to Dynamo on Kubernetes? Run one model end to end with the [Kubernetes Quickstart](../getting-started/quickstart.mdx) first, then come back here to author your own spec.
 
-For the concepts behind the CRDs and the operator, see the [Model Deployment](introduction.mdx) and the [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md).
+For the concepts behind the CRDs and the operator, see the [Model Deployment](introduction.mdx) and the [API Reference](../../reference/kubernetes-api/full-api-reference.mdx).
 
 ## How a DGD is structured
 
@@ -758,5 +758,5 @@ These are independent capabilities you opt into per workload. None are required 
 </CardGroup>
 
 <Info>
-**The Planner is not part of the DGD spec.** SLA-driven autoscaling with the [Planner](../../developer-guide/knowledge-base/modular-components/planner/overview.md) is configured through a **DynamoGraphDeploymentRequest (DGDR)** — see [Auto Deploy with DGDR](../auto-deployment/auto-deploy-with-dgdr.md). For HPA/KEDA scaling of a DGD service, see [Autoscaling](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md). For the full field reference, see the [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md).
+**The Planner is not part of the DGD spec.** SLA-driven autoscaling with the [Planner](../../developer-guide/knowledge-base/modular-components/planner/overview.md) is configured through a **DynamoGraphDeploymentRequest (DGDR)** — see [Auto Deploy with DGDR](../auto-deployment/auto-deploy-with-dgdr.md). For HPA/KEDA scaling of a DGD service, see [Autoscaling](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md). For the full field reference, see the [API Reference](../../reference/kubernetes-api/full-api-reference.mdx).
 </Info>

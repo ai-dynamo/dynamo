@@ -136,7 +136,7 @@ Advanced and operator-owned resources:
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md)**
+**📖 [Dynamo CRD API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx)**
 
 For user-focused workflows, see:
 

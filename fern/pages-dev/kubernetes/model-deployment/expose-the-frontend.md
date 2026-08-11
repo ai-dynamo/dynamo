@@ -46,7 +46,7 @@ spec:
 The operator creates the Ingress object; the controller provisions the actual address.
 
 <Note>
-The `nvidia.com/v1alpha1` API had a convenience `ingress` field on the Frontend component that generated this Ingress (or a service-mesh VirtualService) for you. That field is **not** part of `nvidia.com/v1beta1` — author the Ingress directly as shown above, or use a LoadBalancer Service (Option 2). See the [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#ingressspec) for the v1alpha1 field.
+The `nvidia.com/v1alpha1` API had a convenience `ingress` field on the Frontend component that generated this Ingress (or a service-mesh VirtualService) for you. That field is **not** part of `nvidia.com/v1beta1` — author the Ingress directly as shown above, or use a LoadBalancer Service (Option 2). See the [API Reference](../../reference/kubernetes-api/full-api-reference.mdx#ingressspec) for the v1alpha1 field.
 </Note>
 
 ## Option 2: A LoadBalancer Service
@@ -76,4 +76,4 @@ A Kubernetes Ingress and GAIE are independent. An Ingress (Option 1) exposes a s
 ## Related pages
 
 - [Inference Gateway (GAIE)](../kv-aware-routing/gateway-api.mdx) — Gateway API model-aware routing.
-- [API Reference — IngressSpec](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#ingressspec) — full field reference.
+- [API Reference — IngressSpec](../../reference/kubernetes-api/full-api-reference.mdx#ingressspec) — full field reference.
