@@ -123,7 +123,20 @@ jobs:
         with:
           python-version: '3.13'
 
+      # Reports drift; does not block the publish. Blocking here is inverted:
+      # a skipped publish leaves docs.nvidia.com serving the PREVIOUS state,
+      # whose API pages are older than the ones being withheld -- and it takes
+      # every unrelated docs change down with it. Publishing slightly-stale
+      # generated pages is strictly better for readers than publishing nothing.
+      #
+      # The same check still gates merges as the "Generated API References"
+      # job in pre-merge.yml, so drift is caught where it can be acted on, by
+      # the author who caused it. Enforcing it a second time at publish time
+      # adds no signal, only blast radius.
+      #
+      # Drift that reaches main is reconciled by regenerate-api-references.yml.
       - name: Check generated API references
+        continue-on-error: true
         run: |
           python3 -m pip install 'griffe==2.1.0'
           python3 source-checkout/docs/fern/scripts/gen_python_api.py --check
