@@ -15,6 +15,7 @@ use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 pub struct WorkerSelectionContext<'a> {
+    pub(super) request: &'a SchedulingRequest,
     pub(super) request_id: &'a str,
     pub(super) request_blocks: u64,
     pub(super) block_size: u32,
@@ -138,6 +139,22 @@ impl WorkerSelectionContext<'_> {
 
     pub fn tracks_prefill_tokens(&self) -> bool {
         self.track_prefill_tokens
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.request.session_id.as_deref()
+    }
+
+    pub fn expected_output_tokens(&self) -> Option<u32> {
+        self.request.expected_output_tokens
+    }
+
+    pub fn priority_jump(&self) -> f64 {
+        self.request.priority_jump
+    }
+
+    pub fn strict_priority(&self) -> u32 {
+        self.request.strict_priority
     }
 
     pub fn router_temperature_override(&self) -> Option<f64> {
@@ -515,5 +532,41 @@ mod tests {
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn custom_picker_receives_agent_metadata() {
+        struct ContextPicker;
+
+        impl WorkerPicker for ContextPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                _input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(context.session_id(), Some("session-1"));
+                assert_eq!(context.expected_output_tokens(), Some(128));
+                assert_eq!(context.priority_jump(), 3.0);
+                assert_eq!(context.strict_priority(), 2);
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.session_id = Some("session-1".into());
+        request.expected_output_tokens = Some(128);
+        request.priority_jump = 3.0;
+        request.strict_priority = 2;
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(ContextPicker),
+        );
+
+        policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
     }
 }

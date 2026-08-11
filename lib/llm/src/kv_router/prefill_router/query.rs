@@ -35,12 +35,12 @@ where
         if self.lifecycle_state() != PrefillLifecycleState::Active {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         }
-        let prefill_router = self
-            .prefill_router
-            .get()
+        let binding = self
+            .binding
+            .load_full()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        match prefill_router {
+        match &binding.router {
             InnerPrefillRouter::KvRouter(router) => {
                 let outcome = router
                     .chooser
@@ -86,7 +86,9 @@ where
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        if let Some(InnerPrefillRouter::KvRouter(router)) = self.prefill_router.get() {
+        if let Some(binding) = self.binding.load_full()
+            && let InnerPrefillRouter::KvRouter(router) = &binding.router
+        {
             router.chooser.register_workers(worker_ids);
         }
     }
@@ -299,12 +301,20 @@ mod tests {
             .unwrap();
         let shared = Arc::new(SessionAffinityPushRouter::new(push_router, None, false).unwrap());
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
-        prefill
-            .prefill_router
-            .set(InnerPrefillRouter::SimpleRouter(shared.clone()))
-            .ok()
-            .expect("install test router");
-        prefill.mark_active_for_test();
+        prefill.binding.store(Some(Arc::new(
+            crate::kv_router::prefill_router::PrefillBinding {
+                endpoint_id: dynamo_runtime::protocols::EndpointId {
+                    namespace: namespace.to_string(),
+                    component: component.to_string(),
+                    name: endpoint_name.to_string(),
+                },
+                router: InnerPrefillRouter::SimpleRouter(shared.clone()),
+            },
+        )));
+        prefill.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
         worker_runtimes.push(router_runtime);
         (shared, prefill, worker_runtimes, workers)
     }

@@ -130,25 +130,6 @@ impl Drop for OccupancyPermit {
     }
 }
 
-/// A committed worker selection and its optional runtime-owned occupancy lease.
-///
-/// Dropping the reservation releases exactly the counter generation acquired by
-/// this selection, even if discovery removes and later re-adds the same worker ID.
-pub struct RoutingReservation {
-    target: RouteTarget,
-    _permit: Option<OccupancyPermit>,
-}
-
-impl RoutingReservation {
-    pub const fn target(&self) -> RouteTarget {
-        self.target
-    }
-
-    pub fn has_occupancy(&self) -> bool {
-        self._permit.is_some()
-    }
-}
-
 /// Trait for monitoring worker load and determining overload state.
 /// Implementations can define custom load metrics and overload thresholds.
 #[async_trait]
@@ -305,9 +286,24 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
     std::sync::OnceLock::new();
 
-/// At most one multimodal cache cleanup watcher per endpoint.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RuntimeEndpointId {
+    connection_id: u64,
+    endpoint_id: EndpointId,
+}
+
+impl RuntimeEndpointId {
+    fn for_endpoint(endpoint: &Endpoint) -> Self {
+        Self {
+            connection_id: endpoint.drt().connection_id(),
+            endpoint_id: endpoint.id(),
+        }
+    }
+}
+
+/// At most one multimodal cache cleanup watcher per runtime endpoint.
 static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
-    dashmap::DashMap<EndpointId, ()>,
+    dashmap::DashMap<RuntimeEndpointId, ()>,
 > = std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
@@ -430,11 +426,12 @@ fn spawn_multimodal_cache_cleanup_watcher(
     use tokio_stream::StreamExt as _;
 
     let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-    let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
+    let watcher_id = RuntimeEndpointId::for_endpoint(&endpoint);
+    if guard.insert(watcher_id.clone(), ()).is_some() {
         tracing::debug!(
-            ?endpoint_id,
-            "Multimodal cache cleanup watcher already running for this endpoint, skipping"
+            connection_id = watcher_id.connection_id,
+            ?watcher_id.endpoint_id,
+            "Multimodal cache cleanup watcher already running for this runtime endpoint, skipping"
         );
         return;
     }
@@ -444,7 +441,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
     let component = endpoint.component().name().to_string();
 
     tokio::spawn(async move {
-        struct GuardRelease(EndpointId);
+        struct GuardRelease(RuntimeEndpointId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
                 if let Some(map) = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get() {
@@ -452,7 +449,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
                 }
             }
         }
-        let _release = GuardRelease(endpoint_id);
+        let _release = GuardRelease(watcher_id);
 
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
@@ -1288,45 +1285,6 @@ where
         }
     }
 
-    /// Peek a request-aware target without mutating picker or admission state.
-    pub fn peek_target(&self, request: &T) -> anyhow::Result<RouteTarget> {
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids();
-        if instance_ids.is_empty() {
-            return Err(self.empty_free_pool_error(&routing_instances));
-        }
-
-        let decision = match self.router_mode {
-            RouterMode::RoundRobin | RouterMode::Random => self.picker()?.peek(
-                CandidateView::Workers(instance_ids),
-                RouteContext::default(),
-                |_| 0,
-            ),
-            RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => {
-                self.occupancy_state()?.peek(
-                    self.picker()?,
-                    CandidateView::Workers(instance_ids),
-                    RouteContext::default(),
-                )
-            }
-            RouterMode::DeviceAwareWeighted => {
-                let state = self.occupancy_state()?;
-                let selection = self.device_aware_candidates(request, instance_ids);
-                state.peek(
-                    self.picker()?,
-                    CandidateView::DeviceAware(&selection.candidates),
-                    selection.context,
-                )
-            }
-            RouterMode::Direct => {
-                anyhow::bail!("Direct routing requires an explicit worker target")
-            }
-            RouterMode::KV => anyhow::bail!("KV routing selects through the KV scheduler"),
-        }
-        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        Ok(decision.target)
-    }
-
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn occupancy_for_test(&self, worker_id: u64) -> u64 {
@@ -1334,20 +1292,6 @@ where
             .as_deref()
             .map(|state| state.load(worker_id))
             .unwrap_or(0)
-    }
-
-    /// Commit a request-aware target and retain any occupancy lease until the
-    /// returned reservation is dropped.
-    pub async fn reserve_target(
-        &self,
-        request: &T,
-        pinned_worker: Option<u64>,
-    ) -> anyhow::Result<RoutingReservation> {
-        let (instance_id, permit) = self.select_exact_target(request, pinned_worker).await?;
-        Ok(RoutingReservation {
-            target: RouteTarget::worker(instance_id),
-            _permit: permit,
-        })
     }
 
     async fn select_exact_target(
@@ -3070,6 +3014,33 @@ mod tests {
         .unwrap();
 
         assert!(!map.contains_key(&endpoint_id));
+    }
+
+    #[tokio::test]
+    async fn cache_cleanup_watcher_identity_includes_runtime() {
+        let runtime = Runtime::from_current().unwrap();
+        let first = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let second = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = |distributed: &DistributedRuntime| {
+            distributed
+                .namespace("cache-watcher-identity".to_string())
+                .unwrap()
+                .component("workers".to_string())
+                .unwrap()
+                .endpoint("generate".to_string())
+        };
+        let first = RuntimeEndpointId::for_endpoint(&endpoint(&first));
+        let second = RuntimeEndpointId::for_endpoint(&endpoint(&second));
+
+        assert_eq!(first.endpoint_id, second.endpoint_id);
+        assert_ne!(first.connection_id, second.connection_id);
+        assert_ne!(first, second);
+
+        runtime.shutdown();
     }
 
     /// A `StreamingDispatch` that records what the router hands the seam, so the
