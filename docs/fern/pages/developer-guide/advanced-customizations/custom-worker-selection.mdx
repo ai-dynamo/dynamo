@@ -32,7 +32,7 @@ For each request, Dynamo first applies its built-in worker eligibility rules. Cu
 
 The example catalog registers two policy types:
 
-- A basic policy that scores active requests for every worker type.
+- A basic policy that can require a minimum effective cache overlap, then scores active requests for every worker type.
 - A disaggregated policy with separate prefill and decode scorers and pickers.
 
 In the Python frontend, the disaggregated factory selects its components from `worker_type`:
@@ -42,7 +42,9 @@ In the Python frontend, the disaggregated factory selects its components from `w
 | Prefill | Active prefill tokens | Select the lowest total cost |
 | Decode | Projected decode blocks | Select the lowest total cost |
 
-Both policies request only the `LOAD` signal group. A policy can also request cache or routing signals when its filter, scorer, or picker uses them.
+The `least-busy` policy requests `LOAD` by default. Set a positive `min_effective_overlap_blocks` value to also request `CACHE` and reject workers below that threshold. The `disaggregated-load` policy requests only `LOAD`.
+
+The cache-overlap filter is a hard requirement. If no eligible worker meets the threshold, Dynamo returns HTTP 503.
 
 ## Register and Configure a Policy
 
@@ -108,7 +110,7 @@ Implement `WorkerPicker` to choose one row after scoring. `WorkerInputView::cand
 
 Candidate order is unspecified. Inspect the worker, cost, or another signal instead of relying on the first row.
 
-The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows one scorer and picker. The `disaggregated` crate in the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) shows separate implementations for prefill and decode workers.
+The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows an optional cache-overlap filter, scorer, and picker. The `disaggregated` crate in the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) shows separate implementations for prefill and decode workers.
 
 ### Available Signals
 
