@@ -37,6 +37,12 @@ pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_sec
 #[cfg(test)]
 const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct NonAuthoritativeRecoveryError {
+    message: String,
+}
+
 #[derive(Debug)]
 struct SourceBinding {
     source: KvEventSource,
@@ -903,6 +909,11 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     .await;
                 return true;
             }
+            Err(error) if error.is::<NonAuthoritativeRecoveryError>() => {
+                tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "Authoritative KV recovery snapshot remained unavailable after bounded retries; leaving state and cursor unchanged");
+                slot.rank.retry_after_failed_snapshot();
+                return false;
+            }
             Err(error) => {
                 tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "KV recovery failed; continuing with degraded live events");
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
@@ -982,6 +993,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
         let mut last_error = None;
+        let mut saw_non_authoritative_failure = false;
         for attempt in 0..RECOVERY_MAX_RETRIES {
             let result = {
                 // Limit only the in-flight RPC. The shared permit is deliberately released
@@ -1019,6 +1031,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     last_error = Some(anyhow::anyhow!(
                         "worker tree dump failed at event {last_event_id}: {message}"
                     ));
+                    saw_non_authoritative_failure = true;
                 }
                 Ok(WorkerKvQueryResponse::TreeDump { reset_scope, .. })
                     if reset_scope != ResetScope::All =>
@@ -1026,6 +1039,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     last_error = Some(anyhow::anyhow!(
                         "worker returned unsupported recovery snapshot scope {reset_scope:?}"
                     ));
+                    saw_non_authoritative_failure = true;
                 }
                 Ok(response) => return Ok(response),
                 Err(error) => {
@@ -1037,7 +1051,15 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
         }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("KV recovery returned no response")))
+        let error =
+            last_error.unwrap_or_else(|| anyhow::anyhow!("KV recovery returned no response"));
+        if saw_non_authoritative_failure {
+            return Err(NonAuthoritativeRecoveryError {
+                message: error.to_string(),
+            }
+            .into());
+        }
+        Err(error)
     }
 }
 
@@ -1867,6 +1889,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_dump_failures_remain_non_authoritative() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let (_tx, rx) = watch::channel(membership_view(&serving, &kv_endpoint, std::iter::empty()));
+        let transport = Arc::new(MockTransport::default());
+        transport
+            .responses
+            .lock()
+            .await
+            .extend(
+                (0..RECOVERY_MAX_RETRIES).map(|_| WorkerKvQueryResponse::TreeDumpFailed {
+                    last_event_id: 6,
+                    message: "snapshot unavailable".to_string(),
+                }),
+            );
+        let client =
+            WorkerQueryClient::new_target_for_test(RecordingTarget::default(), rx, transport);
+        let target = source(&kv_endpoint, 1).recovery_target.unwrap();
+
+        let error = client
+            .fetch_recovery_response((1, 0), target, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is::<NonAuthoritativeRecoveryError>());
+    }
+
     #[tokio::test]
     async fn stale_target_fault_does_not_reset_or_fence_the_replacement_source() {
         let serving = EndpointId::from("test.router.generate");
@@ -2205,7 +2255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_dump_failure_leaves_state_and_cursor_non_authoritative() {
+    async fn non_authoritative_dump_failure_leaves_state_and_cursor_unchanged() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -2232,10 +2282,10 @@ mod tests {
                 (worker.worker_id, worker.dp_rank),
                 binding,
                 CancellationToken::new(),
-                Ok(WorkerKvQueryResponse::TreeDumpFailed {
-                    last_event_id: 1,
+                Err(NonAuthoritativeRecoveryError {
                     message: "snapshot unavailable".to_string(),
-                }),
+                }
+                .into()),
             )
             .await;
         assert!(!complete_initial);

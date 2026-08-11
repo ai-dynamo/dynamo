@@ -23,7 +23,7 @@ fn apply_event_with_counters(
     trie: &mut RadixTree,
     event: RouterEvent,
     counters: &PreBoundEventCounters,
-) {
+) -> bool {
     let kind = EventKind::of(&event.event.data);
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
@@ -36,6 +36,7 @@ fn apply_event_with_counters(
         );
     }
     counters.inc(kind, result);
+    result_is_ok
 }
 
 fn apply_routing_decision_with_prune_tracking(
@@ -127,6 +128,10 @@ struct PendingMutationReceivers<'a> {
 
 enum MutationRequest {
     Event(RouterEvent),
+    EventWithAck {
+        event: RouterEvent,
+        resp: oneshot::Sender<bool>,
+    },
     ResetWorkerDpRank {
         worker_id: WorkerId,
         dp_rank: DpRank,
@@ -150,7 +155,8 @@ impl KvEventSender {
             .await
             .map_err(|error| match error.0 {
                 MutationRequest::Event(event) => mpsc::error::SendError(event),
-                MutationRequest::ResetWorkerDpRank { .. } => {
+                MutationRequest::EventWithAck { .. }
+                | MutationRequest::ResetWorkerDpRank { .. } => {
                     unreachable!("event sender only submits event mutations")
                 }
             })
@@ -168,7 +174,12 @@ fn apply_mutation(
     prune_manager: &Option<WorkerPruneManager>,
 ) {
     match mutation {
-        MutationRequest::Event(event) => apply_event_with_counters(trie, event, counters),
+        MutationRequest::Event(event) => {
+            apply_event_with_counters(trie, event, counters);
+        }
+        MutationRequest::EventWithAck { event, resp } => {
+            let _ = resp.send(apply_event_with_counters(trie, event, counters));
+        }
         MutationRequest::ResetWorkerDpRank {
             worker_id,
             dp_rank,
@@ -705,6 +716,25 @@ impl KvIndexerInterface for KvIndexer {
 }
 
 impl KvIndexer {
+    /// Apply one event on the mutation queue and wait for its backend result.
+    pub async fn apply_event_and_wait(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.mutation_tx
+            .send(MutationRequest::EventWithAck {
+                event,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        if !resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+        {
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+        Ok(())
+    }
+
     /// Process a routing decision with pre-computed hashes.
     pub async fn process_routing_decision_with_hashes(
         &self,

@@ -736,9 +736,7 @@ impl LocalKvIndexer {
         };
         if matches!(&event.event.data, KvCacheEventData::Cleared) {
             if targets_primary {
-                self.indexer
-                    .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
-                    .await?;
+                self.indexer.apply_event_and_wait(event.clone()).await?;
             }
             for indexer in self.all_lower_tier_indexers() {
                 indexer.apply_event_and_wait(event.clone()).await?;

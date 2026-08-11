@@ -68,14 +68,11 @@ impl Indexer {
             } => {
                 if is_clear {
                     let mut reset_error = None;
-                    if targets_primary {
-                        if let Err(error) = primary
-                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
-                            .await
-                        {
-                            tracing::warn!(%error, "Failed to reset primary residency");
-                            reset_error = Some(error);
-                        }
+                    if targets_primary
+                        && let Err(error) = primary.apply_event_and_wait(event.clone()).await
+                    {
+                        tracing::warn!(%error, "Failed to reset primary residency");
+                        reset_error = Some(error);
                     }
                     for indexer in lower_tier.all() {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
@@ -101,11 +98,11 @@ impl Indexer {
             } => {
                 if is_clear {
                     let mut reset_error = None;
-                    if targets_primary {
-                        if let Err(error) = primary.apply_event_and_wait(event.clone()).await {
-                            tracing::warn!(%error, "Failed to reset primary residency");
-                            reset_error = Some(error);
-                        }
+                    if targets_primary
+                        && let Err(error) = primary.apply_event_and_wait(event.clone()).await
+                    {
+                        tracing::warn!(%error, "Failed to reset primary residency");
+                        reset_error = Some(error);
                     }
                     for indexer in lower_tier.all() {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
@@ -335,6 +332,8 @@ mod tests {
     use super::test_util::store_event;
     use super::*;
     use crate::indexer::KvIndexerInterface;
+    #[cfg(feature = "metrics")]
+    use crate::indexer::{METRIC_EVENT_CLEARED, METRIC_STATUS_OK};
     use crate::protocols::{
         KvCacheEvent, LocalBlockHash, ResidencyDomain, StorageTier, WorkerWithDpRank,
     };
@@ -564,6 +563,38 @@ mod tests {
 
         assert!(matches!(error, KvRouterError::IndexerOffline));
         assert!(healthy_tier.dump_events().await.unwrap().is_empty());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    async fn acknowledged_clear_records_primary_event_for_both_indexers() {
+        for num_threads in [1, 2] {
+            let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+            let indexer = create_indexer_with_metrics(4, num_threads, metrics.clone());
+            indexer
+                .apply_event_routed(RouterEvent::with_residency_domain(
+                    7,
+                    KvCacheEvent {
+                        event_id: 1,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 0,
+                    },
+                    StorageTier::Device,
+                    ResidencyDomain::Worker,
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                metrics
+                    .kv_cache_events_applied
+                    .get_metric_with_label_values(&[METRIC_EVENT_CLEARED, METRIC_STATUS_OK])
+                    .unwrap()
+                    .get(),
+                1,
+                "clear metric mismatch for {num_threads} indexer thread(s)"
+            );
+        }
     }
 }
 
