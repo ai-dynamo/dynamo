@@ -40,6 +40,17 @@ type GroveMultinodeDeployer struct {
 	Rank          int32 // explicit node rank (used when IsInterPodGMS is true)
 }
 
+// GroveComponentResourceName returns the Grove child resource name for a DGD
+// component. Grove currently creates one PodClique or PodCliqueScalingGroup
+// instance per component at PodCliqueSet replica index zero.
+func GroveComponentResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string) string {
+	return fmt.Sprintf(
+		"%s-0-%s",
+		PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		strings.ToLower(componentName),
+	)
+}
+
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
 	if d.IsInterPodGMS {
 		// GMS: each PCLQ has multiple replicas; pods at the same index across
@@ -82,37 +93,65 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 	return hostnames
 }
 
+// GroveReadiness is one coherent observation of every Grove component backing
+// a DGD. Callers should reuse it for readiness, status, and reason projection
+// rather than rereading the same resources.
+type GroveReadiness struct {
+	Ready             bool
+	Classification    string
+	Message           string
+	ComponentStatuses map[string]v1beta1.ComponentReplicaStatus
+}
+
+// EvaluateGroveReadiness resolves one Grove readiness snapshot.
+func EvaluateGroveReadiness(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *v1beta1.DynamoGraphDeployment,
+) (GroveReadiness, error) {
+	allReady, classification, message, componentStatuses, err := evaluateGroveComponents(ctx, reader, dgd)
+	if err != nil {
+		return GroveReadiness{}, err
+	}
+	return GroveReadiness{
+		Ready:             allReady,
+		Classification:    classification,
+		Message:           message,
+		ComponentStatuses: componentStatuses,
+	}, nil
+}
+
 // GetComponentReadinessAndServiceReplicaStatuses determines if all Grove components are ready
 // and returns the replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus, error) {
-	allReady, _, message, componentStatuses, err := evaluateGroveComponents(ctx, client, dgd)
-	return allReady, message, componentStatuses, err
+func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus, error) {
+	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
+	return readiness.Ready, readiness.Message, readiness.ComponentStatuses, err
 }
 
 // ClassifyGroveReadiness returns the DGD-level Ready condition reason for a
-// Grove-backed DGD one of the v1beta1.DGDReadyReason* constants.
+// Grove-backed DGD as one of the v1beta1.DGDReadyReason* constants.
 // It performs the same Grove status reads as
 // GetComponentReadinessAndServiceReplicaStatuses; callers that need both the
 // reason and the readiness/message/component-status detail in the same
-// reconcile should prefer calling evaluateGroveComponents directly to avoid
+// reconcile should prefer calling EvaluateGroveReadiness directly to avoid
 // reading Grove status twice. A non-nil error indicates a transient read
 // failure that should be retried, not a classification.
-func ClassifyGroveReadiness(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (string, error) {
-	_, reason, _, _, err := evaluateGroveComponents(ctx, client, dgd)
-	return reason, err
+func ClassifyGroveReadiness(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment) (string, error) {
+	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
+	return readiness.Classification, err
 }
 
-// evaluateGroveComponents is the single per-component evaluation loop shared
-// by GetComponentReadinessAndServiceReplicaStatuses and ClassifyGroveReadiness.
+// evaluateGroveComponents is the single per-component evaluation loop behind
+// all public Grove readiness views.
 //
 // Each Check*Ready call returns the DGD-level Ready reason its component would
 // imply (a v1beta1.DGDReadyReason* value) when that component is not ready. The
 // reasons are aggregated in place: if every not-ready component implies the
 // same reason, that reason is used; if they disagree, the result is
 // MixedNotReadyReasons.
-func evaluateGroveComponents(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (allReady bool, classificationReason string, message string, componentStatuses map[string]v1beta1.ComponentReplicaStatus, err error) {
+func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment) (allReady bool, classificationReason string, message string, componentStatuses map[string]v1beta1.ComponentReplicaStatus, err error) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 	aggregatedReason := ""
@@ -122,8 +161,8 @@ func evaluateGroveComponents(ctx context.Context, client client.Client, dgd *v1b
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		componentName := component.ComponentName
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
-		resourceName := fmt.Sprintf("%s-0-%s", PCSNameForDGD(dgd.Name, dgd.Spec.Components), strings.ToLower(componentName))
+		usesPCSG := component.UsesPCSG()
+		resourceName := GroveComponentResourceName(dgd, componentName)
 
 		var ok bool
 		var reason string
@@ -132,9 +171,9 @@ func evaluateGroveComponents(ctx context.Context, client client.Client, dgd *v1b
 		var checkErr error
 
 		if usesPCSG {
-			ok, reason, componentStatus, componentReason, checkErr = CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			ok, reason, componentStatus, componentReason, checkErr = CheckPCSGReady(ctx, reader, resourceName, dgd.Namespace, logger)
 		} else {
-			ok, reason, componentStatus, componentReason, checkErr = CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			ok, reason, componentStatus, componentReason, checkErr = CheckPodCliqueReady(ctx, reader, resourceName, dgd.Namespace, logger)
 		}
 		// A non-NotFound read error is a transient failure to determine
 		// readiness. Propagate it (rather than folding it into a not-ready
@@ -177,9 +216,9 @@ func evaluateGroveComponents(ctx context.Context, client client.Client, dgd *v1b
 // rollout is unfinished, PodsNotReady when scheduled but not enough replicas
 // are ready, or SomeResourcesNotReady when the cause cannot be determined. It
 // is empty when the component is ready.
-func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
+func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
 	podClique := &grovev1alpha1.PodClique{}
-	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
+	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodClique not found", "resourceName", resourceName)
@@ -288,9 +327,9 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 // It checks various status fields to ensure all replicas are available and the PCSG
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
+func CheckPCSGReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
+	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodCliqueScalingGroup not found", "resourceName", resourceName)

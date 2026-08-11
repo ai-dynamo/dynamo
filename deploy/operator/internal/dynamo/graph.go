@@ -303,6 +303,19 @@ func GenerateDynamoComponentsDeployments(
 	for i := range parentDGD.Spec.Components {
 		component := &parentDGD.Spec.Components[i]
 		componentName := component.ComponentName
+
+		// Reject invalid GMS client references before synchronizing any DCDs.
+		gmsSpec := GetGPUMemoryService(component)
+		if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
+			var containers []corev1.Container
+			if component.PodTemplate != nil {
+				containers = component.PodTemplate.Spec.Containers
+			}
+			if err := gmsExtraClientContainersError(gmsSpec, containers); err != nil {
+				return nil, fmt.Errorf("component %q: %w", componentName, err)
+			}
+		}
+
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
 		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
@@ -312,6 +325,49 @@ func GenerateDynamoComponentsDeployments(
 	}
 
 	return deployments, nil
+}
+
+// gmsExtraClientContainersError returns a deterministic error for invalid
+// intra-pod GMS client references.
+func gmsExtraClientContainersError(
+	gmsSpec *v1beta1.GPUMemoryServiceSpec,
+	containers []corev1.Container,
+) error {
+	// Index declared container names for constant-time client lookup.
+	containerNames := make(map[string]struct{}, len(containers))
+	for i := range containers {
+		containerNames[containers[i].Name] = struct{}{}
+	}
+
+	// Scan the requested clients for duplicate and unresolved references.
+	seenClients := make(map[string]struct{}, len(gmsSpec.ExtraClientContainers))
+	missingClients := make([]string, 0)
+	duplicateClients := make([]string, 0)
+	for _, name := range gmsSpec.ExtraClientContainers {
+		if _, duplicate := seenClients[name]; duplicate {
+			duplicateClients = append(duplicateClients, name)
+			continue
+		}
+		seenClients[name] = struct{}{}
+		if _, exists := containerNames[name]; !exists {
+			missingClients = append(missingClients, name)
+		}
+	}
+
+	// Return one stable error that names every invalid client reference.
+	if len(missingClients) == 0 && len(duplicateClients) == 0 {
+		return nil
+	}
+	sort.Strings(missingClients)
+	sort.Strings(duplicateClients)
+	problems := make([]string, 0, 2)
+	if len(duplicateClients) > 0 {
+		problems = append(problems, fmt.Sprintf("contains duplicate names %q", duplicateClients))
+	}
+	if len(missingClients) > 0 {
+		problems = append(problems, fmt.Sprintf("references missing pod containers %q", missingClients))
+	}
+	return fmt.Errorf("gpuMemoryService.extraClientContainers %s", strings.Join(problems, "; "))
 }
 
 func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
@@ -1105,6 +1161,8 @@ const (
 // multiple ServiceRoles depending on the deployment topology:
 //
 //   - single-node, no GMS: 1 role (RoleMain)
+//   - single-node, forceScalingGroup: 1 role (RoleMain with a single pod;
+//     the PCSG replica count carries the horizontal scale)
 //   - multinode, no GMS:    2 roles (RoleLeader + RoleWorker)
 //   - single-node, inter-pod GMS: 1 engine PCLQ (replicated) + 1 RoleGMS
 //     weight-server PCLQ
@@ -1162,6 +1220,8 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 		return expandMultinodeRoles(componentName, numberOfNodes)
 	case isInterPodGMS:
 		return expandSingleNodeGMSRoles(componentName, component.GetTotalEnginePods())
+	case component.IsGroveScalingGroupForced():
+		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
 		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
@@ -1174,6 +1234,12 @@ func expandSingleNodeRoles(componentName string, componentReplicas *int32) []Ser
 	}
 	return []ServiceRole{
 		{Name: componentName, Role: RoleMain, Replicas: replicas},
+	}
+}
+
+func expandSingleNodeScalingGroupRoles(componentName string) []ServiceRole {
+	return []ServiceRole{
+		{Name: componentName, Role: RoleMain, Replicas: 1},
 	}
 }
 
@@ -1218,7 +1284,7 @@ func LongestPodCliqueNameForDGDComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 ) string {
 	lowerComponentName := strings.ToLower(componentName)
-	if component == nil || (component.GetNumberOfNodes() <= 1 && !component.IsInterPodGMSEnabled()) {
+	if component == nil || !component.UsesPCSG() {
 		return lowerComponentName
 	}
 
@@ -1245,7 +1311,7 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 		componentName := component.ComponentName
 		lowerName := strings.ToLower(componentName)
 		var budget int
-		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+		if component.UsesPCSG() {
 			// PCSG = lowerName, PCLQ = longest rendered role name.
 			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
 		} else {
@@ -1606,13 +1672,19 @@ func GenerateBasePodSpec(
 	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
-	if GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled() {
+	gmsSpec := GetGPUMemoryService(component)
+	if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
+		// Recheck rendered containers to protect direct or legacy DCDs that bypass admission.
+		if err := gmsExtraClientContainersError(gmsSpec, podSpec.Containers); err != nil {
+			return nil, err
+		}
+
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
-		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
+		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
 				if podSpec.Containers[i].Name == name {
@@ -1621,7 +1693,7 @@ func GenerateBasePodSpec(
 				}
 			}
 			if container == nil {
-				continue
+				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
 			gms.EnsureClient(&podSpec, container)
 		}
@@ -2113,9 +2185,8 @@ func propagateDGDSpecMetadata(annotations, labels map[string]string, component *
 	podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
 }
 
-// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 // cliqueParams groups the context needed to build a single PodClique template
-// from a ServiceRole. All fields come from the enclosing GenerateGrovePodCliqueSet
+// from a ServiceRole. All fields come from the enclosing Grove render
 // loop iteration and are read-only.
 type cliqueParams struct {
 	r                           ServiceRole
@@ -2137,8 +2208,7 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
-	kubeClient                  ctrlclient.Client
-	ctx                         context.Context
+	checkpointRestore           *checkpoint.ResolvedPodSpecRestore
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 }
 
@@ -2164,9 +2234,15 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		(p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
-		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
-			p.operatorConfig.Checkpoint.Storage,
+		if p.checkpointInfo != nil &&
+			p.checkpointInfo.Enabled &&
+			p.checkpointInfo.Ready &&
+			p.checkpointRestore == nil {
+			return nil, fmt.Errorf("resolved checkpoint restore is required for role %s", p.r.Name)
+		}
+		if err := checkpoint.InjectResolvedCheckpointIntoPodSpec(
+			podSpec,
+			p.checkpointRestore,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
@@ -2285,16 +2361,16 @@ func applyRestartAnnotation(annotations map[string]string, componentName string,
 	return annotations
 }
 
-func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclient.Client, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
+func resolveGroveClusterTopologyDomains(ctx context.Context, reader ctrlclient.Reader, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
 	if kvt == nil || kvt.ClusterTopologyName == "" {
 		return nil, nil
 	}
-	if kubeClient == nil {
+	if reader == nil {
 		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
 	ct := &grovev1alpha1.ClusterTopologyBinding{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
@@ -2329,7 +2405,11 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 	return false
 }
 
-func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
+func resolveGroveSchedulerQueue(
+	ctx context.Context,
+	annotations map[string]string,
+	runtimeConfig *controller_common.RuntimeConfig,
+) (string, error) {
 	if runtimeConfig.Gate.Enabled(features.Grove) && runtimeConfig.Gate.Enabled(features.KaiScheduler) && runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
 	}
@@ -2344,17 +2424,30 @@ func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]stri
 	return queueName, nil
 }
 
+// GenerateGrovePodCliqueSet reads the provider inputs needed to construct the
+// desired PodCliqueSet. Resolved domain values stay local and are passed to
+// the leaf rendering helpers that consume them.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient ctrlclient.Client,
+	reader ctrlclient.Reader,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) (*grovev1alpha1.PodCliqueSet, error) {
+	if dynamoDeployment == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
+	}
+	if operatorConfig == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without operator configuration")
+	}
+	if runtimeConfig == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without runtime configuration")
+	}
+
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Components)
 	gangSet.Namespace = dynamoDeployment.Namespace
@@ -2401,7 +2494,7 @@ func GenerateGrovePodCliqueSet(
 	var groveClusterTopologyDomains []v1beta1.TopologyDomain
 	if dynamoDeployment.Spec.Experimental != nil {
 		var err error
-		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, kubeClient, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, reader, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -2433,12 +2526,28 @@ func GenerateGrovePodCliqueSet(
 		if checkpointInfoByComponent != nil {
 			checkpointInfo = checkpointInfoByComponent[componentName]
 		}
+		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
+		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
+			checkpointInfo != nil &&
+			checkpointInfo.StartupPolicy != "" &&
+			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
+			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(
+				ctx,
+				reader,
+				dynamoDeployment.Namespace,
+				checkpointInfo,
+				operatorConfig.Checkpoint.Storage,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve checkpoint restore for component %s: %w", componentName, err)
+			}
+		}
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
 		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
-		usesPCSG := isMultinode || isInterPodGMS
+		usesPCSG := component.UsesPCSG()
 		roles := expandRolesForComponent(componentName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 
@@ -2463,8 +2572,7 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
-				kubeClient:                  kubeClient,
-				ctx:                         ctx,
+				checkpointRestore:           checkpointRestore,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 			})
 			if err != nil {

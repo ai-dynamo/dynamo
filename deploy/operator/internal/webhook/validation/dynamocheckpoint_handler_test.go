@@ -32,7 +32,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 		oldCheckpoint      *nvidiacomv1alpha1.DynamoCheckpoint
 		mutateRequest      func(*testing.T, map[string]any)
 		checkpointDisabled bool
-		gmsSnapshot        bool
 		wantSchemaErr      string
 		wantCELErr         string
 		wantWebhook        []string
@@ -60,7 +59,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 					Mode:    nvidiacomv1alpha1.GPUMemoryServiceMode("unknown"),
 				}
 			}),
-			gmsSnapshot:   true,
 			wantSchemaErr: `spec.gpuMemoryService.mode: Unsupported value: "unknown": supported values: "intraPod", "interPod"`,
 		},
 		{
@@ -72,15 +70,13 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 					ExtraClientContainers: []string{"saver"},
 				}
 			}),
-			gmsSnapshot: true,
-			wantCELErr:  "spec.gpuMemoryService: Invalid value: extraClientContainers is only supported with mode=intraPod",
+			wantCELErr: "spec.gpuMemoryService: Invalid value: extraClientContainers is only supported with mode=intraPod",
 		},
 
 		// Structural create rules.
 		{
-			name:        "prepared intra-pod GMS checkpoint is accepted",
-			checkpoint:  preparedDynamoCheckpointForAdmission(nil),
-			gmsSnapshot: true,
+			name:       "prepared intra-pod GMS checkpoint is accepted",
+			checkpoint: preparedDynamoCheckpointForAdmission(nil),
 		},
 		{
 			name: "DGD-only metadata annotations are ignored",
@@ -94,13 +90,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpointDisabled: true,
 			wantWebhook: []string{
 				"spec: Forbidden: checkpoint functionality is disabled in the operator configuration",
-			},
-		},
-		{
-			name:       "GMS checkpoint feature gate is enforced",
-			checkpoint: preparedDynamoCheckpointForAdmission(nil),
-			wantWebhook: []string{
-				"spec.gpuMemoryService: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
 			},
 		},
 		{
@@ -120,7 +109,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 				}
 			}),
-			gmsSnapshot: true,
 			wantWebhook: []string{
 				`spec.gpuMemoryService.mode: Unsupported value: "interPod": supported values: "intraPod"`,
 			},
@@ -133,7 +121,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
 				}
 			}),
-			gmsSnapshot: true,
 			wantWebhook: []string{
 				`spec.job.podTemplateSpec.spec.volumes: Required value: must contain the GMS shared volume "gms-intrapod-control"`,
 				`spec.job.podTemplateSpec.spec.initContainers: Required value: must contain the GMS init sidecar "gms-server"`,
@@ -148,7 +135,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint: preparedDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
 				checkpoint.Spec.GPUMemoryService.ExtraClientContainers = []string{"saver"}
 			}),
-			gmsSnapshot: true,
 			wantWebhook: []string{
 				`spec.gpuMemoryService.extraClientContainers[0]: Invalid value: "saver": does not name a container in spec.job.podTemplateSpec.spec.containers`,
 			},
@@ -162,7 +148,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 					corev1.Container{Name: "saver"},
 				)
 			}),
-			gmsSnapshot: true,
 			wantWebhook: []string{
 				`spec.job.podTemplateSpec.spec.containers[1].env: Required value: must contain GMS_SOCKET_DIR=/gms-intrapod-control for GMS`,
 				`spec.job.podTemplateSpec.spec.containers[1].resources.claims: Required value: must contain the GMS resource claim "intrapod-shared-gpu"`,
@@ -174,36 +159,15 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint: preparedDynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
 				checkpoint.Spec.Job.TargetContainerName = "missing"
 			}),
-			gmsSnapshot: true,
 			wantWebhook: []string{
 				`spec.job.targetContainerName: Invalid value: "missing": does not name a container in podTemplateSpec.spec.containers`,
 			},
 		},
-		{
-			name: "gate and preparation failures aggregate",
-			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
-				checkpoint.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-					Enabled: true,
-					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
-				}
-			}),
-			wantWebhook: []string{
-				"spec.gpuMemoryService: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
-				`spec.job.podTemplateSpec.spec.volumes: Required value: must contain the GMS shared volume "gms-intrapod-control"`,
-				`spec.job.podTemplateSpec.spec.initContainers: Required value: must contain the GMS init sidecar "gms-server"`,
-				`spec.job.podTemplateSpec.spec.containers[0].env: Required value: must contain GMS_SOCKET_DIR=/gms-intrapod-control for GMS`,
-				`spec.job.podTemplateSpec.spec.containers[0].resources.claims: Required value: must contain the GMS resource claim "intrapod-shared-gpu"`,
-				`spec.job.podTemplateSpec.spec.containers[0].volumeMounts: Required value: must mount volume "gms-intrapod-control" at "/gms-intrapod-control" for GMS`,
-				`spec.job.podTemplateSpec.spec.resourceClaims: Required value: must contain the GMS pod resource claim "intrapod-shared-gpu"`,
-			},
-		},
-
 		// Update, CEL immutability, and deletion behavior.
 		{
 			name:          "unchanged checkpoint update is accepted",
 			oldCheckpoint: preparedDynamoCheckpointForAdmission(nil),
 			checkpoint:    preparedDynamoCheckpointForAdmission(nil),
-			gmsSnapshot:   true,
 		},
 		{
 			name:               "checkpoint feature gate applies on update",
@@ -231,7 +195,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
 				}
 			}),
-			gmsSnapshot: true,
 			wantWebhook: []string{
 				`spec.job.podTemplateSpec.spec.volumes: Required value: must contain the GMS shared volume "gms-intrapod-control"`,
 				`spec.job.podTemplateSpec.spec.initContainers: Required value: must contain the GMS init sidecar "gms-server"`,
@@ -252,7 +215,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 				}
 				checkpoint.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
 			}),
-			gmsSnapshot: true,
 		},
 	}
 
@@ -299,8 +261,7 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			handler := NewDynamoCheckpointHandler()
 			ctx := dgdAdmissionContext(dynamoCheckpointAdmissionOperation(tt.oldCheckpoint), nvidiacomv1alpha1.GroupVersion.WithKind("DynamoCheckpoint"))
 			ctx = features.WithGate(ctx, features.Gates{
-				Checkpoint:  !tt.checkpointDisabled,
-				GMSSnapshot: tt.gmsSnapshot,
+				Checkpoint: !tt.checkpointDisabled,
 			})
 			var warnings []string
 			var err error

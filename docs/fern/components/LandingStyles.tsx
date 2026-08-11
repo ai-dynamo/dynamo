@@ -5,16 +5,20 @@
  * Landing page component styles (Home and Community).
  *
  * Styles for WelcomeHero, WhyDynamo, EventsCalendar and CommunityLanding.
- * These rules also live in main.css, which is the local-preview and no-JS
- * baseline; this block is what reaches production.
+ * This block is their only home -- main.css carries none of these rules, so
+ * there is no fallback baseline. If this block does not render, both pages
+ * render unstyled. (CustomFooter.tsx is the one that genuinely mirrors
+ * main.css, enforced by the `sync-site-css` pre-commit hook.)
  *
  * Delivered as a page-level <style> block (NOT via the docs.yml `css:` field)
  * so it survives the shared NVIDIA global theme, which replaces project `css`
- * at publish. The same theme also replaces the custom `footer:`, so the
- * SITE_CSS block in CustomFooter.tsx does not reach these pages either --
- * that is why the Home and Community components rendered unstyled. Same
- * pattern as ReferenceStyles.tsx and RecipeStyles.tsx, which are unaffected
- * for exactly this reason.
+ * at publish (#11952) -- production ships no main.css <link> at all. Same
+ * pattern as ReferenceStyles.tsx and RecipeStyles.tsx.
+ *
+ * main.css content does still reach production, mirrored verbatim into
+ * CustomFooter.tsx's SITE_CSS by sync_site_css.py, and that block does render
+ * on these pages. It is not somewhere to put landing rules, though: it is
+ * generated, so any hand edit is overwritten on the next sync.
  *
  * Injected via dangerouslySetInnerHTML, like RecipeStyles.tsx, not as a text
  * child like ReferenceStyles.tsx. A text child is escaped on render, which
@@ -34,8 +38,8 @@
  * regex-scans this file for imports without skipping comments, and a quoted
  * non-relative specifier makes it shell out to `npx rolldown` on every build.
  *
- * Then place <LandingStyles /> once, right after the imports, on welcome.mdx
- * and community/README.mdx.
+ * Then place <LandingStyles /> once, right after the imports, on
+ * pages/home/index.mdx and pages/community/community.mdx.
  */
 const LANDING_CSS = `
 /* ===================== Welcome (Home) landing page ===================== */
@@ -102,24 +106,39 @@ article:has(.dynamo-welcome)::before {
 /* Turn Fern's generated title and subtitle into the first half of the hero. */
 article:has(.dynamo-welcome) > header {
   margin: 0;
-  padding: clamp(3rem, 6vh, 4.5rem) 1rem 0;
+  /* The extra top padding reserves the space the mark below occupies, since
+     the mark is taken out of the flow to sit above the heading. */
+  padding: calc(clamp(3rem, 6vh, 4.5rem) + 92px + 1.45rem) 1rem 0;
   text-align: center;
 }
 
-article:has(.dynamo-welcome) > header::before {
-  content: "";
+/* The Dynamo mark, rendered as an <img> from the page MDX. It cannot be a
+   background-image here: Fern rewrites asset paths only in MDX and docs.yml,
+   never inside a <style> string, so a url() reaches the browser verbatim and
+   404s. That puts the mark in the prose, below the heading, so pull it back up
+   over the heading; the header padding above holds its place. */
+article:has(.dynamo-welcome) .dynamo-welcome__mark {
+  position: absolute;
+  top: clamp(3rem, 6vh, 4.5rem);
+  left: 50%;
+  transform: translateX(-50%);
   display: block;
   width: 92px;
   height: 92px;
-  margin: 0 auto 1.45rem;
+  margin: 0;
   border: 1px solid rgba(118, 185, 0, 0.4);
   border-radius: 24px;
-  background: #f3fbdc
-    url("https://avatars.githubusercontent.com/u/201626793?s=200&v=4") center /
-    cover no-repeat;
+  background-color: #f3fbdc;
+  object-fit: cover;
   box-shadow:
     0 18px 42px rgba(54, 86, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.dark article:has(.dynamo-welcome) .dynamo-welcome__mark {
+  border-color: rgba(118, 185, 0, 0.4);
+  background-color: #0c0d0b;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
 }
 
 article:has(.dynamo-welcome) > header .fern-breadcrumb {
@@ -475,146 +494,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   .dynamo-welcome__terminal-stage {
     transition: none;
   }
-}
-
-/* App-notification community stack on wide screens; it moves below the demo when space is tight. */
-.dynamo-welcome__community {
-  position: absolute;
-  top: -20rem;
-  right: calc((100vw - 1200px) / -2 + 1rem);
-  z-index: 30;
-  display: flex;
-  width: 242px;
-  flex-direction: column;
-  gap: 0.55rem;
-}
-
-.dynamo-welcome__notification {
-  display: grid;
-  grid-template-columns: 2.55rem 1fr;
-  gap: 0.7rem;
-  align-items: center;
-  min-height: 4.3rem;
-  padding: 0.65rem 0.75rem;
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  border-radius: 18px;
-  background:
-    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.74), transparent 45%),
-    linear-gradient(145deg, rgba(250, 250, 250, 0.72), rgba(231, 235, 226, 0.62));
-  color: var(--grayscale-a12) !important;
-  box-shadow:
-    0 18px 46px rgba(28, 38, 18, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.88);
-  text-decoration: none !important;
-  backdrop-filter: blur(24px) saturate(1.4);
-  transition:
-    transform 160ms ease,
-    border-color 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.dark .dynamo-welcome__notification {
-  border-color: rgba(255, 255, 255, 0.12);
-  background:
-    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.12), transparent 45%),
-    linear-gradient(145deg, rgba(35, 38, 31, 0.78), rgba(14, 16, 12, 0.7));
-  box-shadow:
-    0 18px 46px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-}
-
-.dynamo-welcome__notification:hover,
-.dynamo-welcome__notification:focus-visible {
-  transform: translateX(-4px);
-  border-color: rgba(118, 185, 0, 0.55);
-  box-shadow: 0 18px 42px rgba(54, 86, 0, 0.2);
-}
-
-.dynamo-welcome__notification:focus-visible {
-  outline: 3px solid rgba(118, 185, 0, 0.34);
-  outline-offset: 3px;
-}
-
-.dynamo-welcome__notification-icon {
-  display: grid;
-  width: 2.55rem;
-  height: 2.55rem;
-  place-items: center;
-  border-radius: 11px;
-  color: white;
-  box-shadow:
-    0 5px 14px rgba(0, 0, 0, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
-}
-
-.dynamo-welcome__notification--slack .dynamo-welcome__notification-icon {
-  background: #4a154b;
-}
-
-.dynamo-welcome__notification--calendar .dynamo-welcome__notification-icon {
-  background: #ff3b30;
-}
-
-.dynamo-welcome__notification-icon svg {
-  width: 1.42rem;
-  height: 1.42rem;
-  fill: currentColor;
-}
-
-.dynamo-welcome__calendar-app {
-  display: grid;
-  width: 1.55rem;
-  height: 1.65rem;
-  grid-template-rows: 0.55rem 1fr;
-  overflow: hidden;
-  border-radius: 5px;
-  background: white;
-  color: #171717;
-  text-align: center;
-}
-
-.dynamo-welcome__calendar-app > span {
-  display: grid;
-  place-items: center;
-  background: #ff3b30;
-  color: white;
-  font-size: 0.38rem;
-  font-weight: 800;
-  letter-spacing: 0.03em;
-}
-
-.dynamo-welcome__calendar-app strong {
-  display: grid;
-  place-items: center;
-  font-size: 0.72rem;
-  line-height: 1;
-}
-
-.dynamo-welcome__notification-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 0.18rem;
-  color: var(--grayscale-a11);
-  font-size: 0.76rem;
-  line-height: 1.25;
-}
-
-.dynamo-welcome__notification-app {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-  color: var(--grayscale-a12);
-  font-size: 0.78rem;
-  font-weight: 700;
-}
-
-.dynamo-welcome__notification-app small {
-  color: var(--grayscale-a9);
-  font-size: 0.65rem;
-  font-weight: 500;
-  text-transform: uppercase;
 }
 
 /* Scroll-driven feature story: copy advances on the left while one large visual stays pinned. */
@@ -1260,6 +1139,36 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   box-shadow: 0 5px 14px rgba(255, 59, 48, 0.28);
 }
 
+/* Days with something on the community calendar. The highlight marks today,
+   so the dot is what carries event information in the grid. */
+.dynamo-calendar__month-grid > .has-event {
+  position: relative;
+  color: var(--grayscale-a12);
+  font-weight: 700;
+}
+
+.dynamo-calendar__month-grid > .has-event::after {
+  content: "";
+  position: absolute;
+  bottom: 0.1rem;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #76b900;
+}
+
+/* Today and an event on the same cell: the dot goes white so it stays legible
+   against the red fill. */
+.dynamo-calendar__month-grid > .has-event.is-selected {
+  color: white;
+}
+
+.dynamo-calendar__month-grid > .has-event.is-selected::after {
+  background: white;
+}
+
 .dynamo-calendar__source {
   display: flex;
   align-items: center;
@@ -1481,21 +1390,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   margin: 0;
 }
 
-@media (max-width: 1360px) {
-
-  .dynamo-welcome__community {
-    position: static;
-    width: min(100%, 720px);
-    margin: 2rem auto 0;
-    flex-direction: row;
-  }
-
-  .dynamo-welcome__notification {
-    flex: 1;
-    min-width: 0;
-  }
-}
-
 @media (max-width: 960px) {
 
   .dynamo-story {
@@ -1547,13 +1441,13 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 
   article:has(.dynamo-welcome) > header {
-    padding-top: 2.75rem;
+    padding-top: calc(2.75rem + 60px + 1rem);
   }
 
-  article:has(.dynamo-welcome) > header::before {
+  article:has(.dynamo-welcome) .dynamo-welcome__mark {
+    top: 2.75rem;
     width: 60px;
     height: 60px;
-    margin-bottom: 1rem;
     border-radius: 14px;
   }
 
@@ -1593,14 +1487,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
     line-height: 1.65;
   }
 
-  .dynamo-welcome__community {
-    width: min(100%, 350px);
-    flex-direction: column;
-  }
-
-  .dynamo-welcome__notification {
-    width: 100%;
-  }
   .dynamo-story__step {
     margin-bottom: 3.5rem;
   }
@@ -1707,7 +1593,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 
   .dynamo-welcome__cta,
-  .dynamo-welcome__notification,
   .dynamo-story__step,
   .dynamo-story__step-copy,
   .dynamo-story__stage-panel {
@@ -2139,7 +2024,284 @@ article:has(.dynamo-community-page) { margin-bottom: 0; }
   .dynamo-community-meeting__actions { flex-direction: column; }
   .dynamo-community-meeting__actions .dynamo-community-button, .dynamo-community-meeting__actions .dynamo-community-text-link { width: 100%; }
 }
-`;
+
+
+/* Community rail: the right-hand Slack and calendar links. Restored with
+   the hero mark; the inline secondary buttons that briefly stood in for
+   them are gone, so these selectors are the only place they live. */
+.dynamo-welcome__community {
+  position: absolute;
+  top: -20rem;
+  right: calc((100vw - 1200px) / -2 + 1rem);
+  z-index: 30;
+  display: flex;
+  width: 242px;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.dynamo-welcome__notification {
+  display: grid;
+  grid-template-columns: 2.55rem 1fr;
+  gap: 0.7rem;
+  align-items: center;
+  min-height: 4.3rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.74), transparent 45%),
+    linear-gradient(145deg, rgba(250, 250, 250, 0.72), rgba(231, 235, 226, 0.62));
+  color: var(--grayscale-a12) !important;
+  box-shadow:
+    0 18px 46px rgba(28, 38, 18, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.88);
+  text-decoration: none !important;
+  backdrop-filter: blur(24px) saturate(1.4);
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.dark .dynamo-welcome__notification {
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.12), transparent 45%),
+    linear-gradient(145deg, rgba(35, 38, 31, 0.78), rgba(14, 16, 12, 0.7));
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.dynamo-welcome__notification:hover,
+.dynamo-welcome__notification:focus-visible {
+  transform: translateX(-4px);
+  border-color: rgba(118, 185, 0, 0.55);
+  box-shadow: 0 18px 42px rgba(54, 86, 0, 0.2);
+}
+
+.dynamo-welcome__notification:focus-visible {
+  outline: 3px solid rgba(118, 185, 0, 0.34);
+  outline-offset: 3px;
+}
+
+.dynamo-welcome__notification-icon {
+  display: grid;
+  width: 2.55rem;
+  height: 2.55rem;
+  place-items: center;
+  border-radius: 11px;
+  color: white;
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.dynamo-welcome__notification--slack .dynamo-welcome__notification-icon {
+  background: #4a154b;
+}
+
+.dynamo-welcome__notification--calendar .dynamo-welcome__notification-icon {
+  background: #ff3b30;
+}
+
+.dynamo-welcome__notification-icon svg {
+  width: 1.42rem;
+  height: 1.42rem;
+  fill: currentColor;
+}
+
+.dynamo-welcome__calendar-app {
+  display: grid;
+  width: 1.55rem;
+  height: 1.65rem;
+  grid-template-rows: 0.55rem 1fr;
+  overflow: hidden;
+  border-radius: 5px;
+  background: white;
+  color: #171717;
+  text-align: center;
+}
+
+.dynamo-welcome__calendar-app > span {
+  display: grid;
+  place-items: center;
+  background: #ff3b30;
+  color: white;
+  font-size: 0.38rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.dynamo-welcome__calendar-app strong {
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.dynamo-welcome__notification-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.18rem;
+  color: var(--grayscale-a11);
+  font-size: 0.76rem;
+  line-height: 1.25;
+}
+
+.dynamo-welcome__notification-app {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--grayscale-a12);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.dynamo-welcome__notification-app small {
+  color: var(--grayscale-a9);
+  font-size: 0.65rem;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+@media (max-width: 1360px) {
+
+  .dynamo-welcome__community {
+    position: static;
+    width: min(100%, 720px);
+    margin: 2rem auto 0;
+    flex-direction: row;
+  }
+
+  .dynamo-welcome__notification {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 640px) {
+
+  article:has(.dynamo-welcome) {
+    padding-inline: 0.75rem;
+  }
+
+  article:has(.dynamo-welcome) > header {
+    padding-top: 2.75rem;
+  }
+
+  article:has(.dynamo-welcome) > header::before {
+    width: 60px;
+    height: 60px;
+    margin-bottom: 1rem;
+    border-radius: 14px;
+  }
+
+  article:has(.dynamo-welcome) > header .fern-page-heading {
+    font-size: clamp(3.5rem, 18vw, 4.75rem);
+  }
+
+  article:has(.dynamo-welcome) > header .fern-page-subtitle {
+    max-width: 340px;
+    white-space: normal;
+  }
+
+  .dynamo-welcome__terminal {
+    margin-top: 6.5rem;
+  }
+
+  .dynamo-welcome__demo-reveal {
+    top: -5.25rem;
+    width: 100%;
+    margin: 0;
+    padding: 0.5rem 0.55rem 0.2rem;
+  }
+
+  .dynamo-welcome__demo-reveal h2 {
+    font-size: 1.7rem;
+  }
+
+  .dynamo-welcome__terminal-stage {
+    padding: 0.6rem;
+    border-radius: 21px;
+  }
+
+  .dynamo-welcome__statement {
+    width: 100%;
+    min-height: 6.5rem;
+    font-size: 0.95rem;
+    line-height: 1.65;
+  }
+
+  .dynamo-welcome__community {
+    width: min(100%, 350px);
+    flex-direction: column;
+  }
+
+  .dynamo-welcome__notification {
+    width: 100%;
+  }
+  .dynamo-story__step {
+    margin-bottom: 3.5rem;
+  }
+
+  .dynamo-story__step h3 {
+    font-size: 2.15rem;
+  }
+
+  .dynamo-story__step-copy > p:last-child {
+    font-size: 0.98rem;
+  }
+
+  .dynamo-story__mobile-graphic {
+    min-height: 390px;
+    padding: 1rem;
+    border-radius: 20px;
+  }
+
+  .dynamo-story-graphic {
+    min-height: 330px;
+  }
+
+  .dynamo-story-orbit {
+    width: 300px;
+  }
+
+  .dynamo-story-core {
+    width: 5.8rem;
+    height: 5.8rem;
+    border-radius: 22px;
+  }
+
+  .dynamo-story-orbit .node {
+    min-width: 5.7rem;
+    min-height: 2.7rem;
+    font-size: 0.64rem;
+  }
+
+  .dynamo-story-stack span:nth-child(n) {
+    margin-inline: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .dynamo-welcome__cursor {
+    animation: none;
+    opacity: 1;
+  }
+
+  .dynamo-welcome__cta,
+  .dynamo-welcome__notification,
+  .dynamo-story__step,
+  .dynamo-story__step-copy,
+  .dynamo-story__stage-panel {
+    transition: none;
+  }
+}`;
 
 export function LandingStyles() {
   return <style dangerouslySetInnerHTML={{ __html: LANDING_CSS }} />;

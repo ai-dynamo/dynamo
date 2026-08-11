@@ -32,6 +32,7 @@ from dynamo.profiler.utils.replay_optimize import (
     optimize_dense_agg_with_replay,
     optimize_dense_disagg_with_replay,
 )
+from dynamo.replay import ReplayReport
 
 pytestmark = [
     pytest.mark.unit,
@@ -195,7 +196,12 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     def fake_run_trace_replay(trace_file, **kwargs):
         captured["trace_file"] = trace_file
         captured["kwargs"] = kwargs
-        return {"output_throughput_tok_s": 1.0}
+        return ReplayReport(
+            summary={"output_throughput_tok_s": 1.0},
+            per_request=None,
+            coverage={},
+            planner=None,
+        )
 
     monkeypatch.setattr(
         "dynamo.profiler.utils.replay_optimize.evaluate.run_trace_replay",
@@ -215,6 +221,8 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     assert captured["kwargs"]["trace_format"] == "applied_compute_agentic"
     assert captured["kwargs"]["trace_shared_prefix_ratio"] == 0.5
     assert captured["kwargs"]["trace_num_prefix_groups"] == 1
+    assert captured["kwargs"]["capture_per_request"] is False
+    assert captured["kwargs"]["capture_planner_details"] is False
 
 
 def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
@@ -232,7 +240,12 @@ def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
     def fake_run_synthetic_trace_replay(*args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
-        return {"output_throughput_tok_s": 1.0}
+        return ReplayReport(
+            summary={"output_throughput_tok_s": 1.0},
+            per_request=None,
+            coverage={},
+            planner=None,
+        )
 
     monkeypatch.setattr(
         "dynamo.profiler.utils.replay_optimize.evaluate.run_synthetic_trace_replay",
@@ -251,6 +264,8 @@ def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
     assert captured["kwargs"]["request_rate"] == 6.5
     assert captured["kwargs"]["arrival_interval_ms"] is None
     assert captured["kwargs"]["arrival_seed"] == 17
+    assert captured["kwargs"]["capture_per_request"] is False
+    assert captured["kwargs"]["capture_planner_details"] is False
 
 
 def _disagg_spec(

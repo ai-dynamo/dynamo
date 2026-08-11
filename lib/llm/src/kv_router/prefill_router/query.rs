@@ -5,12 +5,17 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
+use dynamo_kv_router::selector::WorkerSelector;
 
 use super::{
     InnerPrefillRouter, PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter,
 };
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
-impl PrefillRouter {
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     /// Query the best prefill worker without executing a request.
     ///
     /// This query is advisory and does not book scheduler or occupancy state;
@@ -30,12 +35,12 @@ impl PrefillRouter {
         if self.lifecycle_state() != PrefillLifecycleState::Active {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         }
-        let prefill_router = self
-            .prefill_router
-            .get()
+        let binding = self
+            .binding
+            .load_full()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        match prefill_router {
+        match &binding.router {
             InnerPrefillRouter::KvRouter(router) => {
                 let outcome = router
                     .chooser
@@ -81,7 +86,9 @@ impl PrefillRouter {
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        if let Some(InnerPrefillRouter::KvRouter(router)) = self.prefill_router.get() {
+        if let Some(binding) = self.binding.load_full()
+            && let InnerPrefillRouter::KvRouter(router) = &binding.router
+        {
             router.chooser.register_workers(worker_ids);
         }
     }

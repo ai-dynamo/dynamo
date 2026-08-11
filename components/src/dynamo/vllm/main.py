@@ -31,6 +31,7 @@ from dynamo.common.snapshot.restore_context import (
 )
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
+    EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
@@ -46,6 +47,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.router_hints import enable_router_hint_support
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -55,8 +57,9 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_vllm_token_budget,
 )
-from .handlers import get_dp_range_for_worker
+from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -213,6 +216,20 @@ def setup_metrics_collection(
         Additional labels can be provided via inject_labels parameter.
     """
     metrics_model_name = get_metrics_model_name(config)
+
+    # The DynamoMultimodalEmbeddingCacheConnector (scheduler side, EngineCore
+    # process) publishes its cache metrics through the multiprocess .db files.
+    # Forward that family only when the connector is configured — the
+    # encode-routing path exposes the same metric names in-process via
+    # register_embedding_cache_metrics instead.
+    engine_metric_prefixes = ["vllm:", "lmcache:"]
+    ec_config = getattr(config.engine_args, "ec_transfer_config", None)
+    if (
+        getattr(ec_config, "ec_connector", None)
+        == "DynamoMultimodalEmbeddingCacheConnector"
+    ):
+        engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
         # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
@@ -242,7 +259,7 @@ def setup_metrics_collection(
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=engine_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -272,7 +289,7 @@ def setup_metrics_collection(
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=engine_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -288,7 +305,7 @@ def setup_metrics_collection(
             register_engine_metrics_callback(
                 endpoint=generate_endpoint,
                 registry=REGISTRY,
-                metric_prefix_filters=["vllm:", "lmcache:"],
+                metric_prefix_filters=engine_metric_prefixes,
                 namespace_name=config.namespace,
                 component_name=config.component,
                 endpoint_name=config.endpoint,
@@ -554,6 +571,7 @@ def setup_vllm_engine(
         capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         namespace=config.namespace,
         component=config.component,
+        model_name=get_metrics_model_name(config),
     )
 
     # Taken from build_async_engine_client_from_engine_args()
@@ -665,7 +683,16 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    dp_range = get_dp_range_for_worker(vllm_config)
+    apply_data_parallel_runtime_config(runtime_config, dp_range)
+    enable_router_hint_support(
+        runtime_config, config.engine_args, worker_type, dp_range
+    )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    if model_type != ModelType.Embedding:
+        publish_vllm_token_budget(
+            runtime_config, vllm_config.model_config.max_model_len
+        )
 
     # Get runtime configuration from vLLM engine
     logging.info(
@@ -674,7 +701,6 @@ async def register_vllm_model(
     runtime_values = get_engine_cache_info(engine_client)
     num_gpu_blocks = runtime_values["num_gpu_blocks"]
     # Get data_parallel_size from vllm_config (defaults to 1)
-    dp_range = get_dp_range_for_worker(vllm_config)
     if num_gpu_blocks is None:
         # TODO(upstream-vllm): remove this workaround once vLLM propagates
         # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.
@@ -727,9 +753,6 @@ async def register_vllm_model(
             SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
         )
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
-
-    runtime_config.data_parallel_start_rank = dp_range[0]
-    runtime_config.data_parallel_size = dp_range[1]
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)

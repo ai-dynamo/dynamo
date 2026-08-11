@@ -7,12 +7,18 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    router_hint::RouterHint,
     scheduling::RoutingEligibility,
+    selector::WorkerSelector,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
+    kv_router::{
+        FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
+        push_router::KvPushRouter,
+    },
+    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -27,6 +33,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
+    pub(super) router_hint: Option<RouterHint>,
 }
 
 #[derive(Clone, Copy)]
@@ -69,7 +76,10 @@ struct BestMatchArgs<'a> {
     routing_constraints: RoutingConstraints,
 }
 
-impl KvPushRouter {
+impl<Sel> KvPushRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
         let outcome = self
             .chooser
@@ -90,16 +100,26 @@ impl KvPushRouter {
                 args.pinned_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
-                true,
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: true,
+                },
             )
             .await?;
+        let outcome = match outcome {
+            FindBestMatchInnerOutcome::WithAdmission(outcome) => outcome,
+            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
+                unreachable!("with-admission routing returned advisory outcome")
+            }
+        };
         match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: _,
                 routing_hashes,
+                router_hint,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -107,6 +127,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                router_hint,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
@@ -124,6 +145,7 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
+        let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
@@ -133,13 +155,35 @@ impl KvPushRouter {
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
-        let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
-        let return_routing_hashes =
-            !is_query_only && self.chooser.indexer().records_routing_decisions();
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
-        let explicit_pin = pinned_worker_hint(phase, routing);
+        let mut allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
+        let migration_excluded_worker_ids = request
+            .migration_state
+            .as_ref()
+            .map(|state| state.excluded_worker_ids())
+            .unwrap_or_default();
+        if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
+            let workers = self.chooser.workers_with_configs.borrow();
+            let eligible =
+                allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());
+            eligible.retain(|worker_id| {
+                workers.get(worker_id).is_some_and(|config| {
+                    routing_constraints.is_compatible_with_worker_taints(&config.taints)
+                }) && !migration_excluded_worker_ids.contains(worker_id)
+            });
+            if eligible.is_empty()
+                && let Some(error) = request
+                    .migration_state
+                    .as_ref()
+                    .and_then(|state| state.exhausted_error())
+            {
+                return Err(anyhow::anyhow!(error));
+            }
+        }
+        let return_routing_hashes =
+            !is_query_only && self.chooser.indexer().records_routing_decisions();
         let SelectionOptions {
             affinity_worker,
             policy_class,

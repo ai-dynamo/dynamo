@@ -365,27 +365,10 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		DYNAMO_CLUSTERTEST_OPERATOR_IMAGE='$(CLUSTERTEST_OPERATOR_IMAGE)' \
 		$(MAKE) clustertest
 
-# Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
-.PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
+# Deprecated manual smoke test for the legacy Kustomize install path.
+.PHONY: test-e2e
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
-
-# DGDR e2e test configuration.
-# Override these via the command line, e.g.:
-#   make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
-DGDR_TEST_TIMEOUT ?= 75m
-DGDR_NAMESPACE ?= dynamo-test
-DGDR_IMAGE ?=
-
-.PHONY: test-e2e-dgdr  # Run DGDR e2e tests against a live cluster with the operator installed.
-test-e2e-dgdr:
-ifndef DGDR_IMAGE
-	$(error DGDR_IMAGE is required. Example: make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0)
-endif
-	go test ./test/e2e/dgdr/ -v -ginkgo.v -timeout=$(DGDR_TEST_TIMEOUT) \
-		-dgdr-namespace=$(DGDR_NAMESPACE) \
-		-dgdr-image=$(DGDR_IMAGE) \
-		$(DGDR_TEST_FLAGS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
@@ -739,12 +722,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/kubernetes/api-reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
 	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
-	python3 docs/fix-api-anchors.py ../../docs/fern/kubernetes/api-reference.md
+	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
 HELM_CHART_DIR := ../helm/charts/platform
 

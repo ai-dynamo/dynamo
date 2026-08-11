@@ -39,6 +39,23 @@ def _processor(
     )
 
 
+async def _prepare_prompt(processor, request, request_id, context, mode):
+    """Compose the active validation and multimodal preparation stages."""
+    processor.validate_multimodal_request(request)
+    prepared = await processor.prepare_input(request, request_id, context, mode)
+    prompt = prepared.pre_rendered_prompt or processor.build_tokens_prompt(
+        prepared.request,
+        prepared.multi_modal_data,
+        prepared.mm_processor_kwargs,
+    )
+    return SimpleNamespace(
+        prompt=prompt,
+        request=prepared.request,
+        multi_modal_data=prepared.multi_modal_data,
+        mm_processor_kwargs=prepared.mm_processor_kwargs,
+    )
+
+
 @pytest.mark.asyncio
 async def test_extracts_mixed_url_data_url_and_decoded_media():
     processor = _processor()
@@ -161,7 +178,8 @@ async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -172,7 +190,8 @@ async def test_rejects_media_when_multimodal_is_disabled():
         )
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "multi_modal_uuids": {"image_url": ["cached-image"]},
@@ -183,7 +202,8 @@ async def test_rejects_media_when_multimodal_is_disabled():
         )
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "extra_args": {"mm_kwargs_shm": {"modality": "image", "items": []}},
@@ -202,7 +222,8 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
     )
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -246,7 +267,8 @@ async def test_reads_processor_kwargs_from_router_extra_args():
     audio = object()
     processor.audio_loader.load_audio.return_value = audio
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {
@@ -633,7 +655,8 @@ async def test_aggregated_uses_transferred_prompt_and_falls_back_to_urls():
     transferred = {"type": "multimodal", "prompt_token_ids": [1, 99, 2]}
     processor.try_receive_mm_kwargs = AsyncMock(return_value=transferred)
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -649,7 +672,8 @@ async def test_aggregated_uses_transferred_prompt_and_falls_back_to_urls():
     processor.try_receive_mm_kwargs.return_value = None
     image = Image.new("RGB", (1, 1))
     processor.image_loader.load_image_batch.return_value = [image]
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -708,7 +732,8 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
     image = Image.new("RGB", (1, 1))
     processor.image_loader.load_image_batch.return_value = [image]
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -733,7 +758,8 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
         lambda grid, shape, request_id: decode_mm_data,
     )
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -759,7 +785,8 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
 async def test_non_qwen_decode_uses_expanded_prompt_tokens():
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -785,7 +812,8 @@ async def test_decode_reloads_video_media():
     video = object()
     processor.video_loader.load_video_batch.return_value = [video]
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {
@@ -1067,3 +1095,202 @@ def test_qwen_handoff_accepts_encoder_embeddings():
         "image_grid_thw": [[1, 16, 16]],
         "embeddings_shape": [1, 256, 1024],
     }
+
+
+# --- Kimi-K3 structural-pad -> checkpoint-native expansion -------------------
+
+_K3_PAD_ID = 163605
+_K3_NATIVE_IDS = [27, 91, 74, 30223, 11947, 114136, 91, 29]
+
+
+def _k3_processor(
+    *,
+    model_type: str = "kimi_k3",
+    unified_vision_chunk: bool = False,
+    pad_id: object = _K3_PAD_ID,
+    image_placeholder: object = "<|kimi_image_placeholder|>",
+    native_ids: object = _K3_NATIVE_IDS,
+) -> tuple[mod.VllmMultimodalRequestProcessor, MagicMock]:
+    tokenizer = SimpleNamespace(
+        encode=MagicMock(return_value=native_ids),
+    )
+    engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    model_type=model_type,
+                    media_placeholder_token_id=pad_id,
+                    image_placeholder=image_placeholder,
+                    use_unified_vision_chunk=unified_vision_chunk,
+                )
+            )
+        ),
+        get_tokenizer=MagicMock(return_value=tokenizer),
+    )
+    processor = mod.VllmMultimodalRequestProcessor(
+        model="moonshotai/Kimi-K3",
+        engine_client=engine_client,
+        enable_multimodal=True,
+        use_unified_vision_chunk=unified_vision_chunk,
+    )
+    return processor, engine_client
+
+
+def test_k3_pad_expands_once_for_scalar_image():
+    processor, _ = _k3_processor()
+
+    result = processor._expand_kimi_k3_pads(
+        [1, _K3_PAD_ID, 2],
+        {"image": object()},
+    )
+
+    assert result == [1, *_K3_NATIVE_IDS, 2]
+
+
+def test_k3_pad_expands_once_per_image():
+    processor, _ = _k3_processor()
+
+    result = processor._expand_kimi_k3_pads(
+        [_K3_PAD_ID, 7, _K3_PAD_ID],
+        {"image": [object(), object()]},
+    )
+
+    assert result == [*_K3_NATIVE_IDS, 7, *_K3_NATIVE_IDS]
+
+
+def test_k3_pad_expands_for_unified_vision_chunk():
+    processor, _ = _k3_processor(unified_vision_chunk=True)
+
+    result = processor._expand_kimi_k3_pads(
+        [1, _K3_PAD_ID, 2],
+        {"vision_chunk": object()},
+    )
+
+    assert result == [1, *_K3_NATIVE_IDS, 2]
+
+
+def test_k3_mismatched_pad_count_is_rejected():
+    processor, _ = _k3_processor()
+
+    with pytest.raises(ValueError, match="refusing to expand"):
+        processor._expand_kimi_k3_pads(
+            [_K3_PAD_ID],
+            {"image": [object(), object()]},
+        )
+
+
+def test_k3_already_native_prompt_is_untouched():
+    processor, _ = _k3_processor()
+    native_prompt = [1, *_K3_NATIVE_IDS, 2]
+
+    result = processor._expand_kimi_k3_pads(
+        native_prompt,
+        {"image": object()},
+    )
+
+    assert result is native_prompt
+
+
+def test_non_k3_model_is_never_rewritten_and_resolution_is_cached():
+    processor, engine_client = _k3_processor(model_type="qwen3_vl")
+    tokens = [1, _K3_PAD_ID, 2]
+
+    assert processor._expand_kimi_k3_pads(tokens, {"image": object()}) is tokens
+    assert processor._expand_kimi_k3_pads(tokens, {"image": object()}) is tokens
+    engine_client.get_tokenizer.assert_not_called()
+
+
+def test_incomplete_engine_metadata_is_not_cached():
+    processor, engine_client = _k3_processor()
+    engine_client.vllm_config.model_config.hf_config = None
+
+    assert processor._kimi_k3_pad_expansion() is None
+
+    _, ready_engine_client = _k3_processor()
+    engine_client.vllm_config.model_config.hf_config = (
+        ready_engine_client.vllm_config.model_config.hf_config
+    )
+    assert processor._kimi_k3_pad_expansion() == (_K3_PAD_ID, _K3_NATIVE_IDS)
+
+
+def test_k3_without_raw_image_media_is_untouched():
+    processor, engine_client = _k3_processor(pad_id=None)
+    tokens = [1, _K3_PAD_ID, 2]
+
+    assert processor._expand_kimi_k3_pads(tokens, None) is tokens
+    assert processor._expand_kimi_k3_pads(tokens, {}) is tokens
+    assert processor._expand_kimi_k3_pads(tokens, {"video": object()}) is tokens
+    assert processor._expand_kimi_k3_pads(tokens, {"image": []}) is tokens
+    engine_client.get_tokenizer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("pad_id", "image_placeholder", "native_ids", "message"),
+    [
+        (None, "<|kimi_image_placeholder|>", _K3_NATIVE_IDS, "integer"),
+        (_K3_PAD_ID, "", _K3_NATIVE_IDS, "non-empty image_placeholder"),
+        (_K3_PAD_ID, "<|kimi_image_placeholder|>", [], "non-empty integer"),
+        (_K3_PAD_ID, "<|kimi_image_placeholder|>", ["bad"], "non-empty integer"),
+    ],
+)
+def test_invalid_k3_metadata_fails_fast(
+    pad_id: object,
+    image_placeholder: object,
+    native_ids: object,
+    message: str,
+):
+    processor, _ = _k3_processor(
+        pad_id=pad_id,
+        image_placeholder=image_placeholder,
+        native_ids=native_ids,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        processor._expand_kimi_k3_pads(
+            [_K3_PAD_ID],
+            {"image": object()},
+        )
+
+
+def test_k3_tokenizer_failure_is_not_cached_or_suppressed():
+    processor, engine_client = _k3_processor()
+    engine_client.get_tokenizer.side_effect = RuntimeError("tokenizer failed")
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="tokenizer failed"):
+            processor._expand_kimi_k3_pads(
+                [_K3_PAD_ID],
+                {"image": object()},
+            )
+    assert engine_client.get_tokenizer.call_count == 2
+
+
+def test_k3_successful_mapping_is_cached():
+    processor, engine_client = _k3_processor()
+
+    for _ in range(2):
+        assert (
+            processor._expand_kimi_k3_pads(
+                [_K3_PAD_ID],
+                {"image": object()},
+            )
+            == _K3_NATIVE_IDS
+        )
+    engine_client.get_tokenizer.assert_called_once_with()
+
+
+def test_k3_long_prompt_splices_only_rare_pads():
+    processor, _ = _k3_processor()
+    tokens = list(range(100_000))
+    tokens[10] = _K3_PAD_ID
+    tokens[-10] = _K3_PAD_ID
+
+    result = processor._expand_kimi_k3_pads(
+        tokens,
+        {"image": [object(), object()]},
+    )
+
+    assert result[:10] == tokens[:10]
+    assert result[10 : 10 + len(_K3_NATIVE_IDS)] == _K3_NATIVE_IDS
+    assert result[-(len(_K3_NATIVE_IDS) + 9) : -9] == _K3_NATIVE_IDS
+    assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
