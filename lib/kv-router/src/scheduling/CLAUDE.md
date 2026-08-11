@@ -123,7 +123,7 @@ The `selector` module contains the public Rust contract for custom worker scorer
 - Document the source, units, lifetime, staleness, missing-data behavior, weighting, and clamping for each public value.
 - Require callers to name each `WorkerInputs` group that they use. Do not add a public `ALL` shortcut.
 - Before you add a value to an existing input group, account for its calculation and retained-column cost for every policy that requests that group.
-- Do not expose `SchedulingRequest`, worker maps, router configuration internals, default-score weights, or host-owned eligibility and reservation state.
+- Do not pass the full `SchedulingRequest`, worker maps, router configuration internals, default-score weights, or host-owned eligibility and reservation state to custom policies.
 - Keep `DefaultWorkerScorer` and `DefaultWorkerPicker` internal. External policies own both stages of their policy.
 - Keep eligibility, picker-row validation, accounting, and reservation in the host path.
 
