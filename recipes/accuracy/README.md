@@ -56,7 +56,7 @@ of its env list, then apply it:
 # (for example when switching ENDPOINT to a different target).
 kubectl delete job accuracy-check -n $NAMESPACE --ignore-not-found
 kubectl apply -f accuracy.yaml -n $NAMESPACE
-kubectl logs -f -l app=accuracy-check -n $NAMESPACE
+kubectl logs -f job/accuracy-check -n $NAMESPACE
 ```
 
 ## Reading the result
@@ -87,8 +87,9 @@ compare the general range rather than exact decimals:
   benchmarking (on SGLang, the `SGLANG_SIMULATE_ACC_*` environment variables).
   Those bypass real draft-token verification, so the outputs are not
   representative. Accuracy must be measured with verification on.
-- The HF token in `hf-token-secret` must have accepted the benchmark dataset's
-  terms if it is gated.
+- The `hf-token-secret` is optional: the Job starts without it, and it is only
+  needed for gated models or datasets. For a gated benchmark (GPQA-Diamond, for
+  example) the token must have accepted the dataset's terms.
 - The Job mounts a `model-cache` PVC for the tokenizer, dataset, and results.
   Most recipes create one under that name; if the recipe under test uses a
   different one, update `claimName` in the manifest, or the pod sits `Pending`

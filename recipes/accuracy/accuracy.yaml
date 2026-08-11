@@ -145,6 +145,9 @@ spec:
           echo "Artifact dir: ${RUN_DIR}"
           echo "=============================================="
 
+          # NOTE: --tokenizer-trust-remote-code executes tokenizer code from
+          # the TARGET_MODEL repo; some checkpoints require it to load. Only
+          # point TARGET_MODEL at repos you trust.
           aiperf profile \
             -m "$TARGET_MODEL" \
             --tokenizer "$TARGET_MODEL" \
@@ -206,6 +209,10 @@ spec:
         # raise it to finish sooner, bounded by what the deployment can serve.
         - name: CONCURRENCY
           value: "10"
+        # Readiness poll: attempts x 5s sleep = max wait for the model to
+        # appear on /v1/models before the Job fails (720 = 1 hour).
+        - name: WAIT_FOR_MODEL_MAX_ATTEMPTS
+          value: "720"
         - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
           value: "3600"
         - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
@@ -222,8 +229,11 @@ spec:
         - name: PYTHONUNBUFFERED
           value: "1"
         envFrom:
+        # Only needed for gated models/datasets; optional so the pod still
+        # starts when the secret is absent.
         - secretRef:
             name: hf-token-secret
+            optional: true
         resources:
           requests:
             cpu: "4"
