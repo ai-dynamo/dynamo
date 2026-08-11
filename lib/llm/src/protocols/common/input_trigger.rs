@@ -9,13 +9,7 @@
 //! Responses API `function_call_output` items) that is lost or split during protocol
 //! normalization.
 
-use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, CreateChatCompletionRequest,
-    responses::{InputItem, InputParam, InputRole, Item, MessageItem, Role as ResponseRole},
-};
-use dynamo_runtime::pipeline::Context;
-
-use super::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger};
+use super::extensions::InputTrigger;
 use crate::protocols::{
     anthropic::{
         AnthropicContentBlock, AnthropicCreateMessageRequest, AnthropicMessageContent,
@@ -26,20 +20,10 @@ use crate::protocols::{
         responses::NvCreateResponse,
     },
 };
-
-/// Attach a classified `input_trigger` to the `AgentContext` already present in
-/// `context`. If no agent context exists, this is a no-op: the trigger only makes
-/// sense alongside session identity.
-pub fn attach_input_trigger<T>(context: &mut Context<T>, input_trigger: InputTrigger)
-where
-    T: Send + Sync + 'static,
-{
-    if let Ok(agent_context) = context.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
-        let mut agent_context = (*agent_context).clone();
-        agent_context.input_trigger = Some(input_trigger);
-        context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
-    }
-}
+use dynamo_protocols::types::{
+    ChatCompletionRequestMessage, CreateChatCompletionRequest,
+    responses::{InputItem, InputParam, InputRole, Item, MessageItem, Role as ResponseRole},
+};
 
 /// Classify an OpenAI Chat Completions request by its last causal message.
 pub fn classify_chat_request(request: &NvCreateChatCompletionRequest) -> InputTrigger {
@@ -88,6 +72,7 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                     ResponseRole::User => InputTrigger::UserMessage,
                     _ => InputTrigger::Other,
                 },
+                // TODO: Classify non-function tool output variants as ToolResult.
                 _ => InputTrigger::Other,
             }
         }
