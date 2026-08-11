@@ -98,11 +98,14 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 
 ## Add a Policy
 
-1. Copy `basic` or `disaggregated` into a new crate.
-2. Implement the scorer and picker. Declare each signal with `required_worker_inputs`.
-3. Parse and validate policy parameters in the provider.
+Start with a new Rust library crate. The `basic` and `disaggregated` crates are runnable references, not templates.
+
+1. Implement the scorer and picker. Declare each signal with `required_worker_inputs`.
+2. Parse and validate policy parameters in the provider.
+3. Return a factory that builds the policy for each worker type.
 4. Register a unique policy type name.
-5. Add the crate dependency and `register` call to `catalog`.
-6. Add the crate to the root Cargo workspace so CI builds it.
+5. Add the crate dependency and `register` call to the catalog that ships with your frontend or EPP.
+
+The [custom routing guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) explains the traits, available signals, factory lifecycle, and registration flow.
 
 `score` and `pick` run in the scheduler queue actor. Keep them free of blocking I/O and return finite costs and a valid candidate row.
