@@ -1308,6 +1308,15 @@ where
         self.scheduler.free_if_worker(request_id, worker).await
     }
 
+    /// Release an aborted booking only if it still belongs to `worker`.
+    pub async fn abort_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.scheduler.abort_if_worker(request_id, worker).await
+    }
+
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
         self.scheduler.pending_count()

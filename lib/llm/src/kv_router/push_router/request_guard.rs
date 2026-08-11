@@ -55,24 +55,39 @@ where
         }
     }
 
-    async fn finish(&mut self) {
+    async fn release(&mut self, completed: bool) {
         if self.freed {
             return;
         }
-        if self.scheduler_tracked
-            && let Err(error) = self
-                .chooser
-                .free_if_worker(&self.context_id, self.worker)
-                .await
-        {
-            tracing::warn!(
-                request_id = %self.context_id,
-                worker = ?self.worker,
-                %error,
-                "Failed to free request"
-            );
+        if self.scheduler_tracked {
+            let result = if completed {
+                self.chooser
+                    .free_if_worker(&self.context_id, self.worker)
+                    .await
+            } else {
+                self.chooser
+                    .abort_if_worker(&self.context_id, self.worker)
+                    .await
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    request_id = %self.context_id,
+                    worker = ?self.worker,
+                    %error,
+                    completed,
+                    "Failed to release request"
+                );
+            }
         }
         self.freed = true;
+    }
+
+    async fn complete(&mut self) {
+        self.release(true).await;
+    }
+
+    async fn abort(&mut self) {
+        self.release(false).await;
     }
 }
 
@@ -97,7 +112,7 @@ where
         let context_id = self.context_id.clone();
         let worker = self.worker;
         handle.spawn(async move {
-            let result = chooser.free_if_worker(&context_id, worker).await;
+            let result = chooser.abort_if_worker(&context_id, worker).await;
             if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
@@ -399,11 +414,11 @@ where
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
-        self.cleanup.finish().await;
+        self.cleanup.complete().await;
     }
 
     pub(super) async fn abort(&mut self) {
-        self.cleanup.finish().await;
+        self.cleanup.abort().await;
     }
 }
 

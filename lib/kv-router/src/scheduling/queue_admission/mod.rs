@@ -5,6 +5,153 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::types::SessionContext;
+
+/// Scheduler-assigned identity for one request managed by a [`PolicyQueuePolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PolicyQueueId(u64);
+
+impl PolicyQueueId {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// One worker/rank visible to queue admission for this request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyQueueWorker {
+    worker: WorkerWithDpRank,
+    capacity_tokens: Option<usize>,
+    available: bool,
+}
+
+impl PolicyQueueWorker {
+    pub(crate) fn new(
+        worker: WorkerWithDpRank,
+        capacity_tokens: Option<usize>,
+        available: bool,
+    ) -> Self {
+        Self {
+            worker,
+            capacity_tokens,
+            available,
+        }
+    }
+
+    /// Return the worker and data-parallel rank.
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.worker
+    }
+
+    /// Return the worker's reported KV capacity in tokens.
+    ///
+    /// `None` means discovery did not report usable KV capacity.
+    pub fn capacity_tokens(&self) -> Option<usize> {
+        self.capacity_tokens
+    }
+
+    /// Return whether the worker is currently eligible, including transient overload state.
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+}
+
+/// Read-only request facts supplied to a queue admission policy.
+pub struct PolicyQueueRequest<'a> {
+    id: PolicyQueueId,
+    request_id: &'a str,
+    context_tokens: usize,
+    session_context: Option<&'a SessionContext>,
+    workers: &'a [PolicyQueueWorker],
+}
+
+impl<'a> PolicyQueueRequest<'a> {
+    pub(crate) fn new(
+        id: PolicyQueueId,
+        request_id: &'a str,
+        context_tokens: usize,
+        session_context: Option<&'a SessionContext>,
+        workers: &'a [PolicyQueueWorker],
+    ) -> Self {
+        Self {
+            id,
+            request_id,
+            context_tokens,
+            session_context,
+            workers,
+        }
+    }
+
+    pub fn id(&self) -> PolicyQueueId {
+        self.id
+    }
+
+    pub fn request_id(&self) -> &str {
+        self.request_id
+    }
+
+    pub fn context_tokens(&self) -> usize {
+        self.context_tokens
+    }
+
+    pub fn session_context(&self) -> Option<&SessionContext> {
+        self.session_context
+    }
+
+    /// Return the routing partition's current workers.
+    ///
+    /// Transient overload and hard availability are reported by
+    /// [`PolicyQueueWorker::is_available`]. Request constraints remain the worker picker's job.
+    pub fn workers(&self) -> &[PolicyQueueWorker] {
+        self.workers
+    }
+}
+
+/// Initial queue admission decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PolicyQueueDecision {
+    /// Do not track this request in the custom queue policy.
+    Bypass,
+    /// Allow normal queue ordering and worker selection.
+    Ready,
+    /// Keep the request in host-owned deferred storage until the policy wakes it.
+    Defer,
+}
+
+/// Lifecycle input delivered serially by the scheduler queue actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PolicyQueueEvent<'a> {
+    Dispatched {
+        id: PolicyQueueId,
+        worker: WorkerWithDpRank,
+    },
+    Completed {
+        request_id: &'a str,
+    },
+    Aborted {
+        request_id: &'a str,
+    },
+    /// Periodic or topology-driven opportunity to reconsider deferred work.
+    Reconcile {
+        workers: &'a [PolicyQueueWorker],
+    },
+}
+
+/// Optional admission policy hosted by [`super::policy_queue::PolicyQueue`].
+///
+/// Dynamo keeps ownership of requests and deferred storage. Implementations retain only
+/// policy state and append IDs of previously deferred requests that should become ready.
+pub trait PolicyQueuePolicy: Send {
+    fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision;
+
+    fn on_event(&mut self, _event: PolicyQueueEvent<'_>, _ready: &mut Vec<PolicyQueueId>) {}
+}
 
 /// Lock-free access to the latest logical context observed for one request.
 #[derive(Debug, Clone)]

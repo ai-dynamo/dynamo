@@ -23,6 +23,7 @@ use policy::{
 
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
+use super::queue_admission::PolicyQueuePolicy;
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
@@ -39,6 +40,14 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    /// Transfer an optional queue admission policy into this selector's scheduler.
+    ///
+    /// External policies should attach one through [`WorkerSelectionPolicy::with_queue_policy`]
+    /// rather than implementing this low-level method.
+    fn take_queue_policy(&mut self) -> Option<Box<dyn PolicyQueuePolicy>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
