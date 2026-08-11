@@ -230,6 +230,79 @@ def extract_prompt_logprobs_from_sglang_meta(
     return payload
 
 
+def _decode_sglang_token_ids(
+    token_ids: list[int],
+    tokenizer: Any,
+) -> list[Optional[str]]:
+    """Decode individual token IDs like SGLang's OpenAI adapter."""
+    if not token_ids or tokenizer is None:
+        return [None] * len(token_ids)
+    try:
+        return list(tokenizer.batch_decode([[token_id] for token_id in token_ids]))
+    except Exception:
+        logger.debug("SGLang tokenizer failed to decode logprob tokens", exc_info=True)
+        return [None] * len(token_ids)
+
+
+def extract_openai_completion_prompt_logprobs(
+    meta_info: dict[str, Any],
+    *,
+    tokenizer: Any = None,
+) -> Optional[dict[str, Any]]:
+    """Return SGLang prompt logprobs in the legacy completions wire shape."""
+    input_logprobs = meta_info.get("input_token_logprobs")
+    if not input_logprobs:
+        return None
+
+    input_top_logprobs = meta_info.get("input_top_logprobs") or []
+    decoded_input_tokens = iter(
+        _decode_sglang_token_ids(
+            [token_id for _, token_id, token in input_logprobs if token is None],
+            tokenizer,
+        )
+    )
+    tokens: list[str] = []
+    token_logprobs: list[Optional[float]] = []
+    top_logprobs: list[Optional[dict[str, float]]] = []
+
+    for index, entry in enumerate(input_logprobs):
+        logprob, _token_id, token = entry
+        token_text = token if token is not None else next(decoded_input_tokens, None)
+        tokens.append(token_text or "")
+        token_logprobs.append(None if logprob is None else float(logprob))
+        top_at_position = (
+            input_top_logprobs[index] if index < len(input_top_logprobs) else None
+        )
+        if top_at_position is None:
+            top_logprobs.append(None)
+            continue
+
+        decoded_top_tokens = iter(
+            _decode_sglang_token_ids(
+                [token_id for _, token_id, token in top_at_position if token is None],
+                tokenizer,
+            )
+        )
+        top_logprobs.append(
+            {
+                (
+                    top_token
+                    if top_token is not None
+                    else next(decoded_top_tokens, None) or "null"
+                ): float(top_logprob)
+                for top_logprob, _token_id, top_token in top_at_position
+            }
+        )
+
+    return {
+        "tokens": tokens,
+        "token_logprobs": token_logprobs,
+        "top_logprobs": top_logprobs,
+        # Dynamo generated protocol offsets are u32; SGLang emits -1.
+        "text_offset": [0] * len(tokens),
+    }
+
+
 _SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
     "an O(N) per-position detokenization in the upstream sglang tokenizer "
@@ -301,20 +374,36 @@ def extract_from_sglang_meta(
     meta_info: dict[str, Any],
     num_output_logprobs_so_far: int,
     *,
+    num_output_tokens_in_chunk: Optional[int] = None,
     return_tokens_as_token_ids: bool = False,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]], int]:
-    """Extract logprobs from SGLang's ``meta_info`` dict.
+    """Extract logprobs from SGLang ``meta_info`` across supported stream shapes.
 
-    SGLang's ``output_token_logprobs`` / ``output_top_logprobs`` are
-    cumulative across stream chunks even though ``output_ids`` is
-    disjoint — the caller passes the running count to slice the new
-    entries, and the returned third element is the updated count.
+    SGLang emits cumulative metadata on some releases and metadata for just
+    the disjoint ``output_ids`` chunk on others. Prefer the exact per-chunk
+    window when its length matches ``output_ids``; otherwise use the running
+    cursor for cumulative metadata.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
         return None, None, num_output_logprobs_so_far
 
-    new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
+    per_chunk = (
+        num_output_tokens_in_chunk is not None
+        and len(output_token_logprobs) <= num_output_tokens_in_chunk
+    )
+    if per_chunk:
+        start = 0
+        end = len(output_token_logprobs)
+        next_logprobs_total = num_output_logprobs_so_far + end
+    else:
+        start = num_output_logprobs_so_far
+        end = len(output_token_logprobs)
+        if num_output_tokens_in_chunk is not None:
+            end = min(end, start + num_output_tokens_in_chunk)
+        next_logprobs_total = len(output_token_logprobs)
+
+    new_logprobs = output_token_logprobs[start:end]
     if not new_logprobs:
         return None, None, num_output_logprobs_so_far
 
@@ -323,7 +412,7 @@ def extract_from_sglang_meta(
     top_logprobs: Optional[list[list[dict[str, Any]]]] = None
     output_top = meta_info.get("output_top_logprobs")
     if output_top:
-        new_top = output_top[num_output_logprobs_so_far:]
+        new_top = output_top[start:end]
         if new_top:
             top_logprobs = []
             for position_entries in new_top:
@@ -346,4 +435,4 @@ def extract_from_sglang_meta(
                     )
                 top_logprobs.append(position_list)
 
-    return log_probs, top_logprobs, len(output_token_logprobs)
+    return log_probs, top_logprobs, next_logprobs_total

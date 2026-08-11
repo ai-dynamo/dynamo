@@ -562,6 +562,26 @@ mod tests {
     }
 
     #[test]
+    fn test_sglang_compatible_logprob_depth_validation() {
+        for depth in [6, 21, u8::MAX] {
+            let accepted: NvCreateCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "prompt": "test",
+                "logprobs": depth
+            }))
+            .expect("deserialize accepted depth");
+            ValidateRequest::validate(&accepted).expect("SGLang-compatible depth must validate");
+        }
+
+        let too_large = serde_json::from_value::<NvCreateCompletionRequest>(json!({
+            "model": "test-model",
+            "prompt": "test",
+            "logprobs": 256
+        }));
+        assert!(too_large.is_err());
+    }
+
+    #[test]
     fn test_prompt_embeds_only() {
         // Create valid embeddings: > 100 bytes (PyTorch format)
         let valid_data = vec![0u8; 256];

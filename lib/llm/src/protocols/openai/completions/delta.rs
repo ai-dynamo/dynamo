@@ -118,7 +118,12 @@ impl DeltaGenerator {
                 .map(|(((t, tid), lp), top_lps)| {
                     let converted =
                         convert_backend_top_logprobs(top_lps, t, *tid, *lp, return_as_ids);
-                    serde_json::to_value(converted).unwrap()
+                    serde_json::Value::Object(
+                        converted
+                            .into_iter()
+                            .map(|entry| (entry.token, serde_json::json!(entry.logprob)))
+                            .collect(),
+                    )
                 })
                 .collect()
         });
@@ -141,6 +146,31 @@ impl DeltaGenerator {
             text_offset,
             top_logprobs: top_lps,
         })
+    }
+
+    fn prompt_logprobs_from_engine_data(
+        engine_data: Option<&serde_json::Value>,
+    ) -> Option<dynamo_protocols::types::Logprobs> {
+        engine_data
+            .and_then(|data| data.get("openai_completion_prompt_logprobs"))
+            .and_then(|logprobs| serde_json::from_value(logprobs.clone()).ok())
+    }
+
+    fn merge_logprobs(
+        prompt_logprobs: Option<dynamo_protocols::types::Logprobs>,
+        completion_logprobs: Option<dynamo_protocols::types::Logprobs>,
+    ) -> Option<dynamo_protocols::types::Logprobs> {
+        match (prompt_logprobs, completion_logprobs) {
+            (Some(mut prompt), Some(completion)) => {
+                prompt.tokens.extend(completion.tokens);
+                prompt.token_logprobs.extend(completion.token_logprobs);
+                prompt.top_logprobs.extend(completion.top_logprobs);
+                prompt.text_offset.extend(completion.text_offset);
+                Some(prompt)
+            }
+            (Some(prompt), None) => Some(prompt),
+            (None, completion) => completion,
+        }
     }
 
     pub fn create_choice(
@@ -255,20 +285,26 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         } else {
             None
         };
-        let logprobs = self.create_logprobs(
+
+        let finish_reason = delta.finish_reason.map(Into::into);
+        let stop_reason = delta.stop_reason.clone();
+
+        // Create the first choice chunk. SGLang supplies echoed-prompt
+        // logprobs in its opaque engine metadata; prepend those only here.
+        let index = delta.index.unwrap_or(0);
+        let is_first_choice_delta = self.echoed_choices.insert(index);
+        let prompt_logprobs = is_first_choice_delta
+            .then(|| Self::prompt_logprobs_from_engine_data(delta.engine_data.as_ref()))
+            .flatten();
+        let completion_logprobs = self.create_logprobs(
             delta.tokens,
             delta.token_ids,
             delta.log_probs,
             delta.top_logprobs,
         );
-
-        let finish_reason = delta.finish_reason.map(Into::into);
-        let stop_reason = delta.stop_reason.clone();
-
-        // create choice
-        let index = delta.index.unwrap_or(0);
+        let logprobs = Self::merge_logprobs(prompt_logprobs, completion_logprobs);
         let text = delta.text.clone().map(|text| {
-            if self.echoed_choices.insert(index) {
+            if is_first_choice_delta {
                 self.echo_text.clone().unwrap_or_default() + &text
             } else {
                 text
@@ -464,6 +500,44 @@ mod tests {
     }
 
     #[test]
+    fn test_echo_prepends_sglang_prompt_logprobs_to_first_chunk() {
+        let mut request = create_test_request();
+        request.inner.echo = Some(true);
+        request.inner.logprobs = Some(2);
+        let mut generator = request.response_generator("req-prompt-logprobs".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = Some(vec![vec![common::llm_backend::TopLogprob {
+            rank: 1,
+            token_id: 1,
+            token: Some("hello".to_string()),
+            logprob: -0.5,
+            bytes: None,
+        }]]);
+        output.engine_data = Some(serde_json::json!({
+            "openai_completion_prompt_logprobs": {
+                "tokens": ["test"],
+                "token_logprobs": [null],
+                "top_logprobs": [null],
+                "text_offset": [0]
+            }
+        }));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+        let logprobs = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs");
+
+        assert_eq!(logprobs.tokens, vec!["test", "hello"]);
+        assert_eq!(logprobs.token_logprobs, vec![None, Some(-0.5)]);
+        assert_eq!(logprobs.top_logprobs[0], serde_json::Value::Null);
+        assert_eq!(logprobs.top_logprobs[1], serde_json::json!({"hello": -0.5}));
+    }
+
+    #[test]
     fn test_plain_request_without_extra_fields_omits_nvext() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-no-nvext".to_string());
@@ -559,19 +633,10 @@ mod tests {
 
         assert_eq!(logprobs.tokens, vec!["token_id:123"]);
         let top_logprobs = logprobs.top_logprobs[0]
-            .as_array()
-            .expect("top_logprobs array");
-        let other = top_logprobs
-            .iter()
-            .find(|item| item["token"] == "token_id:999")
-            .expect("top token_id formatting");
-        assert_eq!(other["bytes"], serde_json::json!(b"token_id:999"));
-        let selected = top_logprobs
-            .iter()
-            .find(|item| item["token"] == "token_id:123")
-            .expect("selected token fallback");
-        assert_eq!(selected["token"], "token_id:123");
-        assert_eq!(selected["bytes"], serde_json::json!(b"token_id:123"));
+            .as_object()
+            .expect("top_logprobs map");
+        assert_eq!(top_logprobs["token_id:999"], serde_json::json!(-1.0));
+        assert_eq!(top_logprobs["token_id:123"], serde_json::json!(-0.5));
     }
 
     #[test]

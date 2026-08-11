@@ -331,11 +331,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _extract_logprobs(
         meta_info: Dict[str, Any],
         num_output_logprobs_so_far: int,
+        *,
+        num_output_tokens_in_chunk: int | None = None,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
             num_output_logprobs_so_far,
+            num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
@@ -367,6 +370,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_tokens_as_token_ids = bool(
             output_options.get("return_tokens_as_token_ids")
         )
+        include_prompt_logprobs = output_options.get("prompt_logprobs") is not None
         user_stop_token_ids = _user_stop_token_ids(request)
 
         lora_path = self._resolve_lora(request)
@@ -424,6 +428,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
+                    include_prompt_logprobs=include_prompt_logprobs,
                     metadata_uploader=metadata_uploader,
                 ):
                     yield out
@@ -494,6 +499,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
+                    include_prompt_logprobs=include_prompt_logprobs,
                     metadata_uploader=metadata_uploader,
                 ):
                     yield out
@@ -513,6 +519,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         context: Context,
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
+        include_prompt_logprobs: bool = False,
         metadata_uploader: MetadataUploader | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
@@ -534,6 +541,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # With n>1, chunks for different choices are interleaved, so track the
         # cumulative-logprob cursor per choice index instead of globally.
         output_logprobs_per_choice: dict[int, int] = {}
+        prompt_logprobs_emitted: set[int] = set()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -585,6 +593,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     ) = self._extract_logprobs(
                         meta_info,
                         output_logprobs_per_choice.get(output_idx, 0),
+                        num_output_tokens_in_chunk=len(output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
                     output_logprobs_per_choice[output_idx] = next_logprobs_total
@@ -593,12 +602,34 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                engine_data: dict[str, Any] = dict(res.get("engine_data") or {})
+                if (
+                    metadata_uploader is None
+                    and include_prompt_logprobs
+                    and output_idx not in prompt_logprobs_emitted
+                ):
+                    tokenizer = getattr(
+                        getattr(self.engine, "tokenizer_manager", None),
+                        "tokenizer",
+                        None,
+                    )
+                    prompt_logprobs = (
+                        _shared_logprobs.extract_openai_completion_prompt_logprobs(
+                            meta_info, tokenizer=tokenizer
+                        )
+                    )
+                    if prompt_logprobs is not None:
+                        engine_data[
+                            "openai_completion_prompt_logprobs"
+                        ] = prompt_logprobs
+                        prompt_logprobs_emitted.add(output_idx)
+
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
-                    out["engine_data"] = {"routed_experts": routed_experts}
+                    engine_data["routed_experts"] = routed_experts
                 if finish_reason:
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
@@ -624,6 +655,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             meta_info.clear()
                 elif metadata_uploader is not None:
                     meta_info.clear()
+                if engine_data:
+                    out["engine_data"] = engine_data
                 if not context.is_stopped():
                     yield out
 
