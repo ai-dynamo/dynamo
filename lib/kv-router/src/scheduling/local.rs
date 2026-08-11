@@ -215,6 +215,11 @@ where
             overloaded_worker_provider,
             available_worker_provider,
         )?);
+        let recheck_interval = queue
+            .policy_reconcile_interval()
+            .map_or(recheck_interval, |policy_interval| {
+                policy_interval.min(recheck_interval)
+            });
 
         let (queue_updates, _) = watch::channel(());
 
@@ -595,20 +600,15 @@ where
             self.queue.update_worker(worker).await;
             return Ok(());
         }
-        let owned = self.slots.request_worker(&request_id) == Some(worker);
         self.slots
             .free_if_worker(&request_id, worker, Instant::now())?;
-        if owned {
-            match outcome {
-                RequestOutcome::Completed(context_tokens) => {
-                    self.queue
-                        .complete_request(&request_id, worker, context_tokens)
-                        .await;
-                }
-                RequestOutcome::Aborted => self.queue.abort_request(&request_id, worker).await,
+        match outcome {
+            RequestOutcome::Completed(context_tokens) => {
+                self.queue
+                    .complete_request(&request_id, worker, context_tokens)
+                    .await;
             }
-        } else {
-            self.queue.update_worker(worker).await;
+            RequestOutcome::Aborted => self.queue.abort_request(&request_id, worker).await,
         }
         Ok(())
     }
@@ -627,6 +627,11 @@ where
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.queue.supports_overlap_refresh()
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) fn has_queue_policy(&self) -> bool {
+        self.queue.has_queue_policy()
     }
 
     pub fn worker_type(&self) -> &'static str {

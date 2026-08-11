@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::types::SessionContext;
@@ -28,15 +29,22 @@ pub struct PolicyQueueWorker {
     worker: WorkerWithDpRank,
     capacity_tokens: Option<usize>,
     available: bool,
+    eligible: bool,
 }
 
 impl PolicyQueueWorker {
     /// Create a worker snapshot for testing a queue policy outside the scheduler host.
-    pub fn new(worker: WorkerWithDpRank, capacity_tokens: Option<usize>, available: bool) -> Self {
+    pub fn new(
+        worker: WorkerWithDpRank,
+        capacity_tokens: Option<usize>,
+        available: bool,
+        eligible: bool,
+    ) -> Self {
         Self {
             worker,
             capacity_tokens,
             available,
+            eligible,
         }
     }
 
@@ -55,6 +63,22 @@ impl PolicyQueueWorker {
     /// Return whether the worker is currently eligible, including transient overload state.
     pub fn is_available(&self) -> bool {
         self.available
+    }
+
+    /// Return whether this request can use the worker.
+    ///
+    /// Reconciliation events describe the partition rather than one request,
+    /// so their workers are always eligible.
+    pub fn is_eligible(&self) -> bool {
+        self.eligible
+    }
+
+    pub(crate) fn set_available(&mut self, available: bool) {
+        self.available = available;
+    }
+
+    pub(crate) fn set_eligible(&mut self, eligible: bool) {
+        self.eligible = eligible;
     }
 }
 
@@ -104,7 +128,9 @@ impl<'a> PolicyQueueRequest<'a> {
     /// Return the routing partition's current workers.
     ///
     /// Transient overload and hard availability are reported by
-    /// [`PolicyQueueWorker::is_available`]. Request constraints remain the worker picker's job.
+    /// [`PolicyQueueWorker::is_available`]. Request eligibility is reported by
+    /// [`PolicyQueueWorker::is_eligible`]. The worker picker validates eligibility
+    /// again before final selection.
     pub fn workers(&self) -> &[PolicyQueueWorker] {
         self.workers
     }
@@ -152,6 +178,13 @@ pub trait PolicyQueuePolicy: Send {
     fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision;
 
     fn on_event(&mut self, _event: PolicyQueueEvent<'_>, _ready: &mut Vec<PolicyQueueId>) {}
+
+    /// Return the maximum interval between reconciliation events.
+    ///
+    /// `None` uses the host interval. A zero duration is ignored.
+    fn reconcile_interval(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// Lock-free access to the latest logical context observed for one request.

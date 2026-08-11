@@ -751,7 +751,7 @@ impl SelectionCore {
             )
             .await?;
         let mode = if book {
-            ScheduleMode::Tracked {
+            ScheduleMode::TrackedWithLifecycle {
                 request_id: selection_id.clone().ok_or_else(|| {
                     SelectionError::Internal(
                         "booked selection did not include a selection ID".to_string(),
@@ -1031,6 +1031,13 @@ impl SelectionCore {
             track_prefill_tokens,
             lora_name,
         } = booking;
+
+        if entry.scheduler.has_queue_policy() {
+            return Err(SelectionError::BadRequest(
+                "create_reservation is not supported with a queue policy; use select_and_reserve"
+                    .to_string(),
+            ));
+        }
 
         // Strict booking: never lazily recreate a worker/rank removed since the
         // reservation was resolved.

@@ -138,7 +138,7 @@ enum AdmissionCommand {
     },
     Update {
         worker: Option<WorkerWithDpRank>,
-        finished: Option<(String, PolicyRequestOutcome)>,
+        finished: Option<(String, WorkerWithDpRank, PolicyRequestOutcome)>,
         ack_tx: oneshot::Sender<()>,
     },
     Cleanup,
@@ -246,6 +246,8 @@ struct SchedulerQueueActor<
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     policy_workers: Vec<PolicyQueueWorker>,
+    policy_workers_initialized: bool,
+    policy_bookings: HashMap<String, WorkerWithDpRank>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
 }
 
@@ -272,6 +274,7 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
     has_queue_policy: bool,
+    policy_reconcile_interval: Option<Duration>,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     _marker: PhantomData<fn() -> (Sel, RF)>,
@@ -352,6 +355,10 @@ impl<
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
         let queue_policy = selector.take_queue_policy();
+        let policy_reconcile_interval = queue_policy
+            .as_ref()
+            .and_then(|policy| policy.reconcile_interval())
+            .filter(|interval| !interval.is_zero());
         let has_queue_policy = queue_policy.is_some();
         let pending = match queue_policy {
             Some(policy) => PolicyQueue::new(profile.clone()).with_policy(policy),
@@ -422,6 +429,8 @@ impl<
             overloaded_worker_provider,
             available_worker_provider,
             policy_workers: Vec::new(),
+            policy_workers_initialized: false,
+            policy_bookings: HashMap::new(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
         };
         tokio::spawn(actor.run(admission_rx));
@@ -435,6 +444,7 @@ impl<
             workers_with_configs,
             queueing_enabled,
             has_queue_policy,
+            policy_reconcile_interval,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             _marker: PhantomData,
@@ -660,6 +670,7 @@ impl<
             Some(worker),
             Some((
                 request_id.to_owned(),
+                worker,
                 PolicyRequestOutcome::Completed { context_tokens },
             )),
         )
@@ -669,7 +680,7 @@ impl<
     pub(crate) async fn abort_request(&self, request_id: &str, worker: WorkerWithDpRank) {
         self.update_after(
             Some(worker),
-            Some((request_id.to_owned(), PolicyRequestOutcome::Aborted)),
+            Some((request_id.to_owned(), worker, PolicyRequestOutcome::Aborted)),
         )
         .await;
     }
@@ -677,7 +688,7 @@ impl<
     async fn update_after(
         &self,
         worker: Option<WorkerWithDpRank>,
-        finished: Option<(String, PolicyRequestOutcome)>,
+        finished: Option<(String, WorkerWithDpRank, PolicyRequestOutcome)>,
     ) {
         if !self.queueing_enabled {
             return;
@@ -723,6 +734,10 @@ impl<
 
     pub(crate) fn has_queue_policy(&self) -> bool {
         self.has_queue_policy
+    }
+
+    pub(crate) fn policy_reconcile_interval(&self) -> Option<Duration> {
+        self.policy_reconcile_interval
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -786,8 +801,8 @@ impl<
                     finished,
                     ack_tx,
                 } => {
-                    if let Some((request_id, outcome)) = finished {
-                        self.handle_policy_finished(&request_id, outcome);
+                    if let Some((request_id, worker, outcome)) = finished {
+                        self.handle_policy_finished(&request_id, worker, outcome);
                     }
                     self.handle_update(worker).await;
                     if drain_cleanup && self.drain_cleanup() {
@@ -848,7 +863,7 @@ impl<
         };
         let policy_admission =
             if request.mode.lifecycle_request_id().is_some() && self.pending.has_policy() {
-                self.refresh_policy_workers();
+                self.refresh_policy_request_workers(&request);
                 self.pending.admit_policy(
                     request
                         .mode
@@ -959,6 +974,40 @@ impl<
     }
 
     fn refresh_policy_workers(&mut self) {
+        let rebuild = !self.policy_workers_initialized
+            || self.workers_with_configs.has_changed().unwrap_or(false);
+        if rebuild {
+            let workers = self.workers_with_configs.borrow_and_update();
+            self.policy_workers.clear();
+            for (&worker_id, config) in workers.iter() {
+                let capacity_tokens =
+                    config
+                        .total_kv_blocks()
+                        .filter(|blocks| *blocks > 0)
+                        .map(|blocks| {
+                            let tokens = blocks
+                                .saturating_mul(u64::from(self.block_size))
+                                .saturating_add(
+                                    config.native_offloading_capacity_tokens().unwrap_or(0),
+                                );
+                            usize::try_from(tokens).unwrap_or(usize::MAX)
+                        });
+                let start = config.data_parallel_start_rank();
+                let end = start.saturating_add(config.data_parallel_size());
+                for dp_rank in start..end {
+                    self.policy_workers.push(PolicyQueueWorker::new(
+                        WorkerWithDpRank::new(worker_id, dp_rank),
+                        capacity_tokens,
+                        true,
+                        true,
+                    ));
+                }
+            }
+            self.policy_workers
+                .sort_unstable_by_key(PolicyQueueWorker::worker);
+            self.policy_workers_initialized = true;
+        }
+
         let overloaded_worker_ids = self
             .overloaded_worker_provider
             .as_ref()
@@ -967,41 +1016,34 @@ impl<
             .available_worker_provider
             .as_ref()
             .and_then(|provider| provider());
-        let workers = self.workers_with_configs.borrow();
-        self.policy_workers.clear();
-
-        for (&worker_id, config) in workers.iter() {
+        for worker in &mut self.policy_workers {
+            let worker_id = worker.worker().worker_id;
             let available = available_worker_ids
                 .as_ref()
                 .is_none_or(|workers| workers.contains(&worker_id))
                 && overloaded_worker_ids
                     .as_ref()
                     .is_none_or(|workers| !workers.contains(&worker_id));
-            let capacity_tokens =
-                config
-                    .total_kv_blocks()
-                    .filter(|blocks| *blocks > 0)
-                    .map(|blocks| {
-                        let tokens = blocks
-                            .saturating_mul(u64::from(self.block_size))
-                            .saturating_add(
-                                config.native_offloading_capacity_tokens().unwrap_or(0),
-                            );
-                        usize::try_from(tokens).unwrap_or(usize::MAX)
-                    });
-            let start = config.data_parallel_start_rank();
-            let end = start.saturating_add(config.data_parallel_size());
-            for dp_rank in start..end {
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                self.policy_workers.push(PolicyQueueWorker::new(
-                    worker,
-                    capacity_tokens,
-                    available,
-                ));
-            }
+            worker.set_available(available);
+            worker.set_eligible(true);
         }
-        self.policy_workers
-            .sort_unstable_by_key(PolicyQueueWorker::worker);
+    }
+
+    fn refresh_policy_request_workers(&mut self, request: &SchedulingRequest) {
+        self.refresh_policy_workers();
+        let workers = self.workers_with_configs.borrow();
+        let eligibility = request.eligibility();
+        for worker in &mut self.policy_workers {
+            let worker_rank = worker.worker();
+            worker.set_eligible(
+                eligibility
+                    .pinned_worker()
+                    .is_none_or(|pinned| pinned == worker_rank)
+                    && eligibility
+                        .validate_worker_rank(&workers, worker_rank)
+                        .is_ok(),
+            );
+        }
     }
 
     fn drain_cleanup(&mut self) -> bool {
@@ -1015,6 +1057,7 @@ impl<
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
             let request_id = &cleanup.request_id;
+            self.policy_bookings.remove(request_id);
             made_ready |= self
                 .pending
                 .policy_event(PolicyQueueEvent::Aborted { request_id });
@@ -1045,7 +1088,16 @@ impl<
         made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
     }
 
-    fn handle_policy_finished(&mut self, request_id: &str, outcome: PolicyRequestOutcome) -> bool {
+    fn handle_policy_finished(
+        &mut self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        outcome: PolicyRequestOutcome,
+    ) -> bool {
+        if self.policy_bookings.get(request_id).copied() != Some(worker) {
+            return false;
+        }
+        self.policy_bookings.remove(request_id);
         let event = match outcome {
             PolicyRequestOutcome::Completed { context_tokens } => PolicyQueueEvent::Completed {
                 request_id,
@@ -1338,6 +1390,8 @@ impl<
         );
         let made_ready = policy_id.is_some_and(|id| {
             if owns_lifecycle {
+                let previous = self.policy_bookings.insert(request_id.clone(), worker);
+                debug_assert!(previous.is_none(), "duplicate policy booking request ID");
                 self.pending
                     .policy_event(PolicyQueueEvent::Dispatched { id, worker })
             } else {
@@ -1522,6 +1576,7 @@ mod tests {
     use async_trait::async_trait;
     use rustc_hash::FxHashMap;
     use tokio::sync::{Barrier, watch};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::protocols::{
@@ -1529,8 +1584,8 @@ mod tests {
         WorkerWithDpRank,
     };
     use crate::router_hint::RouterHintRootCandidates;
-    use crate::scheduling::OverlapSignals;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
+    use crate::scheduling::{LocalScheduler, OverlapSignals, ScheduleRequest};
     use crate::scheduling::{
         PolicyQueuePolicy, PolicyQueueRequest, RefreshedOverlap, RouterPolicyConfig,
     };
@@ -1697,6 +1752,47 @@ mod tests {
                 _ => {}
             }
         }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(Duration::from_millis(5))
+        }
+    }
+
+    struct ReadyPolicy {
+        state: Arc<QueuePolicyState>,
+    }
+
+    impl PolicyQueuePolicy for ReadyPolicy {
+        fn admit(&mut self, _request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+            PolicyQueueDecision::Ready
+        }
+
+        fn on_event(&mut self, event: PolicyQueueEvent<'_>, _ready: &mut Vec<PolicyQueueId>) {
+            if matches!(event, PolicyQueueEvent::Completed { .. }) {
+                self.state.completed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    struct EligibilityPolicy {
+        observed: Arc<AtomicBool>,
+    }
+
+    impl PolicyQueuePolicy for EligibilityPolicy {
+        fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+            assert_eq!(request.workers().len(), 2);
+            assert_eq!(
+                request
+                    .workers()
+                    .iter()
+                    .filter(|worker| worker.is_eligible())
+                    .map(PolicyQueueWorker::worker)
+                    .collect::<Vec<_>>(),
+                vec![WorkerWithDpRank::new(1, 0)]
+            );
+            self.observed.store(true, Ordering::Relaxed);
+            PolicyQueueDecision::Bypass
+        }
     }
 
     struct QueuePolicySelector {
@@ -1780,6 +1876,59 @@ mod tests {
         ));
 
         (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_local_scheduler_with_custom_selector<
+        Sel: WorkerSelector<SimpleWorkerConfig> + Send + 'static,
+    >(
+        num_workers: usize,
+        selector: Sel,
+        recheck_interval: Duration,
+    ) -> (
+        LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, Sel>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        CancellationToken,
+    ) {
+        let dp_ranges = (0..num_workers as u64)
+            .map(|worker_id| (worker_id, (0, 1)))
+            .collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            dp_ranges,
+            false,
+            0,
+            "test",
+        ));
+        let workers = (0..num_workers as u64)
+            .map(|worker_id| {
+                (
+                    worker_id,
+                    SimpleWorkerConfig {
+                        total_kv_blocks: Some(1024),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let (_workers_tx, workers_rx) = watch::channel(workers);
+        let cancellation = CancellationToken::new();
+        let scheduler = LocalScheduler::new_without_overlap_refresh(
+            Arc::clone(&slots),
+            workers_rx,
+            None,
+            16,
+            selector,
+            RouterQueuePolicy::Fcfs,
+            None,
+            recheck_interval,
+            true,
+            cancellation.clone(),
+            "test",
+            false,
+        );
+        (scheduler, slots, cancellation)
     }
 
     #[allow(clippy::type_complexity)]
@@ -2183,6 +2332,10 @@ mod tests {
             })),
         };
         let (queue, slots) = make_queue_with_custom_selector(1, 16, 128, None, selector);
+        assert_eq!(
+            queue.policy_reconcile_interval(),
+            Some(Duration::from_millis(5))
+        );
         let (mut request, mut response_rx) = make_request("policy-request", 32);
         request.mode = ScheduleMode::TrackedWithLifecycle {
             request_id: "policy-request".to_owned(),
@@ -2214,6 +2367,134 @@ mod tests {
             .await;
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
         assert_eq!(state.completed_context_tokens.load(Ordering::Relaxed), 48);
+    }
+
+    #[tokio::test]
+    async fn custom_queue_policy_observes_request_eligibility() {
+        let observed = Arc::new(AtomicBool::new(false));
+        let selector = QueuePolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(EligibilityPolicy {
+                observed: Arc::clone(&observed),
+            })),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 128, None, selector);
+        let (mut request, response_rx) = make_request("eligibility-request", 32);
+        request.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "eligibility-request".to_owned(),
+        };
+        request.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        let lease = queue.new_request_lifecycle_lease(Some("eligibility-request"));
+        let mut lease = queue
+            .enqueue_with_block_hashes_and_lease(request, None, lease)
+            .await;
+        let response = response_rx.await.unwrap().unwrap();
+        lease.as_mut().unwrap().disarm();
+
+        assert!(observed.load(Ordering::Relaxed));
+        assert_eq!(response.best_worker, WorkerWithDpRank::new(1, 0));
+        slots
+            .free(&"eligibility-request".to_owned(), Instant::now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_queue_policy_observes_completion_after_worker_removal() {
+        let state = Arc::new(QueuePolicyState::default());
+        let selector = QueuePolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(ReadyPolicy {
+                state: Arc::clone(&state),
+            })),
+        };
+        let (scheduler, slots, cancellation) =
+            make_local_scheduler_with_custom_selector(1, selector, Duration::from_secs(60));
+        let worker = WorkerWithDpRank::new(0, 0);
+        let response = scheduler
+            .schedule_request(ScheduleRequest {
+                mode: ScheduleMode::TrackedWithLifecycle {
+                    request_id: "removed-worker-request".to_owned(),
+                },
+                token_seq: None,
+                block_hashes: None,
+                isl_tokens: 32,
+                lora_name: None,
+                expected_output_tokens: None,
+                pinned_worker: None,
+                allowed_worker_ids: None,
+                routing_constraints: crate::protocols::RoutingConstraints::default(),
+                router_config_override: None,
+                priority_jump: 0.0,
+                strict_priority: 0,
+                policy_class: None,
+                session_context: None,
+                overlap: OverlapSignals::default(),
+                router_hint_candidates: None,
+                retain_router_hint_chain: false,
+                shared_cache_hits: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.best_worker, worker);
+
+        slots.reconcile_workers(Vec::new()).unwrap();
+        scheduler
+            .complete_if_worker("removed-worker-request", worker, 48)
+            .await
+            .unwrap();
+
+        assert_eq!(state.completed.load(Ordering::Relaxed), 1);
+        cancellation.cancel();
+    }
+
+    #[tokio::test]
+    async fn custom_queue_policy_controls_reconcile_cadence() {
+        let state = Arc::new(QueuePolicyState::default());
+        let selector = QueuePolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(DeferOncePolicy {
+                state: Arc::clone(&state),
+            })),
+        };
+        let (scheduler, _slots, cancellation) =
+            make_local_scheduler_with_custom_selector(1, selector, Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            scheduler.schedule_request(ScheduleRequest {
+                mode: ScheduleMode::TrackedWithLifecycle {
+                    request_id: "policy-request".to_owned(),
+                },
+                token_seq: None,
+                block_hashes: None,
+                isl_tokens: 32,
+                lora_name: None,
+                expected_output_tokens: None,
+                pinned_worker: None,
+                allowed_worker_ids: None,
+                routing_constraints: crate::protocols::RoutingConstraints::default(),
+                router_config_override: None,
+                priority_jump: 0.0,
+                strict_priority: 0,
+                policy_class: None,
+                session_context: None,
+                overlap: OverlapSignals::default(),
+                router_hint_candidates: None,
+                retain_router_hint_chain: false,
+                shared_cache_hits: None,
+            }),
+        )
+        .await
+        .expect("policy cadence should override the 60 second host interval")
+        .unwrap();
+
+        scheduler
+            .complete_if_worker("policy-request", response.best_worker, 48)
+            .await
+            .unwrap();
+        assert_eq!(state.dispatched.load(Ordering::Relaxed), 1);
+        cancellation.cancel();
     }
 
     #[test]
