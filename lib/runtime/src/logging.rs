@@ -277,6 +277,7 @@ fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
         .build()?;
     Ok(OTEL_RUNTIME.get_or_init(|| rt).handle().clone())
 }
+
 fn build_span_exporter(
     protocol: OtlpProtocol,
     endpoint: &str,

@@ -420,14 +420,23 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
 
-fn attach_agent_context_from_context(
-    request: &mut PreprocessedRequest,
+fn agent_context_from_context(
     context: &PipelineContext<()>,
+) -> Option<Arc<crate::protocols::common::extensions::AgentContext>> {
+    context
+        .get_optional::<crate::protocols::common::extensions::AgentContext>(
+            crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
+        )
+        .ok()
+        .flatten()
+}
+
+fn attach_agent_context(
+    request: &mut PreprocessedRequest,
+    agent_context: Option<&crate::protocols::common::extensions::AgentContext>,
 ) {
-    if let Ok(agent_context) = context.get::<crate::protocols::common::extensions::AgentContext>(
-        crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
-    ) {
-        request.agent_context = Some(agent_context.as_ref().clone());
+    if let Some(agent_context) = agent_context {
+        request.agent_context = Some(agent_context.clone());
     }
 }
 
@@ -4427,29 +4436,33 @@ impl
         // The handle snapshots the pristine request and its arrival time here;
         // the single payload record is published once at stream completion
         // (or with an empty response on cancel/timeout), off the request path.
-        let payload_http_headers = if crate::request_trace::payload::http_header_capture_active() {
-            context
-                .get_optional::<std::collections::BTreeMap<String, String>>(
-                    crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
-                )
-                .ok()
-                .flatten()
+        let agent_context = agent_context_from_context(&context);
+        let agent_session_id = agent_context
+            .as_deref()
+            .map(|context| context.session_id.as_str());
+        let payload_handle = if crate::request_trace::payload::payload_capture_active()
+            && crate::request_trace::config::should_emit_payload(agent_session_id, &request_id)
+        {
+            let payload_http_headers =
+                if crate::request_trace::payload::http_header_capture_active() {
+                    context
+                        .get_optional::<std::collections::BTreeMap<String, String>>(
+                            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+                        )
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+            crate::request_trace::payload::create_handle_with_agent_session(
+                &request,
+                &request_id,
+                payload_http_headers,
+                agent_session_id,
+            )
         } else {
             None
         };
-        let payload_agent_context = context
-            .get::<crate::protocols::common::extensions::AgentContext>(
-                crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
-            )
-            .ok();
-        let payload_handle = crate::request_trace::payload::create_handle_with_agent_session(
-            &request,
-            &request_id,
-            payload_http_headers,
-            payload_agent_context
-                .as_deref()
-                .map(|context| context.session_id.as_str()),
-        );
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
@@ -4494,7 +4507,7 @@ impl
                     .map(|name| name.as_ref().clone()),
             )
             .await?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_agent_context(&mut common_request, agent_context.as_deref());
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
             &request,
@@ -4692,7 +4705,8 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        let agent_context = agent_context_from_context(&context);
+        attach_agent_context(&mut common_request, agent_context.as_deref());
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,

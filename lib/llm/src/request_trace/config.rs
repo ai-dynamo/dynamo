@@ -133,7 +133,6 @@ impl RequestTracePolicy {
 struct RequestTraceRuntimePolicy {
     policy: RequestTracePolicy,
     sample_ratio: Option<f64>,
-    legacy_audit_force_logging: bool,
 }
 
 impl RequestTraceRuntimePolicy {
@@ -142,23 +141,25 @@ impl RequestTraceRuntimePolicy {
     /// The agent session ID keeps agent request and tool records together. Other
     /// request-end and request-payload records use the request ID as their stable key.
     fn should_sample(&self, record: &RequestTraceRecord) -> bool {
-        if self.legacy_audit_force_logging
-            && record.event_type == super::RequestTraceEventType::RequestPayload
-        {
-            return true;
-        }
-        request_trace_key(record).is_some_and(|key| self.should_sample_key(key))
+        should_sample_record(record, self.sample_ratio)
     }
 
     fn should_emit_payload(&self, agent_session_id: Option<&str>, request_id: &str) -> bool {
-        self.legacy_audit_force_logging
-            || should_sample_request(agent_session_id, request_id, self.sample_ratio)
+        should_sample_request(agent_session_id, request_id, self.sample_ratio)
     }
+}
 
-    fn should_sample_key(&self, key: &str) -> bool {
-        self.sample_ratio
-            .is_none_or(|ratio| should_sample_key(key.as_bytes(), ratio))
+fn should_sample_record(record: &RequestTraceRecord, sample_ratio: Option<f64>) -> bool {
+    let Some(ratio) = sample_ratio else {
+        return true;
+    };
+    if ratio >= 1.0 {
+        return true;
     }
+    if ratio <= 0.0 {
+        return false;
+    }
+    request_trace_key(record).is_some_and(|key| should_sample_key(key.as_bytes(), ratio))
 }
 
 fn should_sample_request(
@@ -169,11 +170,6 @@ fn should_sample_request(
     sample_ratio.is_none_or(|ratio| {
         should_sample_key(agent_session_id.unwrap_or(request_id).as_bytes(), ratio)
     })
-}
-
-#[cfg(test)]
-fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
-    request_trace_key(record).is_some_and(|key| should_sample_key(key.as_bytes(), ratio))
 }
 
 fn request_trace_key(record: &RequestTraceRecord) -> Option<&str> {
@@ -353,7 +349,6 @@ fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
             s3_flush_interval_ms,
         },
         sample_ratio,
-        legacy_audit_force_logging: audit_force_logging,
     }
 }
 
@@ -718,15 +713,17 @@ mod tests {
         let request = request_record("request-123");
         let payload = payload_record("request-123");
 
-        assert!(!should_sample_record(&request, 0.0));
-        assert!(should_sample_record(&request, 1.0));
+        assert!(!should_sample_record(&request, Some(0.0)));
+        assert!(should_sample_record(&request, Some(1.0)));
         assert_eq!(
-            should_sample_record(&request, 0.5),
-            should_sample_record(&payload, 0.5)
+            should_sample_record(&request, Some(0.5)),
+            should_sample_record(&payload, Some(0.5))
         );
 
         let decisions = (0..256)
-            .map(|index| should_sample_record(&request_record(&format!("request-{index}")), 0.5))
+            .map(|index| {
+                should_sample_record(&request_record(&format!("request-{index}")), Some(0.5))
+            })
             .collect::<Vec<_>>();
         assert!(decisions.iter().any(|decision| *decision));
         assert!(decisions.iter().any(|decision| !*decision));
@@ -746,12 +743,31 @@ mod tests {
         let tool = tool_record(session_id);
         let expected = should_sample_key(session_id.as_bytes(), 0.5);
 
-        assert_eq!(should_sample_record(&request, 0.5), expected);
-        assert_eq!(should_sample_record(&tool, 0.5), expected);
+        assert_eq!(should_sample_record(&request, Some(0.5)), expected);
+        assert_eq!(should_sample_record(&tool, Some(0.5)), expected);
         assert_eq!(
             should_sample_request(Some(session_id), &request_id, Some(0.5)),
             expected
         );
+    }
+
+    #[test]
+    fn identity_sample_ratios_keep_keyless_records() {
+        let record = RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RequestEnd,
+            event_time_unix_ms: 1_000,
+            event_source: None,
+            agent_context: None,
+            request: None,
+            tool: None,
+            payload: None,
+        };
+
+        assert!(should_sample_record(&record, None));
+        assert!(should_sample_record(&record, Some(1.0)));
+        assert!(!should_sample_record(&record, Some(0.0)));
+        assert!(!should_sample_record(&record, Some(0.5)));
     }
 
     #[test]
@@ -771,7 +787,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_audit_forced_payloads_ignore_the_request_trace_sample_ratio() {
+    fn legacy_audit_forced_payloads_honor_the_request_trace_sample_ratio() {
         with_request_trace_env(
             &[
                 (env_audit::DYN_AUDIT_FORCE_LOGGING, "true"),
@@ -780,7 +796,7 @@ mod tests {
             || {
                 let runtime_policy = load_runtime_policy_from_env();
                 assert_eq!(runtime_policy.sample_ratio, Some(0.0));
-                assert!(runtime_policy.should_emit_payload(None, "request-123"));
+                assert!(!runtime_policy.should_emit_payload(None, "request-123"));
                 assert!(!runtime_policy.should_sample(&request_record("request-123")));
             },
         );

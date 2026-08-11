@@ -199,6 +199,7 @@ mod tests {
     use crate::request_trace::RequestTraceToolEvent;
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn emits_tracker_timing_lengths_and_hashes() {
         BUS.init(16);
         let mut rx = BUS.subscribe();
