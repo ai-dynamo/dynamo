@@ -385,25 +385,50 @@ static REQUEST_PLANE_TLS_CONNECTOR: once_cell::sync::OnceCell<Option<TlsConnecto
     once_cell::sync::OnceCell::new();
 
 fn get_request_plane_tls_connector() -> anyhow::Result<&'static Option<TlsConnector>> {
-    REQUEST_PLANE_TLS_CONNECTOR.get_or_try_init(|| {
-        use crate::config::environment_names::tcp_response_stream::tls as env;
-        let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
-        let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
-        let tls_requested = ca_cert_path.is_some() || insecure;
-        if !tls_requested {
-            return Ok(None);
-        }
-        let tls_config = crate::tls_utils::client_tls_config(
-            ca_cert_path.as_deref().map(std::path::Path::new),
-            insecure,
-        )?;
-        Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
-    })
+    REQUEST_PLANE_TLS_CONNECTOR.get_or_try_init(build_request_plane_tls_connector_from_env)
+}
+
+/// Build the request-plane client TLS connector from the `DYN_TCP_TLS_*`
+/// environment. Returns `None` when no TLS is requested (no CA and not
+/// insecure). Split out from the `OnceCell` init so the env parsing can be
+/// unit-tested directly.
+fn build_request_plane_tls_connector_from_env() -> anyhow::Result<Option<TlsConnector>> {
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
+    let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+    let tls_requested = ca_cert_path.is_some() || insecure;
+    if !tls_requested {
+        return Ok(None);
+    }
+    let tls_config = crate::tls_utils::client_tls_config(
+        ca_cert_path.as_deref().map(std::path::Path::new),
+        insecure,
+    )?;
+    Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
 }
 
 impl TcpConnection {
     /// Create a new connection with lock-free submit and batched write/read tasks
     async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
+        Self::connect_with_connector(
+            addr,
+            timeout,
+            channel_buffer,
+            get_request_plane_tls_connector()?.as_ref(),
+        )
+        .await
+    }
+
+    /// Like [`TcpConnection::connect`], but with an explicitly supplied TLS
+    /// connector instead of the process-global `REQUEST_PLANE_TLS_CONNECTOR`.
+    /// This lets tests drive the real connect/handshake/reader/writer path with a
+    /// per-test connector, without initializing (and poisoning) the cached one.
+    async fn connect_with_connector(
+        addr: SocketAddr,
+        timeout: Duration,
+        channel_buffer: usize,
+        connector: Option<&TlsConnector>,
+    ) -> Result<Self> {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| anyhow::anyhow!("TCP connect timeout to {}", addr))??;
@@ -411,9 +436,7 @@ impl TcpConnection {
         // Configure socket for lower latency
         Self::configure_socket(&stream)?;
 
-        let (read_half, write_half): (BoxRead, BoxWrite) = if let Some(connector) =
-            get_request_plane_tls_connector()?
-        {
+        let (read_half, write_half): (BoxRead, BoxWrite) = if let Some(connector) = connector {
             use crate::config::environment_names::tcp_response_stream::tls as env;
             let server_name = match std::env::var(env::DYN_TCP_TLS_SERVER_NAME) {
                 Ok(name) => rustls::pki_types::ServerName::try_from(name)
@@ -1651,6 +1674,22 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWrite};
     use tokio::net::TcpListener;
 
+    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write as _;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
     #[test]
     fn test_tcp_config_default() {
         let config = TcpRequestConfig::default();
@@ -1774,64 +1813,125 @@ mod tests {
         (addr, conn_count)
     }
 
-    /// Full request-plane TLS handshake + encrypted round-trip using the real
-    /// `tls_utils` config builders (the same ones egress/ingress use). Generates
-    /// a self-signed cert, trusts it as the CA, and drives a verified handshake
-    /// with SNI `localhost` (mirroring `connector.connect(server_name, stream)`
-    /// in `TcpConnection::connect`), then echoes bytes over the encrypted stream.
+    /// Env parsing for the request-plane client connector (independent of the
+    /// process-global `OnceCell`): no TLS env → no connector; CA or insecure →
+    /// connector built.
+    #[test]
+    fn request_plane_tls_connector_from_env_parses() {
+        let (cert, _key) = make_cert_files();
+        temp_env::with_vars_unset(["DYN_TCP_TLS_CA_CERT_PATH", "DYN_TCP_TLS_INSECURE"], || {
+            assert!(
+                build_request_plane_tls_connector_from_env()
+                    .unwrap()
+                    .is_none()
+            );
+        });
+        temp_env::with_vars(
+            [
+                (
+                    "DYN_TCP_TLS_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                ("DYN_TCP_TLS_INSECURE", None),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", Some("1")),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+    }
+
+    /// End-to-end encrypted request through the **real** request-plane client
+    /// path: `TcpConnection::connect_with_connector` performs the TLS handshake
+    /// (SNI from `DYN_TCP_TLS_SERVER_NAME`), spawns the reader/writer tasks over
+    /// boxed TLS I/O, and `send_request` frames a request that a TLS-wrapped echo
+    /// server (built from the production `server_tls_config`) reads and replies
+    /// to. This exercises handshake + SNI + boxed I/O + reader/writer + framing,
+    /// not just a `tls_utils` round-trip.
     #[tokio::test]
-    async fn request_plane_tls_handshake_roundtrip() {
-        use std::io::Write as _;
+    async fn request_plane_tls_end_to_end() {
+        use crate::pipeline::network::codec::TcpResponseMessage;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        // Self-signed cert with SAN=localhost; also used as the trusted CA.
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-
-        // Server acceptor + client connector via the real builders.
-        let server_config =
-            crate::tls_utils::server_tls_config(cert_file.path(), key_file.path()).unwrap();
+        // Self-signed cert (SAN=localhost), trusted as the CA by the client.
+        let (cert, key) = make_cert_files();
+        let server_config = crate::tls_utils::server_tls_config(cert.path(), key.path()).unwrap();
         let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
-        let client_config =
-            crate::tls_utils::client_tls_config(Some(cert_file.path()), false).unwrap();
+        let client_config = crate::tls_utils::client_tls_config(Some(cert.path()), false).unwrap();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
 
-        // TLS echo server on loopback.
+        // TLS-wrapped echo server speaking the request-plane wire framing.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
-            let mut tls = acceptor.accept(tcp).await.expect("server TLS handshake");
-            let mut buf = [0u8; 5];
-            tls.read_exact(&mut buf).await.unwrap();
-            tls.write_all(&buf).await.unwrap();
-            tls.flush().await.unwrap();
+            let tls = acceptor.accept(tcp).await.expect("server TLS handshake");
+            let (mut r, mut w) = tokio::io::split(tls);
+            // path
+            let mut l2 = [0u8; 2];
+            r.read_exact(&mut l2).await.unwrap();
+            let mut path = vec![0u8; u16::from_be_bytes(l2) as usize];
+            r.read_exact(&mut path).await.unwrap();
+            // headers
+            let mut hl = [0u8; 2];
+            r.read_exact(&mut hl).await.unwrap();
+            let mut headers = vec![0u8; u16::from_be_bytes(hl) as usize];
+            r.read_exact(&mut headers).await.unwrap();
+            // payload
+            let mut l4 = [0u8; 4];
+            r.read_exact(&mut l4).await.unwrap();
+            let mut payload = vec![0u8; u32::from_be_bytes(l4) as usize];
+            r.read_exact(&mut payload).await.unwrap();
+            // echo the payload back as a response frame
+            let resp = TcpResponseMessage::new(Bytes::from(payload));
+            w.write_all(&resp.encode().unwrap()).await.unwrap();
+            w.flush().await.unwrap();
         });
 
-        // Client: TCP connect + verified TLS handshake with SNI (mirrors egress).
-        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
-        let mut tls = connector
-            .connect(server_name, tcp)
-            .await
-            .expect("client TLS handshake (CA verification + SNI)");
+        // Drive the real client path with an explicit connector (no OnceCell) and
+        // SNI supplied via env so it matches the cert's `localhost` SAN.
+        let payload = Bytes::from_static(b"encrypted-request-plane-payload");
+        let expected = payload.clone();
+        let response = temp_env::async_with_vars(
+            [("DYN_TCP_TLS_SERVER_NAME", Some("localhost"))],
+            async move {
+                let conn = TcpConnection::connect_with_connector(
+                    addr,
+                    Duration::from_secs(5),
+                    10,
+                    Some(&connector),
+                )
+                .await
+                .expect("client connect + TLS handshake");
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                conn.send_request(payload, &headers)
+                    .await
+                    .expect("send_request over TLS")
+            },
+        )
+        .await;
 
-        tls.write_all(b"hello").await.unwrap();
-        tls.flush().await.unwrap();
-        let mut resp = [0u8; 5];
-        tls.read_exact(&mut resp).await.unwrap();
-        assert_eq!(&resp, b"hello", "bytes should round-trip over TLS");
-
-        server.await.unwrap();
+        assert_eq!(
+            response, expected,
+            "payload should round-trip through the encrypted request plane"
+        );
     }
 
     struct RecordingWriter {
