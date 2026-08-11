@@ -32,10 +32,13 @@ Special Interest Groups (SIGs) are open, standing groups that coordinate work wi
 | sig-rl | Reinforcement learning integrations | `dynamo-rl-codeowners` |
 | sig-hardware | Hardware platform enablement and optimization, across NVIDIA and non-NVIDIA accelerators | `dynamo-xpu-codeowners` |
 | sig-deploy | Deploy path, including cloud-provider platform enablement | `dynamo-operator-codeowners`, `dynamo-efa-codeowners` |
-| sig-scaling | Scaling and lifecycle | `dynamo-planner-codeowners`, `dynamo-fault-tolerance-codeowners`, `dynamo-gms-codeowners` |
+| sig-scaling | Scaling deployments, including the planner | `dynamo-planner-codeowners` |
+| sig-resiliency | Fault tolerance, GMS, snapshot, and cold start | `dynamo-gms-codeowners`, `dynamo-fault-tolerance-codeowners` |
 | sig-engines | Backend engine integrations (vLLM, SGLang, TensorRT-LLM) | `dynamo-backend-vllm-codeowners`, `dynamo-backend-sglang-codeowners`, `dynamo-backend-trtllm-codeowners`, `dynamo-tokenspeed-codeowners` |
-| sig-perf-sim | Performance, AIPerf, and simulation (AIConfigurator) | `dynamo-performance-codeowners` |
+| sig-performance | Performance and benchmarking, including AIPerf | `dynamo-performance-codeowners` |
+| sig-simulation | Deployment simulation and configuration, including AIConfigurator | n/a |
 | sig-multimodal | Multimodal and diffusion workloads | `dynamo-multimodal-codeowners`, `dynamo-diffusion-codeowners` |
+| sig-devx | Documentation, installation, and contributor workflow | `dynamo-docs-codeowners` |
 
 The `docs`, `ops`, and `process` areas are program functions that Maintainers coordinate themselves; they have no SIG.
 
@@ -45,12 +48,12 @@ Several projects in the [ai-dynamo](https://github.com/ai-dynamo) organization l
 
 | Project | Repository | SIG |
 | :---- | :---- | :---- |
-| AIPerf | [ai-dynamo/aiperf](https://github.com/ai-dynamo/aiperf) | sig-perf-sim |
-| AIConfigurator | [ai-dynamo/aiconfigurator](https://github.com/ai-dynamo/aiconfigurator) | sig-perf-sim |
+| AIPerf | [ai-dynamo/aiperf](https://github.com/ai-dynamo/aiperf) | sig-performance |
+| AIConfigurator | [ai-dynamo/aiconfigurator](https://github.com/ai-dynamo/aiconfigurator) | sig-simulation |
 | NIXL | [ai-dynamo/nixl](https://github.com/ai-dynamo/nixl) | sig-memory-transport |
 | FlexTensor | [ai-dynamo/flextensor](https://github.com/ai-dynamo/flextensor) | sig-memory-transport |
-| ModelExpress | [ai-dynamo/modelexpress](https://github.com/ai-dynamo/modelexpress) | sig-rl, sig-scaling |
+| ModelExpress | [ai-dynamo/modelexpress](https://github.com/ai-dynamo/modelexpress) | sig-resiliency |
 | Grove | [ai-dynamo/grove](https://github.com/ai-dynamo/grove) | sig-deploy, sig-scaling |
-| Snapshot | [ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot) | sig-scaling, sig-deploy |
+| Snapshot | [ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot) | sig-resiliency, sig-deploy |
 | OpenEngine | [ai-dynamo/openengine](https://github.com/ai-dynamo/openengine) | sig-engines, sig-core |
 | AITune | [ai-dynamo/aitune](https://github.com/ai-dynamo/aitune) | sig-multimodal |
