@@ -60,6 +60,7 @@ data:
       backend: DEEPGEMM
       max_num_tokens: 8192
 ---
+# Shared Blackwell disaggregated graph; provider overlays add RDMA fabric details.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -92,7 +93,8 @@ spec:
           command:
             - /bin/sh
             - -c
-    TRTLLMPrefillWorker:
+    # Provider Components target backend-neutral worker service keys.
+    PrefillWorker:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -100,6 +102,11 @@ spec:
       resources:
         limits:
           gpu: "2"
+        requests:
+          gpu: "2"
+          custom: &ephemeralStorage
+            ephemeral-storage: 2Gi
+      # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
         size: 256Gi
       extraPodSpec:
@@ -148,7 +155,7 @@ spec:
           - name: model-cache
             persistentVolumeClaim:
               claimName: model-cache
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret
@@ -156,6 +163,10 @@ spec:
       resources:
         limits:
           gpu: "4"
+        requests:
+          gpu: "4"
+          custom: *ephemeralStorage
+      # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
         size: 256Gi
       extraPodSpec:

@@ -55,7 +55,7 @@ class GMSClientMemoryManager:
         self._session: _GMSClientSession | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
         self._lock = threading.RLock()
-        self._failure: RuntimeError | None = None
+        self._failure: str | None = None
         self._vmm.ensure_initialized()
         self._granularity = int(self._vmm.get_allocation_granularity(device))
         if self._granularity <= 0:
@@ -80,7 +80,10 @@ class GMSClientMemoryManager:
                 device_uuid = device_identity.get_device_uuid(self._device)
                 session = self._session_factory(self._socket_path, lock_type)
                 if session.identity[1] != device_uuid:
-                    session.close()
+                    try:
+                        session.close()
+                    except Exception:
+                        logger.exception("GMS close failed after identity mismatch")
                     raise RuntimeError("GMS sidecar is on another physical GPU")
                 self._session = session
             except Exception as exc:
@@ -250,11 +253,11 @@ class GMSClientMemoryManager:
 
     def _check(self) -> None:
         if self._failure is not None:
-            raise self._failure
+            raise RuntimeError(self._failure)
 
     def _latch(self, message: str, cause: Exception) -> RuntimeError:
         if self._failure is None:
-            self._failure = RuntimeError(f"{message}: {cause}")
+            self._failure = f"{message}: {cause}"
         session = self._session
         self._session = None
         if session is not None:
@@ -262,4 +265,4 @@ class GMSClientMemoryManager:
                 session.close()
             except Exception:
                 logger.exception("GMS disconnect failed after operational failure")
-        return self._failure
+        return RuntimeError(self._failure)
