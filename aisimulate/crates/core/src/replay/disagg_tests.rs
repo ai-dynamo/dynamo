@@ -575,6 +575,42 @@ fn test_trace_smoke_reports_decode_only_tokens() {
 }
 
 #[test]
+fn prefill_truncates_the_output_plan_without_mutating_decode() {
+    let original_output_token_ids = vec![11, 12, 13];
+    let request = DirectRequest {
+        tokens: vec![1; 128],
+        max_output_tokens: 1,
+        output_token_ids: Some(original_output_token_ids.clone()),
+        uuid: Some(Uuid::from_u128(90_020)),
+        arrival_timestamp_ms: Some(0.0),
+        ..Default::default()
+    };
+    let mut state = DisaggRequestState::new(
+        ReplayRequestPayload::materialized(request),
+        0.0,
+        HandoffId::new(Uuid::from_u128(90_021)),
+        HandoffOrder::SourceFirst,
+        0.0,
+        None,
+        None,
+    );
+
+    let prefill = state.build_prefill_request().unwrap();
+    assert_eq!(prefill.max_output_tokens, 1);
+    assert_eq!(prefill.output_token_ids.as_deref(), Some(&[11][..]));
+    let prefill_plan = prefill.output_token_ids.as_ref().unwrap();
+    assert_eq!(prefill_plan.capacity(), prefill_plan.len());
+    assert_eq!(
+        state
+            .original_request()
+            .unwrap()
+            .output_token_ids
+            .as_deref(),
+        Some(original_output_token_ids.as_slice())
+    );
+}
+
+#[test]
 fn decode_terminal_retains_handoff_until_deferred_cleanup_drains() {
     let request_shapes = [
         (6_755, 500),

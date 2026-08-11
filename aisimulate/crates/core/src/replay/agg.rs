@@ -268,12 +268,7 @@ where
     ) -> anyhow::Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
-        let output_length = request.metadata().max_output_tokens;
-        let effective_output_length = request
-            .metadata()
-            .output_token_ids
-            .as_ref()
-            .map_or(output_length, Vec::len);
+        let output_length = request.metadata().effective_max_output_tokens();
         request.metadata_mut().uuid = Some(uuid);
         if matches!(self.admission.mode(), ReplayMode::Concurrency { .. }) {
             request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
@@ -317,7 +312,7 @@ where
                 );
                 self.requests.insert(
                     uuid,
-                    AggRequestState::new_running(input_length, effective_output_length),
+                    AggRequestState::new_running(input_length, output_length),
                 );
                 self.dispatch_to_worker(
                     request.into_direct_request(),
@@ -558,7 +553,7 @@ where
                 turn_index,
             } = ready;
             let input_length = request.input_length();
-            let output_length = request.metadata().max_output_tokens;
+            let output_length = request.metadata().effective_max_output_tokens();
             let session_metadata = session_id.clone().zip(turn_index);
             let uuid = self.assign_request(request, arrival_time_ms, metadata, session_id)?;
             if let Some(sink) = &self.artifact_sink {

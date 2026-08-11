@@ -90,6 +90,25 @@ impl DirectRequest {
         self.max_output_tokens
     }
 
+    /// Effective output length after applying an authored exact token plan.
+    #[inline]
+    pub fn effective_max_output_tokens(&self) -> usize {
+        self.output_token_ids
+            .as_ref()
+            .map_or(self.max_output_tokens, Vec::len)
+    }
+
+    pub(crate) fn clone_with_output_limit(&self, limit: usize) -> Self {
+        let max_output_tokens = self.effective_max_output_tokens().min(limit);
+        let mut request = self.clone();
+        request.max_output_tokens = max_output_tokens;
+        request.output_token_ids = self
+            .output_token_ids
+            .as_ref()
+            .map(|ids| ids[..max_output_tokens].to_vec());
+        request
+    }
+
     pub fn arrival_time_ms(&self) -> Option<f64> {
         self.arrival_timestamp_ms
     }
@@ -110,6 +129,44 @@ impl DirectRequest {
         self.replay_context.as_ref().is_none_or(|context| {
             context.prompt_token_source != ReplayPromptTokenSource::LengthOnlySynthetic
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DirectRequest;
+
+    #[test]
+    fn output_plan_is_authoritative_when_limited() {
+        let request = DirectRequest {
+            tokens: vec![1, 2],
+            max_output_tokens: 0,
+            output_token_ids: Some(vec![7, 8]),
+            ..Default::default()
+        };
+
+        assert_eq!(request.effective_max_output_tokens(), 2);
+        let limited = request.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 1);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[7][..]));
+        assert_eq!(limited.output_token_ids.unwrap().capacity(), 1);
+        assert_eq!(request.output_token_ids.as_deref(), Some(&[7, 8][..]));
+
+        let empty_plan = DirectRequest {
+            max_output_tokens: 4,
+            output_token_ids: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(empty_plan.effective_max_output_tokens(), 0);
+        let limited = empty_plan.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[][..]));
+
+        let unplanned = DirectRequest::default();
+        assert_eq!(unplanned.effective_max_output_tokens(), 0);
+        let limited = unplanned.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert!(limited.output_token_ids.is_none());
     }
 }
 

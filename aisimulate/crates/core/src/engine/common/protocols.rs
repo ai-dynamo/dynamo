@@ -79,6 +79,15 @@ pub(crate) struct DirectRequest {
     pub arrival_timestamp_ms: Option<f64>,
 }
 
+impl DirectRequest {
+    #[inline]
+    pub(crate) fn effective_max_output_tokens(&self) -> usize {
+        self.output_token_ids
+            .as_ref()
+            .map_or(self.max_output_tokens, Vec::len)
+    }
+}
+
 /// Cost of materializing one prompt in native G1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PrefillCost {

@@ -426,7 +426,7 @@ fn engine_replay_preserves_exact_output_token_plan() {
 
     let report = run_engine_replay(replay).unwrap();
     assert_eq!(report.request_counts.total_output_tokens, 3);
-    assert_eq!(report.per_request[0].requested_output_length, 1);
+    assert_eq!(report.per_request[0].requested_output_length, 3);
     assert_eq!(report.per_request[0].output_length, 3);
 }
 
