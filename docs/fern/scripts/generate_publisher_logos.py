@@ -96,7 +96,7 @@ SOURCES: dict[str, str] = {
     "Vultr": "www.vultr.com",
     "WEKA": "www.weka.io",
     "dstack": "dstack.ai",
-    "vCluster": "www.vcluster.com"
+    "vCluster": "www.vcluster.com",
 }
 
 # Sites whose <link rel="icon"> is missing or unusable; fetch these directly.
@@ -195,7 +195,11 @@ export const PUBLISHER_LOGOS: Record<string, string> = {
 
 
 def render(logos: dict[str, str]) -> str:
-    lines = [f"  {json.dumps(k)}: {json.dumps(v)}," for k in sorted(logos) for v in [logos[k]]]
+    lines = [
+        f"  {json.dumps(k)}: {json.dumps(v)},"
+        for k in sorted(logos)
+        for v in [logos[k]]
+    ]
     return BANNER + "\n".join(lines) + "\n};\n"
 
 
@@ -209,13 +213,17 @@ def main() -> int:
 
     if args.check:
         if not OUT.exists() or OUT.read_text() != rendered:
-            print(f"{OUT.relative_to(ROOT.parents[1])} is out of date; rerun without --check")
+            print(
+                f"{OUT.relative_to(ROOT.parents[1])} is out of date; rerun without --check"
+            )
             return 1
         print(f"publisher logos up to date: {len(logos)} of {len(SOURCES)}")
         return 0
 
     OUT.write_text(rendered)
-    print(f"wrote {OUT.relative_to(ROOT.parents[1])}: {len(logos)} of {len(SOURCES)} publishers")
+    print(
+        f"wrote {OUT.relative_to(ROOT.parents[1])}: {len(logos)} of {len(SOURCES)} publishers"
+    )
     if missing:
         print("  no icon served (falls back to initials): " + ", ".join(missing))
     return 0
