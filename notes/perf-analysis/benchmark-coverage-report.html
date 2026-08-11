@@ -95,6 +95,17 @@ SPDX-License-Identifier: Apache-2.0
     padding:10px 12px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
     font-size:11.5px;line-height:1.65;color:var(--ink)}
   .run pre .c{color:var(--muted)}
+  .tiertabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--axis);margin:14px 0 0}
+  .ttab{appearance:none;border:1px solid var(--ring);border-bottom:none;background:var(--naT);
+    color:var(--ink2);font:inherit;font-size:12.5px;font-weight:600;padding:8px 13px;
+    border-radius:7px 7px 0 0;cursor:pointer;display:flex;align-items:center;gap:7px;line-height:1.2}
+  .ttab:hover{color:var(--ink)}
+  .ttab[aria-selected="true"]{background:var(--surface);color:var(--ink);border-color:var(--axis);
+    position:relative;top:1px;box-shadow:0 -2px 0 0 var(--ink) inset}
+  .ttab .dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+  .dot-auto{background:var(--good)} .dot-partial{background:var(--warning)} .dot-manual{background:var(--critical)}
+  .tpanel{display:none;border:1px solid var(--axis);border-top:none;border-radius:0 0 9px 9px;padding:20px 22px}
+  .tpanel.on{display:block}
   ul{margin:8px 0 0;padding-left:20px;color:var(--ink2)}
   li{margin:5px 0}
   li strong{color:var(--ink)}
@@ -114,7 +125,16 @@ SPDX-License-Identifier: Apache-2.0
   </section>
 
   <section>
-    <div class="tierhead"><h2><span class="n">§2</span>Tier 1 — End-to-end</h2><span class="pill">Primary · headline numbers</span><span class="cadence cad-manual">✕ On demand only</span></div>
+    <h2><span class="n">§2</span>The three tiers</h2>
+    <p class="lede">What exists at each level, what it covers, whether anything runs it, and how to run it yourself. Nothing measures performance automatically — one tier executes in CI but discards its timings, the other two run only when a person starts them.</p>
+    <div class="tiertabs" role="tablist" id="tiertabs">
+      <button class="ttab" role="tab" id="ttab-t1" aria-selected="true" aria-controls="tpanel-t1" onclick="selTier('t1')"><span class="dot dot-manual"></span>Tier 1 · End-to-end</button>
+      <button class="ttab" role="tab" id="ttab-t2" aria-selected="false" aria-controls="tpanel-t2" onclick="selTier('t2')"><span class="dot dot-partial"></span>Tier 2 · Subsystem</button>
+      <button class="ttab" role="tab" id="ttab-t3" aria-selected="false" aria-controls="tpanel-t3" onclick="selTier('t3')"><span class="dot dot-partial"></span>Tier 3 · Micro</button>
+    </div>
+    <div class="tpanel on" id="tpanel-t1" role="tabpanel">
+      <div class="tierhead" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px">Tier 1 — End-to-end</h2><span class="pill">Primary · headline numbers</span> <span class="cadence cad-manual">✕ On demand only</span></div>
+
     <p class="lede">Answers: what is the system doing now, and where does the time go?</p>
     <table>
       <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Status</th></tr></thead>
@@ -137,10 +157,10 @@ kubectl apply -f &lt;model&gt;/&lt;framework&gt;/&lt;mode&gt;/perf.yaml  -n $NAM
 aiperf profile --model &lt;model&gt; --url http://localhost:8000 \
   --endpoint-type chat --streaming --concurrency 10 --request-count 100</pre>
     </div>
-  </section>
+      </div>
+    <div class="tpanel" id="tpanel-t2" role="tabpanel">
+      <div class="tierhead" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px">Tier 2 — Subsystem</h2><span class="pill">Ceiling · isolation</span> <span class="cadence cad-partial">▲ Functional in CI · timing on demand</span></div>
 
-  <section>
-    <div class="tierhead"><h2><span class="n">§3</span>Tier 2 — Subsystem</h2><span class="pill">Ceiling · isolation</span><span class="cadence cad-partial">▲ Functional in CI · timing on demand</span></div>
     <p class="lede">Answers: what is this part capable of, independent of what currently constrains it?</p>
     <table>
       <thead><tr><th style="width:30%">What exists</th><th style="width:28%">Covers</th><th>Notes</th></tr></thead>
@@ -167,10 +187,10 @@ python -m dynamo.replay --trace-format mooncake --router-mode kv_router \
 <span class="c"># Interconnect ceiling</span>
 kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESPACE</pre>
     </div>
-  </section>
+      </div>
+    <div class="tpanel" id="tpanel-t3" role="tabpanel">
+      <div class="tierhead" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px">Tier 3 — Micro</h2><span class="pill">CI-gateable · attributable</span> <span class="cadence cad-partial">▲ 6 of 10 run every PR · timings discarded</span></div>
 
-  <section>
-    <div class="tierhead"><h2><span class="n">§4</span>Tier 3 — Micro</h2><span class="pill">CI-gateable · attributable</span><span class="cadence cad-partial">▲ Runs every PR · timings discarded</span></div>
     <p class="lede">Answers: what does this function cost? Ten criterion benches; nine have a single primary author.</p>
     <table>
       <thead><tr><th style="width:44%">Bench</th><th style="width:20%">Stage</th><th>Measures</th></tr></thead>
@@ -179,7 +199,7 @@ kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESP
         <tr><td><code>llm/benches/tokenizer_dataset.rs</code></td><td>Preprocess</td><td>sequential vs batched</td></tr>
         <tr><td><code>kv-router/benches/tracking_hash.rs</code></td><td>Route</td><td>block hashing</td></tr>
         <tr><td><code>kv-router/benches/policy_queue.rs</code></td><td>Route</td><td>scheduling queue, pop + drain</td></tr>
-        <tr><td><code>llm/benches/kv_router_bench.rs</code></td><td>Route</td><td><span class="glyph" style="color:var(--critical)">✕</span><strong>No bench functions found</strong> — likely dead, still compile-gated in CI</td></tr>
+        <tr><td><code>llm/benches/kv_router_bench.rs</code></td><td>Route</td><td><span class="glyph" style="color:var(--warning)">▲</span><strong>Not a micro bench</strong> — a 1,749-line KV-router stress harness with its own CLI, gated behind <code>kv-router-stress</code>. Belongs in Tier 2</td></tr>
         <tr><td><code>kvbm-logical/benches/block_manager.rs</code></td><td>KV management</td><td>match active/inactive, bulk drop</td></tr>
         <tr><td><code>runtime/benches/tcp_codec_perf.rs</code></td><td>Transport</td><td>request/response encode + decode</td></tr>
         <tr><td><code>llm/benches/transfer_context_v2.rs</code></td><td>Transport</td><td>blocking, async, concurrent</td></tr>
@@ -187,9 +207,10 @@ kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESP
         <tr><td><code>llm/benches/request_trace_finish_metadata.rs</code></td><td>Postprocess</td><td>finish metadata, tool calls</td></tr>
       </tbody>
     </table>
-    <div class="note"><strong>All ten execute on every PR, and every timing is thrown away.</strong> <code>dynamo-pipeline.yml:169</code> runs <code>cargo test --all-targets</code>, which includes bench targets. Every <code>[[bench]]</code> sets <code>harness = false</code>, so criterion owns the binary, detects test mode, and runs each benchmark <em>once for validation</em> — no sampling, no timing, no comparison.<br><br><strong>This was not a decision.</strong> <code>--all-targets</code> arrived in a CI consolidation (#8525) where it means "compile and test everything"; the benches were swept in and criterion's test mode is its designed response. The only later commit touching that line (#11853) treats the benches purely as an obstacle to keeping the <em>test</em> command green. Whether to gate on performance was never posed. The accidental upside is real: a bench that panics or stops compiling fails the pipeline, so none can silently bit-rot.</div>
+    <div class="note"><strong>Six of the ten execute on every PR, and every timing is thrown away.</strong> <code>dynamo-pipeline.yml:169</code> runs <code>cargo test --all-targets</code>, which includes bench targets; the other four are feature-gated (<code>kv-router-stress</code>, <code>request-trace-bench</code>, <code>block-manager</code>+<code>testing-cuda</code>, <code>testing</code>) and do not build in the default pipeline. Every <code>[[bench]]</code> sets <code>harness = false</code>, so criterion owns the binary, detects test mode, and runs each benchmark <em>once for validation</em> — no sampling, no timing, no comparison.<br><br><strong>This was not a decision.</strong> <code>--all-targets</code> arrived in a CI consolidation (#8525) where it means "compile and test everything"; the benches were swept in and criterion's test mode is its designed response. The only later commit touching that line (#11853) treats the benches purely as an obstacle to keeping the <em>test</em> command green. Whether to gate on performance was never posed. The accidental upside is real: a bench that panics or stops compiling fails the pipeline, so none can silently bit-rot.</div>
     <div class="run">
       <h4>How to get actual numbers</h4>
+      <p class="where">Per-bench detail — what each one outputs, and how it scores against the procedure — is in <code>micro-bench-audit.html</code>.</p>
 <pre><span class="c"># Time one crate, or one bench</span>
 cargo bench -p dynamo-kv-router
 cargo bench -p dynamo-llm --bench tokenizer_simple
@@ -200,10 +221,11 @@ cargo bench -p dynamo-kv-router -- --save-baseline before
 cargo bench -p dynamo-kv-router -- --baseline before</pre>
       <div class="note" style="margin-top:0"><strong>What blocks a gate is the environment, not the benchmarks.</strong> Criterion compares against <code>target/criterion/</code>, which is ephemeral in CI — only sccache is configured, so no baseline survives a run. And the workflow documents that "under 12x contention 3/3 parallel shards segfault," while <code>policy_queue.rs</code> already sets <code>.noise_threshold(0.03)</code>. <strong>First step is a measurement, not a proposal:</strong> run <code>cargo bench</code> twice on the same commit on the same runner. If variance exceeds 3%, the gate is not buildable on this infrastructure.</div>
     </div>
+      </div>
   </section>
 
   <section>
-    <h2><span class="n">§5</span>Inference path — coverage by tier</h2>
+    <h2><span class="n">§3</span>Inference path — coverage by tier</h2>
     <p class="lede">Each stage of the request path, scored per tier. Coverage tracks authorship, not the path: stages are covered where someone building them happened to add a benchmark.</p>
     <p class="lede" style="font-size:12.5px;color:var(--muted);margin-top:-10px">The strip below summarises each stage by its <em>weakest</em> tier; the matrix gives the per-tier detail.</p>
 
@@ -288,7 +310,7 @@ cargo bench -p dynamo-kv-router -- --baseline before</pre>
   </section>
 
   <section>
-    <h2><span class="n">§6</span>What the map says</h2>
+    <h2><span class="n">§4</span>What the map says</h2>
     <ul>
       <li><strong>Both micro-level holes sit at the client-facing edges.</strong> HTTP ingress and SSE relay have no bench — precisely where a closed-loop client's latency is most sensitive, and precisely what mock workers cannot speak to, since the mocker replaces generation.</li>
       <li><strong>Tier 1 is weaker than it looks.</strong> Every stage reads "strong" at e2e only because the client interval contains it. With no server-side capture in any recipe, that column measures the whole and attributes nothing.</li>
@@ -302,6 +324,20 @@ cargo bench -p dynamo-kv-router -- --baseline before</pre>
 </main>
 <div id="tip" role="tooltip" aria-hidden="true"></div>
 <script>
+function selTier(id){
+  ['t1','t2','t3'].forEach(function(x){
+    document.getElementById('ttab-'+x).setAttribute('aria-selected', x===id?'true':'false');
+    document.getElementById('tpanel-'+x).classList.toggle('on', x===id);
+  });
+}
+document.getElementById('tiertabs').addEventListener('keydown', function(e){
+  var ids=['t1','t2','t3'];
+  var cur=ids.findIndex(function(x){return document.getElementById('ttab-'+x).getAttribute('aria-selected')==='true';});
+  var n=null;
+  if(e.key==='ArrowRight') n=(cur+1)%3;
+  if(e.key==='ArrowLeft')  n=(cur+2)%3;
+  if(n!==null){ selTier(ids[n]); document.getElementById('ttab-'+ids[n]).focus(); e.preventDefault(); }
+});
 (function(){
   var tip=document.getElementById('tip'),cur=null;
   function show(el){
