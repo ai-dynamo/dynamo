@@ -691,6 +691,15 @@ impl LocalModel {
         }
 
         // Register the Model Deployment Card via discovery interface
+        if lora_info.is_none()
+            && let Some(engine_capacity) = self.runtime_config.tcp_worker_pool_capacity_hint()
+        {
+            endpoint
+                .drt()
+                .network_manager()
+                .set_engine_capacity_hint(engine_capacity)
+                .await?;
+        }
         register_model_card(endpoint, &self.card).await?;
 
         Ok(())

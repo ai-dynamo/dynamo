@@ -119,6 +119,10 @@ client, the Frontend returns the configured overload status, HTTP 529 by default
 The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
 advanced override, must be at least `2`, and is read only when the engine limit is enabled.
 
+When `DYN_ENGINE_REQUEST_LIMIT` is unset and the backend reports capacity, the worker pool is sized
+to `ceil(1.5 × max_num_seqs × data_parallel_size)`. `DYN_TCP_WORKER_POOL_SIZE` overrides this
+automatic sizing.
+
 ### Overflow Channel Sizing
 
 The channel capacity is `Q - 1` because one dispatcher task can hold a request between the queue and
