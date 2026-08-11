@@ -5,7 +5,7 @@
 
 use dynamo_kv_router::{
     WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerSelectionContext, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
 
 /// Scores each candidate by its current number of active requests.
@@ -50,16 +50,37 @@ impl WorkerScorer for UncachedBlocksScorer {
     }
 }
 
-/// Picks the candidate with the lowest accumulated scorer cost.
-pub(crate) struct LowestCostPicker;
+/// Uses device affinity for tool results and total cost for other requests.
+pub(crate) struct RequestAwarePicker;
 
-impl WorkerPicker for LowestCostPicker {
-    /// Returns the row with the lowest cost.
+impl WorkerPicker for RequestAwarePicker {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE
+    }
+
     fn pick(
         &mut self,
-        _context: &WorkerSelectionContext<'_>,
+        context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
+        if context
+            .session_context()
+            .and_then(|session| session.input_trigger())
+            == Some(WorkerSelectionInputTrigger::ToolResult)
+        {
+            return input
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| {
+                    left.device_overlap_blocks()
+                        .total_cmp(&right.device_overlap_blocks())
+                })
+                .map(|(row, _)| row)
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"));
+        }
+
         input
             .candidates()
             .iter()

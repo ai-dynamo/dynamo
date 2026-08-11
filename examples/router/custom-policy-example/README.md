@@ -29,7 +29,7 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 | `catalog` | You need to register policy types for configuration |
 | `epp` | Worker selection runs in a standalone EPP |
 
-The basic policy adds an active-request cost and an uncached-request cost for every worker. The disaggregated policy scores active prefill work plus uncached request blocks for prefill workers, and projected decode blocks for decode workers. Both own their picker implementation.
+The basic policy adds an active-request cost and an uncached-request cost for every worker. Its picker normally chooses the lowest total cost, but tool-result turns choose the worker with the most device overlap through `session_context().input_trigger()`. The disaggregated policy scores active prefill work plus uncached request blocks for prefill workers, and projected decode blocks for decode workers. Both own their picker implementation.
 
 ## 1. Create the Policy Crate
 

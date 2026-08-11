@@ -77,6 +77,7 @@ pub struct WorkerCacheInput {
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
     pub(super) disk_overlap_blocks: f64,
+    pub(super) default_shared_beyond_device_blocks: u32,
     pub(super) shared_beyond_device_blocks: u32,
 }
 

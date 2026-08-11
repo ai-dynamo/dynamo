@@ -227,7 +227,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let shared_overlap_blocks =
-            weights.shared_cache_multiplier * cache.shared_beyond_device_blocks as f64;
+            weights.shared_cache_multiplier * cache.default_shared_beyond_device_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
@@ -293,7 +293,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if cache.shared_beyond_device_blocks > 0 {
+        if cache.default_shared_beyond_device_blocks > 0 {
             tracing::debug!(
                 request_id = context.request_id,
                 worker_type = self.worker_type,
@@ -305,7 +305,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                cache.shared_beyond_device_blocks,
+                cache.default_shared_beyond_device_blocks,
                 load.raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
@@ -1724,6 +1724,37 @@ mod tests {
             result.worker, worker0,
             "effective overlap should still credit older callers without tier maps"
         );
+    }
+
+    #[test]
+    fn summary_overlap_fallback_preserves_default_shared_prefix() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
+        let mut request = base_request(64);
+        request.overlap.effective_overlap_blocks.insert(worker, 2.0);
+        #[allow(clippy::single_range_in_vec_init)]
+        let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
+        request.shared_cache_hits = Some(shared_hits);
+        let input = WorkerSelectionInput::new(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+            LogitWeights {
+                overlap_score_credit: 1.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 1.0,
+                shared_cache_multiplier: 1.0,
+            },
+            WorkerInputs::CACHE,
+        );
+
+        let row = input.row(worker, None, WorkerInputs::CACHE);
+
+        assert_eq!(row.cache.device_overlap_blocks, 0.0);
+        assert_eq!(row.cache.default_device_overlap_blocks, 2.0);
+        assert_eq!(row.cache.shared_beyond_device_blocks, 4);
+        assert_eq!(row.cache.default_shared_beyond_device_blocks, 2);
     }
 
     /// Without shared cache hits, the scoring should be unchanged.

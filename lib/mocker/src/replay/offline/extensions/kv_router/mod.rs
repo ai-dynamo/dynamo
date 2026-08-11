@@ -1177,7 +1177,13 @@ mod tests {
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
-        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+        assert_eq!(
+            scheduling_request
+                .session_context
+                .as_ref()
+                .map(|context| context.session_id()),
+            Some("session-a")
+        );
     }
 
     #[test]

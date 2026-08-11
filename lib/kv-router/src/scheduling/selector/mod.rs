@@ -127,13 +127,20 @@ impl<'a> WorkerSelectionInput<'a> {
                 .copied()
                 .map(|blocks| blocks as f64)
                 .unwrap_or(0.0);
+            let shared_beyond = |device_blocks: f64| {
+                self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
+                    // `hits_beyond` expects the unweighted device prefix depth.
+                    hits.hits_beyond(device_blocks.round().max(0.0) as u32)
+                })
+            };
+            let default_device_overlap_blocks = if self.has_tier_overlap_blocks {
+                device_overlap_blocks
+            } else {
+                effective_overlap_blocks
+            };
             WorkerCacheInput {
                 effective_overlap_blocks,
-                default_device_overlap_blocks: if self.has_tier_overlap_blocks {
-                    device_overlap_blocks
-                } else {
-                    effective_overlap_blocks
-                },
+                default_device_overlap_blocks,
                 device_overlap_blocks,
                 host_overlap_blocks: self
                     .request
@@ -151,13 +158,8 @@ impl<'a> WorkerSelectionInput<'a> {
                     .get(&worker)
                     .copied()
                     .unwrap_or(0) as f64,
-                shared_beyond_device_blocks: self.request.shared_cache_hits.as_ref().map_or(
-                    0,
-                    |hits| {
-                        // `hits_beyond` expects the unweighted device prefix depth.
-                        hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
-                    },
-                ),
+                default_shared_beyond_device_blocks: shared_beyond(default_device_overlap_blocks),
+                shared_beyond_device_blocks: shared_beyond(device_overlap_blocks),
             }
         } else {
             WorkerCacheInput::default()

@@ -18,7 +18,7 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
 use filter::MinimumEffectiveOverlapFilter;
-use selection::{LeastBusyScorer, LowestCostPicker, UncachedBlocksScorer};
+use selection::{LeastBusyScorer, RequestAwarePicker, UncachedBlocksScorer};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,7 +62,7 @@ fn provider(
                 worker_type,
                 filters,
                 vec![Box::new(LeastBusyScorer), Box::new(UncachedBlocksScorer)],
-                Box::new(LowestCostPicker),
+                Box::new(RequestAwarePicker),
             )
         },
     ))
