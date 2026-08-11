@@ -356,7 +356,9 @@ where
     C: Borrow<KvRouterConfig> + Send,
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+        WorkerInputs::ALL
+            | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+            | WorkerInputs::DEFAULT_POLICY_CACHE
     }
 
     fn score(
@@ -402,7 +404,9 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
 ) -> Option<(WorkerWithDpRank, f64)> {
     debug_assert_eq!(
         scorer.required_worker_inputs(),
-        WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+        WorkerInputs::ALL
+            | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+            | WorkerInputs::DEFAULT_POLICY_CACHE
     );
     if let Some(worker) = eligibility.pinned_worker() {
         let row = input.row(worker, None, WorkerInputs::ALL);
@@ -609,7 +613,7 @@ mod tests {
             request.eligibility(),
             block_size,
             weights,
-            WorkerInputs::ALL,
+            WorkerInputs::ALL | WorkerInputs::DEFAULT_POLICY_CACHE,
         );
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
@@ -1735,7 +1739,20 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
         request.shared_cache_hits = Some(shared_hits);
-        let input = WorkerSelectionInput::new(
+        let default_input = WorkerSelectionInput::new(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+            LogitWeights {
+                overlap_score_credit: 1.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 1.0,
+                shared_cache_multiplier: 1.0,
+            },
+            WorkerInputs::CACHE | WorkerInputs::DEFAULT_POLICY_CACHE,
+        );
+        let custom_input = WorkerSelectionInput::new(
             &workers,
             &request,
             request.eligibility(),
@@ -1749,12 +1766,13 @@ mod tests {
             WorkerInputs::CACHE,
         );
 
-        let row = input.row(worker, None, WorkerInputs::CACHE);
+        let default_row = default_input.row(worker, None, WorkerInputs::CACHE);
+        let custom_row = custom_input.row(worker, None, WorkerInputs::CACHE);
 
-        assert_eq!(row.cache.device_overlap_blocks, 0.0);
-        assert_eq!(row.cache.default_device_overlap_blocks, 2.0);
-        assert_eq!(row.cache.shared_beyond_device_blocks, 4);
-        assert_eq!(row.cache.default_shared_beyond_device_blocks, 2);
+        assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
+        assert_eq!(custom_row.cache.shared_beyond_device_blocks, 4);
+        assert_eq!(default_row.cache.default_device_overlap_blocks, 2.0);
+        assert_eq!(default_row.cache.default_shared_beyond_device_blocks, 2);
     }
 
     /// Without shared cache hits, the scoring should be unchanged.

@@ -52,6 +52,7 @@ struct LogitWeights {
 struct WorkerSelectionInput<'a> {
     request: &'a SchedulingRequest,
     has_tier_overlap_blocks: bool,
+    use_default_cache_fallbacks: bool,
     context: WorkerSelectionContext<'a>,
 }
 
@@ -82,6 +83,7 @@ impl<'a> WorkerSelectionInput<'a> {
         Self {
             request,
             has_tier_overlap_blocks,
+            use_default_cache_fallbacks: inputs.contains(WorkerInputs::DEFAULT_POLICY_CACHE),
             context: WorkerSelectionContext {
                 request,
                 request_id: request.mode.request_id().unwrap_or("-"),
@@ -138,6 +140,12 @@ impl<'a> WorkerSelectionInput<'a> {
             } else {
                 effective_overlap_blocks
             };
+            let (default_shared_beyond_device_blocks, shared_beyond_device_blocks) =
+                if self.use_default_cache_fallbacks {
+                    (shared_beyond(default_device_overlap_blocks), 0)
+                } else {
+                    (0, shared_beyond(device_overlap_blocks))
+                };
             WorkerCacheInput {
                 effective_overlap_blocks,
                 default_device_overlap_blocks,
@@ -158,8 +166,8 @@ impl<'a> WorkerSelectionInput<'a> {
                     .get(&worker)
                     .copied()
                     .unwrap_or(0) as f64,
-                default_shared_beyond_device_blocks: shared_beyond(default_device_overlap_blocks),
-                shared_beyond_device_blocks: shared_beyond(device_overlap_blocks),
+                default_shared_beyond_device_blocks,
+                shared_beyond_device_blocks,
             }
         } else {
             WorkerCacheInput::default()
@@ -319,7 +327,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     let weights = selection_weights(kv_router_config, request);
     let (inputs, needs_filtered_baseline) = match &state {
         WorkerSelectionPolicyStateRef::Default(_) => (
-            WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS,
+            WorkerInputs::ALL
+                | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+                | WorkerInputs::DEFAULT_POLICY_CACHE,
             false,
         ),
         WorkerSelectionPolicyStateRef::Custom(state) => {
