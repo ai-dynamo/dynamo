@@ -42,7 +42,7 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
 | `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens`, `basetenkenizer` | `default` |
-| `--tokenizer-fallback` | `DYN_TOKENIZER_FALLBACK` | `true`, `false` | `true` |
+| `--tokenizer-fallback` / `--no-tokenizer-fallback` | `DYN_TOKENIZER_FALLBACK` | enabled, disabled | enabled |
 
 **Examples:**
 
@@ -58,7 +58,7 @@ python -m dynamo.frontend
 python -m dynamo.frontend --tokenizer basetenkenizer
 
 # Require Baseten Tokenizer instead of falling back to HuggingFace
-python -m dynamo.frontend --tokenizer basetenkenizer --tokenizer-fallback false
+python -m dynamo.frontend --tokenizer basetenkenizer --no-tokenizer-fallback
 ```
 
 ## Dynamo Frontend Behavior
@@ -68,5 +68,5 @@ When a non-default backend is selected:
 1. The frontend resolves `--tokenizer` / `DYN_TOKENIZER` and passes the selected backend to the Rust runtime.
 2. `ModelDeploymentCard::tokenizer()` loads the HuggingFace tokenizer first for fallback behavior and L1 cache special-token metadata.
 3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file.
-4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--tokenizer-fallback false`, startup fails and reports the backend loading error instead.
+4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, startup fails and reports the backend loading error instead.
 5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.

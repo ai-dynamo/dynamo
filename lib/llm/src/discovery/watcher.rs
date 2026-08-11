@@ -224,6 +224,8 @@ where
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
+    /// Frontend-level tokenizer fallback override for discovered model cards.
+    tokenizer_fallback_enabled: Option<bool>,
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
@@ -353,6 +355,7 @@ where
             metrics,
             local_model_path: None,
             tokenizer_backend: None,
+            tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
         }
@@ -370,6 +373,10 @@ where
         self.tokenizer_backend = tokenizer_backend;
     }
 
+    pub fn set_tokenizer_fallback_enabled(&mut self, enabled: Option<bool>) {
+        self.tokenizer_fallback_enabled = enabled;
+    }
+
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
     }
@@ -381,9 +388,12 @@ where
             .collect();
     }
 
-    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+    fn apply_tokenizer_overrides(&self, card: &mut ModelDeploymentCard) {
         if let Some(tokenizer_backend) = self.tokenizer_backend {
             card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
+        if let Some(enabled) = self.tokenizer_fallback_enabled {
+            card.runtime_config.tokenizer_fallback_enabled = Some(enabled);
         }
     }
 
@@ -1011,7 +1021,7 @@ where
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
-        self.apply_tokenizer_backend_override(&mut card);
+        self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
@@ -1325,6 +1335,47 @@ mod tests {
             &card,
             &[OTHER_GENERATE_CAPABILITY]
         ));
+    }
+
+    #[tokio::test]
+    async fn tokenizer_fallback_override_applies_to_discovered_card() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        watcher.set_tokenizer_fallback_enabled(Some(false));
+
+        let mut card = ModelDeploymentCard::with_name_only("strict-tokenizer");
+        card.runtime_config.tokenizer_fallback_enabled = Some(true);
+        let instance = DiscoveryInstance::Model {
+            namespace: "ns1".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            card_json: serde_json::to_value(card).unwrap(),
+            model_suffix: None,
+        };
+
+        let desired = watcher
+            .normalize(instance, &NamespaceFilter::Global)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            desired.card.runtime_config.tokenizer_fallback_enabled,
+            Some(false)
+        );
     }
 
     #[tokio::test]

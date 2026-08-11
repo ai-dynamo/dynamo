@@ -506,9 +506,9 @@ See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components
   Environment variable: `DYN_TOKENIZER`
 </ParamField>
 
-<ParamField path="--tokenizer-fallback" type="boolean" default="true">
-  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Set
-  this option to `false` to fail during startup instead.
+<ParamField path="--tokenizer-fallback / --no-tokenizer-fallback" type="boolean" default="true">
+  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
+  `--no-tokenizer-fallback` to fail during startup instead.
 
   Environment variable: `DYN_TOKENIZER_FALLBACK`
 </ParamField>

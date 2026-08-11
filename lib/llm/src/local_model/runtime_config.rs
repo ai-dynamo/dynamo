@@ -549,14 +549,19 @@ impl ModelRuntimeConfig {
             .unwrap_or_else(TokenizerBackend::from_env_or_default)
     }
 
-    pub fn is_tokenizer_fallback_enabled(&self) -> bool {
-        self.tokenizer_fallback_enabled.unwrap_or_else(|| {
-            std::env::var(ENV_TOKENIZER_FALLBACK)
-                .ok()
-                .as_deref()
-                .and_then(dynamo_runtime::config::parse_bool_opt)
-                .unwrap_or(true)
-        })
+    pub fn is_tokenizer_fallback_enabled(&self) -> anyhow::Result<bool> {
+        if let Some(enabled) = self.tokenizer_fallback_enabled {
+            return Ok(enabled);
+        }
+
+        match std::env::var(ENV_TOKENIZER_FALLBACK) {
+            Ok(value) => dynamo_runtime::config::parse_bool(&value)
+                .map_err(|error| anyhow::anyhow!("{ENV_TOKENIZER_FALLBACK}: {error}")),
+            Err(std::env::VarError::NotPresent) => Ok(true),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{ENV_TOKENIZER_FALLBACK} must contain valid UTF-8")
+            }
+        }
     }
 
     /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
@@ -853,13 +858,13 @@ mod tests {
     fn tokenizer_fallback_env_default_and_explicit_config_precedence() {
         temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("false"))], || {
             let config = ModelRuntimeConfig::default();
-            assert!(!config.is_tokenizer_fallback_enabled());
+            assert!(!config.is_tokenizer_fallback_enabled().unwrap());
 
             let config = ModelRuntimeConfig {
                 tokenizer_fallback_enabled: Some(true),
                 ..Default::default()
             };
-            assert!(config.is_tokenizer_fallback_enabled());
+            assert!(config.is_tokenizer_fallback_enabled().unwrap());
         });
 
         temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("true"))], || {
@@ -867,12 +872,18 @@ mod tests {
                 tokenizer_fallback_enabled: Some(false),
                 ..Default::default()
             };
-            assert!(!config.is_tokenizer_fallback_enabled());
+            assert!(!config.is_tokenizer_fallback_enabled().unwrap());
         });
 
         temp_env::with_vars_unset([ENV_TOKENIZER_FALLBACK], || {
             let config = ModelRuntimeConfig::default();
-            assert!(config.is_tokenizer_fallback_enabled());
+            assert!(config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("flase"))], || {
+            let config = ModelRuntimeConfig::default();
+            let error = config.is_tokenizer_fallback_enabled().unwrap_err();
+            assert!(error.to_string().contains(ENV_TOKENIZER_FALLBACK));
         });
     }
 

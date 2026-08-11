@@ -554,18 +554,17 @@ class FrontendArgGroup(ArgGroup):
             choices=["default", "fastokens", "basetenkenizer"],
         )
 
-        add_argument(
+        add_negatable_bool_argument(
             g,
             flag_name="--tokenizer-fallback",
             env_var="DYN_TOKENIZER_FALLBACK",
             default=True,
             help=(
                 "Fall back to HuggingFace when the selected fastokens or "
-                "basetenkenizer backend cannot load the model tokenizer. Set this "
-                "option to false to fail during startup instead."
+                "basetenkenizer backend cannot load the model tokenizer. Use "
+                "--no-tokenizer-fallback to fail during startup instead."
             ),
-            arg_type=parse_bool,
-            metavar="{true,false}",
+            env_value_type=parse_bool,
         )
 
         add_negatable_bool_argument(

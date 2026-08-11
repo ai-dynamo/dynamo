@@ -12,13 +12,13 @@ T = TypeVar("T")
 
 
 def parse_bool(value: str) -> bool:
-    """Parse a case-insensitive true or false CLI value."""
+    """Parse Dynamo's truthy and falsy configuration values."""
     normalized = value.strip().lower()
-    if normalized == "true":
+    if normalized in ("1", "true", "on", "yes"):
         return True
-    if normalized == "false":
+    if normalized in ("", "0", "false", "off", "no"):
         return False
-    raise argparse.ArgumentTypeError("expected 'true' or 'false'")
+    raise argparse.ArgumentTypeError("expected one of: true/false, 1/0, on/off, yes/no")
 
 
 def split_served_model_names(served_model_name: Any) -> list[str]:
@@ -162,6 +162,7 @@ def add_negatable_bool_argument(
     help: str,
     dest: Optional[str] = None,
     obsolete_flag: Optional[str] = None,
+    env_value_type: Optional[Callable[..., bool]] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -174,6 +175,7 @@ def add_negatable_bool_argument(
         help: Help text
         dest: Optional destination name for the parsed value
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
+        env_value_type: Optional strict parser for the environment value
     """
     add_argument(
         parser,
@@ -183,7 +185,7 @@ def add_negatable_bool_argument(
         help=help,
         dest=dest,
         obsolete_flag=obsolete_flag,
-        arg_type=None,
+        arg_type=env_value_type,
         action=argparse.BooleanOptionalAction,
     )
 

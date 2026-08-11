@@ -1210,7 +1210,7 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
-        let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled();
+        let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
