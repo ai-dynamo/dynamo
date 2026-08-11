@@ -155,9 +155,7 @@ class frontend_service:
     MODEL_MIGRATION_TOTAL = "model_migration_total"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
-    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
-        "model_migration_max_seq_len_exceeded_total"
-    )
+    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = "model_migration_max_seq_len_exceeded_total"
     # Total number of request cancellations
     MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
     # Total number of requests rejected due to resource exhaustion
@@ -268,11 +266,13 @@ class kvindexer:
 
 
 class kvrouter:
+
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
 
 
 class kvstats:
+
     # Total number of KV cache blocks available on the worker
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
@@ -312,11 +312,13 @@ class labels:
 
 
 class lifecycle:
+
     CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
     DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class model_info:
+
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
 
@@ -454,6 +456,7 @@ class tokio_perf:
     WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
     WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
     WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    QUEUE_OVERLOAD_WARNINGS_TOTAL = "queue_overload_warnings_total"
     BLOCKING_THREADS = "blocking_threads"
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
