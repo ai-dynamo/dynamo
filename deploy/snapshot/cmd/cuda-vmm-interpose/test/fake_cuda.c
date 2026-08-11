@@ -43,7 +43,10 @@ static unsigned int multicast_bind_count;
 static int last_exported_fd = -1;
 static int last_internal_export_alias = -1;
 static int internal_export_aliases[32];
+static CUmemAllocationHandleType handle_types[32];
+static CUdevice create_devices[32];
 static int last_imported_fd = -1;
+static unsigned char last_imported_fabric[CU_IPC_HANDLE_SIZE];
 static int colliding_export_source = -1;
 static CUdeviceptr map_addresses[16];
 static CUdeviceptr access_addresses[16];
@@ -58,11 +61,23 @@ static CUmemGenericAllocationHandle released_handles[16];
 static pthread_t initial_thread;
 static _Thread_local CUcontext current_context;
 static CUcontext last_context;
+static int device_count = 1;
+static CUdevice device_handles[16];
+static CUdevice device_identities[16];
+static unsigned int device_get_calls;
+static unsigned int device_uuid_calls;
+static unsigned int device_count_calls;
 
 __attribute__((constructor)) static void
 initialize_fake_cuda(void)
 {
+  size_t index;
+
   initial_thread = pthread_self();
+  for (index = 0; index < sizeof(device_identities) / sizeof(device_identities[0]); index++) {
+    device_handles[index] = (CUdevice)index;
+    device_identities[index] = (CUdevice)index;
+  }
 }
 
 static int
@@ -126,6 +141,12 @@ int
 fake_cuda_last_imported_fd(void)
 {
   return last_imported_fd;
+}
+
+unsigned char
+fake_cuda_last_imported_fabric_byte(unsigned int index)
+{
+  return index < sizeof(last_imported_fabric) ? last_imported_fabric[index] : 0;
 }
 
 CUdeviceptr
@@ -220,6 +241,53 @@ fake_cuda_create_count(void)
   return create_count;
 }
 
+CUdevice
+fake_cuda_create_device(unsigned int index)
+{
+  return index < create_count &&
+          index < sizeof(create_devices) / sizeof(create_devices[0])
+      ? create_devices[index]
+      : -1;
+}
+
+void
+fake_cuda_set_device_count(int count)
+{
+  device_count = count;
+}
+
+void
+fake_cuda_set_device_handle(int ordinal, CUdevice device)
+{
+  if (ordinal >= 0 && (size_t)ordinal < sizeof(device_handles) / sizeof(device_handles[0]))
+    device_handles[ordinal] = device;
+}
+
+void
+fake_cuda_set_device_identity(CUdevice device, CUdevice identity)
+{
+  if (device >= 0 && (size_t)device < sizeof(device_identities) / sizeof(device_identities[0]))
+    device_identities[device] = identity;
+}
+
+unsigned int
+fake_cuda_device_get_calls(void)
+{
+  return device_get_calls;
+}
+
+unsigned int
+fake_cuda_device_uuid_calls(void)
+{
+  return device_uuid_calls;
+}
+
+unsigned int
+fake_cuda_device_count_calls(void)
+{
+  return device_count_calls;
+}
+
 unsigned int
 fake_cuda_import_count(void)
 {
@@ -276,12 +344,37 @@ cuCtxSetCurrent(CUcontext context)
 }
 
 CUresult CUDAAPI
+cuDeviceGet(CUdevice* device, int ordinal)
+{
+  device_get_calls++;
+  if (device == NULL || ordinal < 0 || ordinal >= device_count ||
+      (size_t)ordinal >= sizeof(device_handles) / sizeof(device_handles[0]))
+    return CUDA_ERROR_INVALID_DEVICE;
+  *device = device_handles[ordinal];
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
 cuDeviceGetUuid_v2(CUuuid* uuid, CUdevice device)
 {
+  CUdevice identity;
   size_t index;
 
-  for (index = 0; index < sizeof(uuid->bytes); index++)
-    uuid->bytes[index] = (char)(index + device + 1);
+  device_uuid_calls++;
+  if (uuid == NULL || device < 0 || (size_t)device >= sizeof(device_identities) / sizeof(device_identities[0]))
+    return CUDA_ERROR_INVALID_DEVICE;
+  identity = device_identities[device];
+  for (index = 0; index < sizeof(uuid->bytes); index++) uuid->bytes[index] = (char)(index + identity + 1);
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuDeviceGetCount(int* count)
+{
+  device_count_calls++;
+  if (count == NULL)
+    return CUDA_ERROR_INVALID_VALUE;
+  *count = device_count;
   return CUDA_SUCCESS;
 }
 
@@ -290,12 +383,18 @@ cuMemCreate(
     CUmemGenericAllocationHandle* output, size_t size,
     const CUmemAllocationProp* properties, unsigned long long flags)
 {
+  size_t index;
+
   (void)size;
-  (void)properties;
   (void)flags;
+  if (create_count < sizeof(create_devices) / sizeof(create_devices[0]))
+    create_devices[create_count] = properties->location.id;
   create_count++;
   active_handle_count++;
   *output = next_handle++;
+  index = (size_t)(*output - UINT64_C(0x1234));
+  if (index < sizeof(handle_types) / sizeof(handle_types[0]))
+    handle_types[index] = properties->requestedHandleTypes;
   return CUDA_SUCCESS;
 }
 
@@ -361,10 +460,18 @@ cuMemExportToShareableHandle(
     CUmemAllocationHandleType type, unsigned long long flags)
 {
   int fd;
+  size_t index;
 
   (void)flags;
-  if (!real_handle(handle) ||
-      type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+  if (!real_handle(handle))
+    return CUDA_ERROR_INVALID_HANDLE;
+  if (type == CU_MEM_HANDLE_TYPE_FABRIC) {
+    for (index = 0; index < CU_IPC_HANDLE_SIZE; index++)
+      ((unsigned char*)shareable)[index] = (unsigned char)(0xa0U + index);
+    export_count++;
+    return CUDA_SUCCESS;
+  }
+  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
     return CUDA_ERROR_INVALID_HANDLE;
   if (getenv("FAKE_CUDA_COLLIDE_EXPORT_IDENTITY") != NULL) {
     if (colliding_export_source < 0)
@@ -395,14 +502,21 @@ cuMemImportFromShareableHandle(
 {
   struct stat status;
   int fd = (int)(uintptr_t)os_handle;
+  size_t index;
 
-  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ||
-      fstat(fd, &status) != 0)
+  if (type == CU_MEM_HANDLE_TYPE_FABRIC) {
+    memcpy(last_imported_fabric, os_handle, sizeof(last_imported_fabric));
+  } else if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR || fstat(fd, &status) != 0) {
     return CUDA_ERROR_INVALID_HANDLE;
-  last_imported_fd = fd;
+  } else {
+    last_imported_fd = fd;
+  }
   import_count++;
   active_handle_count++;
   *output = next_handle++;
+  index = (size_t)(*output - UINT64_C(0x1234));
+  if (index < sizeof(handle_types) / sizeof(handle_types[0]))
+    handle_types[index] = CU_MEM_HANDLE_TYPE_NONE;
   return CUDA_SUCCESS;
 }
 
@@ -410,6 +524,8 @@ CUresult CUDAAPI
 cuMemGetAllocationPropertiesFromHandle(
     CUmemAllocationProp* properties, CUmemGenericAllocationHandle handle)
 {
+  size_t index = (size_t)(handle - UINT64_C(0x1234));
+
   if (!real_handle(handle))
     return CUDA_ERROR_INVALID_HANDLE;
   memset(properties, 0, sizeof(*properties));
@@ -417,7 +533,9 @@ cuMemGetAllocationPropertiesFromHandle(
   properties->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   properties->location.id = 0;
   properties->requestedHandleTypes =
-      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+      index < sizeof(handle_types) / sizeof(handle_types[0])
+          ? handle_types[index]
+          : CU_MEM_HANDLE_TYPE_NONE;
   return CUDA_SUCCESS;
 }
 
@@ -548,8 +666,12 @@ cuGetProcAddress_v2(
     *output = (void*)&cuCtxGetCurrent;
   else if (strcmp(symbol, "cuCtxSetCurrent") == 0)
     *output = (void*)&cuCtxSetCurrent;
+  else if (strcmp(symbol, "cuDeviceGet") == 0)
+    *output = (void*)&cuDeviceGet;
   else if (strcmp(symbol, "cuDeviceGetUuid_v2") == 0)
     *output = (void*)&cuDeviceGetUuid_v2;
+  else if (strcmp(symbol, "cuDeviceGetCount") == 0)
+    *output = (void*)&cuDeviceGetCount;
   else if (strcmp(symbol, "cuMemcpyDtoH_v2") == 0)
     *output = (void*)&cuMemcpyDtoH_v2;
   else if (strcmp(symbol, "cuMemcpyHtoD_v2") == 0)

@@ -262,6 +262,59 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
 }
 
+func TestBuildCheckpointJobReusesCheckpointStorageMount(t *testing.T) {
+	const volumeName = "checkpoints"
+
+	t.Log("Configure a checkpoint template that already mounts the storage PVC")
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Volumes = []corev1.Volume{{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
+		},
+	}}
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+		Name:      volumeName,
+		MountPath: "/checkpoints",
+	}}
+	r := makeCheckpointReconciler(checkpointTestScheme(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-pvc", Namespace: testNamespace},
+	})
+	r.Config.Checkpoint.Storage = configv1alpha1.CheckpointStorageConfiguration{
+		Type: snapshotprotocol.StorageTypePVC,
+		PVC: configv1alpha1.CheckpointPVCConfig{
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		},
+	}
+
+	t.Log("Build the checkpoint job")
+	job, err := buildCheckpointJob(context.Background(), r.Client, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	t.Log("Verify the existing storage volume and mount are reused exactly once")
+	var checkpointVolumes []corev1.Volume
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, volume.Name)
+		if volume.PersistentVolumeClaim != nil &&
+			volume.PersistentVolumeClaim.ClaimName == "snapshot-pvc" {
+			checkpointVolumes = append(checkpointVolumes, volume)
+		}
+	}
+	require.Len(t, checkpointVolumes, 1)
+	assert.Equal(t, volumeName, checkpointVolumes[0].Name)
+
+	var baseMounts []corev1.VolumeMount
+	for _, mount := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, mount.Name)
+		if mount.MountPath == "/checkpoints" {
+			baseMounts = append(baseMounts, mount)
+		}
+	}
+	require.Len(t, baseMounts, 1)
+	assert.Equal(t, volumeName, baseMounts[0].Name)
+}
+
 func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)

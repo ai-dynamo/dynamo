@@ -1,14 +1,119 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
+
+func TestRemountProcSys(t *testing.T) {
+	type mountCall struct {
+		source string
+		target string
+		fstype string
+		flags  uintptr
+		data   string
+	}
+
+	currentFlags := uintptr(syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC)
+	tests := []struct {
+		name      string
+		rw        bool
+		mounted   bool
+		failCall  int
+		wantCalls []mountCall
+		wantError string
+	}{
+		{
+			name: "read-write creates bind mount",
+			rw:   true,
+			wantCalls: []mountCall{
+				{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND | syscall.MS_REC},
+				{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT},
+			},
+		},
+		{
+			name:      "read-write bind mount error",
+			rw:        true,
+			failCall:  1,
+			wantCalls: []mountCall{{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND | syscall.MS_REC}},
+			wantError: "failed to bind mount /proc/sys for rw remount: invalid argument",
+		},
+		{
+			name:     "read-write remount error after creating bind mount",
+			rw:       true,
+			failCall: 2,
+			wantCalls: []mountCall{
+				{source: "/proc/sys", target: "/proc/sys", flags: syscall.MS_BIND | syscall.MS_REC},
+				{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT},
+			},
+			wantError: "failed to remount /proc/sys rw: invalid argument",
+		},
+		{
+			name:    "read-only",
+			mounted: true,
+			wantCalls: []mountCall{
+				{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT | syscall.MS_RDONLY},
+			},
+		},
+		{
+			name:      "read-write remount error",
+			rw:        true,
+			mounted:   true,
+			failCall:  1,
+			wantCalls: []mountCall{{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT}},
+			wantError: "failed to remount /proc/sys rw: invalid argument",
+		},
+		{
+			name:      "read-only remount error",
+			mounted:   true,
+			failCall:  1,
+			wantCalls: []mountCall{{target: "/proc/sys", flags: currentFlags | syscall.MS_BIND | syscall.MS_REMOUNT | syscall.MS_RDONLY}},
+			wantError: "failed to remount /proc/sys ro: invalid argument",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []mountCall
+			mount := func(source, target, fstype string, flags uintptr, data string) error {
+				calls = append(calls, mountCall{source, target, fstype, flags, data})
+				if len(calls) == tc.failCall {
+					return syscall.EINVAL
+				}
+				return nil
+			}
+
+			err := remountProcSys(tc.rw, tc.mounted, currentFlags, mount)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("remountProcSys() error = %v", err)
+				}
+			} else {
+				if err == nil || err.Error() != tc.wantError {
+					t.Fatalf("remountProcSys() error = %v, want %q", err, tc.wantError)
+				}
+				if !errors.Is(err, syscall.EINVAL) {
+					t.Fatalf("remountProcSys() error does not wrap EINVAL: %v", err)
+				}
+			}
+			if len(calls) != len(tc.wantCalls) {
+				t.Fatalf("mount calls = %#v, want %#v", calls, tc.wantCalls)
+			}
+			for i := range calls {
+				if calls[i] != tc.wantCalls[i] {
+					t.Errorf("mount call %d = %#v, want %#v", i, calls[i], tc.wantCalls[i])
+				}
+			}
+		})
+	}
+}
 
 func TestClassifyMounts(t *testing.T) {
 	tests := []struct {

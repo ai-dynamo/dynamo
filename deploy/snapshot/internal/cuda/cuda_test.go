@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,44 +19,89 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
+)
+
+const (
+	testGPUUUIDA = "GPU-aaaaaaaa-1111-2222-3333-444444444444"
+	testGPUUUIDB = "GPU-bbbbbbbb-5555-6666-7777-888888888888"
+	testGPUUUIDC = "GPU-cccccccc-9999-aaaa-bbbb-cccccccccccc"
+	testGPUUUIDD = "GPU-dddddddd-eeee-ffff-0000-111111111111"
 )
 
 func TestBuildDeviceMap(t *testing.T) {
 	tests := []struct {
-		name    string
-		source  []string
-		target  []string
-		want    string
-		wantErr bool
+		name          string
+		source        []string
+		target        []string
+		want          string
+		wantPlacement []types.VMMPlacement
+		wantErr       bool
 	}{
 		{
 			name:   "single GPU",
-			source: []string{"GPU-aaa"},
-			target: []string{"GPU-bbb"},
-			want:   "GPU-aaa=GPU-bbb",
+			source: []string{testGPUUUIDA},
+			target: []string{testGPUUUIDB},
+			want:   testGPUUUIDA + "=" + testGPUUUIDB,
+			wantPlacement: []types.VMMPlacement{{
+				SourceGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+				TargetGPUUUID: strings.TrimPrefix(testGPUUUIDB, "GPU-"),
+				TargetOrdinal: 0,
+			}},
 		},
 		{
 			name:   "single GPU identity returns no map",
-			source: []string{"GPU-aaa"},
-			target: []string{"GPU-aaa"},
+			source: []string{testGPUUUIDA},
+			target: []string{testGPUUUIDA},
 			want:   "",
+			wantPlacement: []types.VMMPlacement{{
+				SourceGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+				TargetGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+				TargetOrdinal: 0,
+			}},
 		},
 		{
 			name:   "multiple GPUs",
-			source: []string{"GPU-aaa", "GPU-bbb"},
-			target: []string{"GPU-ccc", "GPU-ddd"},
-			want:   "GPU-aaa=GPU-ccc,GPU-bbb=GPU-ddd",
+			source: []string{testGPUUUIDA, testGPUUUIDB},
+			target: []string{testGPUUUIDC, testGPUUUIDD},
+			want: testGPUUUIDA + "=" + testGPUUUIDC + "," +
+				testGPUUUIDB + "=" + testGPUUUIDD,
+			wantPlacement: []types.VMMPlacement{
+				{
+					SourceGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+					TargetGPUUUID: strings.TrimPrefix(testGPUUUIDC, "GPU-"),
+					TargetOrdinal: 0,
+				},
+				{
+					SourceGPUUUID: strings.TrimPrefix(testGPUUUIDB, "GPU-"),
+					TargetGPUUUID: strings.TrimPrefix(testGPUUUIDD, "GPU-"),
+					TargetOrdinal: 1,
+				},
+			},
 		},
 		{
 			name:   "multiple GPU identity returns no map",
-			source: []string{"GPU-aaa", "GPU-bbb"},
-			target: []string{"GPU-bbb", "GPU-aaa"},
+			source: []string{testGPUUUIDA, testGPUUUIDB},
+			target: []string{testGPUUUIDB, testGPUUUIDA},
 			want:   "",
+			wantPlacement: []types.VMMPlacement{
+				{
+					SourceGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+					TargetGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+					TargetOrdinal: 1,
+				},
+				{
+					SourceGPUUUID: strings.TrimPrefix(testGPUUUIDB, "GPU-"),
+					TargetGPUUUID: strings.TrimPrefix(testGPUUUIDB, "GPU-"),
+					TargetOrdinal: 0,
+				},
+			},
 		},
 		{
 			name:    "mismatched lengths",
-			source:  []string{"GPU-aaa", "GPU-bbb"},
-			target:  []string{"GPU-ccc"},
+			source:  []string{testGPUUUIDA, testGPUUUIDB},
+			target:  []string{testGPUUUIDC},
 			wantErr: true,
 		},
 		{
@@ -67,7 +113,25 @@ func TestBuildDeviceMap(t *testing.T) {
 		{
 			name:    "source empty target non-empty",
 			source:  []string{},
-			target:  []string{"GPU-aaa"},
+			target:  []string{testGPUUUIDA},
+			wantErr: true,
+		},
+		{
+			name:    "malformed source",
+			source:  []string{"GPU-not-a-uuid"},
+			target:  []string{testGPUUUIDA},
+			wantErr: true,
+		},
+		{
+			name:    "duplicate source",
+			source:  []string{testGPUUUIDA, testGPUUUIDA},
+			target:  []string{testGPUUUIDB, testGPUUUIDC},
+			wantErr: true,
+		},
+		{
+			name:    "duplicate target",
+			source:  []string{testGPUUUIDA, testGPUUUIDB},
+			target:  []string{testGPUUUIDC, testGPUUUIDC},
 			wantErr: true,
 		},
 	}
@@ -75,17 +139,91 @@ func TestBuildDeviceMap(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := BuildDeviceMap(tc.source, tc.target, logr.Discard())
+			placement, placementErr := BuildVMMPlacement(tc.source, tc.target)
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("expected error, got %q", got)
+				}
+				if placementErr == nil {
+					t.Errorf("expected placement error, got %#v", placement)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			if placementErr != nil {
+				t.Fatalf("unexpected placement error: %v", placementErr)
+			}
 			if got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
+			}
+			if !slices.Equal(placement, tc.wantPlacement) {
+				t.Errorf("placement = %#v, want %#v", placement, tc.wantPlacement)
+			}
+		})
+	}
+}
+
+func TestValidateVMMPlacementRejectsInvalidPlans(t *testing.T) {
+	valid := []types.VMMPlacement{
+		{
+			SourceGPUUUID: strings.TrimPrefix(testGPUUUIDA, "GPU-"),
+			TargetGPUUUID: strings.TrimPrefix(testGPUUUIDC, "GPU-"),
+			TargetOrdinal: 0,
+		},
+		{
+			SourceGPUUUID: strings.TrimPrefix(testGPUUUIDB, "GPU-"),
+			TargetGPUUUID: strings.TrimPrefix(testGPUUUIDD, "GPU-"),
+			TargetOrdinal: 1,
+		},
+	}
+	if err := ValidateVMMPlacement(
+		[]string{testGPUUUIDA, testGPUUUIDB},
+		valid,
+	); err != nil {
+		t.Fatalf("valid placement rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func([]types.VMMPlacement) []types.VMMPlacement
+	}{
+		{
+			name: "count mismatch",
+			mutate: func(plan []types.VMMPlacement) []types.VMMPlacement {
+				return plan[:1]
+			},
+		},
+		{
+			name: "noncanonical source UUID",
+			mutate: func(plan []types.VMMPlacement) []types.VMMPlacement {
+				plan[0].SourceGPUUUID = strings.ToUpper(plan[0].SourceGPUUUID)
+				return plan
+			},
+		},
+		{
+			name: "duplicate target ordinal",
+			mutate: func(plan []types.VMMPlacement) []types.VMMPlacement {
+				plan[1].TargetOrdinal = 0
+				return plan
+			},
+		},
+		{
+			name: "source order mismatch",
+			mutate: func(plan []types.VMMPlacement) []types.VMMPlacement {
+				plan[0], plan[1] = plan[1], plan[0]
+				return plan
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := slices.Clone(valid)
+			if err := ValidateVMMPlacement(
+				[]string{testGPUUUIDA, testGPUUUIDB},
+				test.mutate(plan),
+			); err == nil {
+				t.Fatal("invalid placement accepted")
 			}
 		})
 	}

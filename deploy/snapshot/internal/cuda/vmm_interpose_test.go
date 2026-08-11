@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -18,9 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
@@ -31,7 +35,6 @@ func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
-
 		if err := os.WriteFile(filepath.Join(path, "environ"), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -46,6 +49,580 @@ func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
 	enabled, err := DetectVMMInterpose(procRoot, []int{10, 11})
 	if err != nil || !enabled {
 		t.Fatalf("uniform launcher scope = %t, %v", enabled, err)
+	}
+}
+
+func TestExchangeVMMRejectsNonemptySuccessBeforeReadingPayload(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
+	path := filepath.Join(t.TempDir(), "vmm.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	releasePeer := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		request := make([]byte, vmmHeaderSize)
+		if _, err := io.ReadFull(connection, request); err != nil {
+			return
+		}
+		_ = writeVMMBytes(connection, encodeVMMHeader(vmmHeader{
+			Operation:      vmmSetPlacement,
+			Count:          1,
+			AllocationUUID: [16]byte{1},
+			ObjectID:       1,
+			PayloadSize:    1,
+			Message:        "unexpected",
+			Participant:    participant,
+		}))
+		<-releasePeer
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = exchangeVMM(
+		ctx,
+		VMMProcess{SocketPath: path, Participant: participant},
+		vmmHeader{Operation: vmmSetPlacement},
+		nil,
+		-1,
+		vmmResponseEmpty,
+	)
+	close(releasePeer)
+	<-done
+	if err == nil || !strings.Contains(err.Error(), "nonempty success response") {
+		t.Fatalf("nonempty SET_PLACEMENT response error = %v", err)
+	}
+}
+
+func TestVMMPlacementPayloadSizeLimit(t *testing.T) {
+	maximumCount := vmmMaximumRedisBulk / vmmPlacementSize
+	size, err := vmmPlacementPayloadSize(maximumCount)
+	if err != nil || size != maximumCount*vmmPlacementSize {
+		t.Fatalf("maximum placement payload size = %d, %v", size, err)
+	}
+	if _, err := vmmPlacementPayloadSize(maximumCount + 1); err == nil {
+		t.Fatal("placement payload above the C limit was accepted")
+	}
+}
+
+func TestSetRestoredVMMPlacementEmptyExtraEndpoint(t *testing.T) {
+	const (
+		participant = "11111111111111111111111111111111"
+		extra       = "22222222222222222222222222222222"
+		sourceUUID  = "00112233-4455-6677-8899-aabbccddeeff"
+	)
+	managed := serveVMMProcess(t, "", participant, func(
+		request vmmResponse,
+	) (vmmResponse, error) {
+		if err := validateVMMPlacementRequest(
+			request, sourceUUID, sourceUUID, 0,
+		); err != nil {
+			return vmmResponse{}, err
+		}
+		return vmmResponse{
+			header: vmmHeader{Operation: vmmSetPlacement},
+			fd:     -1,
+		}, nil
+	})
+	extraEndpoint := func(t *testing.T, reject bool) VMMProcess {
+		return serveVMMProcess(t, "", extra, func(
+			request vmmResponse,
+		) (vmmResponse, error) {
+			if request.header.Operation != vmmSetPlacement ||
+				request.header.Count != 0 ||
+				len(request.payload) != 0 {
+				return vmmResponse{}, errors.New("extra endpoint received nonempty setup")
+			}
+			response := vmmResponse{
+				header: vmmHeader{Operation: vmmSetPlacement},
+				fd:     -1,
+			}
+			if reject {
+				response.header.Status = -1
+				response.header.Message = "detached CUDA placement metadata is inconsistent"
+			}
+			return response, nil
+		})
+	}
+	payload, err := encodeVMMPlacement([]types.VMMPlacement{{
+		SourceGPUUUID: sourceUUID,
+		TargetGPUUUID: sourceUUID,
+		TargetOrdinal: 0,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		reject    bool
+		wantError bool
+	}{
+		{name: "zero-managed endpoint accepts empty setup"},
+		{name: "managed endpoint rejects empty setup", reject: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := setRestoredVMMPlacement(
+				context.Background(),
+				[]vmmPlacementSetup{
+					{process: managed, count: 1, payload: payload},
+					{process: extraEndpoint(t, test.reject)},
+				},
+			)
+			if (err != nil) != test.wantError {
+				t.Fatalf("set placement error = %v, wantError=%t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateVMMResponseShapeRejectsInvalidShapeBeforeAllocation(t *testing.T) {
+	tests := []struct {
+		name        string
+		expectation vmmResponseExpectation
+		response    vmmHeader
+		fdCount     int
+	}{
+		{
+			name:        "oversized fabric payload",
+			expectation: vmmResponseFabricBroker,
+			response: vmmHeader{
+				HandleType:  vmmHandleFabric,
+				PayloadSize: vmmFabricHandleSize + 1,
+			},
+		},
+		{
+			name:        "POSIX payload",
+			expectation: vmmResponsePOSIXBroker,
+			response: vmmHeader{
+				HandleType:  vmmHandlePOSIX,
+				PayloadSize: 1,
+			},
+			fdCount: 1,
+		},
+		{
+			name:        "wrong handle type",
+			expectation: vmmResponseFabricBroker,
+			response:    vmmHeader{HandleType: vmmHandlePOSIX},
+		},
+		{
+			name:        "empty response count",
+			expectation: vmmResponseEmpty,
+			response:    vmmHeader{Count: 1},
+		},
+		{
+			name:        "empty response object metadata",
+			expectation: vmmResponseEmpty,
+			response: vmmHeader{
+				ObjectID:       1,
+				AllocationUUID: [16]byte{1},
+				Message:        "unexpected",
+			},
+		},
+		{
+			name:        "empty response FD",
+			expectation: vmmResponseEmpty,
+			fdCount:     1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := validateVMMResponseShape(
+				vmmRestoreOwner,
+				test.response,
+				test.expectation,
+				test.fdCount,
+			)
+			if err == nil {
+				t.Fatal("invalid typed response declaration was accepted")
+			}
+		})
+	}
+}
+
+func TestRestoreVMMFabricTransport(t *testing.T) {
+	const (
+		generation   = "00112233445566778899aabbccddeeff"
+		sourceUUID   = "00112233-4455-6677-8899-aabbccddeeff"
+		participantA = "11111111111111111111111111111111"
+		participantB = "22222222222222222222222222222222"
+	)
+	contents := []byte{1, 2, 3, 4}
+	raw := bytes.Repeat([]byte{0xa5}, vmmFabricHandleSize)
+	mapping := func(participant string, address uint64) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             address,
+			Size:                uint64(len(contents)),
+			GPUUUID:             sourceUUID,
+			RequestedHandleType: vmmHandleFabric,
+			Access:              []byte{1, 2, 3, 4},
+			AccessCount:         1,
+			AccessSize:          4,
+		}
+	}
+	ledger := vmmLedger{
+		Version:    vmmLedgerVersion,
+		Generation: generation,
+		Participants: []vmmParticipant{
+			{
+				ID: participantA,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{sourceUUID},
+				},
+			},
+			{
+				ID: participantB,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{sourceUUID},
+				},
+			},
+		},
+		Resources: []vmmResource{{
+			ID:        1,
+			Kind:      "allocation",
+			Owner:     mapping(participantA, 0x1000),
+			Importers: []vmmMapping{mapping(participantB, 0x2000)},
+		}},
+	}
+	encoded, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(base64.StdEncoding.EncodeToString(raw))) {
+		t.Fatal("FABRIC raw broker bytes appeared in durable ledger JSON")
+	}
+	digest := sha256.New()
+	writeVMMDigestPart(digest, encoded)
+	writeVMMDigestObject(digest, 1, contents)
+	expectedDigest := hex.EncodeToString(digest.Sum(nil))
+	events := make(chan string, 8)
+	owner := serveVMMProcess(
+		t, "", participantA,
+		func(request vmmResponse) (vmmResponse, error) {
+			switch request.header.Operation {
+			case vmmSetPlacement:
+				if err := validateVMMPlacementRequest(
+					request, sourceUUID, sourceUUID, 0,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmSetPlacement},
+					fd:     -1,
+				}, nil
+			case vmmRestoreOwner:
+				if request.header.HandleType != vmmHandleFabric ||
+					request.fd >= 0 {
+					return vmmResponse{}, errors.New("invalid FABRIC owner request shape")
+				}
+				if err := validateVMMRestoreRequest(
+					request, 1, vmmOwner, 0, contents,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				events <- "owner"
+				return vmmResponse{
+					header: vmmHeader{
+						Operation:  vmmRestoreOwner,
+						HandleType: vmmHandleFabric,
+					},
+					payload: append([]byte(nil), raw...),
+					fd:      -1,
+				}, nil
+			case vmmIdentify:
+				return vmmResponse{
+					header: vmmHeader{
+						Operation:   vmmIdentify,
+						Participant: participantA,
+					},
+					fd: -1,
+				}, nil
+			default:
+				return vmmResponse{}, fmt.Errorf(
+					"unexpected owner operation %d", request.header.Operation,
+				)
+			}
+		},
+	)
+	importer := serveVMMProcess(
+		t, "", participantB,
+		func(request vmmResponse) (vmmResponse, error) {
+			switch request.header.Operation {
+			case vmmSetPlacement:
+				if err := validateVMMPlacementRequest(
+					request, sourceUUID, sourceUUID, 0,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmSetPlacement},
+					fd:     -1,
+				}, nil
+			case vmmRestoreImporter:
+				if request.header.HandleType != vmmHandleFabric ||
+					request.fd >= 0 ||
+					len(request.payload) < vmmRecordSize+vmmFabricHandleSize ||
+					!bytes.Equal(
+						request.payload[len(request.payload)-vmmFabricHandleSize:],
+						raw,
+					) {
+					return vmmResponse{}, errors.New(
+						"invalid FABRIC importer request shape",
+					)
+				}
+				metadata := request.payload[:len(request.payload)-vmmFabricHandleSize]
+				request.payload = metadata
+				if err := validateVMMRestoreRequest(
+					request, 1, vmmImporter, 0, nil,
+				); err != nil {
+					return vmmResponse{}, err
+				}
+				events <- "importer"
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmRestoreImporter},
+					fd:     -1,
+				}, nil
+			case vmmIdentify:
+				return vmmResponse{
+					header: vmmHeader{
+						Operation:   vmmIdentify,
+						Participant: participantB,
+					},
+					fd: -1,
+				}, nil
+			default:
+				return vmmResponse{}, fmt.Errorf(
+					"unexpected importer operation %d",
+					request.header.Operation,
+				)
+			}
+		},
+	)
+	loaded := map[string][]byte{
+		vmmRedisKey(generation, "state"):      []byte("detached"),
+		vmmRedisKey(generation, "ledger"):     encoded,
+		vmmRedisKey(generation, "digest"):     []byte(expectedDigest),
+		vmmRedisKey(generation, "resource:1"): contents,
+	}
+	t.Setenv(VMMRedisAddressEnv, serveVMMRestoreRedis(t, loaded, nil))
+	t.Setenv(VMMRedisRDBPathEnv, "")
+	t.Setenv(VMMRedisRestoreCmdEnv, "/bin/true")
+	t.Setenv("NODE_NAME", "node-a")
+	if err := RestoreVMM(
+		context.Background(),
+		[]VMMProcess{owner, importer},
+		generation,
+		expectedDigest,
+		t.TempDir(),
+		[]types.VMMPlacement{{
+			SourceGPUUUID: sourceUUID,
+			TargetGPUUUID: sourceUUID,
+			TargetOrdinal: 0,
+		}},
+		func() error {
+			events <- "unlock"
+			return nil
+		},
+		logr.Discard(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{<-events, <-events, <-events}
+	want := []string{"unlock", "owner", "importer"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("FABRIC restore events = %v, want %v", got, want)
+	}
+}
+
+func TestVMMProtocolV4HandleTypeLayout(t *testing.T) {
+	encoded := encodeVMMHeader(vmmHeader{
+		Operation:  vmmRestoreOwner,
+		HandleType: vmmHandleFabric,
+	})
+	if got := binary.LittleEndian.Uint16(encoded[4:6]); got != 4 {
+		t.Fatalf("protocol version = %d, want 4", got)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[16:20]); got != vmmHandleFabric {
+		t.Fatalf("header handle type = %d, want %d", got, vmmHandleFabric)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[20:24]); got != 0 {
+		t.Fatalf("header reserved word = %d, want 0", got)
+	}
+	if len(encoded) != vmmHeaderSize {
+		t.Fatalf("header size = %d, want %d", len(encoded), vmmHeaderSize)
+	}
+	decoded, err := decodeVMMHeader(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.HandleType != vmmHandleFabric {
+		t.Fatalf(
+			"decoded handle type = %d, want %d",
+			decoded.HandleType, vmmHandleFabric,
+		)
+	}
+	encoded[255] = 1
+	if _, err := decodeVMMHeader(encoded); err == nil {
+		t.Fatal("nonzero final reserved header byte was accepted")
+	}
+}
+
+func TestValidateVMMLedgerExactHandleTypes(t *testing.T) {
+	const (
+		owner        = "11111111111111111111111111111111"
+		importer     = "22222222222222222222222222222222"
+		sourceUUID   = "00112233-4455-6677-8899-aabbccddeeff"
+		resourceID   = uint64(1)
+		resourceSize = uint64(4096)
+	)
+	mapping := func(participant string, handleType uint32) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             0x1000,
+			Size:                resourceSize,
+			GPUUUID:             sourceUUID,
+			RequestedHandleType: handleType,
+			Access:              []byte{1},
+			AccessCount:         1,
+			AccessSize:          1,
+		}
+	}
+	ledger := func(ownerType, importerType uint32) vmmLedger {
+		return vmmLedger{
+			Version: vmmLedgerVersion,
+			Participants: []vmmParticipant{
+				{
+					ID: owner,
+					Placement: vmmPlacement{
+						Node: "node-a", GPUUUIDs: []string{sourceUUID},
+					},
+				},
+				{
+					ID: importer,
+					Placement: vmmPlacement{
+						Node: "node-a", GPUUUIDs: []string{sourceUUID},
+					},
+				},
+			},
+			Resources: []vmmResource{{
+				ID:        resourceID,
+				Kind:      "allocation",
+				Owner:     mapping(owner, ownerType),
+				Importers: []vmmMapping{mapping(importer, importerType)},
+			}},
+		}
+	}
+	for _, handleType := range []uint32{vmmHandlePOSIX, vmmHandleFabric} {
+		if err := validateVMMLedger(ledger(handleType, handleType)); err != nil {
+			t.Fatalf("exact handle type %d rejected: %v", handleType, err)
+		}
+	}
+	if err := validateVMMLedger(ledger(9, 9)); err == nil {
+		t.Fatal("combined POSIX|FABRIC handle type was accepted")
+	}
+	if err := validateVMMLedger(
+		ledger(vmmHandlePOSIX, vmmHandleFabric),
+	); err == nil {
+		t.Fatal("mixed owner/importer handle types were accepted")
+	}
+	atLimit := ledger(vmmHandlePOSIX, vmmHandlePOSIX)
+	atLimit.Resources[0].Owner.Size = vmmMaximumRedisBulk
+	atLimit.Resources[0].Importers[0].Size = vmmMaximumRedisBulk
+	if err := validateVMMLedger(atLimit); err != nil {
+		t.Fatalf("allocation at the Redis bulk limit was rejected: %v", err)
+	}
+	for _, role := range []string{"owner", "importer"} {
+		t.Run(role+" above allocation limit", func(t *testing.T) {
+			aboveLimit := ledger(vmmHandlePOSIX, vmmHandlePOSIX)
+			if role == "owner" {
+				aboveLimit.Resources[0].Owner.Size =
+					vmmMaximumRedisBulk + 1
+			} else {
+				aboveLimit.Resources[0].Importers[0].Size =
+					vmmMaximumRedisBulk + 1
+			}
+			if err := validateVMMLedger(aboveLimit); err == nil {
+				t.Fatal("mapping above the Redis bulk limit was accepted")
+			}
+		})
+	}
+}
+
+func TestVMMBrokerResultShapesAndCleanup(t *testing.T) {
+	t.Run("fabric", func(t *testing.T) {
+		raw := bytes.Repeat([]byte{0xa5}, vmmFabricHandleSize)
+		response := vmmResponse{
+			header:  vmmHeader{HandleType: vmmHandleFabric},
+			payload: raw,
+			fd:      -1,
+		}
+		result, err := takeVMMBrokerResult(&response, vmmHandleFabric)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.fd >= 0 || len(result.bytes) != vmmFabricHandleSize {
+			t.Fatalf("FABRIC broker result = %#v", result)
+		}
+		if err := closeVMMBrokerResult(&result); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(raw, make([]byte, vmmFabricHandleSize)) {
+			t.Fatal("FABRIC broker cleanup did not wipe raw bytes")
+		}
+	})
+	t.Run("posix rejects payload and closes fd", func(t *testing.T) {
+		fd, err := unix.MemfdCreate("vmm-broker-shape", unix.MFD_CLOEXEC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte{1}
+		response := vmmResponse{
+			header:  vmmHeader{HandleType: vmmHandlePOSIX},
+			payload: payload,
+			fd:      fd,
+		}
+		if _, err := takeVMMBrokerResult(
+			&response, vmmHandlePOSIX,
+		); err == nil {
+			t.Fatal("POSIX broker response with payload was accepted")
+		}
+		if payload[0] != 0 || response.fd != -1 {
+			t.Fatal("invalid POSIX broker result was not cleaned")
+		}
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			t.Fatal("invalid POSIX broker FD remained open")
+		}
+	})
+}
+
+func TestVMMFabricImporterTransportIsTransient(t *testing.T) {
+	metadata := []byte{1, 2, 3}
+	raw := bytes.Repeat([]byte{0x7b}, vmmFabricHandleSize)
+	payload, fd, err := vmmImporterTransport(metadata, vmmBrokerResult{
+		handleType: vmmHandleFabric,
+		fd:         -1,
+		bytes:      raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fd >= 0 || len(payload) != len(metadata)+vmmFabricHandleSize ||
+		!bytes.Equal(payload[:len(metadata)], metadata) ||
+		!bytes.Equal(payload[len(metadata):], raw) {
+		t.Fatalf("FABRIC importer transport has invalid shape: fd=%d len=%d", fd, len(payload))
+	}
+	payload[0] = 0xff
+	payload[len(metadata)] = 0
+	if metadata[0] != 1 || raw[0] != 0x7b {
+		t.Fatal("FABRIC importer transport aliases durable metadata or broker bytes")
 	}
 }
 
@@ -85,6 +662,27 @@ func TestRestoreVMMProcessesUsesNamespacePIDSocket(t *testing.T) {
 	}
 	if process.Participant != participant {
 		t.Fatalf("participant = %q, want %q", process.Participant, participant)
+	}
+}
+
+func TestIdentifyVMMProcessRequiresLowercaseHexParticipant(t *testing.T) {
+	tests := []string{
+		"",
+		"1111111111111111111111111111111",
+		"111111111111111111111111111111111",
+		"1111111111111111111111111111111A",
+		"1111111111111111111111111111111g",
+	}
+	for _, participant := range tests {
+		t.Run(fmt.Sprintf("%q", participant), func(t *testing.T) {
+			endpoint := serveVMMProcess(t, "", participant, nil)
+			_, err := identifyVMMProcess(VMMProcess{
+				SocketPath: endpoint.SocketPath,
+			})
+			if err == nil {
+				t.Fatalf("identify participant %q was accepted", participant)
+			}
+		})
 	}
 }
 
@@ -203,6 +801,7 @@ func TestRestoreVMMRejectsNoOpRestoreCommand(t *testing.T) {
 		generation,
 		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		t.TempDir(),
+		nil,
 		func() error {
 			t.Fatal("preflight failure invoked unlock callback")
 			return nil
@@ -218,6 +817,7 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 	const (
 		generation   = "00112233445566778899aabbccddeeff"
 		sourceUUID   = "00112233-4455-6677-8899-aabbccddeeff"
+		otherUUID    = "ffeeddcc-bbaa-9988-7766-554433221100"
 		participantA = "11111111111111111111111111111111"
 		participantB = "22222222222222222222222222222222"
 	)
@@ -235,7 +835,7 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 		}
 	}
 	ledger := vmmLedger{
-		Version:    1,
+		Version:    vmmLedgerVersion,
 		Generation: generation,
 		Participants: []vmmParticipant{
 			{ID: participantA, Placement: vmmPlacement{Node: "node-a", GPUUUIDs: []string{sourceUUID}}},
@@ -266,19 +866,20 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 	t.Setenv(VMMRedisRestoreCmdEnv, "/bin/true")
 	t.Setenv("NODE_NAME", "node-a")
 	preflight := []string{
+		"content:1", "content:2",
 		"placement:1:owner,2:importer",
 		"placement:2:owner,1:importer",
-		"content:1", "content:2",
 	}
 
 	tests := []struct {
-		name          string
-		corruptSecond bool
-		unlockError   error
-		failOwner     uint64
-		wantError     string
-		replayEvents  []string
-		noUnlock      bool
+		name                  string
+		corruptSecond         bool
+		rejectSecondPlacement bool
+		unlockError           error
+		failOwner             uint64
+		wantError             string
+		replayEvents          []string
+		noUnlock              bool
 	}{
 		{
 			name: "success unlocks once after all preflight",
@@ -294,6 +895,12 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 			corruptSecond: true,
 			wantError:     "content digest",
 			noUnlock:      true,
+		},
+		{
+			name:                  "second placement rejection does not unlock",
+			rejectSecondPlacement: true,
+			wantError:             "placement rejected",
+			noUnlock:              true,
 		},
 		{
 			name:        "unlock failure sends no owner replay",
@@ -326,10 +933,12 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 
 			processes := []VMMProcess{
 				serveVMMRestoreProcess(
-					t, participantA, sourceUUID, contents, 1, test.failOwner, events,
+					t, participantA, sourceUUID, contents, 1, test.failOwner,
+					false, events,
 				),
 				serveVMMRestoreProcess(
-					t, participantB, sourceUUID, contents, 2, test.failOwner, events,
+					t, participantB, sourceUUID, contents, 2, test.failOwner,
+					test.rejectSecondPlacement, events,
 				),
 			}
 			err := RestoreVMM(
@@ -338,6 +947,18 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 				generation,
 				expectedDigest,
 				t.TempDir(),
+				[]types.VMMPlacement{
+					{
+						SourceGPUUUID: sourceUUID,
+						TargetGPUUUID: sourceUUID,
+						TargetOrdinal: 1,
+					},
+					{
+						SourceGPUUUID: otherUUID,
+						TargetGPUUUID: otherUUID,
+						TargetOrdinal: 0,
+					},
+				},
 				func() error {
 					events <- "unlock"
 					return test.unlockError
@@ -355,6 +976,9 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 				gotEvents = append(gotEvents, <-events)
 			}
 			wantEvents := slices.Clone(preflight)
+			if test.corruptSecond {
+				wantEvents = wantEvents[:2]
+			}
 			if !test.noUnlock {
 				wantEvents = append(wantEvents, "unlock")
 			}
@@ -412,6 +1036,89 @@ func TestInspectVMMRejectsUnsupportedGraph(t *testing.T) {
 	}
 }
 
+func TestPrepareVMMRejectsOversizedAllocationBeforeOwnerRead(t *testing.T) {
+	const (
+		owner      = "11111111111111111111111111111111"
+		importer   = "22222222222222222222222222222222"
+		sourceUUID = "00112233-4455-6677-8899-aabbccddeeff"
+	)
+	allocationUUID := [16]byte{1}
+	operations := make(chan uint16, 3)
+	process := func(participant string, record vmmCaptureRecord) VMMProcess {
+		return serveVMMProcess(
+			t, "", participant,
+			func(request vmmResponse) (vmmResponse, error) {
+				operations <- request.header.Operation
+				if request.header.Operation != vmmInspect {
+					return vmmResponse{}, fmt.Errorf(
+						"unexpected VMM operation %d",
+						request.header.Operation,
+					)
+				}
+				payload := encodeVMMRecordsForTest(
+					[]vmmCaptureRecord{record},
+				)
+				return vmmResponse{
+					header: vmmHeader{
+						Operation: vmmInspect,
+						Count:     1,
+					},
+					payload: payload,
+					fd:      -1,
+				}, nil
+			},
+		)
+	}
+	mapping := func(role uint32, address uint64) vmmCaptureRecord {
+		record := vmmCaptureRecord{
+			allocationUUID: allocationUUID,
+			address:        address,
+			size:           vmmMaximumRedisBulk + 1,
+			role:           role,
+			gpuUUID:        sourceUUID,
+			access:         []byte{1},
+			accessCount:    1,
+			accessSize:     1,
+		}
+		if role == vmmOwner {
+			record.properties = []byte{1}
+		}
+		return record
+	}
+	t.Setenv(VMMRedisAddressEnv, "127.0.0.1:1")
+	t.Setenv(VMMRedisRDBPathEnv, filepath.Join(t.TempDir(), "dump.rdb"))
+	t.Setenv("NODE_NAME", "node-a")
+	_, err := PrepareVMM(
+		context.Background(),
+		[]VMMProcess{
+			process(owner, mapping(vmmOwner, 0x1000)),
+			process(importer, mapping(vmmImporter, 0x2000)),
+		},
+		"generation",
+		t.TempDir(),
+		logr.Discard(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "allocation limit") {
+		t.Fatalf("oversized checkpoint error = %v, want allocation limit", err)
+	}
+	for index := 0; index < 2; index++ {
+		if operation := <-operations; operation != vmmInspect {
+			t.Fatalf(
+				"checkpoint operation %d = %d, want INSPECT",
+				index, operation,
+			)
+		}
+	}
+	select {
+	case operation := <-operations:
+		t.Fatalf(
+			"oversized checkpoint reached operation %d after inspection",
+			operation,
+		)
+	default:
+	}
+}
+
 func TestDecodeVMMRecordsRejectsZeroAllocationUUID(t *testing.T) {
 	payload := encodeVMMRecordsForTest([]vmmCaptureRecord{{
 		address:     0x1000,
@@ -430,7 +1137,7 @@ func TestDecodeVMMRecordsRejectsZeroAllocationUUID(t *testing.T) {
 func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 	const ownerID = "11111111111111111111111111111111"
 	const importerID = "22222222222222222222222222222222"
-	owner := serveVMMInspect(t, []vmmCaptureRecord{{
+	owner := serveVMMInspectAs(t, ownerID, []vmmCaptureRecord{{
 		allocationUUID: [16]byte{9, 8},
 		address:        0x2000,
 		size:           4096,
@@ -440,8 +1147,7 @@ func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 		accessCount:    1,
 		accessSize:     2,
 	}})
-	owner.Participant = ownerID
-	importer := serveVMMInspect(t, []vmmCaptureRecord{{
+	importer := serveVMMInspectAs(t, importerID, []vmmCaptureRecord{{
 		allocationUUID: [16]byte{9, 8},
 		address:        0x4000,
 		size:           4096,
@@ -450,8 +1156,6 @@ func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 		accessCount:    1,
 		accessSize:     2,
 	}})
-	importer.Participant = importerID
-
 	ledger, err := inspectVMM(
 		context.Background(),
 		[]VMMProcess{importer, owner},
@@ -537,11 +1241,11 @@ func TestInspectVMMGraphEncodingIsIndependentOfDiscoveryOrder(t *testing.T) {
 		}
 		var processes []VMMProcess
 		for _, specification := range specifications {
-			process := serveVMMInspect(
+			process := serveVMMInspectAs(
 				t,
+				specification.participant,
 				[]vmmCaptureRecord{specification.record},
 			)
-			process.Participant = specification.participant
 			processes = append(processes, process)
 		}
 		if reverse {
@@ -593,9 +1297,7 @@ func TestInspectVMMKeepsIndependentOwnerUUIDsSeparate(t *testing.T) {
 		return record
 	}
 	process := func(participant string, record vmmCaptureRecord) VMMProcess {
-		result := serveVMMInspect(t, []vmmCaptureRecord{record})
-		result.Participant = participant
-		return result
+		return serveVMMInspectAs(t, participant, []vmmCaptureRecord{record})
 	}
 	uuidA := [16]byte{1}
 	uuidB := [16]byte{2}
@@ -635,9 +1337,10 @@ func TestInspectVMMKeepsIndependentOwnerUUIDsSeparate(t *testing.T) {
 	}
 }
 
-func TestValidateRestoredVMMProcessesRequiresIdentityPlacement(t *testing.T) {
+func TestValidateRestoredVMMProcessesUsesAuthoritativePlacement(t *testing.T) {
 	const participant = "11111111111111111111111111111111"
 	const sourceUUID = "00112233-4455-6677-8899-aabbccddeeff"
+	const targetUUID = "ffeeddcc-bbaa-9988-7766-554433221100"
 	ledger := vmmLedger{Participants: []vmmParticipant{{
 		ID: participant,
 		Placement: vmmPlacement{
@@ -648,42 +1351,46 @@ func TestValidateRestoredVMMProcessesRequiresIdentityPlacement(t *testing.T) {
 	tests := []struct {
 		name        string
 		currentNode string
-		currentUUID string
+		placement   []types.VMMPlacement
 		wantError   string
 	}{
 		{
-			name:        "exact identity",
+			name:        "authoritative remap",
 			currentNode: "node-a",
-			currentUUID: sourceUUID,
+			placement: []types.VMMPlacement{{
+				SourceGPUUUID: sourceUUID,
+				TargetGPUUUID: targetUUID,
+				TargetOrdinal: 0,
+			}},
 		},
 		{
-			name:        "same ordinal different UUID",
+			name:        "missing source UUID",
 			currentNode: "node-a",
-			currentUUID: "ffeeddcc-bbaa-9988-7766-554433221100",
-			wantError:   "currently maps GPU",
+			placement: []types.VMMPlacement{{
+				SourceGPUUUID: targetUUID,
+				TargetGPUUUID: sourceUUID,
+				TargetOrdinal: 0,
+			}},
+			wantError: "absent from the authoritative placement",
 		},
 		{
 			name:        "different current node",
 			currentNode: "node-b",
-			currentUUID: sourceUUID,
-			wantError:   "target node",
+			placement: []types.VMMPlacement{{
+				SourceGPUUUID: sourceUUID,
+				TargetGPUUUID: targetUUID,
+				TargetOrdinal: 0,
+			}},
+			wantError: "target node",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			process := serveVMMPlacement(
-				t,
-				participant,
-				7,
-				sourceUUID,
-				test.currentUUID,
-			)
-
-			placement, err := validateRestoredVMMProcesses(
-				context.Background(),
-				[]VMMProcess{process},
+			setups, placement, err := validateRestoredVMMProcesses(
+				[]VMMProcess{{Participant: participant}},
 				ledger,
 				test.currentNode,
+				test.placement,
 			)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
@@ -694,8 +1401,20 @@ func TestValidateRestoredVMMProcessesRequiresIdentityPlacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := placement[participant][sourceUUID]; got != 7 {
-				t.Fatalf("validated ordinal = %d, want 7", got)
+			if len(setups) != 1 {
+				t.Fatalf("placement setup count = %d, want 1", len(setups))
+			}
+			if err := validateVMMPlacementPayload(
+				setups[0].count,
+				setups[0].payload,
+				sourceUUID,
+				targetUUID,
+				0,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if got := placement[participant][sourceUUID]; got != 0 {
+				t.Fatalf("validated ordinal = %d, want 0", got)
 			}
 		})
 	}
@@ -714,90 +1433,45 @@ func TestValidateRestoredVMMProcessesParticipantSet(t *testing.T) {
 			GPUUUIDs: []string{sourceUUID},
 		},
 	}}}
-	valid := func(t *testing.T) VMMProcess {
-		return serveVMMPlacement(t, participant, 7, sourceUUID, sourceUUID)
-	}
-	empty := func(t *testing.T, id string) VMMProcess {
-		return serveVMMPlacementResponse(t, id, 0, nil)
-	}
+	valid := VMMProcess{Participant: participant}
+	empty := VMMProcess{Participant: extra}
+	placementPlan := []types.VMMPlacement{{
+		SourceGPUUUID: sourceUUID,
+		TargetGPUUUID: sourceUUID,
+		TargetOrdinal: 0,
+	}}
 	tests := []struct {
 		name          string
-		processes     func(*testing.T) []VMMProcess
+		processes     []VMMProcess
 		wantError     string
 		wantPlacement bool
 	}{
 		{
-			name: "extra empty placement is ignored",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{valid(t), empty(t, extra)}
-			},
+			name:          "extra empty placement is ignored",
+			processes:     []VMMProcess{valid, empty},
 			wantPlacement: true,
 		},
 		{
-			name: "extra managed placement is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{
-					valid(t),
-					serveVMMPlacement(t, extra, 7, sourceUUID, sourceUUID),
-				}
-			},
-			wantError: "unexpected restored CUDA VMM participant",
-		},
-		{
-			name: "missing expected endpoint is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{empty(t, extra)}
-			},
+			name:      "missing expected endpoint is rejected",
+			processes: []VMMProcess{empty},
 			wantError: "has no restored shim endpoint",
 		},
 		{
-			name: "expected empty placement is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{empty(t, participant)}
-			},
-			wantError: "current GPU placement count is 0, want 1",
-		},
-		{
 			name: "duplicate participant is rejected",
-			processes: func(*testing.T) []VMMProcess {
-				return []VMMProcess{
-					{Participant: participant},
-					{Participant: participant},
-				}
+			processes: []VMMProcess{
+				{Participant: participant},
+				{Participant: participant},
 			},
 			wantError: "multiple restored shims claim participant",
-		},
-		{
-			name: "extra placement query error is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{
-					valid(t),
-					{
-						Participant: extra,
-						SocketPath:  filepath.Join(t.TempDir(), "missing.sock"),
-					},
-				}
-			},
-			wantError: "query CUDA VMM participant",
-		},
-		{
-			name: "extra placement decode error is rejected",
-			processes: func(t *testing.T) []VMMProcess {
-				return []VMMProcess{
-					valid(t),
-					serveVMMPlacementResponse(t, extra, 1, nil),
-				}
-			},
-			wantError: "decode CUDA VMM participant",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			placement, err := validateRestoredVMMProcesses(
-				context.Background(),
-				test.processes(t),
+			setups, placement, err := validateRestoredVMMProcesses(
+				test.processes,
 				ledger,
 				"node-a",
+				placementPlan,
 			)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
@@ -814,11 +1488,15 @@ func TestValidateRestoredVMMProcessesParticipantSet(t *testing.T) {
 			if len(placement) != 1 {
 				t.Fatalf("execution placement has %d participants, want 1", len(placement))
 			}
+			if len(setups) != 2 || setups[1].count != 0 ||
+				len(setups[1].payload) != 0 {
+				t.Fatalf("extra endpoint setup = %#v, want empty payload", setups)
+			}
 			if _, ok := placement[extra]; ok {
 				t.Fatal("extra empty participant was included in execution placement")
 			}
-			if got := placement[participant][sourceUUID]; got != 7 {
-				t.Fatalf("validated ordinal = %d, want 7", got)
+			if got := placement[participant][sourceUUID]; got != 0 {
+				t.Fatalf("validated ordinal = %d, want 0", got)
 			}
 		})
 	}
@@ -961,13 +1639,155 @@ func TestExchangeVMMPreservesPayloadCoalescedWithHeader(t *testing.T) {
 		vmmHeader{Operation: vmmIdentify},
 		nil,
 		-1,
-		vmmResponseFDNone,
+		vmmResponseUntyped,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(response.payload, want) {
 		t.Fatalf("payload = %q, want %q", response.payload, want)
+	}
+}
+
+func TestExchangeVMMBindsEstablishedParticipant(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
+	process := serveVMMProcess(
+		t,
+		"",
+		participant,
+		func(request vmmResponse) (vmmResponse, error) {
+			if request.header.Participant != participant {
+				return vmmResponse{}, fmt.Errorf(
+					"request participant = %q, want %q",
+					request.header.Participant,
+					participant,
+				)
+			}
+			return vmmResponse{
+				header: vmmHeader{Operation: request.header.Operation},
+				fd:     -1,
+			}, nil
+		},
+	)
+	if _, err := exchangeVMM(
+		context.Background(),
+		process,
+		vmmHeader{Operation: vmmInspect},
+		nil,
+		-1,
+		vmmResponseUntyped,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExchangeVMMRejectsWrongResponseParticipant(t *testing.T) {
+	const (
+		participant = "11111111111111111111111111111111"
+		wrong       = "22222222222222222222222222222222"
+	)
+	process := serveVMMProcess(
+		t,
+		"",
+		participant,
+		func(request vmmResponse) (vmmResponse, error) {
+			return vmmResponse{
+				header: vmmHeader{
+					Operation:   request.header.Operation,
+					Participant: wrong,
+				},
+				fd: -1,
+			}, nil
+		},
+	)
+	if _, err := exchangeVMM(
+		context.Background(),
+		process,
+		vmmHeader{Operation: vmmInspect},
+		nil,
+		-1,
+		vmmResponseUntyped,
+	); err == nil || !strings.Contains(err.Error(), "response participant") {
+		t.Fatalf("wrong response participant error = %v", err)
+	}
+}
+
+func TestExchangeVMMRejectsTypedBrokerShapeBeforeReadingPayload(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
+	tests := []struct {
+		name        string
+		expectation vmmResponseExpectation
+		handleType  uint32
+		payloadSize uint64
+	}{
+		{
+			name:        "oversized fabric declaration",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandleFabric,
+			payloadSize: vmmFabricHandleSize + 1,
+		},
+		{
+			name:        "short fabric declaration",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandleFabric,
+			payloadSize: vmmFabricHandleSize - 1,
+		},
+		{
+			name:        "POSIX declaration with payload",
+			expectation: vmmResponsePOSIXBroker,
+			handleType:  vmmHandlePOSIX,
+			payloadSize: 1,
+		},
+		{
+			name:        "wrong typed handle",
+			expectation: vmmResponseFabricBroker,
+			handleType:  vmmHandlePOSIX,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "vmm.sock")
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				connection, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer connection.Close()
+				request := make([]byte, vmmHeaderSize)
+				if _, err := io.ReadFull(connection, request); err != nil {
+					return
+				}
+				_ = writeVMMBytes(connection, encodeVMMHeader(vmmHeader{
+					Operation:   vmmRestoreOwner,
+					HandleType:  test.handleType,
+					PayloadSize: test.payloadSize,
+					Participant: participant,
+				}))
+			}()
+
+			_, err = exchangeVMM(
+				context.Background(),
+				VMMProcess{
+					SocketPath:  path,
+					Participant: participant,
+				},
+				vmmHeader{Operation: vmmRestoreOwner},
+				nil,
+				-1,
+				test.expectation,
+			)
+			<-done
+			if err == nil {
+				t.Fatal("invalid typed broker response was accepted")
+			}
+		})
 	}
 }
 
@@ -1029,7 +1849,7 @@ func testExchangeVMMClosesReceivedFD(t *testing.T, response []byte) {
 		vmmHeader{Operation: vmmIdentify},
 		nil,
 		-1,
-		vmmResponseFDNone,
+		vmmResponseUntyped,
 	)
 	<-done
 	if err == nil {
@@ -1041,6 +1861,7 @@ func testExchangeVMMClosesReceivedFD(t *testing.T, response []byte) {
 }
 
 func TestExchangeVMMRejectsMissingRequiredFD(t *testing.T) {
+	const participant = "11111111111111111111111111111111"
 	path := filepath.Join(t.TempDir(), "vmm.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
@@ -1058,17 +1879,19 @@ func TestExchangeVMMRejectsMissingRequiredFD(t *testing.T) {
 			return
 		}
 		_ = writeVMMBytes(connection, encodeVMMHeader(vmmHeader{
-			Operation: vmmRestoreOwner,
+			Operation:   vmmRestoreOwner,
+			HandleType:  vmmHandlePOSIX,
+			Participant: participant,
 		}))
 	}()
 
 	if _, err := exchangeVMM(
 		context.Background(),
-		VMMProcess{SocketPath: path},
+		VMMProcess{SocketPath: path, Participant: participant},
 		vmmHeader{Operation: vmmRestoreOwner},
 		nil,
 		-1,
-		vmmResponseFDRequired,
+		vmmResponsePOSIXBroker,
 	); err == nil {
 		t.Fatal("missing required response FD was accepted")
 	}
@@ -1105,42 +1928,49 @@ func TestReceiveVMMFDsPreservesOwnershipOnPartialParseFailure(t *testing.T) {
 	}
 }
 
-func serveVMMPlacement(
-	t *testing.T,
-	participant string,
-	ordinal int32,
-	sourceUUID string,
-	currentUUID string,
-) VMMProcess {
-	t.Helper()
-	payload := make([]byte, vmmPlacementSize)
-	binary.LittleEndian.PutUint32(payload[0:4], uint32(ordinal))
-	copy(payload[8:24], parseGPUUUID(sourceUUID))
-	copy(payload[24:40], parseGPUUUID(currentUUID))
-	return serveVMMPlacementResponse(t, participant, 1, payload)
-}
-
-func serveVMMPlacementResponse(
-	t *testing.T,
-	participant string,
+func validateVMMPlacementPayload(
 	count uint32,
 	payload []byte,
-) VMMProcess {
-	t.Helper()
-	return serveVMMProcess(t, "", participant, func(
-		request vmmResponse,
-	) (vmmResponse, error) {
-		if request.header.Operation != vmmQueryPlacement {
-			return vmmResponse{}, fmt.Errorf(
-				"unexpected VMM operation %d", request.header.Operation,
-			)
-		}
-		return vmmResponse{
-			header:  vmmHeader{Operation: vmmQueryPlacement, Count: count},
-			payload: payload,
-			fd:      -1,
-		}, nil
-	})
+	sourceUUID string,
+	targetUUID string,
+	ordinal int32,
+) error {
+	if count != 1 || len(payload) != vmmPlacementSize {
+		return fmt.Errorf(
+			"placement shape = count %d, payload %d bytes",
+			count,
+			len(payload),
+		)
+	}
+	if binary.LittleEndian.Uint32(payload[0:4]) != uint32(ordinal) ||
+		binary.LittleEndian.Uint32(payload[4:8]) != 0 ||
+		!bytes.Equal(payload[8:24], parseGPUUUID(sourceUUID)) ||
+		!bytes.Equal(payload[24:40], parseGPUUUID(targetUUID)) {
+		return errors.New("placement payload does not match authoritative plan")
+	}
+	return nil
+}
+
+func validateVMMPlacementRequest(
+	request vmmResponse,
+	sourceUUID string,
+	targetUUID string,
+	ordinal int32,
+) error {
+	if request.header.Operation != vmmSetPlacement || request.fd >= 0 {
+		return fmt.Errorf(
+			"unexpected placement operation %d or FD %d",
+			request.header.Operation,
+			request.fd,
+		)
+	}
+	return validateVMMPlacementPayload(
+		request.header.Count,
+		request.payload,
+		sourceUUID,
+		targetUUID,
+		ordinal,
+	)
 }
 
 func countMatchingFDs(t *testing.T, dev uint64, ino uint64) int {
@@ -1168,10 +1998,23 @@ func serveVMMInspect(
 	records []vmmCaptureRecord,
 ) VMMProcess {
 	t.Helper()
+	return serveVMMInspectAs(
+		t,
+		"11111111111111111111111111111111",
+		records,
+	)
+}
+
+func serveVMMInspectAs(
+	t *testing.T,
+	participant string,
+	records []vmmCaptureRecord,
+) VMMProcess {
+	t.Helper()
 	return serveVMMProcess(
 		t,
 		"",
-		"11111111111111111111111111111111",
+		participant,
 		func(request vmmResponse) (vmmResponse, error) {
 			if request.header.Operation != vmmInspect {
 				return vmmResponse{}, fmt.Errorf(
@@ -1340,6 +2183,7 @@ func serveVMMRestoreProcess(
 	contents [][]byte,
 	ownerResource uint64,
 	failOwner uint64,
+	rejectPlacement bool,
 	events chan<- string,
 ) VMMProcess {
 	t.Helper()
@@ -1353,17 +2197,21 @@ func serveVMMRestoreProcess(
 			fd: -1,
 		}
 		switch request.header.Operation {
-		case vmmQueryPlacement:
-			placement := make([]byte, vmmPlacementSize)
-			copy(placement[8:24], parseGPUUUID(sourceUUID))
-			copy(placement[24:40], parseGPUUUID(sourceUUID))
-			response.header.Count = 1
-			response.payload = placement
+		case vmmSetPlacement:
+			if err := validateVMMPlacementRequest(
+				request, sourceUUID, sourceUUID, 1,
+			); err != nil {
+				return response, err
+			}
 			events <- "placement:" + roleSummary
+			if rejectPlacement {
+				response.header.Status = 1
+				response.header.Message = "placement rejected"
+			}
 			return response, nil
 		case vmmRestoreOwner:
 			if err := validateVMMRestoreRequest(
-				request, ownerResource, vmmOwner,
+				request, ownerResource, vmmOwner, 1,
 				contents[ownerResource-1],
 			); err != nil {
 				return response, err
@@ -1375,12 +2223,13 @@ func serveVMMRestoreProcess(
 				return response, nil
 			}
 			var err error
+			response.header.HandleType = request.header.HandleType
 			response.fd, err = unix.MemfdCreate("vmm-restore-owner", unix.MFD_CLOEXEC)
 			return response, err
 		case vmmRestoreImporter:
 			importerResource := uint64(3) - ownerResource
 			if err := validateVMMRestoreRequest(
-				request, importerResource, vmmImporter, nil,
+				request, importerResource, vmmImporter, 1, nil,
 			); err != nil {
 				return response, err
 			}
@@ -1399,13 +2248,16 @@ func validateVMMRestoreRequest(
 	request vmmResponse,
 	resourceID uint64,
 	wantRole uint32,
+	wantOrdinal int32,
 	wantContents []byte,
 ) error {
 	if request.header.ObjectID != resourceID || len(request.payload) < vmmRecordSize {
 		return fmt.Errorf("invalid resource %d replay header", resourceID)
 	}
 	if binary.LittleEndian.Uint64(request.payload[16:24]) != resourceID ||
-		binary.LittleEndian.Uint32(request.payload[48:52]) != wantRole {
+		binary.LittleEndian.Uint32(request.payload[48:52]) != wantRole ||
+		int32(binary.LittleEndian.Uint32(request.payload[64:68])) !=
+			wantOrdinal {
 		return fmt.Errorf("invalid resource %d replay payload", resourceID)
 	}
 	metadataSize := vmmRecordSize +
@@ -1416,7 +2268,9 @@ func validateVMMRestoreRequest(
 		!bytes.Equal(request.payload[metadataSize:], wantContents) {
 		return fmt.Errorf("invalid resource %d replay contents", resourceID)
 	}
-	if (request.fd >= 0) != (wantRole == vmmImporter) {
+	wantFD := wantRole == vmmImporter &&
+		request.header.HandleType == vmmHandlePOSIX
+	if (request.fd >= 0) != wantFD {
 		return fmt.Errorf("invalid resource %d replay FD", resourceID)
 	}
 	return nil
@@ -1446,14 +2300,28 @@ func serveVMMProcess(
 			}
 			request, err := readVMMTestRequest(connection)
 			if err == nil {
+				if request.header.Participant != "" &&
+					request.header.Participant != participant {
+					err = fmt.Errorf(
+						"request participant %q does not match endpoint %q",
+						request.header.Participant,
+						participant,
+					)
+				} else if request.header.Operation != vmmIdentify &&
+					request.header.Participant == "" {
+					err = errors.New("established request omitted participant")
+				}
 				response := vmmResponse{
 					header: vmmHeader{Operation: vmmIdentify, Participant: participant},
 					fd:     -1,
 				}
-				if handler != nil {
+				if err == nil && handler != nil {
 					response, err = handler(request)
 				}
 				if err == nil {
+					if response.header.Participant == "" {
+						response.header.Participant = participant
+					}
 					err = writeVMMTestResponse(connection, response)
 				}
 				err = errors.Join(err, closeVMMFD(&response.fd))

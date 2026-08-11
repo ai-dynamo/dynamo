@@ -10,6 +10,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func main() {
@@ -18,6 +19,7 @@ func main() {
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
+	cudaVMMPlacement := flag.String("cuda-vmm-placement", "", "Transient CUDA VMM placement plan")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	flag.Parse()
@@ -26,11 +28,18 @@ func main() {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
 
+	var placement []types.VMMPlacement
+	if *cudaVMMPlacement != "" {
+		if err := json.Unmarshal([]byte(*cudaVMMPlacement), &placement); err != nil {
+			fatal(log, err, "invalid --cuda-vmm-placement")
+		}
+	}
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
-		TargetPodIP:    *targetPodIP,
+		CheckpointPath:   *checkpointPath,
+		CUDADeviceMap:    *cudaDeviceMap,
+		CUDAVMMPlacement: placement,
+		CgroupRoot:       *cgroupRoot,
+		TargetPodIP:      *targetPodIP,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

@@ -77,8 +77,14 @@ func buildCheckpointJob(
 	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
 		return nil, err
 	} else if ok {
-		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
-		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		// Reuse an existing mount of the configured PVC when present.
+		volumeName, err := snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inject checkpoint storage volume: %w", err)
+		}
+		if err := snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, volumeName, storage.BasePath); err != nil {
+			return nil, fmt.Errorf("failed to inject checkpoint storage mount: %w", err)
+		}
 		if podTemplate.Annotations == nil {
 			podTemplate.Annotations = map[string]string{}
 		}

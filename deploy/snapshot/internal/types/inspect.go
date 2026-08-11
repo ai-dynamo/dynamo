@@ -34,9 +34,17 @@ type CheckpointContainerSnapshot struct {
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	CheckpointPath string
-	PlaceholderPID int
-	TargetRoot     string
-	CgroupRoot     string
-	CUDADeviceMap  string
+	CheckpointPath   string
+	PlaceholderPID   int
+	TargetRoot       string
+	CgroupRoot       string
+	CUDADeviceMap    string
+	CUDAVMMPlacement []VMMPlacement
+}
+
+// VMMPlacement describes one transient source-to-target GPU placement.
+type VMMPlacement struct {
+	SourceGPUUUID string `json:"sourceGPUUUID"`
+	TargetGPUUUID string `json:"targetGPUUUID"`
+	TargetOrdinal int32  `json:"targetOrdinal"`
 }

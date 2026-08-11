@@ -4,14 +4,15 @@ All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Snapshot CUDA POSIX-FD VMM interposer
+# Snapshot CUDA shared VMM interposer
 
 This launcher-scoped `LD_PRELOAD` interposer checkpoints complete CUDA Driver
-API VMM allocations shared through POSIX file descriptors. It is transparent
-to inference frameworks: applications do not call checkpoint hooks. The
+API VMM allocations shared through either POSIX file descriptors or single-node
+`CU_MEM_HANDLE_TYPE_FABRIC`/IMEX unicast handles. It is transparent to
+inference frameworks: applications do not call checkpoint hooks. The
 interposer composes with `cuda-checkpoint --launch-job`; Redis replaces the
-CUDA job-file role only for shim-managed POSIX-FD VMM state. CUDA checkpoint
-continues to own unrelated CUDA state, including legacy CUDA IPC.
+CUDA job-file role only for shim-managed VMM state. CUDA checkpoint continues
+to own unrelated CUDA state, including legacy CUDA IPC.
 
 ## Enablement and flow
 
@@ -49,18 +50,21 @@ PID. While the CUDA process lock is held, the coordinator poisons the dedicated
 Redis database, loads the RDB, verifies the expected generation and
 manifest-bound state digest, and validates all graph metadata and allocation
 bytes. The non-restored coordinator also verifies its `NODE_NAME` against the
-source node, and each restored shim queries the real driver for the UUID
-currently mapped to every source ordinal. M1 rejects node changes, GPU changes,
-ordinal reordering, and access descriptors that are not exactly one read/write
-DEVICE descriptor on the allocation GPU.
+source node. It builds a complete identity-first source-to-target placement from
+the manifest source UUIDs and target UUIDs in current runtime ordinal order,
+then sends each restored shim only its expected source entries. Each shim
+validates all detached allocation metadata before atomically updating the
+target ordinal in allocation properties and access descriptors. The saved
+source UUID remains the allocation identity; restored shims do not enumerate
+CUDA devices during placement setup.
 
 Processes launched through the shim but without capture-visible shared VMM
 mappings, such as a launcher, are not durable VMM graph participants. After
 native CUDA restore, the coordinator accepts such an endpoint only when
-`QUERY_PLACEMENT` proves that it has zero detached managed placements. An
+an empty `SET_PLACEMENT` proves that it has zero detached managed placements. An
 unexpected endpoint with any managed placement fails closed. This does not
 support partial process restore: every durable ledger participant must still
-restore on the source node with its exact captured GPU placement.
+restore on the source node under the authoritative placement plan.
 
 After all preflight checks pass, the coordinator unlocks the CUDA processes
 immediately before the first owner replay request. This is required because
@@ -82,28 +86,43 @@ tagged process-local logical token from supported `cuMemCreate` and
 release, and allocation-property queries. Unknown tagged tokens fail closed;
 logical tokens are never passed to the UMD.
 
-The application also never observes a raw CUDA POSIX export FD. On the first
-successful owner export, the shim assigns that allocation a random nonzero
-128-bit UUID. Every export of the same allocation returns a fresh fixed-size
-sealed memfd containing the UUID, exact owner control-socket path, and owner
-participant ID. The application can transport this opaque capability with
-`SCM_RIGHTS`; it remains caller-owned and open after import.
-Capabilities are bearer tokens: sealing protects their contents, while control
-socket directory permissions remain the authorization boundary. An importer
-accepts only the exact canonical
-`CONTROL-DIRECTORY/cuda-vmm-PID.sock` shape in its own configured control
-directory (`DYN_SNAPSHOT_CONTROL_DIR`, or `/snapshot-control` by default),
-with a positive canonical decimal namespace PID.
+The application never observes a raw CUDA POSIX export FD or raw CUDA FABRIC
+handle. On the first successful owner export, the shim assigns that allocation
+a random nonzero 128-bit UUID.
 
-An importer validates only this sealed capability. For another process's
-owner, it releases its process-global shim mutex, requests a fresh raw CUDA FD
-from the named owner over the bounded-time control socket, reacquires the
-mutex, revalidates active state, and imports that FD. A same-process import
-exports locally without calling its own control socket. The owner binds the
-broker response to the operation, allocation UUID, and participant ID. The
-owner and importer close their raw FD copies on every path and never persist
-them. Malformed tokens, unavailable owners, broker mismatches, and raw CUDA
-FDs passed directly to the import wrapper fail closed without fallback.
+- A POSIX export returns the existing fresh 256-byte sealed memfd capability
+  containing the UUID, exact owner control-socket path, and owner participant
+  ID. The application can transport this opaque capability with `SCM_RIGHTS`;
+  it remains caller-owned and open after import.
+- A FABRIC export calls the real driver on every attempt, then returns an exact
+  64-byte logical token containing a magic/version/type discriminator, UUID,
+  32 lowercase hexadecimal participant bytes, positive namespace PID, and
+  zero reserved word. The driver-produced 64 bytes are immediately discarded.
+  Repeated exports reuse the logical UUID and route identity.
+
+The POSIX capability and FABRIC token are bearer values. Control-socket
+directory permissions remain the authorization boundary. The FABRIC PID is
+only a transient local routing hint; durable allocation identity is the
+participant ID plus allocation UUID. The importer derives the canonical
+`CONTROL-DIRECTORY/cuda-vmm-PID.sock` path from its own configured control
+directory (`DYN_SNAPSHOT_CONTROL_DIR`, or `/snapshot-control` by default).
+
+For another process's owner, the importer releases its process-global shim
+mutex during bounded control-socket I/O, reacquires the mutex, revalidates
+active state and identity, then passes the freshly brokered raw handle directly
+to the real driver. A same-process import exports locally without calling its
+own socket. The private protocol is typed:
+
+| Handle type | Broker result |
+|---|---|
+| POSIX FD (`1`) | Exactly one `SCM_RIGHTS` FD and no payload |
+| FABRIC (`8`) | No FD and exactly 64 payload bytes |
+
+The owner binds responses to operation, exact handle type, allocation UUID, and
+participant ID. Raw FD copies are closed and raw FABRIC bytes are wiped and
+discarded on every path. Malformed logical tokens, raw CUDA handles passed to
+the application import wrapper, unavailable owners, and response-shape or
+identity mismatches fail closed without fallback or live Redis lookup.
 
 ## Redis and RDB contract
 
@@ -131,17 +150,24 @@ application-handle liveness, and access descriptors. It does not persist
 PIDs, FD numbers, capture allocation UUIDs, real CUDA handles, CUDA contexts,
 or opaque transport handles. Device ordinals can occur inside opaque
 allocation-property and access-descriptor replay records, but they are not
-durable identity. M1 admits only an access descriptor whose ordinal matches
+durable identity. The shim admits only an access descriptor whose ordinal matches
 the allocation's transient validated device ordinal; restore uses an ordinal
-only after current UUID validation. A
+only after validating the controller-supplied source/target UUID plan. A
 deterministic SHA-256 digest over that graph
-metadata and every allocation byte is stored in Redis and the checkpoint
-manifest. The artifact requires the same architecture, CUDA ABI, and shim
+metadata and every allocation byte is stored in Redis and the checkpoint manifest. Redis
+stores the allocation graph and contents, never POSIX FDs, logical FABRIC
+tokens, raw FABRIC handles, PIDs, or socket paths. Ledger version 2 and private
+control protocol version 4 are required; cross-version artifact restore is
+unsupported. The artifact requires the same architecture, CUDA ABI, and shim
 build.
 
-## Supported M1 contract
+## Supported contract
 
-- CUDA Driver API POSIX-FD VMM only.
+- CUDA Driver API VMM with `requestedHandleTypes` exactly POSIX FD (`1`) or
+  exactly FABRIC (`8`). Zero, combined bitmasks such as `9`, and every other
+  type are rejected.
+- FABRIC is single-node M2 IMEX unicast only. Exporter and importer must use
+  fabric-ready hardware and have access to the same IMEX channel.
 - One owner physical allocation, one complete offset-zero mapping per
   participant, all participants launched through the shim, and one
   checkpoint/restore cycle.
@@ -152,21 +178,34 @@ build.
 - Managed generic handles are stable shim tokens. They may remain live across
   checkpoint, or may follow the mapping-only lifecycle after application
   release.
-- POSIX sharing handles are sealed shim capabilities. Repeated owner exports
-  reuse one allocation UUID but return independent capability FDs.
+- Every owner and importer for one logical resource uses the same exact handle
+  type. POSIX sharing handles are sealed shim capabilities; FABRIC sharing
+  handles are exact 64-byte shim tokens. Repeated owner exports reuse one
+  allocation UUID.
+- Individual allocation contents are limited to Redis's 512 MiB bulk limit;
+  restore frames add only one exact record, property, and access descriptor.
 - Legacy CUDA IPC passes through unchanged to CUDA checkpoint's native
   job-file support.
 - `cuMulticastBindMem` and its available `_v2` resolver entry are poison-only:
-  binding a managed allocation is rejected before the UMD because M1 does not
+  binding a managed allocation is rejected before the UMD because the shim does not
   capture or replay multicast state. Calls with unrelated real handles pass
   through unchanged.
+
+On restore, owner reconstruction remains one path: create, exact-VA map,
+temporary write access, content copy, final access, and logical-handle rebind.
+The owner then returns either one transient POSIX FD or one transient 64-byte
+FABRIC value. A FABRIC importer receives those bytes only after its durable
+record/access metadata, calls the real import API, wipes the bytes, maps,
+applies access, and rebinds. No raw transport value enters allocation state,
+Redis, JSON, the digest, or a file.
 
 ## Detected and fail-closed
 
 The implementation detects and rejects:
 
 - missing or mixed launcher opt-in and process-set drift;
-- non-POSIX shared-handle types, unknown typed resource kinds, unknown tagged
+- zero, mixed, combined, or unsupported shared-handle types, unknown typed
+  resource kinds, unknown tagged
   logical handles, raw/unsealed/malformed sharing FDs, and untracked real
   handles used for managed map/export;
 - any successful `cuMemRetainAllocationHandle` call, even though the real
@@ -175,17 +214,23 @@ The implementation detects and rejects:
   incomplete access metadata;
 - partial, gapped, mixed managed/unmanaged, or repeated access-update ranges;
 - host, other-device, multi-device, non-read/write, or otherwise non-FlashInfer
-  access descriptors; M1 requires exactly one read/write DEVICE descriptor on
+  access descriptors; the shim requires exactly one read/write DEVICE descriptor on
   the allocation GPU;
 - missing owners/importers or local detached records that do not match the
   allocation UUID, logical object, role, exact VA, and size;
-- zero allocation UUIDs, multiple owners for one UUID, owner endpoint or
-  participant mismatches, unavailable owners, broker timeouts, responses
-  without exactly one raw FD, and any attempt to fall back to importing the
-  application capability directly;
+- zero allocation UUIDs, invalid FABRIC token magic/version/type/participant/PID
+  or reserved word, multiple owners for one UUID, owner endpoint or participant
+  mismatches, unavailable owners, broker timeouts, FABRIC responses carrying an
+  FD or not exactly 64 bytes, POSIX responses carrying a payload or not exactly
+  one FD, and any attempt to fall back to importing an application token
+  directly;
+- real CUDA FABRIC export/import failure, including
+  `CUDA_ERROR_NOT_PERMITTED` when the CUDA FABRIC-support attribute, fabric
+  state, or accessible IMEX channel is absent or mismatched, or when exporter
+  and importer do not share the same channel;
 - fork after CUDA initialization as observed by `pthread_atfork`;
-- missing current `NODE_NAME`, target-node changes, GPU UUID changes at a
-  source ordinal, and ordinal reordering;
+- missing current `NODE_NAME`, target-node changes, or an invalid, incomplete,
+  duplicate, or participant-inconsistent authoritative GPU placement plan;
 - inconsistent manifest VMM fields, a missing/empty/non-regular
   `cuda-vmm.rdb`, or an RDB artifact without manifest opt-in;
 - a checkpoint-side RDB source that is not a regular non-empty file after
@@ -193,7 +238,8 @@ The implementation detects and rejects:
 - a restore command that leaves the pre-restore Redis poison in place, or
   loaded state whose generation, ledger digest, graph metadata, or allocation
   bytes do not match the manifest;
-- CUDA detach/replay, Redis, configuration, socket, and broker-FD cleanup
+- CUDA detach/replay, Redis, configuration, socket, broker-FD cleanup, and
+  FABRIC-byte cleanup
   failures;
 - failure to unlock the CUDA processes at the validated preflight-to-replay
   boundary;
@@ -233,23 +279,30 @@ must enforce these assumptions:
 | Assumption | Possible failure when violated |
 |---|---|
 | The process tree is quiesced before the first VMM `INSPECT` or any other checkpoint-prepare operation and remains quiesced through graph capture and all importer/owner detach operations. At its restored control point, the application remains quiescent through the unlocked owner/importer replay and final-health window. | This is an unsupported contract violation and can silently omit a live mapping from the captured graph, producing an incomplete or corrupt checkpoint. In particular, a remote import that finishes after its participant was inspected can commit a mapping absent from the captured graph. Other concurrent managed calls can cause rejection or CUDA errors; bypassed or otherwise unmanaged CUDA calls can race replay and cause silent mapping or data corruption. |
-| Every application POSIX capability FD and alias is closed before prepare. FlashInfer's self-allgather result slot can be application-owned even when it is not imported, so the workload must close it too. | M1 cannot reliably verify this. A violation can preserve a stale bearer capability outside the captured graph and may be caught later by CRIU or yield undefined behavior. |
+| Every application POSIX capability FD and alias is closed before prepare. FlashInfer's self-allgather result slot can be application-owned even when it is not imported, so the workload must close it too. | The shim cannot reliably verify this. A violation can preserve a stale bearer capability outside the captured graph and may be caught later by CRIU or yield undefined behavior. |
+| No FABRIC logical token remains queued, retained, or unconsumed at the checkpoint boundary. | The 64-byte value has no observable lifecycle. A stale token can survive outside the captured graph and route to detached or replaced owner state. |
 | No FD is queued in `SCM_RIGHTS`. | CRIU can restore a stale capability that does not refer to the newly brokered allocation. |
 | No FD has been received but not imported. | The untracked capability can survive outside the logical graph and later import stale backing. |
 | Applications treat sharing FDs as opaque transport capabilities and do not require raw CUDA-FD `fstat`, `ioctl`, or `poll` behavior. | The returned FD is a sealed memfd, not the NVIDIA character-device export. Unsupported inspection or raw-FD bypass cannot be associated safely and must not be used. |
 | Every managed allocation has one complete offset-zero mapping and one full-range access update, either individually or through an exact contiguous union. | Partial, gapped, mixed, repeated, or unobserved shape cannot be reconstructed exactly. Observed wrapped violations fail admission; bypassed calls can replay incorrectly without detection. |
-| Shared resources use only the M1 POSIX-FD allocation APIs. | IMEX/fabric handles, multicast, mempools, external memory, arrays, or unwrapped allocation-derived handles bypass the graph and can restore incomplete or stale sharing state. |
+| Shared resources use only exact POSIX-FD or FABRIC allocation types through the wrapped Driver APIs. | Multicast APIs/state, mempools, external memory, arrays, native FlashInfer checkpoint hooks, retained/queued transport objects, or unwrapped allocation-derived handles bypass the graph and can restore incomplete or stale sharing state. |
 | Every participating process uses the launcher and resolves managed APIs through the preload/resolver path. | Static binaries, alternate loader namespaces, preload suppression, explicit-handle `dlvsym`, or direct explicit-handle lookup of a managed API can bypass tracking and produce an incomplete graph. cuda-python's explicit `dlsym` lookup of the CUDA resolver is supported. |
 | A process does not fork before CUDA use and then continue without `exec`. | The child inherits the parent's participant ID, listener FD, and socket path but not the control thread. It cannot create an independent endpoint, and checkpoint eventually fails through participant/process-set drift. Fork followed by `exec` reinitializes the launcher-scoped shim. |
-| Checkpoint and restore run on one logical node. | M1 has no cross-node barrier, capability transport, or placement; changing nodes makes local POSIX-FD brokerage and device ordinals invalid. |
-| The restore uses the same architecture, CUDA ABI, shim build, and compatible GPU placement. | Opaque CUDA property/access bytes or device ordinals can have different meaning. Detectable preflight mismatches fail while locked; replay-time CUDA failures fail the restore and trigger target teardown. |
+| Checkpoint and restore run on one logical node, with the same accessible IMEX channel and ready fabric state for FABRIC resources. | Cross-node routing is unsupported. A node, GPU, IMEX channel, or fabric-state change invalidates local brokerage and can cause `CUDA_ERROR_NOT_PERMITTED` or restore failure. |
+| The restore uses the same architecture, CUDA ABI, and shim build. | Identity and same-node remapped GPU placements are reconciled while locked from the controller plan. Other opaque CUDA property/access changes fail preflight; replay-time CUDA failures fail the restore and trigger target teardown. |
 | Redis is dedicated to this job and the restore command atomically loads the supplied RDB. | Another writer or non-atomic load can replace/mix state; digest, generation, or poison checks reject detectable drift. |
-
-Queued `SCM_RIGHTS` FDs and received-but-not-imported FDs are unsupported and
-unobservable to M1.
 
 The non-restored Snapshot coordinator reads its existing `NODE_NAME` for both
 source metadata and current restore placement; restore fails closed when that
-identity is unavailable. M1 remains single-node.
+identity is unavailable. The implementation remains single-node.
+
+## Non-goals
+
+The interposer does not support cross-node routing, multinode IMEX, multicast
+objects or APIs/state, CUDA mempools, unobservable retained, dangling, queued,
+or received-but-not-imported transport capabilities, repeated checkpoint/restore
+cycles, cross-version artifacts, or native application checkpoint hooks,
+including native FlashInfer hooks. It does not remove CUDA's native checkpoint
+responsibility for unrelated CUDA state or legacy CUDA IPC.
 
 Deployment admission and workload discipline must enforce these assumptions.

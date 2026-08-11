@@ -150,6 +150,7 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	cudaDeviceMap := ""
+	var cudaVMMPlacement []types.VMMPlacement
 	if !m.CUDA.IsEmpty() {
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
@@ -174,6 +175,15 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		if err != nil {
 			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
+		if m.CUDA.VMMInterpose {
+			cudaVMMPlacement, err = cuda.BuildVMMPlacement(
+				m.CUDA.SourceGPUUUIDs,
+				targetGPUUUIDs,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build CUDA VMM placement: %w", err)
+			}
+		}
 		log.V(1).Info("GPU UUIDs for device map",
 			"source_uuids", m.CUDA.SourceGPUUUIDs,
 			"target_uuids", targetGPUUUIDs,
@@ -182,11 +192,12 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	return &types.RestoreContainerSnapshot{
-		CheckpointPath: checkpointPath,
-		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
-		CgroupRoot:     cgroupRoot,
-		CUDADeviceMap:  cudaDeviceMap,
+		CheckpointPath:   checkpointPath,
+		PlaceholderPID:   placeholderPID,
+		TargetRoot:       fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		CgroupRoot:       cgroupRoot,
+		CUDADeviceMap:    cudaDeviceMap,
+		CUDAVMMPlacement: cudaVMMPlacement,
 	}, nil
 }
 
@@ -210,6 +221,13 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
+	}
+	if snap.CUDAVMMPlacement != nil {
+		encoded, err := json.Marshal(snap.CUDAVMMPlacement)
+		if err != nil {
+			return nil, fmt.Errorf("encode CUDA VMM placement: %w", err)
+		}
+		args = append(args, "--cuda-vmm-placement", string(encoded))
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)

@@ -116,11 +116,65 @@ DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
 LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
   "$build/lifecycle_test" owner-importer-success
 
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" gpu-identity-capture
+
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" fabric-owner-importer-success
+
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" fabric-ordinal-reindex
+
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" fabric-importer-failure
+
+DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+  "$build/lifecycle_test" set-placement-empty
+
+for shape in \
+  empty missing-source unknown-source duplicate-source duplicate-target \
+  duplicate-ordinal negative reserved zero-source zero-target \
+  inconsistent-device inconsistent-source inconsistent-properties \
+  inconsistent-access; do
+  DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+  DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+  LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+    "$build/lifecycle_test" set-placement-validation "$shape"
+done
+
 for scenario in capability-self canonical-capability-path colliding-raw-identity cross-process; do
   DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
   DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
   LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
     "$build/lifecycle_test" "$scenario"
+done
+
+for scenario in \
+  fabric-self fabric-low-address fabric-cross-process broker-shapes \
+  control-request-validation; do
+  DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+  DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+  LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+    "$build/lifecycle_test" "$scenario"
+done
+
+for shape in \
+  magic version type zero-uuid participant zero-pid reserved unavailable-owner \
+  raw cross-type; do
+  DYN_SNAPSHOT_CUDA_VMM_INTERPOSE=1 \
+  DYN_SNAPSHOT_CONTROL_DIR="$build/control" \
+  LD_PRELOAD="$build/libdynamo_snapshot_cuda_vmm.so" \
+    "$build/lifecycle_test" invalid-fabric-token "$shape"
 done
 
 for shape in \

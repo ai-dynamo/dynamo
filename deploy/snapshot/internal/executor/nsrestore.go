@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"syscall"
 	"time"
@@ -17,10 +18,11 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
-	TargetPodIP    string
+	CheckpointPath   string
+	CUDADeviceMap    string
+	CUDAVMMPlacement []types.VMMPlacement
+	CgroupRoot       string
+	TargetPodIP      string
 }
 
 type RestoreInNamespaceResult struct {
@@ -47,6 +49,18 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	}
 	if err := cuda.ValidateVMMArtifact(opts.CheckpointPath, m.CUDA.VMMInterpose); err != nil {
 		return nil, fmt.Errorf("invalid CUDA VMM checkpoint artifact: %w", err)
+	}
+	if m.CUDA.VMMInterpose {
+		if err := cuda.ValidateVMMPlacement(
+			m.CUDA.SourceGPUUUIDs,
+			opts.CUDAVMMPlacement,
+		); err != nil {
+			return nil, fmt.Errorf("invalid CUDA VMM placement: %w", err)
+		}
+	} else if opts.CUDAVMMPlacement != nil {
+		return nil, errors.New(
+			"CUDA VMM placement provided without manifest opt-in",
+		)
 	}
 	manifestReadDuration := time.Since(manifestReadStart)
 	log.V(1).Info("Loaded checkpoint manifest",
@@ -182,6 +196,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 				m.CUDA.VMMGeneration,
 				m.CUDA.VMMStateDigest,
 				opts.CheckpointPath,
+				opts.CUDAVMMPlacement,
 				func() error {
 					return cuda.UnlockProcessTree(ctx, restorePIDs, log)
 				},
