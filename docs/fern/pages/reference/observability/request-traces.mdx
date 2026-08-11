@@ -51,10 +51,10 @@ batch. Records are batched in-process and uploaded when the batch reaches
 `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES` or when `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS`
 elapses. Object keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`, where
 `run_id` is a per-process UUID that keeps container restarts and hostname collisions from overwriting
-earlier batches. Credentials come from the AWS SDK default provider chain (environment variables,
-IMDS, IRSA, Pod Identity, shared profiles); how the frontend pod is credentialed is a deployment
-concern. On terminal upload failure the batch is dropped and a warning is logged; no on-disk retry
-queue is kept.
+earlier batches. Credentials come from the shared object-store client's provider chain (environment
+variables, IMDS, IRSA, and Pod Identity). Shared AWS config and credential profiles are not loaded;
+how the frontend pod is credentialed is a deployment concern. On terminal upload failure the batch
+is dropped and a warning is logged; no on-disk retry queue is kept.
 
 ```bash
 export DYN_REQUEST_TRACE=1
