@@ -2525,6 +2525,7 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
+ "dynamo-worker-selection-policy-catalog",
  "futures",
  "once_cell",
  "opentelemetry",
@@ -2716,6 +2717,13 @@ name = "dynamo-truthy"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
 ]
 
 [[package]]

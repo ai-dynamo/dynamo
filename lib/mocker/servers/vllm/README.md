@@ -5,14 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Mocker-backed vLLM gRPC server
 
-`dynamo-vllm-mocker-server` implements vLLM's native `Generate` and
-`GenerateStream` RPCs on CPU, using the Dynamo Mocker scheduler for batching,
-KV-capacity, prefix-cache, and timing behavior. Its primary purpose is fast,
-repeatable testing of `dynamo-vllm-sidecar` without a model or GPU.
+`dynamo-vllm-mocker-server` implements vLLM's native Inference and Control services plus standard gRPC health on CPU. It uses the Dynamo Mocker scheduler for batching, KV capacity, prefix cache, and timing behavior.
 
-The mock server temporarily imports the generated types exposed by
-`dynamo-vllm-sidecar`, whose proto is vendored unchanged from vLLM v0.25.1.
-Both consumers will move to vLLM's upstream package once it is published.
+The mock server imports the generated types exposed by `dynamo-vllm-sidecar`. The proto files are vendored unchanged from vLLM.
 
 ## Aggregated serving
 
@@ -29,8 +24,7 @@ Point the existing Dynamo sidecar at it:
 
 ```bash
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path mocker-model
+  --vllm-endpoint 127.0.0.1:50051
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The values use
@@ -62,13 +56,15 @@ Then start one sidecar for each endpoint:
 
 ```bash
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 --model-path mocker-model \
+  --vllm-endpoint 127.0.0.1:50051 \
   --disaggregation-mode prefill
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50052 --model-path mocker-model \
+  --vllm-endpoint 127.0.0.1:50052 \
   --disaggregation-mode decode
 ```
+
+The sidecar discovers model identity through Control. Keep `--disaggregation-mode` for prefill and decode because the current discovery API does not report engine role.
 
 The prefill endpoint returns an opaque vLLM-shaped `kv_transfer_params`
 payload, and the decode endpoint validates that the sidecar forwarded it

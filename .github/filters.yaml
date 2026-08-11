@@ -24,6 +24,20 @@
 all:
   - '**'
 
+# Fern component sources only. The docs filter matches 458 of the last 1172
+# commits on main, but only 21 of those touched a component source, so a step
+# that only exercises components wastes ~95% of its runs on that filter.
+# pre-merge.yml is listed because a change to the component-parsing step should
+# run the step it changes.
+fern_components:
+  - 'docs/fern/components/**/*.ts'
+  - 'docs/fern/components/**/*.tsx'
+  - 'docs/fern/components/**/*.js'
+  - 'docs/fern/components/**/*.jsx'
+  - 'docs/fern/fern.config.json'
+  - 'docs/fern/scripts/check_component_imports.py'
+  - '.github/workflows/pre-merge.yml'
+
 docs:
   - 'docs/**'
   - 'fern/**'
@@ -42,6 +56,23 @@ docs:
   - 'skills/**'
   # Sidecar documentation is not part of the Fern docs site.
   - '!lib/sidecar/**'
+
+api_docs:
+  - '.github/filters.yaml'
+  - '.github/workflows/fern-docs.yml'
+  - '.github/workflows/pre-merge.yml'
+  - 'pyproject.toml'
+  - 'docs/fern/scripts/**'
+  - 'docs/fern/components/**'
+  - 'docs/fern/pages/reference/api/**'
+  - 'docs/fern/index.yml'
+  - 'docs/fern/docs.yml'
+  - 'docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx'
+  - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
+  - 'deploy/operator/docs/footer.md'
+  - 'lib/bindings/python/src/**'
+  - 'components/src/dynamo/**'
+  - '**/Cargo.toml'
 
 examples:
   - 'recipes/**'

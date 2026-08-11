@@ -2470,6 +2470,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-basic"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-custom-policy-example-basic",
+ "dynamo-kv-router",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-epp"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "dynamo-custom-policy-example-catalog",
+ "dynamo-ext-proc",
+ "dynamo-kv-router",
+ "tokio",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.4.0"
 dependencies = [
@@ -3084,6 +3111,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
+ "tonic-health",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3108,7 +3136,15 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
 ]
 
 [[package]]
