@@ -216,7 +216,7 @@ where
             available_worker_provider,
         )?);
         let recheck_interval = queue
-            .policy_reconcile_interval()
+            .admission_reconcile_interval()
             .map_or(recheck_interval, |policy_interval| {
                 policy_interval.min(recheck_interval)
             });
@@ -535,7 +535,7 @@ where
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
         self.slots.free(&request_id, Instant::now())?;
-        if !self.queue.has_queue_policy() {
+        if !self.queue.has_admission_policy() {
             match worker {
                 Some(worker) => self.queue.update_worker(worker).await,
                 None => self.queue.update().await,
@@ -594,7 +594,7 @@ where
         outcome: RequestOutcome,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
-        if !self.queue.has_queue_policy() {
+        if !self.queue.has_admission_policy() {
             self.slots
                 .free_if_worker(&request_id, worker, Instant::now())?;
             self.queue.update_worker(worker).await;
@@ -630,8 +630,8 @@ where
     }
 
     #[cfg(feature = "standalone-selection")]
-    pub(crate) fn has_queue_policy(&self) -> bool {
-        self.queue.has_queue_policy()
+    pub(crate) fn has_admission_policy(&self) -> bool {
+        self.queue.has_admission_policy()
     }
 
     pub fn worker_type(&self) -> &'static str {

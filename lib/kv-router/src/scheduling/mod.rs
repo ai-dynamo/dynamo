@@ -38,7 +38,8 @@ pub use prefill_load::{
     prefill_load_hint_from_effective_tokens,
 };
 pub use queue_admission::{
-    PolicyQueueDecision, PolicyQueueEvent, PolicyQueueId, PolicyQueuePolicy, PolicyQueueRequest,
-    PolicyQueueWorker, RequestProgress, RequestProgressUpdater, WorkerPlacement,
+    QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
+    QueueAdmissionRequest, QueueAdmissionWorker, RequestProgress, RequestProgressUpdater,
+    WorkerPlacement,
 };
 pub use types::*;

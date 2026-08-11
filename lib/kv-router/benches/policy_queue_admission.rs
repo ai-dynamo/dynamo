@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Custom policy admission scaling benchmark.
+//! Queue admission policy scaling benchmark.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench policy_queue_admission --features bench`
 
@@ -14,8 +14,8 @@ use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, ScheduleRequest};
 use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, KvRouterConfig, LocalScheduler, PolicyQueueDecision,
-    PolicyQueuePolicy, PolicyQueueRequest, RouterQueuePolicy, WorkerInputView, WorkerPicker,
+    ActiveSequencesMultiWorker, KvRouterConfig, LocalScheduler, QueueAdmissionDecision,
+    QueueAdmissionPolicy, QueueAdmissionRequest, RouterQueuePolicy, WorkerInputView, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
 use tokio::runtime::Runtime;
@@ -24,10 +24,10 @@ use tokio_util::sync::CancellationToken;
 
 struct BypassPolicy;
 
-impl PolicyQueuePolicy for BypassPolicy {
-    fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+impl QueueAdmissionPolicy for BypassPolicy {
+    fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
         black_box(request.workers());
-        PolicyQueueDecision::Bypass
+        QueueAdmissionDecision::Bypass
     }
 }
 
@@ -77,7 +77,7 @@ fn scheduler(worker_count: usize) -> (BenchScheduler, CancellationToken) {
         Vec::new(),
         Box::new(FirstPicker),
     )
-    .with_queue_policy(Box::new(BypassPolicy));
+    .with_admission_policy(Box::new(BypassPolicy));
     let cancellation_token = CancellationToken::new();
     let scheduler = LocalScheduler::new(
         slots,
