@@ -50,6 +50,7 @@ use std::{
 };
 use tracing;
 
+use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
@@ -550,8 +551,8 @@ pub struct OpenAIPreprocessor {
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
     media_loader: Option<MediaLoader>,
-    /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
-    context_length: u32,
+    /// Engine-published request-token admission policy.
+    token_budget: Option<TokenBudget>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -577,32 +578,127 @@ pub struct OpenAIPreprocessor {
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
 
+pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
         prompt_len: usize,
-        context_length: u32,
+        token_limit: Option<u32>,
         options: PreprocessRequestOptions,
     ) -> Option<u32> {
-        if context_length == 0 || options.preserve_omitted_max_tokens {
+        if options.preserve_omitted_max_tokens {
             return None;
         }
-        Some(context_length.saturating_sub(prompt_len as u32))
+        token_limit.map(|limit| limit.saturating_sub(prompt_len as u32))
     }
 
-    /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
-    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
-    /// images but no expanded length, defers to the backend (`None`); text-only
-    /// uses `token_ids_len`.
-    fn effective_prompt_len_for_cap(
-        expanded_prompt_len: Option<usize>,
-        has_images: bool,
+    /// Return the exact prompt length when the frontend can prove it.
+    ///
+    /// MM routing currently expands image placeholders only. Therefore any
+    /// other non-empty media modality makes even an image-expanded length
+    /// incomplete and forces backend validation.
+    fn exact_prompt_len(
+        expanded_image_prompt_len: Option<usize>,
+        multi_modal_data: Option<&MultimodalDataMap>,
         token_ids_len: usize,
     ) -> Option<usize> {
-        match expanded_prompt_len {
-            Some(n) if n > 0 => Some(n),
-            _ if has_images => None,
-            _ => Some(token_ids_len),
+        let has_images = multi_modal_data
+            .and_then(|media| media.get("image_url"))
+            .is_some_and(|items| !items.is_empty());
+        let has_other_media = multi_modal_data.is_some_and(|media| {
+            media
+                .iter()
+                .any(|(kind, items)| kind != "image_url" && !items.is_empty())
+        });
+
+        if has_other_media {
+            None
+        } else if let Some(expanded_prompt_len) =
+            expanded_image_prompt_len.filter(|length| *length > 0)
+        {
+            Some(expanded_prompt_len)
+        } else if has_images {
+            None
+        } else {
+            Some(token_ids_len)
         }
+    }
+
+    /// Apply the engine-published rejection policy to an exact request length.
+    fn validate_requested_token_budget(
+        prompt_len: usize,
+        max_tokens: Option<u32>,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<()> {
+        let Some(token_budget) = token_budget else {
+            return Ok(());
+        };
+        let combined_limit = token_budget.combined_limit as usize;
+
+        // A prompt that fills the combined budget leaves no room for generation.
+        // When prompt overflow is backend-owned, its effective length may change.
+        if prompt_len >= combined_limit {
+            if !token_budget.reject_prompt_overflow {
+                return Ok(());
+            }
+            return Err(Self::prompt_overflow_error(prompt_len, combined_limit).into());
+        }
+
+        // Generation requires at least one output token when the cap is omitted.
+        let requested_tokens = prompt_len.saturating_add(max_tokens.unwrap_or(1) as usize);
+        if requested_tokens > combined_limit && token_budget.reject_total_overflow {
+            let request_description = match max_tokens {
+                Some(max_tokens) => format!(
+                    "your request has {prompt_len} input tokens and asks for {max_tokens} output \
+                     tokens ({requested_tokens} tokens total)"
+                ),
+                None => format!(
+                    "your request has {prompt_len} input tokens and requires room for at least one \
+                     output token ({requested_tokens} tokens minimum)"
+                ),
+            };
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model configuration accepts at most {} combined input and output \
+                     tokens. However, {}. Please reduce the input length or requested output \
+                     length.",
+                    combined_limit, request_description,
+                ))
+                .build()
+                .into());
+        }
+
+        Ok(())
+    }
+
+    /// Validate a preprocessed request when its frontend-visible prompt length
+    /// is exact, returning that length for other context-budget decisions.
+    fn validate_preprocessed_token_budget(
+        request: &PreprocessedRequest,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<Option<usize>> {
+        if request.prompt_embeds.is_some() {
+            return Ok(None);
+        }
+
+        let exact_prompt_len = Self::exact_prompt_len(
+            request
+                .mm_routing_info
+                .as_ref()
+                .map(|mm| mm.expanded_prompt_len),
+            request.multi_modal_data.as_ref(),
+            request.token_ids.len(),
+        );
+        if let Some(prompt_len) = exact_prompt_len {
+            Self::validate_requested_token_budget(
+                prompt_len,
+                request.stop_conditions.max_tokens,
+                token_budget,
+            )?;
+        }
+
+        Ok(exact_prompt_len)
     }
 
     fn nvext_passthrough_args<R: NvExtProvider>(
@@ -986,6 +1082,19 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let token_budget = match runtime_config
+            .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
+        {
+            Ok(token_budget) => token_budget,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    key = TOKEN_BUDGET_RUNTIME_KEY,
+                    "Ignoring invalid runtime metadata; token overflow handling will be delegated to the backend"
+                );
+                None
+            }
+        };
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
@@ -1019,8 +1128,6 @@ impl OpenAIPreprocessor {
                 )
             })
         };
-
-        let context_length = mdc.effective_context_length();
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -1173,7 +1280,7 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             normalize_tool_call_args,
             media_loader,
-            context_length,
+            token_budget,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(feature = "mm-routing")]
@@ -1219,7 +1326,12 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let (request, annotations, prompt_injected_reasoning, _image_tokens) = self
-            .preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .preprocess_request_with_options(
+                request,
+                tracker,
+                PreprocessRequestOptions::default(),
+                None,
+            )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
     }
@@ -1237,6 +1349,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
+        lora_name: Option<String>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -1245,7 +1358,7 @@ impl OpenAIPreprocessor {
     )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
-        let mut builder = self.builder(request)?;
+        let mut builder = self.builder_with_lora(request, lora_name)?;
 
         let template_start = Instant::now();
         let formatted_prompt = {
@@ -1324,25 +1437,29 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let has_images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|m| m.get("image_url"))
-            .is_some_and(|v| !v.is_empty());
-        let effective_prompt_len = Self::effective_prompt_len_for_cap(
-            preprocessed
-                .mm_routing_info
-                .as_ref()
-                .map(|mm| mm.expanded_prompt_len),
-            has_images,
-            preprocessed.token_ids.len(),
-        );
+        let exact_prompt_len =
+            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(prompt_len) = effective_prompt_len
-            && let Some(max_tokens) =
-                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
+            && let Some(prompt_len) = exact_prompt_len
+            // Preserve omission when the prompt itself is backend-owned. In
+            // particular, setting a saturating zero here would interfere with
+            // SGLang's auto-truncation before the backend sees the request.
+            && !self.token_budget.is_some_and(|token_budget| {
+                prompt_len >= token_budget.combined_limit as usize
+                    && !token_budget.reject_prompt_overflow
+            })
+            && let Some(max_tokens) = Self::omitted_max_tokens_default(
+                prompt_len,
+                self.token_budget
+                    .map(|token_budget| token_budget.combined_limit),
+                options,
+            )
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
+            // A strict limit may be smaller than the raw context window because
+            // the engine reserves tokens. Revalidate the derived budget so an
+            // already-over-limit prompt fails before streaming begins.
+            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
         }
 
         Ok((
@@ -1363,6 +1480,21 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
+    ) -> Result<PreprocessedRequestBuilder> {
+        self.builder_with_lora(request, None)
+    }
+
+    fn builder_with_lora<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        lora_name_override: Option<String>,
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
@@ -1448,7 +1580,7 @@ impl OpenAIPreprocessor {
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone();
+        let lora_name = self.lora_name.clone().or(lora_name_override);
         let cache_namespace = request_cache_salt(request).map(str::to_owned);
 
         // Extract routing hints from nvext if present
@@ -2383,7 +2515,6 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
-        let mut token_count: Option<usize> = None;
         let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
         // match request type before any conversion/processing
         match request.prompt_input_type() {
@@ -2391,12 +2522,10 @@ impl OpenAIPreprocessor {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
-                            token_count = Some(tokens.len());
                             tokens_out = tokens;
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
-                                token_count = Some(token_batches[0].len());
                                 tokens_out = token_batches[0].clone();
                             } else {
                                 bail!(
@@ -2481,14 +2610,12 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
-                            token_count = Some(tokens_vec.len());
                             tokens_out = tokens_vec;
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker).await?;
                                 let tokens = encoding.token_ids().to_vec();
-                                token_count = Some(tokens.len());
                                 tokens_out = tokens;
                             } else {
                                 bail!(
@@ -2502,35 +2629,19 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Validate prompt token count against model's context length
-        if let Some(count) = token_count {
-            Self::validate_token_count(count, self.context_length)?;
-        }
-
         Ok((tokens_out, annotations))
     }
 
-    /// Validate that the prompt token count does not consume the model's entire context length.
-    /// Returns an error if the prompt leaves no room for output tokens.
-    fn validate_token_count(token_count: usize, context_length: u32) -> Result<()> {
-        let max_len = context_length as usize;
-        // max_len == 0 means context_length was not configured (model_card.rs defaults
-        // to 0 when max_position_embeddings is absent), so skip validation.
-        // Use >= because context_length is the total budget (input + output): if the
-        // prompt alone fills it, there is zero room for output tokens.
-        if max_len > 0 && token_count >= max_len {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::InvalidArgument)
-                .message(format!(
-                    "This model's maximum context length is {} tokens. \
-                     However, your messages resulted in {} tokens. \
-                     Please reduce the length of the messages.",
-                    max_len, token_count,
-                ))
-                .build()
-                .into());
-        }
-        Ok(())
+    fn prompt_overflow_error(token_count: usize, combined_limit: usize) -> DynamoError {
+        DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(format!(
+                "This model's maximum context length is {} tokens. \
+                 However, your messages resulted in {} tokens. \
+                 Please reduce the length of the messages.",
+                combined_limit, token_count,
+            ))
+            .build()
     }
 
     async fn encode_with_timing(
@@ -3372,12 +3483,70 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input and tracks what the jail emitted per choice.index
+        // so n > 1 is handled correctly and double-emit is avoided.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+            emitted_text: String,
+            recovered: bool,
+        }
+        // Named so the bool in the recoveries tuple is legible at each use site.
+        struct PendingRecovery {
+            choice_idx: u32,
+            tail: String,
+            tail_already_emitted: bool,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        // Token strings from the parser config so recovery matches the parser
+        // even if the defaults are ever overridden.
+        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_cfg.tool_call_start;
+        let glm47_end = glm47_cfg.tool_call_end;
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+        let glm47_start_jail = glm47_start.clone();
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            // Only retain from the last <tool_call> marker onward to bound
+            // memory on long responses.
+            if is_glm47 && let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
+                    {
+                        let state = cr.entry(choice.index).or_default();
+                        state.input_text.push_str(content);
+                        // Drop everything before the last marker to keep
+                        // the buffer small. Walk back to a char boundary
+                        // before draining so a multi-byte char split
+                        // across chunks never triggers a panic.
+                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
+                        {
+                            Some(pos) => pos,
+                            // No marker yet — keep enough tail to
+                            // catch a marker split across two chunks.
+                            None => state
+                                .input_text
+                                .len()
+                                .saturating_sub(glm47_start_jail.len() - 1),
+                        };
+                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
+                            keep_from -= 1;
+                        }
+                        state.input_text.drain(..keep_from);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3396,7 +3565,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -3408,7 +3577,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -3418,7 +3587,145 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete
+            // <tool_call> block. rfind skips complete blocks so earlier parsed
+            // calls are never duplicated. Recovered content WILL contain raw
+            // markup — callers that require "no tool tags in content" must
+            // filter on finish_reason=length.
+            //
+            // TODO: this recovery runs inside apply_tool_calling_jail, which
+            // the v2 path bypasses (use_parsers_v2 branch above). Adding
+            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+            // streaming recovery while aggregator.rs keeps running. At that
+            // point hoist this above the jail/v2 branch — it only needs
+            // buffered input text + finish_reason, both available there.
+            // Pass 1 (immutable): compute the recovery tail per choice and
+            // whether the jail already released it as content on this chunk.
+            // We collect into a Vec so we can release the immutable borrow on
+            // nv_chunk before mutating it in pass 2.
+            let recoveries: Vec<PendingRecovery> = if is_glm47 {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                nv_chunk
+                    .data
+                    .iter()
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| {
+                        let state = cr.entry(choice.index).or_default();
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
+                                &choice.delta.content
+                        {
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
+                            {
+                                Some(pos) => pos,
+                                None => state
+                                    .emitted_text
+                                    .len()
+                                    .saturating_sub(glm47_start.len() - 1),
+                            };
+                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
+                                keep_from -= 1;
+                            }
+                            state.emitted_text.drain(..keep_from);
+                        }
+                        if state.recovered
+                            || !matches!(
+                                choice.finish_reason,
+                                Some(dynamo_protocols::types::FinishReason::Length)
+                            )
+                        {
+                            return None;
+                        }
+                        let tail =
+                            state
+                                .input_text
+                                .rfind(glm47_start.as_str())
+                                .and_then(|pos| {
+                                    let t = &state.input_text[pos..];
+                                    if !t.contains(glm47_end.as_str()) {
+                                        Some(t.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })?;
+                        let tail_already_emitted = state.emitted_text.contains(&tail);
+                        state.recovered = true;
+                        Some(PendingRecovery {
+                            choice_idx: choice.index,
+                            tail,
+                            tail_already_emitted,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
+            for pr in &recoveries {
+                if !pr.tail_already_emitted {
+                    continue;
+                }
+                if let Some(ref mut data) = nv_chunk.data {
+                    for rc in data
+                        .inner
+                        .choices
+                        .iter_mut()
+                        .filter(|c| c.index == pr.choice_idx)
+                    {
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
+                    }
+                }
             }
+
+            // Pass 3: emit a recovery chunk per affected choice carrying just
+            // the truncated tail (marker onwards, no post-call prose).
+            let recovery_chunks: Vec<_> = recoveries
+                .into_iter()
+                .filter_map(|pr| {
+                    let PendingRecovery {
+                        choice_idx, tail, ..
+                    } = pr;
+                    tracing::warn!(
+                        choice_index = choice_idx,
+                        recovered_bytes = tail.len(),
+                        "glm47 streaming: partial <tool_call> emitted as content \
+                         on length finish"
+                    );
+                    let mut rec = nv_chunk.clone();
+                    rec.id = None;
+                    rec.event = None;
+                    rec.comment = None;
+                    rec.error = None;
+                    let rd = rec.data.as_mut()?;
+                    rd.inner.usage = None;
+                    rd.llm_metrics = None;
+                    rd.inner.choices.retain(|c| c.index == choice_idx);
+                    for rc in &mut rd.inner.choices {
+                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
+                        rc.delta.tool_calls = None;
+                        rc.finish_reason = None;
+                        rc.logprobs = None;
+                    }
+                    Some(rec)
+                })
+                .collect();
+
+            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
         })
     }
 
@@ -4028,7 +4335,16 @@ impl
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
-            .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
+            .preprocess_request_with_options(
+                &request,
+                tracker.as_deref(),
+                preprocess_options,
+                context
+                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|name| name.as_ref().clone()),
+            )
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
 
@@ -4193,7 +4509,14 @@ impl
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
         // convert the chat completion request to a common completion request
-        let mut builder = self.builder(&request)?;
+        let mut builder = self.builder_with_lora(
+            &request,
+            context
+                .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .map(|name| name.as_ref().clone()),
+        )?;
 
         // Check if embeddings are provided - skip tokenization path
         let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
@@ -4220,6 +4543,7 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
         attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -5528,7 +5852,7 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                100,
+                Some(100),
                 PreprocessRequestOptions::default()
             ),
             Some(90)
@@ -5536,7 +5860,7 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                100,
+                Some(100),
                 PreprocessRequestOptions {
                     preserve_omitted_max_tokens: true,
                 },
@@ -5546,40 +5870,235 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                0,
+                None,
                 PreprocessRequestOptions::default()
             ),
             None
         );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                Some(0),
+                PreprocessRequestOptions::default()
+            ),
+            Some(0)
+        );
     }
 
     #[test]
-    fn test_effective_prompt_len_for_cap() {
-        // MM-expanded length present: use it, ignoring the unexpanded token count.
+    fn test_exact_prompt_len() {
+        let images = MultimodalDataMap::from([(
+            "image_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/image.png").unwrap(),
+            )],
+        )]);
+        let videos = MultimodalDataMap::from([(
+            "video_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/video.mp4").unwrap(),
+            )],
+        )]);
+        let mixed = MultimodalDataMap::from([
+            (
+                "image_url".to_string(),
+                vec![MultimodalData::Url(
+                    url::Url::parse("https://example.com/image.png").unwrap(),
+                )],
+            ),
+            (
+                "audio_url".to_string(),
+                vec![MultimodalData::Url(
+                    url::Url::parse("https://example.com/audio.wav").unwrap(),
+                )],
+            ),
+        ]);
+
+        // Image-expanded length present: use it instead of placeholder tokens.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(500), true, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(500), Some(&images), 12),
             Some(500)
         );
         // Expanded length 0 (serde-default / absent) with images: defer to backend.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), true, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(0), Some(&images), 12),
             None
         );
         // No routing info but images present: defer to backend.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(None, true, 12),
+            OpenAIPreprocessor::exact_prompt_len(None, Some(&images), 12),
+            None
+        );
+        // Video/audio expansion is backend-owned, including mixed requests
+        // whose routing metadata expands only the image portion.
+        assert_eq!(
+            OpenAIPreprocessor::exact_prompt_len(None, Some(&videos), 12),
+            None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::exact_prompt_len(Some(500), Some(&mixed), 12),
             None
         );
         // Text-only: use the token count.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(None, false, 12),
+            OpenAIPreprocessor::exact_prompt_len(None, None, 12),
             Some(12)
         );
-        // Expanded length 0 without images: fall back to the token count.
+        // Expanded length 0 without media: fall back to the token count.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(0), None, 12),
             Some(12)
         );
+    }
+
+    fn token_budget(
+        combined_limit: u32,
+        reject_prompt_overflow: bool,
+        reject_total_overflow: bool,
+    ) -> TokenBudget {
+        TokenBudget {
+            combined_limit,
+            reject_prompt_overflow,
+            reject_total_overflow,
+        }
+    }
+
+    #[test]
+    fn test_requested_token_budget_policy_matrix() {
+        let cases = [
+            // Exact combined limit is accepted.
+            (3, Some(7), true, true, false),
+            // One token beyond the combined limit is rejected.
+            (3, Some(8), true, true, true),
+            // A full prompt leaves no room for generation.
+            (10, None, true, true, true),
+            // Each rejection dimension can be delegated independently.
+            (3, Some(8), true, false, false),
+            (10, Some(8), false, true, false),
+        ];
+
+        for (
+            prompt_len,
+            max_tokens,
+            reject_prompt_overflow,
+            reject_total_overflow,
+            should_reject,
+        ) in cases
+        {
+            let budget = token_budget(10, reject_prompt_overflow, reject_total_overflow);
+            assert_eq!(
+                OpenAIPreprocessor::validate_requested_token_budget(
+                    prompt_len,
+                    max_tokens,
+                    Some(&budget),
+                )
+                .is_err(),
+                should_reject,
+            );
+        }
+    }
+
+    fn preprocessed_budget_request(max_tokens: Option<u32>) -> PreprocessedRequest {
+        let stop_conditions = crate::protocols::common::StopConditions {
+            max_tokens,
+            ..Default::default()
+        };
+
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(stop_conditions)
+            .sampling_options(crate::protocols::common::SamplingOptions::default())
+            .output_options(crate::protocols::common::OutputOptions::default())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_preprocessed_completion_budget_validation_and_deferral() {
+        let text_request = preprocessed_budget_request(Some(8));
+        let reject = token_budget(10, true, true);
+        assert!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(&text_request, Some(&reject))
+                .is_err()
+        );
+
+        let defer_total = token_budget(10, true, false);
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &text_request,
+                Some(&defer_total),
+            )
+            .unwrap(),
+            Some(3)
+        );
+
+        // Prompt embeddings do not expose their sequence length as token_ids.
+        let mut embeddings_request = text_request.clone();
+        embeddings_request.prompt_embeds = Some("opaque-tensor".to_string());
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &embeddings_request,
+                Some(&reject),
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    struct UnreachableCompletionBackend;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for UnreachableCompletionBackend
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            panic!("over-budget completion must be rejected before backend dispatch")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completion_operator_rejects_token_budget_overflow() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.context_length = Some(100);
+        mdc.runtime_config
+            .set_engine_specific(TOKEN_BUDGET_RUNTIME_KEY, token_budget(10, true, true))
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        let request = NvCreateCompletionRequest {
+            inner: dynamo_protocols::types::CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: dynamo_protocols::types::Prompt::IntegerArray(vec![1, 2, 3]),
+                max_tokens: Some(8),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            metadata: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        };
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableCompletionBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("over-budget completion should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
     fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {

@@ -88,6 +88,8 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
             effective_overlap_blocks,
             effective_cached_tokens,
         },
+        router_hint_candidates: None,
+        retain_router_hint_chain: false,
         shared_cache_hits: None,
         worker_loads,
         resp_tx: None,

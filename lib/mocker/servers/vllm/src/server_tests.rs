@@ -219,7 +219,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
         ids: vec![1, 2, 3, 4, 5],
     }));
 
-    let error = pb::generate_server::Generate::generate(&service, Request::new(oversized))
+    let error = pb::inference_server::Inference::generate(&service, Request::new(oversized))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::ResourceExhausted);
@@ -245,18 +245,18 @@ async fn concurrent_request_limit_rejects_a_stalled_stream() {
     let mut first_request = request("stalled");
     first_request.stopping.as_mut().unwrap().max_new_tokens = 100;
     let first =
-        pb::generate_server::Generate::generate_stream(&service, Request::new(first_request))
+        pb::inference_server::Inference::generate_stream(&service, Request::new(first_request))
             .await
             .unwrap();
 
     let mut queued_request = request("queued");
     queued_request.stopping.as_mut().unwrap().max_new_tokens = 100;
     let queued =
-        pb::generate_server::Generate::generate_stream(&service, Request::new(queued_request))
+        pb::inference_server::Inference::generate_stream(&service, Request::new(queued_request))
             .await
             .unwrap();
 
-    let error = match pb::generate_server::Generate::generate_stream(
+    let error = match pb::inference_server::Inference::generate_stream(
         &service,
         Request::new(request("rejected")),
     )
@@ -312,7 +312,7 @@ async fn unary_generate_accumulates_output_and_terminal_metadata() {
     let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
 
     let response =
-        pb::generate_server::Generate::generate(&service, Request::new(request("unary")))
+        pb::inference_server::Inference::generate(&service, Request::new(request("unary")))
             .await
             .unwrap()
             .into_inner();
@@ -355,7 +355,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     }));
 
     let mut stream =
-        pb::generate_server::Generate::generate_stream(&service, Request::new(oversized))
+        pb::inference_server::Inference::generate_stream(&service, Request::new(oversized))
             .await
             .expect("streaming RPC opens before the scheduler rejects")
             .into_inner();
@@ -384,10 +384,11 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
     let mut bursty = request("bursty");
     bursty.stopping.as_mut().unwrap().max_new_tokens = 50;
 
-    let mut stream = pb::generate_server::Generate::generate_stream(&service, Request::new(bursty))
-        .await
-        .unwrap()
-        .into_inner();
+    let mut stream =
+        pb::inference_server::Inference::generate_stream(&service, Request::new(bursty))
+            .await
+            .unwrap()
+            .into_inner();
 
     // Stall the consumer so the instant producer fills and overflows the fixed
     // per-request buffer before we read anything.

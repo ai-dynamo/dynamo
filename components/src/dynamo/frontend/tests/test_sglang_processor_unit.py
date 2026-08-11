@@ -17,6 +17,13 @@ import types
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
+from _tool_guidance_parity import (
+    TOOL_GUIDANCE_PARITY_CASES,
+    assistant_response_format,
+    classify_guidance_source,
+    parity_tool,
+    tool_choice_value,
+)
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -233,6 +240,133 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["sampling_options"]["guided_decoding"] == {
             "json": {"type": "object"}
         }
+
+    def test_agent_hints_are_projected_to_routing(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "agent_hints": {
+                        "priority": 10,
+                        "strict_priority": 3,
+                        "osl": 128,
+                    }
+                },
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {
+            "priority": 10,
+            "priority_jump": 10.0,
+            "strict_priority": 3,
+            "expected_output_tokens": 128,
+        }
+
+    def test_negative_priority_hint_preserves_backend_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": -5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": -5, "priority_jump": 0.0}
+
+    def test_existing_routing_overrides_agent_hint_projection(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "routing": {"priority_jump": 1.0, "strict_priority": 2},
+                "nvext": {
+                    "agent_hints": {
+                        "priority": 10,
+                        "strict_priority": 3,
+                        "osl": 128,
+                    }
+                },
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {
+            "priority": 10,
+            "priority_jump": 1.0,
+            "strict_priority": 2,
+            "expected_output_tokens": 128,
+        }
+
+    def test_latency_sensitivity_projects_to_priority_jump_without_priority(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority_jump": 2.5}
+
+    @pytest.mark.parametrize(
+        "latency_sensitivity", [10**400, float("inf"), float("nan")]
+    )
+    def test_invalid_latency_sensitivity_hint_is_ignored(self, latency_sensitivity):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": latency_sensitivity}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize("priority", [2**40, 10**400])
+    def test_out_of_range_priority_hint_is_ignored(self, priority):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": priority}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("strict_priority", -1),
+            ("strict_priority", 2**32),
+            ("osl", -1),
+            ("osl", 2**32),
+        ],
+    )
+    def test_out_of_range_u32_agent_hints_are_ignored(self, field, value):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": 1, field: value}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": 1, "priority_jump": 1.0}
 
     @pytest.mark.parametrize("require_reasoning", [False, True])
     def test_require_reasoning_passthrough(self, require_reasoning):
@@ -1121,6 +1255,43 @@ class TestBuildResponseFormatGuidedDecoding:
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
+    # Keep SGLang's guidance decisions aligned with the shared backend matrix.
+    @pytest.mark.parametrize(
+        "case",
+        TOOL_GUIDANCE_PARITY_CASES,
+        ids=lambda case: case.name,
+    )
+    def test_shared_tool_guidance_policy(self, tokenizer, case):
+        # A divergent case still runs the backend and asserts its RECORDED current
+        # answer, so an exception or any other behavior change fails here rather
+        # than being absorbed. Fixing SGLang makes this fail with "expected
+        # assistant, got tool", which is the signal to drop the entry.
+        expected = case.divergent_source("sglang") or case.expected
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if case.has_tools:
+            request["tools"] = [parity_tool()]
+            request["tool_choice"] = tool_choice_value(case.tool_choice)
+        if case.has_assistant_constraint:
+            request["response_format"] = assistant_response_format()
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name="kimi_k2",
+            reasoning_parser_name=None,
+        )
+
+        assert (
+            classify_guidance_source(
+                result.guided_decoding,
+                has_assistant_constraint=case.has_assistant_constraint,
+            )
+            == expected
+        )
+
     def test_none_when_no_tools(self):
         assert (
             build_tool_call_guided_decoding(
@@ -2889,6 +3060,154 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         assert content == "한"
         assert "\ufffd" not in content
+
+    def test_logprobs_reconstruct_split_multibyte_character(self):
+        """Logprob token strings use context to reconstruct split UTF-8."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        encoded = list("한".encode("utf-8"))
+        choice = None
+        for index, token_id in enumerate(encoded):
+            choice = post.process_output(
+                {
+                    "token_ids": [token_id],
+                    "finish_reason": "stop" if index == len(encoded) - 1 else None,
+                    "log_probs": [-0.1 * (index + 1)],
+                    "top_logprobs": [
+                        [
+                            {
+                                "token_id": token_id,
+                                "token": "\ufffd",
+                                "logprob": -0.1 * (index + 1),
+                            }
+                        ]
+                    ],
+                }
+            )
+
+        assert choice is not None
+        assert choice["delta"]["content"] == "한"
+        logprob_content = choice["logprobs"]["content"]
+        assert [entry["token"] for entry in logprob_content] == ["", "", "한"]
+        assert [entry["bytes"] for entry in logprob_content] == [
+            None,
+            None,
+            list("한".encode("utf-8")),
+        ]
+        assert [entry["top_logprobs"][0]["token"] for entry in logprob_content] == [
+            "",
+            "",
+            "한",
+        ]
+
+    def test_logprobs_regular_token_is_unchanged(self):
+        """Ordinary tokens keep their decoded text and UTF-8 bytes."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": [ord("A")],
+                "finish_reason": "stop",
+                "log_probs": [-0.3],
+            }
+        )
+
+        assert choice is not None
+        assert choice["logprobs"]["content"] == [
+            {
+                "token": "A",
+                "logprob": -0.3,
+                "bytes": [65],
+                "top_logprobs": [],
+            }
+        ]
+
+    def _run_logprob_stream(self, items):
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=FakeRoutedEngine(items=items),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-logprobs", {"model": "test-model"}, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        return asyncio.run(collect())
+
+    def test_missing_chunk_logprobs_do_not_drop_adjacent_logprobs(self):
+        """A missing-logprob chunk is isolated from adjacent valid chunks."""
+        chunks = self._run_logprob_stream(
+            [
+                {"token_ids": [ord("A")], "log_probs": [-0.1]},
+                {"token_ids": [ord("B")], "log_probs": [-0.2]},
+                {"token_ids": [ord("C")]},
+                {
+                    "token_ids": [ord("D")],
+                    "log_probs": [-0.4],
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+
+        choices = [chunk["choices"][0] for chunk in chunks]
+        assert [choice["delta"]["content"] for choice in choices] == [
+            "A",
+            "B",
+            "C",
+            "D",
+        ]
+        assert [
+            choice["logprobs"]["content"][0]["logprob"]
+            if choice["logprobs"] is not None
+            else None
+            for choice in choices
+        ] == [-0.1, -0.2, None, -0.4]
+        assert choices[-1]["finish_reason"] == "stop"
+
+    def test_consistent_chunk_logprobs_keep_normal_batching(self):
+        """Consistent logprob chunks retain the configured stream interval."""
+        chunks = self._run_logprob_stream(
+            [
+                {"token_ids": [ord("A")], "log_probs": [-0.1]},
+                {"token_ids": [ord("B")], "log_probs": [-0.2]},
+                {"token_ids": [ord("C")], "log_probs": [-0.3]},
+                {
+                    "token_ids": [ord("D")],
+                    "log_probs": [-0.4],
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+
+        choices = [chunk["choices"][0] for chunk in chunks]
+        assert [choice["delta"]["content"] for choice in choices] == ["A", "BCD"]
+        assert [entry["logprob"] for entry in choices[1]["logprobs"]["content"]] == [
+            -0.2,
+            -0.3,
+            -0.4,
+        ]
 
     def test_byte_fallback_sequence_longer_than_six_tokens(
         self, byte_fallback_tokenizer

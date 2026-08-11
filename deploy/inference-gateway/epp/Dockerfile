@@ -77,6 +77,7 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
 # Copy all workspace crates (libdynamo_llm depends transitively on many)
 COPY --from=dynamo lib/ lib/
+COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
 
 # ext-proc is also a workspace member (referenced from the root Cargo.toml),
 # so cargo needs its manifest on disk to resolve the workspace even when we

@@ -38,6 +38,17 @@ For example, a deployment with TCP request plane can use different KV event plan
 - **ZMQ KV events (local indexer)**: requests use TCP, KV events use direct ZMQ pub/sub, and persistence lives on workers.
 - **No KV events**: requests use TCP and KV routing predicts cache state from routing decisions.
 
+## Payload Codec Negotiation
+
+`DYN_REQUEST_PLANE_CODEC` sets the payload codec preference advertised by every request-plane
+endpoint served by the process. Supported values are `json` and `msgpack`; the default is `msgpack`.
+The value is process-wide and cached on its first codec lookup. Restart the process after changing it.
+
+For each request, the client discovers the destination endpoint and uses its advertised codec. If a
+legacy destination does not advertise a codec, the client uses JSON. The setting on the sending
+process does not control its outbound requests. Each request and its responses use the same selected
+codec.
+
 ## Configuration
 
 ### Environment Variable
