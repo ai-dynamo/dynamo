@@ -281,7 +281,9 @@ fn reconcile_discovery_event(
             }
             membership.remove_publisher(publisher_id);
         }
-        Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+        Ok(DiscoveryEvent::Added(_))
+        | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+        | Ok(DiscoveryEvent::Removed(_)) => {}
         Err(error) => {
             tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
             *membership = KvSourceMembership::new();

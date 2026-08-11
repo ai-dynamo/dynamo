@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-nixl-default
+spec:
+  services:
+    PrefillWorker:
+      extraPodSpec:
+        mainContainer:
+          env: &nixlEnvironment
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    DecodeWorker:
+      extraPodSpec:
+        mainContainer:
+          env: *nixlEnvironment

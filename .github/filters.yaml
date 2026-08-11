@@ -15,6 +15,7 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
+#   examples -> recipe-check (Kustomize recipe generation and unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -76,6 +77,7 @@ api_docs:
 
 examples:
   - 'recipes/**'
+  - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
@@ -83,8 +85,16 @@ examples:
   - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
+  - 'scripts/generate_kustomize_openapi.py'
+  - 'scripts/kustomize-matrix.py'
+  - 'tests/test_generate_kustomize_openapi.py'
+  - 'tests/test_kustomize_matrix.py'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
 ignore:
+  # CI filter documentation does not affect any CI job.
+  - '.github/FILTERS.md'
   - '.lycheeignore'
   - '.pre-commit-config.yaml'
   - '.coderabbit.yaml'
@@ -166,6 +176,8 @@ core:
   # Rust sidecars have their own classification and do not use the framework
   # container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!tests/test_generate_kustomize_openapi.py'
+  - '!tests/test_kustomize_matrix.py'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
