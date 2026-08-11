@@ -118,3 +118,5 @@ Start with a new Rust library crate. The `basic` and `disaggregated` crates are 
 The [custom routing guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) explains the traits, available signals, factory lifecycle, and registration flow.
 
 `keep`, `score`, and `pick` run in the scheduler queue actor. Keep them free of blocking I/O. Return finite costs and a valid candidate row.
+
+For each candidate, filters run in declaration order before scorers. Candidate order and callback order across different candidates are unspecified. Dynamo normally scores kept candidates directly. It buffers them only when the built-in scorer needs a minimum active prefill load across the filtered set.

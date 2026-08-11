@@ -55,7 +55,7 @@ impl WorkerInputs {
         self.0 & other.0 == other.0
     }
 
-    fn without(self, other: Self) -> Self {
+    pub(super) fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
 }
@@ -113,6 +113,9 @@ pub trait WorkerScorer: Send {
     ) -> Result<f64, WorkerSelectionPolicyError>;
 }
 
+/// Filters run in declaration order for each candidate. Callback order across different
+/// candidates and scorers is unspecified; implementations must not depend on filters and scorers
+/// being interleaved.
 pub trait WorkerFilter: Send {
     /// Declare the worker-signal groups needed by this filter.
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -403,12 +406,53 @@ impl WorkerSelectionPolicy {
     }
 }
 
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn push_scored_candidate(
+    context: &WorkerSelectionContext<'_>,
+    candidate: &WorkerCandidate,
+    scorers: &mut [Box<dyn WorkerScorer>],
+    picker_inputs: WorkerInputs,
+    candidates: &mut Vec<ScoredWorkerCandidate>,
+    cache_inputs: &mut Vec<WorkerCacheInput>,
+    load_inputs: &mut Vec<WorkerLoadInput>,
+    routing_inputs: &mut Vec<WorkerRoutingInput>,
+) -> Result<(), KvSchedulerError> {
+    let mut cost = 0.0;
+    for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
+        let contribution = scorer.score(context, candidate)?;
+        cost += contribution;
+        if !contribution.is_finite() || !cost.is_finite() {
+            return Err(WorkerSelectionPolicyError::NonFiniteCost {
+                scorer_index,
+                row: candidates.len(),
+            }
+            .into());
+        }
+    }
+    candidates.push(ScoredWorkerCandidate {
+        worker: candidate.worker,
+        cost,
+    });
+    if picker_inputs.contains(WorkerInputs::CACHE) {
+        cache_inputs.push(candidate.cache);
+    }
+    if picker_inputs.contains(WorkerInputs::LOAD) {
+        load_inputs.push(candidate.load);
+    }
+    if picker_inputs.contains(WorkerInputs::ROUTING) {
+        routing_inputs.push(candidate.routing);
+    }
+    Ok(())
+}
+
 pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     state: &mut CustomWorkerSelectionState,
     input: &mut WorkerSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
+    needs_filtered_baseline: bool,
 ) -> Result<bool, KvSchedulerError> {
     let CustomWorkerSelectionState {
         filters,
@@ -428,9 +472,45 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     cache_inputs.clear();
     load_inputs.clear();
     routing_inputs.clear();
+    if filters.is_empty() {
+        let pinned = eligibility.pinned_worker().is_some();
+        let mut error = None;
+        eligibility.any_eligible_worker_rank(workers, |worker, config| {
+            let preferred_taint_multiplier =
+                if pinned || !scorer_picker_inputs.contains(WorkerInputs::ROUTING) {
+                    None
+                } else {
+                    request
+                        .routing_constraints
+                        .preferred_taint_multiplier(config.taints())
+                };
+            let candidate = input.row(worker, preferred_taint_multiplier, *scorer_picker_inputs);
+            if let Err(policy_error) = push_scored_candidate(
+                &input.context,
+                &candidate,
+                scorers,
+                *picker_inputs,
+                candidates,
+                cache_inputs,
+                load_inputs,
+                routing_inputs,
+            ) {
+                error = Some(policy_error);
+                return true;
+            }
+            false
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        return Ok(!candidates.is_empty());
+    }
+
     let pinned = eligibility.pinned_worker().is_some();
     let mut has_eligible_worker = false;
     let mut error = None;
+    debug_assert!(!needs_filtered_baseline || scorer_picker_inputs.contains(WorkerInputs::LOAD));
+    let mut min_active_prefill_tokens = usize::MAX;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
         has_eligible_worker = true;
         let routing_multiplier = |inputs: WorkerInputs| {
@@ -442,80 +522,66 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
                     .preferred_taint_multiplier(config.taints())
             }
         };
-        let filter_candidate = (!filters.is_empty())
-            .then(|| input.row(worker, routing_multiplier(*filter_inputs), *filter_inputs));
-        if let Some(filter_candidate) = filter_candidate.as_ref() {
-            for filter in filters.iter_mut() {
-                match filter.keep(&input.context, filter_candidate) {
-                    Ok(true) => {}
-                    Ok(false) => return false,
-                    Err(policy_error) => {
-                        error = Some(policy_error.into());
-                        return true;
-                    }
+        let filter_candidate =
+            input.row(worker, routing_multiplier(*filter_inputs), *filter_inputs);
+        for filter in filters.iter_mut() {
+            match filter.keep(&input.context, &filter_candidate) {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(policy_error) => {
+                    error = Some(policy_error.into());
+                    return true;
                 }
             }
         }
 
-        let candidate = match filter_candidate {
-            Some(filter_candidate) => {
-                let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
-                let additional = input.row(
-                    worker,
-                    routing_multiplier(additional_inputs),
-                    additional_inputs,
-                );
-                filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs)
-            }
-            None => input.row(
-                worker,
-                routing_multiplier(*scorer_picker_inputs),
-                *scorer_picker_inputs,
-            ),
-        };
-        unscored_candidates.push(candidate);
+        let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
+        let additional = input.row(
+            worker,
+            routing_multiplier(additional_inputs),
+            additional_inputs,
+        );
+        let candidate = filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs);
+        if needs_filtered_baseline {
+            min_active_prefill_tokens =
+                min_active_prefill_tokens.min(candidate.load.active_prefill_tokens);
+            unscored_candidates.push(candidate);
+        } else if let Err(policy_error) = push_scored_candidate(
+            &input.context,
+            &candidate,
+            scorers,
+            *picker_inputs,
+            candidates,
+            cache_inputs,
+            load_inputs,
+            routing_inputs,
+        ) {
+            error = Some(policy_error);
+            return true;
+        }
         false
     });
     if let Some(error) = error {
         return Err(error);
     }
 
-    if scorer_picker_inputs.contains(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
-        && input.context.track_prefill_tokens
-        && input.context.weights.overlap_score_credit_decay > 0.0
-    {
-        input.context.min_active_prefill_tokens = unscored_candidates
-            .iter()
-            .map(|candidate| candidate.load.active_prefill_tokens)
-            .min()
-            .unwrap_or(0);
-    }
-
-    for candidate in unscored_candidates.iter() {
-        let mut cost = 0.0;
-        for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
-            let contribution = scorer.score(&input.context, candidate)?;
-            cost += contribution;
-            if !contribution.is_finite() || !cost.is_finite() {
-                return Err(WorkerSelectionPolicyError::NonFiniteCost {
-                    scorer_index,
-                    row: candidates.len(),
-                }
-                .into());
-            }
-        }
-        candidates.push(ScoredWorkerCandidate {
-            worker: candidate.worker,
-            cost,
-        });
-        if picker_inputs.contains(WorkerInputs::CACHE) {
-            cache_inputs.push(candidate.cache);
-        }
-        if picker_inputs.contains(WorkerInputs::LOAD) {
-            load_inputs.push(candidate.load);
-        }
-        if picker_inputs.contains(WorkerInputs::ROUTING) {
-            routing_inputs.push(candidate.routing);
+    if needs_filtered_baseline {
+        input.context.min_active_prefill_tokens = if min_active_prefill_tokens == usize::MAX {
+            0
+        } else {
+            min_active_prefill_tokens
+        };
+        for candidate in unscored_candidates.iter() {
+            push_scored_candidate(
+                &input.context,
+                candidate,
+                scorers,
+                *picker_inputs,
+                candidates,
+                cache_inputs,
+                load_inputs,
+                routing_inputs,
+            )?;
         }
     }
     Ok(has_eligible_worker)
@@ -805,5 +871,61 @@ mod tests {
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn policies_without_filtered_baseline_score_without_buffering() {
+        struct KeepAll;
+
+        impl WorkerFilter for KeepAll {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(true)
+            }
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.track_prefill_tokens = true;
+
+        let no_filter_config = KvRouterConfig {
+            overlap_score_credit_decay: 1.0,
+            ..Default::default()
+        };
+        let no_filter_policy = WorkerSelectionPolicy::new(
+            no_filter_config.clone(),
+            "test",
+            vec![Box::new(DefaultWorkerScorer::new(no_filter_config, "test"))],
+            Box::new(DefaultWorkerPicker::new(0.0)),
+        );
+        no_filter_policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        let WorkerSelectionPolicyState::Custom(state) = &no_filter_policy.state else {
+            panic!("expected custom policy state");
+        };
+        assert!(state.borrow().unscored_candidates.is_empty());
+
+        let filtered_config = KvRouterConfig {
+            overlap_score_credit_decay: 0.0,
+            ..Default::default()
+        };
+        let filtered_policy = WorkerSelectionPolicy::new_with_filters(
+            filtered_config.clone(),
+            "test",
+            vec![Box::new(KeepAll)],
+            vec![Box::new(DefaultWorkerScorer::new(filtered_config, "test"))],
+            Box::new(DefaultWorkerPicker::new(0.0)),
+        );
+        filtered_policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        let WorkerSelectionPolicyState::Custom(state) = &filtered_policy.state else {
+            panic!("expected custom policy state");
+        };
+        assert!(state.borrow().unscored_candidates.is_empty());
     }
 }

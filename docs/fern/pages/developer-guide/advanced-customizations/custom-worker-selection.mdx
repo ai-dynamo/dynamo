@@ -100,15 +100,17 @@ These paths are build inputs. The policy can remain in its own repository, but i
 </Step>
 <Step title="Write filters, scorers, and a picker" id="write-filters-scorers-and-picker">
 
-Implement `WorkerFilter` to exclude an eligible worker. `keep` receives the request context and one candidate. Return `true` to keep it. Filters run before scorers and pickers.
+Implement `WorkerFilter` to exclude an eligible worker. `keep` receives the request context and one candidate. Return `true` to keep it. For each candidate, Dynamo runs filters in declaration order before any scorer. Every filter receives the union of signal groups requested by the policy's filters.
 
-Implement `WorkerScorer` for each cost that the policy measures. `score` receives the request-wide context and one eligible worker. Return a finite cost where lower values are better.
+Implement `WorkerScorer` for each cost that the policy measures. `score` receives the request-wide context and one kept worker. Return a finite cost where lower values are better.
 
-A policy can combine multiple scorers. Dynamo calls each scorer for every eligible worker and adds their costs.
+A policy can combine multiple scorers. Dynamo calls each scorer in declaration order for every kept worker and adds their costs.
 
 Implement `WorkerPicker` to choose one row after scoring. `WorkerInputView::candidates()` contains each worker identity and its total cost. Return the index of the selected row.
 
-Candidate order is unspecified. Inspect the worker, cost, or another signal instead of relying on the first row.
+Candidate row order and callback order across different candidates are unspecified. Inspect the worker, cost, or another signal instead of relying on the first row or on filters and scorers being interleaved.
+
+Dynamo normally sends a kept candidate directly to the scorers. If the built-in scorer needs the minimum active prefill load across a filtered set, Dynamo buffers the kept candidates, computes that baseline during filtering, and then scores them in a second pass. Policies that do not need this filtered aggregate do not buffer candidates.
 
 The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows an optional cache-overlap filter, scorer, and picker. The `disaggregated` crate in the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) shows separate implementations for prefill and decode workers.
 

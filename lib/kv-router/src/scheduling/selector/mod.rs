@@ -314,13 +314,26 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     }
 
     let weights = selection_weights(kv_router_config, request);
-    let inputs = match &state {
-        WorkerSelectionPolicyStateRef::Default(_) => {
-            WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
-        }
+    let (inputs, needs_filtered_baseline) = match &state {
+        WorkerSelectionPolicyStateRef::Default(_) => (
+            WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS,
+            false,
+        ),
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let state = RefCell::borrow(state);
-            state.filter_inputs | state.scorer_picker_inputs
+            let needs_filtered_baseline = !state.filters.is_empty()
+                && state
+                    .scorer_picker_inputs
+                    .contains(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
+                && request.track_prefill_tokens
+                && weights.overlap_score_credit_decay > 0.0;
+            let inputs = state.filter_inputs | state.scorer_picker_inputs;
+            let inputs = if needs_filtered_baseline {
+                inputs.without(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
+            } else {
+                inputs
+            };
+            (inputs, needs_filtered_baseline)
         }
     };
     let mut input =
@@ -335,8 +348,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
-            let has_eligible_worker =
-                collect_custom_candidates(&mut state, &mut input, workers, request, eligibility)?;
+            let has_eligible_worker = collect_custom_candidates(
+                &mut state,
+                &mut input,
+                workers,
+                request,
+                eligibility,
+                needs_filtered_baseline,
+            )?;
             let CustomWorkerSelectionState {
                 picker,
                 picker_inputs,
