@@ -13,6 +13,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func pvcVolume(name, claimName string) corev1.Volume {
+	return corev1.Volume{
+		Name: name,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+		},
+	}
+}
+
 func TestNewRestorePod(t *testing.T) {
 	readinessProbe := &corev1.Probe{PeriodSeconds: 7, TimeoutSeconds: 3}
 	livenessProbe := &corev1.Probe{InitialDelaySeconds: 11}
@@ -134,6 +143,63 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if !foundStandbyEnv {
 		t.Fatalf("expected %s env, got %#v", RestoreStandbyModeEnv, main.Env)
+	}
+}
+
+func TestNewRestorePodReusesExistingCheckpointPVCVolumeAndMount(t *testing.T) {
+	const existingVolumeName = "checkpoints"
+	storage := Storage{
+		Type:     StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	}
+	restorePod, err := NewRestorePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{TargetContainersAnnotation: "main"},
+		},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				pvcVolume(existingVolumeName, storage.PVCName),
+				pvcVolume(CheckpointVolumeName, "other-pvc"),
+			},
+			Containers: []corev1.Container{{
+				Name: "main",
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      existingVolumeName,
+					MountPath: storage.BasePath,
+				}},
+			}},
+		},
+	}, PodOptions{
+		Storage: storage,
+	})
+	if err != nil {
+		t.Fatalf("NewRestorePod returned error: %v", err)
+	}
+
+	if len(restorePod.Spec.Volumes) != 3 {
+		t.Fatalf("expected existing, reserved, and control volumes, got %#v", restorePod.Spec.Volumes)
+	}
+	existing := restorePod.Spec.Volumes[0]
+	if existing.Name != existingVolumeName ||
+		existing.PersistentVolumeClaim == nil ||
+		existing.PersistentVolumeClaim.ClaimName != storage.PVCName {
+		t.Fatalf("expected existing checkpoint PVC volume to be reused, got %#v", existing)
+	}
+	if reserved := restorePod.Spec.Volumes[1]; reserved.Name != CheckpointVolumeName ||
+		reserved.PersistentVolumeClaim == nil ||
+		reserved.PersistentVolumeClaim.ClaimName != "other-pvc" {
+		t.Fatalf("expected unrelated reserved volume to be preserved, got %#v", reserved)
+	}
+
+	main := restorePod.Spec.Containers[0]
+	if len(main.VolumeMounts) != 2 ||
+		main.VolumeMounts[0].Name != existingVolumeName ||
+		main.VolumeMounts[0].MountPath != storage.BasePath {
+		t.Fatalf("expected one reused checkpoint root mount, got %#v", main.VolumeMounts)
+	}
+	if err := ValidateRestorePodSpec(&restorePod.Spec, restorePod.Annotations, storage, ""); err != nil {
+		t.Fatalf("expected prepared restore pod to validate, got %v", err)
 	}
 }
 
@@ -353,6 +419,105 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	assertRestoreStartupGate(t, container.StartupProbe)
 }
 
+func TestPrepareRestorePodSpecRejectsCheckpointVolumeConflicts(t *testing.T) {
+	storage := Storage{Type: StorageTypePVC, PVCName: "snapshot-pvc", BasePath: "/checkpoints"}
+	annotations := map[string]string{TargetContainersAnnotation: "main"}
+
+	tests := []struct {
+		name    string
+		volumes []corev1.Volume
+		mounts  []corev1.VolumeMount
+		errText string
+	}{
+		{
+			name: "reserved name references another PVC",
+			volumes: []corev1.Volume{
+				pvcVolume(CheckpointVolumeName, "other-pvc"),
+			},
+			errText: `volume "checkpoint-storage" is already in use`,
+		},
+		{
+			name: "base path is occupied by another volume",
+			volumes: []corev1.Volume{
+				pvcVolume("checkpoint-data", storage.PVCName),
+				{
+					Name:         "other-data",
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				},
+			},
+			mounts:  []corev1.VolumeMount{{Name: "other-data", MountPath: "/checkpoints"}},
+			errText: `container "main" mounts volume "other-data" at checkpoint base path "/checkpoints", expected volume "checkpoint-data"`,
+		},
+		{
+			name: "multiple volumes reference checkpoint PVC",
+			volumes: []corev1.Volume{
+				pvcVolume("checkpoint-data-a", storage.PVCName),
+				pvcVolume("checkpoint-data-b", storage.PVCName),
+			},
+			errText: `multiple volumes reference checkpoint PVC "snapshot-pvc"`,
+		},
+		{
+			name: "PVC volume source is read-only",
+			volumes: []corev1.Volume{{
+				Name: "checkpoint-data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: storage.PVCName,
+						ReadOnly:  true,
+					},
+				},
+			}},
+			mounts: []corev1.VolumeMount{{
+				Name:      "checkpoint-data",
+				MountPath: storage.BasePath,
+				ReadOnly:  false,
+			}},
+			errText: `checkpoint volume "checkpoint-data" for PVC "snapshot-pvc" must be writable`,
+		},
+		{
+			name: "base path mount uses subPath",
+			volumes: []corev1.Volume{
+				pvcVolume("checkpoint-data", storage.PVCName),
+			},
+			mounts: []corev1.VolumeMount{{
+				Name:      "checkpoint-data",
+				MountPath: "/checkpoints",
+				SubPath:   "snapshot",
+			}},
+			errText: `checkpoint volume "checkpoint-data" mount at "/checkpoints" on container "main" must not use subPath or subPathExpr`,
+		},
+		{
+			name: "base path mount is read-only",
+			volumes: []corev1.Volume{
+				pvcVolume("checkpoint-data", storage.PVCName),
+			},
+			mounts: []corev1.VolumeMount{{
+				Name:      "checkpoint-data",
+				MountPath: storage.BasePath,
+				ReadOnly:  true,
+			}},
+			errText: `checkpoint volume "checkpoint-data" mount at "/checkpoints" on container "main" must be writable`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			podSpec := corev1.PodSpec{
+				Volumes: test.volumes,
+				Containers: []corev1.Container{{
+					Name:         "main",
+					VolumeMounts: test.mounts,
+				}},
+			}
+
+			err := PrepareRestorePodSpec(&podSpec, annotations, storage, "", true)
+			if err == nil || !strings.Contains(err.Error(), test.errText) {
+				t.Fatalf("expected error containing %q, got %v", test.errText, err)
+			}
+		})
+	}
+}
+
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -534,14 +699,27 @@ func TestValidateRestorePodSpec(t *testing.T) {
 
 	badSpec := podSpec.DeepCopy()
 	badSpec.Volumes = []corev1.Volume{badSpec.Volumes[1]}
-	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume for PVC snapshot-pvc" {
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing volume for checkpoint PVC "snapshot-pvc"` {
 		t.Fatalf("expected missing volume error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{badSpec.Containers[0].VolumeMounts[1]}
-	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing checkpoint-storage mount at /checkpoints on container "main"` {
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing mount of checkpoint volume "checkpoint-storage" at "/checkpoints" on container "main"` {
 		t.Fatalf("expected missing mount error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].VolumeMounts[0].ReadOnly = true
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || !strings.Contains(err.Error(), "must be writable") {
+		t.Fatalf("expected read-only checkpoint mount error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
+	badSpec.Containers[0].VolumeMounts[0].ReadOnly = false
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `checkpoint volume "checkpoint-storage" for PVC "snapshot-pvc" must be writable` {
+		t.Fatalf("expected read-only checkpoint PVC source error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()

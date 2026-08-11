@@ -77,8 +77,12 @@ func PrepareRestorePodSpec(
 		return fmt.Errorf("restore pod spec: %w", err)
 	}
 	EnsureLocalhostSeccompProfile(podSpec, seccompProfile)
+	checkpointVolumeName := CheckpointVolumeName
 	if storage.PVCName != "" {
-		InjectCheckpointVolume(podSpec, storage.PVCName)
+		checkpointVolumeName, err = InjectCheckpointVolume(podSpec, storage.PVCName)
+		if err != nil {
+			return fmt.Errorf("restore pod spec: %w", err)
+		}
 	}
 	for _, name := range targets {
 		var container *corev1.Container
@@ -92,7 +96,9 @@ func PrepareRestorePodSpec(
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
 		if storage.BasePath != "" {
-			InjectCheckpointVolumeMount(container, storage.BasePath)
+			if err := InjectCheckpointVolumeMount(container, checkpointVolumeName, storage.BasePath); err != nil {
+				return fmt.Errorf("restore pod spec: %w", err)
+			}
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
@@ -169,18 +175,14 @@ func ValidateRestorePodSpec(
 	if err != nil {
 		return err
 	}
+	checkpointVolumeName := CheckpointVolumeName
 	if storage.PVCName != "" {
-		hasVolume := false
-		for _, volume := range podSpec.Volumes {
-			if volume.Name == CheckpointVolumeName &&
-				volume.PersistentVolumeClaim != nil &&
-				volume.PersistentVolumeClaim.ClaimName == storage.PVCName {
-				hasVolume = true
-				break
-			}
+		checkpointVolumeName, err = resolveCheckpointVolumeName(podSpec, storage.PVCName)
+		if err != nil {
+			return err
 		}
-		if !hasVolume {
-			return fmt.Errorf("missing %s volume for PVC %s", CheckpointVolumeName, storage.PVCName)
+		if checkpointVolumeName == "" {
+			return fmt.Errorf("missing volume for checkpoint PVC %q", storage.PVCName)
 		}
 	}
 	hasControlVolume := false
@@ -205,15 +207,17 @@ func ValidateRestorePodSpec(
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
 		if storage.BasePath != "" {
-			hasMount := false
-			for _, mount := range container.VolumeMounts {
-				if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
-					hasMount = true
-					break
-				}
+			hasMount, err := hasCompatibleCheckpointVolumeMount(container, checkpointVolumeName, storage.BasePath)
+			if err != nil {
+				return err
 			}
 			if !hasMount {
-				return fmt.Errorf("missing %s mount at %s on container %q", CheckpointVolumeName, storage.BasePath, name)
+				return fmt.Errorf(
+					"missing mount of checkpoint volume %q at %q on container %q",
+					checkpointVolumeName,
+					storage.BasePath,
+					name,
+				)
 			}
 		}
 		hasControlMount := false
@@ -363,14 +367,15 @@ func PrepareRestorePodSpecForCheckpoint(
 	return PrepareRestorePodSpec(podSpec, annotations, storage, seccompProfile, isCheckpointReady)
 }
 
-// InjectCheckpointVolume adds the checkpoint PVC volume to the pod spec if
-// not already present. Used by both the snapshot protocol and the operator's
-// GMS checkpoint wiring.
-func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == CheckpointVolumeName {
-			return
-		}
+// InjectCheckpointVolume resolves the unique volume backed by the checkpoint
+// PVC, adding the default volume when none exists.
+func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) (string, error) {
+	volumeName, err := resolveCheckpointVolumeName(podSpec, pvcName)
+	if err != nil {
+		return "", err
+	}
+	if volumeName != "" {
+		return volumeName, nil
 	}
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -381,17 +386,81 @@ func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 			},
 		},
 	})
+	return CheckpointVolumeName, nil
 }
 
-func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == CheckpointVolumeName {
-			return
+func resolveCheckpointVolumeName(podSpec *corev1.PodSpec, pvcName string) (string, error) {
+	var match string
+	var matchReadOnly bool
+	var reserved bool
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == CheckpointVolumeName {
+			reserved = true
 		}
+		if volume.PersistentVolumeClaim != nil &&
+			volume.PersistentVolumeClaim.ClaimName == pvcName {
+			if match != "" {
+				return "", fmt.Errorf("multiple volumes reference checkpoint PVC %q", pvcName)
+			}
+			match = volume.Name
+			matchReadOnly = volume.PersistentVolumeClaim.ReadOnly
+		}
+	}
+	if matchReadOnly {
+		return "", fmt.Errorf("checkpoint volume %q for PVC %q must be writable", match, pvcName)
+	}
+	if match == "" && reserved {
+		return "", fmt.Errorf(
+			"volume %q is already in use and cannot reference checkpoint PVC %q",
+			CheckpointVolumeName,
+			pvcName,
+		)
+	}
+	return match, nil
+}
+
+// InjectCheckpointVolumeMount ensures a root mount at the checkpoint base path.
+func InjectCheckpointVolumeMount(
+	container *corev1.Container,
+	volumeName string,
+	basePath string,
+) error {
+	found, err := hasCompatibleCheckpointVolumeMount(container, volumeName, basePath)
+	if err != nil || found {
+		return err
 	}
 
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      CheckpointVolumeName,
+		Name:      volumeName,
 		MountPath: basePath,
 	})
+	return nil
+}
+
+func hasCompatibleCheckpointVolumeMount(
+	container *corev1.Container,
+	volumeName string,
+	basePath string,
+) (bool, error) {
+	var found bool
+	for _, mount := range container.VolumeMounts {
+		if mount.MountPath != basePath {
+			continue
+		}
+		if found {
+			return false, fmt.Errorf("container %q has multiple volume mounts at checkpoint base path %q", container.Name, basePath)
+		}
+		found = true
+		if mount.Name != volumeName {
+			return false, fmt.Errorf("container %q mounts volume %q at checkpoint base path %q, expected volume %q", container.Name, mount.Name, basePath, volumeName)
+		}
+		if mount.SubPath != "" || mount.SubPathExpr != "" {
+			return false, fmt.Errorf("checkpoint volume %q mount at %q on container %q must not use subPath or subPathExpr", volumeName, basePath, container.Name)
+		}
+		if mount.ReadOnly {
+			return false, fmt.Errorf("checkpoint volume %q mount at %q on container %q must be writable", volumeName, basePath, container.Name)
+		}
+	}
+
+	return found, nil
 }
