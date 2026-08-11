@@ -1665,7 +1665,9 @@ impl
 async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
@@ -1771,7 +1773,9 @@ impl
 async fn test_audio_speech_failed_status_meters_as_client_error() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
