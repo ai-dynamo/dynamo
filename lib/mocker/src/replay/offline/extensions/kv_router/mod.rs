@@ -267,6 +267,7 @@ impl PendingRequest {
         &self,
         block_size: usize,
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        pinned_worker: Option<WorkerWithDpRank>,
     ) -> SchedulingRequest {
         let effective_overlap_blocks = self
             .overlaps
@@ -300,7 +301,7 @@ impl PendingRequest {
             policy_class: self.policy_class.clone(),
             session_id: self.session_id.clone(),
             expected_output_tokens: self.expected_output_tokens,
-            pinned_worker: None,
+            pinned_worker,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -323,6 +324,8 @@ pub(crate) struct OfflineReplayRouter {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
+    session_affinity: bool,
+    session_workers: FxHashMap<String, WorkerWithDpRank>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -344,6 +347,10 @@ impl KvRouterPlacement {
                 num_workers,
             )?,
         })
+    }
+
+    pub(in crate::replay) fn enable_session_affinity(&mut self) {
+        self.router.enable_session_affinity();
     }
 
     fn placement(&self, admission: WorkerAdmission) -> Placement {
@@ -530,7 +537,13 @@ impl OfflineReplayRouter {
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
             tracking_hash,
+            session_affinity: false,
+            session_workers: FxHashMap::default(),
         })
+    }
+
+    fn enable_session_affinity(&mut self) {
+        self.session_affinity = true;
     }
 
     #[cfg(test)]
@@ -872,10 +885,20 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
+        let session_id = request.session_id.clone();
+        let pinned_worker = if self.session_affinity {
+            session_id
+                .as_ref()
+                .and_then(|session_id| self.session_workers.get(session_id))
+                .cloned()
+        } else {
+            None
+        };
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let scheduling_request =
+            request.scheduling_request(self.block_size as usize, worker_loads, pinned_worker);
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
@@ -883,6 +906,17 @@ impl OfflineReplayRouter {
             eligibility,
             self.block_size,
         )?;
+        if let Some(expected) = pinned_worker.as_ref() {
+            anyhow::ensure!(
+                &selection.worker == expected,
+                "KV router moved an affinity-pinned session from worker {} rank {} to worker {} rank {}",
+                expected.worker_id,
+                expected.dp_rank,
+                selection.worker.worker_id,
+                selection.worker.dp_rank,
+            );
+        }
+        let selected_worker = selection.worker;
         let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let dp_rank = usize::try_from(selection.worker.dp_rank)
@@ -910,12 +944,20 @@ impl OfflineReplayRouter {
                     track_prefill_tokens: request.track_prefill_tokens,
                     expected_output_tokens: request.expected_output_tokens,
                     prefill_load_hint,
-                    worker: selection.worker,
+                    worker: selected_worker,
                     lora_name: None,
                 },
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+
+        if self.session_affinity
+            && let Some(session_id) = session_id
+        {
+            self.session_workers
+                .entry(session_id)
+                .or_insert(selected_worker);
+        }
 
         Ok(AdmitOutcome {
             worker_idx,
@@ -1170,7 +1212,7 @@ mod tests {
                 Some("session-a".to_string()),
             )
             .unwrap();
-        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+        let scheduling_request = pending.scheduling_request(64, FxHashMap::default(), None);
 
         assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
     }

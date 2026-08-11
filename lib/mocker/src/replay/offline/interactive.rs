@@ -16,8 +16,7 @@ use crate::replay::offline::agg::{ExternalAggRuntime, RoundRobinAggRuntime};
 use crate::replay::offline::components::ReplayMode;
 use crate::replay::offline::extensions::kv_router::AggRuntime as KvAggRuntime;
 use crate::replay::{
-    ReplayDeterminism, ReplayRouterMode, ReplayTerminalStatus, TraceSimulationReport,
-    with_replay_determinism,
+    ReplayDeterminism, ReplayTerminalStatus, TraceSimulationReport, with_replay_determinism,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -618,15 +617,16 @@ impl OfflineReplaySession {
                 ReplaySessionRouter::KvRouter => {
                     let driver =
                         WorkloadDriver::new_open_agentic(trace_block_size, engine_block_size)?;
-                    InteractiveRuntime::KvRouter(Box::new(KvAggRuntime::new_workload(
-                        &args,
-                        None,
-                        None,
-                        driver,
-                        num_workers,
-                        ReplayMode::Trace,
-                        ReplayRouterMode::KvRouter,
-                    )?))
+                    InteractiveRuntime::KvRouter(Box::new(
+                        KvAggRuntime::new_interactive_kv_workload(
+                            &args,
+                            None,
+                            None,
+                            driver,
+                            num_workers,
+                            ReplayMode::Trace,
+                        )?,
+                    ))
                 }
             })
         })?;
@@ -1408,6 +1408,45 @@ mod tests {
         let report = replay.finalize()?;
         assert_eq!(report.request_counts.completed_requests, 4);
         assert_eq!(report.per_request.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn native_kv_routes_a_session_once_and_pins_parallel_and_later_turns() -> Result<()> {
+        let mut replay = session(ReplaySessionRouter::KvRouter, 2, true);
+        let workflow = ReplayAgenticWorkflow {
+            trace_block_size: TRACE_BLOCK_SIZE,
+            requests: vec![
+                agentic_request(
+                    request("native-root-a", "native-session", 0, 8, &[410, 411], 8),
+                    &[],
+                    0.0,
+                ),
+                agentic_request(
+                    request("native-root-b", "native-session", 1, 8, &[420, 421], 8),
+                    &[],
+                    0.0,
+                ),
+                agentic_request(
+                    request("native-join", "native-session", 2, 8, &[430, 431], 1),
+                    &["native-root-a", "native-root-b"],
+                    0.0,
+                ),
+            ],
+        };
+        replay.append_agentic_workflow(workflow, 0.0)?;
+        replay.close_admission()?;
+        let events = drive_to_drained(&mut replay)?;
+
+        let workers = ["native-root-a", "native-root-b", "native-join"]
+            .map(|logical_id| routed_event(&events, logical_id).worker_id);
+        assert!(workers[0].is_some());
+        assert_eq!(workers, [workers[0]; 3]);
+        assert_eq!(terminal_count(&events), 3);
+
+        let report = replay.finalize()?;
+        assert_eq!(report.request_counts.completed_requests, 3);
+        assert_eq!(report.per_request.len(), 3);
         Ok(())
     }
 

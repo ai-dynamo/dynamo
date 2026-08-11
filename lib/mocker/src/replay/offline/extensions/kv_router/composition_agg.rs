@@ -42,6 +42,8 @@ where
         router_mode: ReplayRouterMode,
         topology: Vec<WorkerTopology>,
     ) -> Result<Self>;
+
+    fn enable_session_affinity(&mut self) -> Result<()>;
 }
 
 impl AggregatedPlacement<RouterEventBatch, KvReplayMetadata> for KvRouterPlacement {
@@ -70,6 +72,11 @@ impl ConfiguredAggregatedPlacement<RouterEventBatch, KvReplayMetadata> for KvRou
             bail!("KV replay composition received round-robin mode");
         }
         Self::new(args, router_config, prefill_load_estimator, num_workers)
+    }
+
+    fn enable_session_affinity(&mut self) -> Result<()> {
+        KvRouterPlacement::enable_session_affinity(self);
+        Ok(())
     }
 }
 
@@ -243,6 +250,18 @@ impl ConfiguredAggregatedPlacement<RouterEventBatch, KvReplayMetadata> for Adapt
             )?)),
         }
     }
+
+    fn enable_session_affinity(&mut self) -> Result<()> {
+        match self {
+            Self::Kv(policy) => {
+                policy.enable_session_affinity();
+                Ok(())
+            }
+            Self::RoundRobin(_) => {
+                bail!("interactive session affinity is available only with native KV routing")
+            }
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -305,6 +324,36 @@ where
             num_workers,
             router_mode,
         )
+    }
+
+    /// Create the interactive KV-router runtime. The native router chooses the
+    /// worker for a session's first ready request; later requests in that
+    /// authored session are pinned to the same worker while still flowing
+    /// through the native router's load, queue, and KV accounting.
+    pub(in crate::replay) fn new_interactive_kv_workload(
+        args: &MockEngineArgs,
+        router_config: Option<ReplayKvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        driver: WorkloadDriver,
+        num_workers: usize,
+        mode: ReplayMode,
+    ) -> Result<Self>
+    where
+        PlacementPolicyImpl: ConfiguredAggregatedPlacement<Observation::Batch, Metadata>,
+    {
+        let admission = AdmissionQueue::<Metadata>::new_workload(driver, mode);
+        Self::new_composed(args, admission, num_workers, |args, topology| {
+            let mut placement = PlacementPolicyImpl::create(
+                args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+                ReplayRouterMode::KvRouter,
+                topology,
+            )?;
+            placement.enable_session_affinity()?;
+            Ok(placement)
+        })
     }
 
     fn new_with_source(
