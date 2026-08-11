@@ -728,8 +728,6 @@ navigation:
                         path: backends/sglang/agents.md
                       - page: Chat Processor
                         path: backends/sglang/sglang-chat-processor.md
-                      - page: Logits Processing
-                        path: backends/sglang/sglang-logits-processing.md
                       - page: Disaggregation
                         path: backends/sglang/sglang-disaggregation.md
                       - page: HiCache
@@ -766,8 +764,6 @@ navigation:
                         path: backends/vllm/vllm-reference-guide.md
                       - page: Chat Processor
                         path: backends/vllm/vllm-chat-processor.md
-                      - page: Logits Processing
-                        path: backends/vllm/vllm-logits-processing.md
                       - page: KV Cache Offloading
                         path: backends/vllm/vllm-kv-offloading.md
                       - page: Native KV Offloading
