@@ -1,47 +1,32 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Aggregated encoder -> classifier + decoder -> join worker.
-
-The module intentionally builds on public Dynamo worker contracts instead of
-specializing ``dynamo.vllm``. One encoder result is shared by two in-process
-consumers. The decoder consumes an adapter-produced vLLM prompt, while the
-classifier consumes the same artifact objects and contributes data to the final
-``engine_data`` payload.
-"""
+"""Aggregated encoder -> classifier + remote decoder -> join worker."""
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import importlib
+import json
 import os
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from typing import Any, Protocol, cast
 
-from vllm.engine.arg_utils import AsyncEngineArgs
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-from dynamo._core import Context
+from dynamo._core import Context, DistributedRuntime
 from dynamo.common.backend import (
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     WorkerConfig,
 )
 from dynamo.common.backend.run import run
 from dynamo.llm.exceptions import InvalidArgument
-from dynamo.vllm.embedded_decoder import EmbeddedVllmDecoder
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
-)
-from dynamo.vllm.multimodal_utils.custom_encoder.adapter.base import (
-    CustomEncoderAdapter,
 )
 from dynamo.vllm.multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -56,19 +41,36 @@ class Classifier(Protocol):
         ...
 
 
-class Decoder(Protocol):
-    """Embedded decoder operations used by the ensemble engine."""
+class DecoderResponse(Protocol):
+    """Annotated response returned by a Dynamo endpoint client."""
 
-    async def generate_final(
+    def is_error(self) -> bool:
+        ...
+
+    def comments(self) -> list[str] | None:
+        ...
+
+    def data(self) -> Any:
+        ...
+
+
+class DecoderClient(Protocol):
+    """Remote decoder client operations used by the ensemble engine."""
+
+    async def wait_for_instances(self) -> list[int]:
+        ...
+
+    async def generate(
         self,
         request: GenerateRequest,
-        prompt: Any,
-        request_id: str,
-    ) -> GenerateChunk:
+        *,
+        context: Context | None = None,
+    ) -> AsyncIterator[DecoderResponse]:
         ...
 
-    async def abort(self, request_id: str) -> None:
-        ...
+
+class Runtime(Protocol):
+    """Runtime lifecycle operation used by the ensemble engine."""
 
     def shutdown(self) -> None:
         ...
@@ -112,9 +114,7 @@ def _load_encoder_backend(class_path: str) -> type[VisionEncoderBackend[Any, Any
     return cast(type[VisionEncoderBackend[Any, Any, Any]], backend_type)
 
 
-def _served_model_name(configured: str | list[str] | None, fallback: str) -> str:
-    if isinstance(configured, list):
-        return configured[0] if configured else fallback
+def _served_model_name(configured: str | None, fallback: str) -> str:
     return configured or fallback
 
 
@@ -126,25 +126,37 @@ class UserEnsembleEngine(LLMEngine):
         *,
         model_name: str,
         served_model_name: str,
-        engine_args: AsyncEngineArgs,
         encoder_backend_type: type[VisionEncoderBackend[Any, Any, Any]],
+        discovery_backend: str,
+        request_plane: str,
+        event_plane: str | None,
+        decoder_endpoint: str,
+        decoder_model_name: str,
+        decoder_connect_timeout: float,
+        max_model_len: int,
         classifier: Classifier | None = None,
     ) -> None:
         self.model_name = model_name
         self.served_model_name = served_model_name
-        self._engine_args = engine_args
         self._encoder_backend_type = encoder_backend_type
+        self._discovery_backend = discovery_backend
+        self._request_plane = request_plane
+        self._event_plane = event_plane
+        self._decoder_endpoint = decoder_endpoint
+        self._decoder_model_name = decoder_model_name
+        self._decoder_connect_timeout = decoder_connect_timeout
+        self._max_model_len = max_model_len
         self._classifier = classifier or DummyClassifier()
 
-        self._decoder: Decoder | None = None
+        self._decoder_runtime: Runtime | None = None
+        self._decoder_client: DecoderClient | None = None
         self._encoder: Encoder | None = None
-        self._adapter: CustomEncoderAdapter[Any] | None = None
 
     @classmethod
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[UserEnsembleEngine, WorkerConfig]:
-        parser = FlexibleArgumentParser(
+        parser = argparse.ArgumentParser(
             description="Aggregated user ensemble worker",
             allow_abbrev=False,
         )
@@ -159,19 +171,24 @@ class UserEnsembleEngine(LLMEngine):
         )
         parser.add_argument("--request-plane", choices=("tcp", "nats"), default="tcp")
         parser.add_argument("--event-plane", choices=("nats", "zmq"), default=None)
+        parser.add_argument("--model", required=True)
+        parser.add_argument("--served-model-name", default=None)
         parser.add_argument("--custom-jinja-template", default=None)
         parser.add_argument("--encoder-class", required=True)
+        parser.add_argument("--max-model-len", type=int, default=4096)
+        parser.add_argument("--decoder-namespace", default=None)
+        parser.add_argument("--decoder-component", default="remote-vllm")
+        parser.add_argument("--decoder-endpoint", default="generate")
+        parser.add_argument("--decoder-model-name", default=None)
+        parser.add_argument("--decoder-connect-timeout", type=float, default=300.0)
         parser.add_argument("--disable-kv-routing", action="store_true")
-        AsyncEngineArgs.add_cli_args(parser, async_args_only=False)
         args = parser.parse_args(argv)
 
-        requested_model = args.model
-        engine_args = AsyncEngineArgs.from_cli_args(args)
-        engine_args.enable_prompt_embeds = True
-        served_model_name = _served_model_name(
-            args.served_model_name,
-            requested_model,
+        served_model_name = _served_model_name(args.served_model_name, args.model)
+        decoder_model_name = args.decoder_model_name or (
+            f"{served_model_name}-remote-vllm"
         )
+        decoder_namespace = args.decoder_namespace or args.namespace
         backend_type = _load_encoder_backend(args.encoder_class)
         custom_template = (
             os.path.abspath(os.path.expanduser(args.custom_jinja_template))
@@ -184,16 +201,25 @@ class UserEnsembleEngine(LLMEngine):
             )
 
         engine = cls(
-            model_name=requested_model,
+            model_name=args.model,
             served_model_name=served_model_name,
-            engine_args=engine_args,
             encoder_backend_type=backend_type,
+            discovery_backend=args.discovery_backend,
+            request_plane=args.request_plane,
+            event_plane=args.event_plane,
+            decoder_endpoint=(
+                f"{decoder_namespace}.{args.decoder_component}."
+                f"{args.decoder_endpoint}"
+            ),
+            decoder_model_name=decoder_model_name,
+            decoder_connect_timeout=args.decoder_connect_timeout,
+            max_model_len=args.max_model_len,
         )
         worker_config = WorkerConfig(
             namespace=args.namespace,
             component=args.component,
             endpoint=args.endpoint,
-            model_name=requested_model,
+            model_name=args.model,
             served_model_name=served_model_name,
             endpoint_types=args.endpoint_types,
             discovery_backend=args.discovery_backend,
@@ -206,66 +232,155 @@ class UserEnsembleEngine(LLMEngine):
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id
-        decoder = EmbeddedVllmDecoder.from_engine_args(self._engine_args)
-        self._decoder = decoder
-
         backend = self._encoder_backend_type()
-        self._adapter = decoder.create_prompt_adapter(backend)
-        self._encoder = AsyncVisionEncoder(
-            backend,
-            name="ensemble-vision-encoder",
+        encoder = AsyncVisionEncoder(backend, name="ensemble-vision-encoder")
+        self._encoder = encoder
+        encoder.load(self.model_name)
+
+        runtime = DistributedRuntime(
+            asyncio.get_running_loop(),
+            self._discovery_backend,
+            self._request_plane,
+            event_plane=self._event_plane,
         )
-        self._encoder.load(self.model_name)
+        self._decoder_runtime = runtime
+        endpoint = runtime.endpoint(self._decoder_endpoint)
+        client = await endpoint.client()
+        self._decoder_client = cast(DecoderClient, client)
+        await asyncio.wait_for(
+            client.wait_for_instances(),
+            timeout=self._decoder_connect_timeout,
+        )
 
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
-            llm=decoder.registration(),
+            llm=LlmRegistration(
+                context_length=self._max_model_len,
+                data_parallel_size=1,
+                data_parallel_start_rank=0,
+            ),
         )
 
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        encoder, adapter, decoder = self._request_resources()
-        request_id = context.id()
+        encoder, decoder_client = self._request_resources()
         image_url = self._single_image_url(request)
-
         artifacts = await encoder.encode([image_url])
-        prompt = adapter.prepare_prompt(list(request["token_ids"]), artifacts)
 
-        async with asyncio.TaskGroup() as group:
-            classification = group.create_task(self._classifier.classify(artifacts))
-            decoding = group.create_task(
-                decoder.generate_final(request, prompt, request_id)
-            )
+        classification = asyncio.create_task(self._classifier.classify(artifacts))
+        decoding = asyncio.create_task(
+            self._generate_remote_final(decoder_client, request, context)
+        )
+        try:
+            await asyncio.gather(classification, decoding)
+        except BaseException:
+            classification.cancel()
+            decoding.cancel()
+            await asyncio.gather(classification, decoding, return_exceptions=True)
+            raise
 
         decoded = decoding.result()
-        decoded["engine_data"] = {"ensemble": {"classifier": classification.result()}}
+        engine_data = decoded.setdefault("engine_data", {})
+        engine_data["ensemble"] = {"classifier": classification.result()}
         yield decoded
 
     async def abort(self, context: Context) -> None:
-        decoder = self._decoder
-        if decoder is not None:
-            await decoder.abort(context.id())
+        context.stop_generating()
 
     async def cleanup(self) -> None:
         encoder = self._encoder
-        decoder = self._decoder
+        runtime = self._decoder_runtime
         self._encoder = None
-        self._decoder = None
-        self._adapter = None
+        self._decoder_client = None
+        self._decoder_runtime = None
 
         if encoder is not None:
             encoder.shutdown()
-        if decoder is not None:
-            decoder.shutdown()
+        if runtime is not None:
+            runtime.shutdown()
 
-    def _request_resources(
+    async def _generate_remote_final(
         self,
-    ) -> tuple[Encoder, CustomEncoderAdapter[Any], Decoder]:
-        if self._encoder is None or self._adapter is None or self._decoder is None:
+        client: DecoderClient,
+        request: GenerateRequest,
+        context: Context,
+    ) -> GenerateChunk:
+        self._validate_output_options(request)
+        remote_request = cast(GenerateRequest, dict(request))
+        remote_request["model"] = self._decoder_model_name
+
+        token_ids: list[int] = []
+        terminal: GenerateChunk | None = None
+        try:
+            stream = await client.generate(remote_request, context=context)
+            async for response in stream:
+                if response.is_error():
+                    comments = response.comments() or []
+                    message = "; ".join(comments) or "unknown remote decoder error"
+                    raise RuntimeError(f"Remote vLLM decoder failed: {message}")
+
+                data = response.data()
+                if isinstance(data, str):
+                    data = json.loads(data)
+                if data is None:
+                    continue
+                if not isinstance(data, dict):
+                    raise RuntimeError(
+                        "Remote vLLM decoder returned a non-object response"
+                    )
+
+                index = data.get("index", 0)
+                if index not in (None, 0):
+                    raise RuntimeError(
+                        f"Remote vLLM decoder returned unexpected index {index}"
+                    )
+                chunk_token_ids = data.get("token_ids")
+                if not isinstance(chunk_token_ids, list):
+                    raise RuntimeError(
+                        "Remote vLLM decoder response did not contain token_ids"
+                    )
+                token_ids.extend(chunk_token_ids)
+
+                if data.get("finish_reason") is not None:
+                    if terminal is not None:
+                        raise RuntimeError(
+                            "Remote vLLM decoder returned multiple terminal responses"
+                        )
+                    terminal = cast(GenerateChunk, dict(data))
+
+            if terminal is None:
+                raise RuntimeError(
+                    "Remote vLLM decoder ended without a terminal response"
+                )
+            terminal["token_ids"] = token_ids
+            terminal["index"] = 0
+            return terminal
+        except BaseException:
+            context.stop_generating()
+            raise
+
+    def _request_resources(self) -> tuple[Encoder, DecoderClient]:
+        if self._encoder is None or self._decoder_client is None:
             raise RuntimeError("UserEnsembleEngine.generate() called before start()")
-        return self._encoder, self._adapter, self._decoder
+        return self._encoder, self._decoder_client
+
+    @staticmethod
+    def _validate_output_options(request: GenerateRequest) -> None:
+        sampling_options = request.get("sampling_options") or {}
+        n = sampling_options.get("n")
+        if n not in (None, 1):
+            raise InvalidArgument(
+                f"UserEnsembleEngine supports exactly one choice; got n={n}"
+            )
+
+        output_options = request.get("output_options") or {}
+        if (
+            output_options.get("logprobs") is not None
+            or output_options.get("prompt_logprobs") is not None
+        ):
+            raise InvalidArgument("UserEnsembleEngine does not support logprobs")
 
     @staticmethod
     def _single_image_url(request: GenerateRequest) -> str:

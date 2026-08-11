@@ -1,7 +1,13 @@
-# User Ensemble Worker
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-This prototype shows that an application can implement an aggregated model
-chain without changing `dynamo.vllm`:
+# User ensemble worker with remote vLLM
+
+This example implements an aggregated model chain with public Dynamo worker and
+client APIs. It runs the decoder as a stock `dynamo.vllm` worker instead of
+embedding native vLLM inside `UserEnsembleEngine`.
 
 ```text
 dynamo.frontend
@@ -9,33 +15,37 @@ dynamo.frontend
        v
 UserEnsembleEngine
        |
-       v
-AsyncVisionEncoder -- shared artifacts --> classifier
-       |                                  |
-       +---- adapter --> EmbeddedVllmDecoder
-                          |               |
-                          +-- AsyncLLM ---+
-                                          |
-                                          v
-                                  terminal response join
+       +---- AsyncVisionEncoder ----> classifier ----+
+       |                                             |
+       +---- client.generate(request, context) ------|----+
+                                                     |    v
+                                                     |  remote
+                                                     |  dynamo.vllm
+                                                     |    |
+                                                     +----+
+                                                       join
 ```
 
-The frontend sends the ordinary OpenAI request. It does not hold or forward
-encoder tensors. The user worker runs the encoder once, passes the same
-in-process artifact objects to the classifier and decoder adapter, waits for
-both branches, and returns one terminal response. Classifier data is attached
-to `nvext.engine_data`; clients must request that optional field.
+The frontend sends the ordinary OpenAI request to `UserEnsembleEngine`. The
+ensemble encodes the image for its local classifier and concurrently forwards
+the original preprocessed request to the remote vLLM endpoint. It propagates the
+same Dynamo request context so cancellation reaches the decoder. The decoder's
+delta chunks are accumulated into one terminal response, then the classifier
+result is attached to `nvext.engine_data`.
 
-`EmbeddedVllmDecoder` is a library component, not another serving endpoint. It
-owns native vLLM initialization, request translation, final-output
-normalization, abort, shutdown, and registration metadata. The frontend still
-listens on the only HTTP inference port, and `UserEnsembleEngine` remains the
-only Dynamo backend endpoint for this chain.
+The remote vLLM worker has its own custom encoder because Python encoder
+artifacts are not JSON-serializable Dynamo request data. Consequently, this
+variant encodes each image twice: once in the ensemble process for the
+classifier and once in the vLLM process for decoding. The in-process variant
+from pull request #12713 encodes once and shares the artifact objects with both
+branches. This remote variant trades that duplicate work and an inter-process
+request hop for a smaller API surface and an independently scalable stock vLLM
+worker.
 
 The supplied classifier deliberately returns `dummy-classification`. Replace
 `DummyClassifier` with application logic that consumes the encoder artifact.
-This first version accepts exactly one image and one output choice and fails the
-whole request if either branch fails.
+This example accepts exactly one image and one output choice and fails the whole
+request if either branch fails.
 
 ## Run
 
@@ -45,9 +55,20 @@ From the repository root:
 ./examples/custom_backend/user_ensemble/launch.sh
 ```
 
-When the decoder shares a GPU with a substantial encoder, reserve room for the
-encoder with `DYN_VLLM_GPU_MEMORY_UTILIZATION` (for example, `0.4`). The default
-is `0.8`, suitable only when the colocated encoder has enough remaining memory.
+The launcher starts three processes: the frontend, a `dynamo.vllm` worker on
+`dynamo.remote-vllm.generate`, and `UserEnsembleEngine` on
+`dynamo.backend.generate`. The decoder registers a private served-model alias so
+frontend traffic for the public model is routed only through the ensemble.
+
+Common overrides are:
+
+```bash
+DYN_MODEL=<model> \
+DYN_WORKER_GPU=0 \
+DYN_VLLM_GPU_MEMORY_UTILIZATION=0.8 \
+DYN_DECODER_COMPONENT=remote-vllm \
+./examples/custom_backend/user_ensemble/launch.sh
+```
 
 Then issue a non-streaming request:
 
@@ -83,8 +104,3 @@ The generated text should contain `42`, and the response should contain:
   }
 }
 ```
-
-The current custom-encoder contract returns CPU-safe artifacts. A future
-in-process contract can add explicitly owned CUDA artifacts; disaggregated
-consumers will require handles and a transfer mechanism such as NIXL rather
-than frontend-mediated tensors.
