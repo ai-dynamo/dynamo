@@ -71,6 +71,21 @@ spec:
             claimName: model-cache
 ```
 
+### Use a Private Hugging Face-Compatible Registry
+
+To download from a private registry such as [MatrixHub](https://github.com/matrixhub-ai/matrixhub),
+set `HF_ENDPOINT` in the download Job. MatrixHub is a self-hosted, Hugging Face-compatible
+model registry. ModelExpress is not required for this path.
+
+```yaml
+env:
+  - name: HF_ENDPOINT
+    value: "https://matrixhub.example.com"
+```
+
+The Hugging Face CLI keeps the same cache layout when it uses a compatible registry, so the
+PVC mount configuration in the next step does not change.
+
 ### Find the Snapshot Path
 
 After the Job completes, the model is stored in HuggingFace's cache layout:
@@ -174,6 +189,23 @@ Use this path when startup time or fleet-wide model rollout time matters more th
 | vLLM worker | Set `--load-format modelexpress`. | The Dynamo runtime image must include the MX Python client. Until an official MX-enabled runtime ships, use an explicitly built development image. |
 | SGLang worker | Use `remote_instance` with `backend=modelexpress`. | This requires an SGLang runtime version containing the native ModelExpress loader plus the MX Python client in the image. |
 | ModelStreamer | Set `MX_MODEL_URI` to the storage location. | Supported URI forms include `s3://...`, `gs://...`, `az://...`, an absolute local path, or a Hugging Face model ID resolved from the local cache. |
+
+### Use MatrixHub as the Initial Model Source
+
+To initialize the ModelExpress cache from [MatrixHub](https://github.com/matrixhub-ai/matrixhub),
+set `HF_ENDPOINT` on the ModelExpress server. MatrixHub supplies the initial model download;
+ModelExpress then caches or distributes the model to later workers.
+
+```yaml
+# ModelExpress server Deployment
+env:
+  - name: HF_ENDPOINT
+    value: "https://matrixhub.example.com"
+```
+
+Set `HF_ENDPOINT` on Dynamo components that independently download model configuration or
+tokenizer files. Keep `MODEL_EXPRESS_URL` in the worker configuration so workers connect to
+the ModelExpress server.
 
 ### Setup
 
