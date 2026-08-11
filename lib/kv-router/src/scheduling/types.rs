@@ -62,6 +62,8 @@ pub struct TierOverlapBlocks {
     pub disk: FxHashMap<WorkerWithDpRank, usize>,
 }
 
+/// Downstream matches must include a wildcard arm because this enum is non-exhaustive.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
