@@ -25,7 +25,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Process-wide guard: once-per-process WARN when telemetry calls hit a
 /// parent `engine.generate` span that has no OTel context (i.e., the
-/// `tracing-opentelemetry` layer isn't installed — non-JSONL deployments).
+/// `tracing-opentelemetry` layer isn't installed).
 /// One log line is enough to surface the configuration issue; rate-limiting
 /// to once avoids flooding logs in high-QPS workers.
 ///
@@ -40,7 +40,8 @@ fn warn_bridge_missing_once(method: &str) {
         tracing::warn!(
             method,
             "telemetry call is a no-op: OTel bridge layer not installed \
-             (needs DYN_LOGGING_JSONL=1 + OTEL_EXPORT_ENABLED=1). \
+             (enable OTEL_EXPORT_ENABLED=1, DYN_LOGGING_CONSOLE_FORMAT=jsonl, \
+             or the legacy DYN_LOGGING_JSONL=1 switch). \
              Engine telemetry attributes / events / child spans are NOT \
              being recorded. Further no-ops in this process are silent."
         );
@@ -425,8 +426,8 @@ impl Context {
     /// bridge is installed, so downstream engine internals (vLLM scheduler,
     /// TRT-LLM forward, SGLang KV transfer) nest UNDER `engine.generate`.
     /// Falls back to the inbound `DistributedTraceContext` for legacy
-    /// callers, Python-instantiated test contexts, and non-JSONL deployments
-    /// without the bridge.
+    /// callers, Python-instantiated test contexts, and deployments without
+    /// the bridge.
     ///
     /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
     /// and `request-id` when the upstream propagated them.

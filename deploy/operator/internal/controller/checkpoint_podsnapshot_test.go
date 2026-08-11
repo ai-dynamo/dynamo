@@ -33,7 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -204,7 +204,7 @@ func TestCreatePodSnapshot_EmptyTargetEmitsBuildFailedEvent(t *testing.T) {
 	_, err := r.createPodSnapshot(context.Background(), ckpt, testHash, podNamed("worker-xyz"))
 	require.Error(t, err)
 
-	recorder := r.Recorder.(*record.FakeRecorder)
+	recorder := r.Recorder.(*events.FakeRecorder)
 	select {
 	case ev := <-recorder.Events:
 		assert.Contains(t, ev, "PodSnapshotBuildFailed")

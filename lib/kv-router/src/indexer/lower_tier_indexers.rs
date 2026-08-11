@@ -21,7 +21,9 @@ use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails,
 };
-use crate::protocols::{LocalBlockHash, StorageTier};
+use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+use crate::router_hint::RouterHintRootCandidates;
+use rustc_hash::FxHashMap;
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
 /// non-device [`StorageTier`] that has received at least one event.
@@ -121,6 +123,15 @@ pub struct TieredMatchDetails {
     pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
 }
 
+impl TieredMatchDetails {
+    pub fn router_hint_root_candidates(&self) -> Option<&RouterHintRootCandidates> {
+        self.lower_tier
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .or(self.device.router_hint_root_candidates.as_ref())
+    }
+}
+
 impl From<&TieredMatchDetails> for WireTieredMatchDetails {
     fn from(d: &TieredMatchDetails) -> Self {
         Self {
@@ -167,6 +178,11 @@ pub fn lower_tier_query_order() -> [StorageTier; 3] {
     ]
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LowerTierQueryOptions {
+    pub retain_router_hint_chain: bool,
+}
+
 /// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
 /// per-tier match map seeded from `device_matches`. Per-worker continuations
 /// flow forward: a worker that matched N device blocks starts the host walk
@@ -175,6 +191,80 @@ pub fn query_lower_tiers(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
     device_matches: &MatchDetails,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    query_lower_tiers_with_options(
+        indexers,
+        sequence,
+        device_matches,
+        LowerTierQueryOptions::default(),
+    )
+}
+
+fn merge_router_hint_tier_candidates(
+    device_candidates: Option<&RouterHintRootCandidates>,
+    tier_matches: &LowerTierMatchDetails,
+) -> Option<RouterHintRootCandidates> {
+    let mut block_hashes = device_candidates
+        .map(|candidates| candidates.block_hashes.clone())
+        .unwrap_or_default();
+    let mut owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize> = FxHashMap::default();
+
+    if let Some(candidates) = device_candidates {
+        owner_prefix_blocks.extend(candidates.owner_prefix_blocks.iter().copied());
+    }
+
+    let Some(extensions) = tier_matches.router_hint_extensions.as_ref() else {
+        return device_candidates.cloned();
+    };
+
+    // Router hints intentionally retain one compact root-aligned chain. The
+    // lower-tier walk records each matched child hash once at its request-block
+    // position and tracks per-owner depths separately, avoiding per-worker hash
+    // copies on the lookup hot path. Positional equality assumes
+    // ExternalSequenceBlockHash is stable across workers and tiers for the same
+    // request-prefix position.
+    for (pos, hash) in &extensions.block_hashes {
+        if block_hashes.len() < *pos {
+            break;
+        }
+
+        if *pos < block_hashes.len() {
+            if block_hashes[*pos] != *hash {
+                break;
+            }
+        } else {
+            block_hashes.push(*hash);
+        }
+    }
+
+    owner_prefix_blocks.extend(
+        extensions
+            .owner_prefix_blocks
+            .iter()
+            .filter(|(_, blocks)| **blocks <= block_hashes.len())
+            .map(|(worker, blocks)| (*worker, *blocks)),
+    );
+
+    let mut owner_prefix_blocks = owner_prefix_blocks
+        .into_iter()
+        .filter(|(_, blocks)| *blocks > 0)
+        .collect::<Vec<_>>();
+    if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
+        return None;
+    }
+    owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
+
+    Some(RouterHintRootCandidates {
+        block_hashes,
+        owner_prefix_blocks,
+    })
+}
+
+pub fn query_lower_tiers_with_options(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
     // No lower-tier indexers are allocated, so there is no continuation
     // work to perform. Return before validating device score/hash lockstep;
@@ -216,9 +306,19 @@ pub fn query_lower_tiers(
             }
         }
 
-        let tier_matches = indexer
-            .backend()
-            .query_match_details(sequence, &continuations);
+        let retain_router_hint_chain =
+            options.retain_router_hint_chain && storage_tier == StorageTier::HostPinned;
+        let mut tier_matches = indexer.backend().query_match_details_with_options(
+            sequence,
+            &continuations,
+            retain_router_hint_chain,
+        );
+        if retain_router_hint_chain {
+            tier_matches.router_hint_root_candidates = merge_router_hint_tier_candidates(
+                device_matches.router_hint_root_candidates.as_ref(),
+                &tier_matches,
+            );
+        }
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
         tracing::debug!(
             ?storage_tier,
@@ -236,7 +336,39 @@ pub fn query_lower_tiers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+    use crate::indexer::KvIndexerInterface;
+    use crate::protocols::{
+        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
+        OverlapScores, WorkerWithDpRank,
+    };
+    use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
+
+    fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
+        values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        parent_hash: Option<u64>,
+        local_values: &[u64],
+        external_hashes: &[u64],
+    ) -> crate::protocols::RouterEvent {
+        router_event(
+            worker_id,
+            event_id,
+            dp_rank,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(
+                    &local_hashes(local_values),
+                    external_hashes,
+                ),
+            }),
+        )
+    }
 
     #[test]
     fn query_lower_tiers_returns_empty_when_no_tiers_allocated() {
@@ -252,10 +384,150 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes: Default::default(),
+            router_hint_root_candidates: None,
         };
 
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
         let result = query_lower_tiers(&indexers, &sequence, &device_matches);
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_extends_router_hint_chain_from_device_prefix() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let worker = WorkerWithDpRank::new(7, 0);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, Some(101), &[12], &[102]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores.scores.insert(worker, 1);
+        let mut last_matched_hashes = FxHashMap::default();
+        last_matched_hashes.insert(worker, ExternalSequenceBlockHash(101));
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes,
+            router_hint_root_candidates: Some(RouterHintRootCandidates {
+                block_hashes: vec![ExternalSequenceBlockHash(101)],
+                owner_prefix_blocks: vec![(worker, 1)],
+            }),
+        };
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions {
+                retain_router_hint_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ]
+        );
+        assert_eq!(candidates.owner_prefix_blocks, vec![(worker, 2)]);
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_keeps_divergent_hint_source_at_shared_prefix() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let worker_1 = WorkerWithDpRank::new(7, 0);
+        let worker_2 = WorkerWithDpRank::new(8, 0);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, Some(101), &[12], &[102]))
+            .await;
+        lower_tier
+            .apply_event(store_event(8, 0, 1, Some(101), &[12], &[202]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores.scores.insert(worker_1, 1);
+        overlap_scores.scores.insert(worker_2, 1);
+        let mut last_matched_hashes = FxHashMap::default();
+        last_matched_hashes.insert(worker_1, ExternalSequenceBlockHash(101));
+        last_matched_hashes.insert(worker_2, ExternalSequenceBlockHash(101));
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes,
+            router_hint_root_candidates: Some(RouterHintRootCandidates {
+                block_hashes: vec![ExternalSequenceBlockHash(101)],
+                owner_prefix_blocks: vec![(worker_1, 1), (worker_2, 1)],
+            }),
+        };
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions {
+                retain_router_hint_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(worker_1, 2), (worker_2, 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_retains_router_hint_chain_when_enabled() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &MatchDetails::default(),
+            LowerTierQueryOptions {
+                retain_router_hint_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102)
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(WorkerWithDpRank::new(7, 0), 2)]
+        );
     }
 }

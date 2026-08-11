@@ -11,7 +11,9 @@ import math
 import os
 import time as _time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Optional
 
 from vllm.config import VllmConfig
@@ -537,6 +539,44 @@ SetupFpmRelayFn = Callable[..., Optional[list]]
 SetupMetricsCollectionFn = Callable[..., None]
 
 
+@dataclass
+class _DecodeWorkerLifecycle:
+    engine_client: Optional[AsyncLLM] = None
+    vllm_config: Optional[VllmConfig] = None
+    handler: Optional[BaseWorkerHandler] = None
+    shutdown_event: asyncio.Event | None = None
+
+    def __enter__(self) -> "_DecodeWorkerLifecycle":
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        original_error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self.cleanup()
+        except Exception:
+            if original_error is None:
+                raise
+            logger.exception(
+                "Failed to clean up decode worker after an earlier failure"
+            )
+
+    def cleanup(self) -> None:
+        """Release resources in reverse construction order."""
+        logger.debug("Cleaning up decode worker")
+        if self.shutdown_event is not None:
+            self.shutdown_event.set()
+        try:
+            if self.handler is not None:
+                self.handler.cleanup()
+        finally:
+            if self.engine_client is not None and self.vllm_config is not None:
+                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
+
+
 class WorkerFactory:
     """Factory for creating and initializing multimodal vLLM workers."""
 
@@ -941,6 +981,26 @@ class WorkerFactory:
         """
         Instantiate and serve
         """
+        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            await self._run_decode_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+                lifecycle=lifecycle,
+            )
+
+    async def _run_decode_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+        snapshot_engine: Optional[EngineSetupResult],
+        lifecycle: _DecodeWorkerLifecycle,
+    ) -> None:
+        """Initialize and serve a decode worker."""
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -1016,6 +1076,8 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -1048,6 +1110,7 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -1227,10 +1290,6 @@ class WorkerFactory:
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
-        finally:
-            logger.debug("Cleaning up decode worker")
-            # Cleanup background tasks
-            handler.cleanup()
 
     async def _create_prefill_worker(
         self,

@@ -38,7 +38,7 @@ dynamo:
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.12.0"
 
-  nats_version: v2.10.28
+  nats_version: v2.12.12
   etcd_version: v3.5.30
 
   nixl_ref: v1.0.1

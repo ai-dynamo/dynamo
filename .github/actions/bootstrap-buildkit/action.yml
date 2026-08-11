@@ -33,8 +33,7 @@ inputs:
     default: '400Gi'
   namespace:
     description: 'Kubernetes namespace for buildkit pods'
-    required: false
-    default: 'buildkit'
+    required: true
   replicas:
     description: 'Number of buildkit replicas'
     required: false

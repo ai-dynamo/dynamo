@@ -14,12 +14,14 @@ use crate::replay::offline::evidence::{
 
 use super::config::{SglangConfig, floor_to_block};
 use super::request::SglangRequest;
+use crate::scheduler::AcceptLengthSample;
 
 #[derive(Default)]
 pub(super) struct DecodeResult {
     pub(super) requests: Vec<SglangRequest>,
     pub(super) completed_requests: Vec<SglangRequest>,
     pub(super) output_signals: Vec<OutputSignal>,
+    pub(super) accept_length: AcceptLengthSample,
     pub(super) retracted_any: bool,
     pub(super) end_ms: f64,
 }
@@ -239,6 +241,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 token_id: None,
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
                     config.worker_type,
                     true,
@@ -281,6 +284,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
+            ..DecodeResult::default()
         });
     }
 
@@ -317,13 +321,16 @@ pub(super) fn simulate_decode_step_with_sampler(
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
+            ..DecodeResult::default()
         });
     };
 
     output_signals.reserve(running.len());
     let mut completed_indices = Vec::new();
+    let mut accept_length = AcceptLengthSample::default();
 
     for (idx, req) in running.iter_mut().enumerate() {
+        let mut emitted_tokens = 0usize;
         let remaining = req.remaining_output_tokens();
         let burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
             remaining.min(1)
@@ -348,6 +355,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 token_id: Some(token_id),
                 completed: is_complete,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
                     config.worker_type,
                     is_complete,
@@ -356,6 +364,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                     config.kv_bytes_per_token,
                 ),
             });
+            emitted_tokens += 1;
 
             if is_complete {
                 completed_indices.push(idx);
@@ -365,6 +374,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             cache_materialized_prefix(req, kv_manager, config);
             req.debug_assert_invariants(config.block_size);
         }
+        accept_length.record_forward(emitted_tokens);
     }
 
     debug_assert!(reservation.len() <= reserved_pages);
@@ -381,6 +391,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         requests: retracted,
         completed_requests,
         output_signals,
+        accept_length,
         retracted_any,
         end_ms: current_time_ms + total_time.as_secs_f64() * 1000.0,
     })
