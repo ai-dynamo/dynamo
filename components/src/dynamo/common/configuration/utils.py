@@ -108,6 +108,7 @@ def add_argument(
     help: str,
     obsolete_flag: Optional[str] = None,
     arg_type: Optional[Union[type, Callable[..., Any]]] = str,
+    env_value_type: Optional[Union[type, Callable[..., Any]]] = None,
     **kwargs: Any,
 ) -> None:
     """
@@ -124,10 +125,11 @@ def add_argument(
         dest: Optional destination name (defaults to flag_name with dashes replaced by underscores)
         choices: Optional list of valid values for the argument.
         arg_type: Type for the argument (default: str)
+        env_value_type: Optional parser used only for the environment value
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
-    value_type_for_env: Optional[Union[type, Callable[..., Any]]] = None
-    if arg_type is not None and callable(arg_type):
+    value_type_for_env = env_value_type
+    if value_type_for_env is None and arg_type is not None and callable(arg_type):
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
@@ -185,7 +187,8 @@ def add_negatable_bool_argument(
         help=help,
         dest=dest,
         obsolete_flag=obsolete_flag,
-        arg_type=env_value_type,
+        arg_type=None,
+        env_value_type=env_value_type,
         action=argparse.BooleanOptionalAction,
     )
 
