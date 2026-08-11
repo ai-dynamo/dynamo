@@ -8,7 +8,10 @@ import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
-from dynamo.sglang.engine_generate import build_native_generate_request
+from dynamo.sglang.engine_generate import (
+    build_native_generate_request,
+    native_generate_stream,
+)
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -306,6 +309,37 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
     )
 
     assert native.top_logprobs_num == 2
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_forwards_only_opaque_response():
+    native_response = {
+        "output_ids": [101],
+        "meta_info": {
+            "id": "request-1",
+            "output_token_logprobs": [(-0.1, 101, "a")],
+        },
+    }
+
+    class TokenizerManager:
+        async def generate_request(self, request, request_context):
+            assert request == "native-request"
+            assert request_context is None
+            yield native_response
+
+    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            native_generate_stream(engine, "native-request"),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+    ]
+    assert chunks[0]["engine_data"]["sglang_response"] is native_response
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):

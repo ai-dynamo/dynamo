@@ -94,4 +94,4 @@ async def native_generate_stream(
 ) -> AsyncIterator[dict[str, Any]]:
     """Dispatch exactly as SGLang native ``/generate`` handler does."""
     async for response in engine.tokenizer_manager.generate_request(request, None):
-        yield {**response, "engine_data": {"sglang_response": response}}
+        yield {"token_ids": [], "engine_data": {"sglang_response": response}}

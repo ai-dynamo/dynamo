@@ -8,7 +8,7 @@
 //! opaquely for the version-matched worker. Text, batched, multimodal, and
 //! non-streaming requests remain outside this token-in/token-out frontend.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 fn sampling_field<T>(object: Option<&Map<String, Value>>, name: &str) -> Result<Option<T>, String>
@@ -24,7 +24,7 @@ where
 }
 
 /// Native SGLang token-input request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SglangGenerateRequest {
     #[serde(default)]
     pub rid: Option<String>,
@@ -84,16 +84,18 @@ impl SglangGenerateRequest {
         sampling_field(self.sampling_params.as_ref(), "ignore_eos")
     }
 
-    /// Preserve the native request while replacing fields owned by Dynamo request plane.
-    pub fn worker_envelope(&self, request_id: &str) -> serde_json::Result<Value> {
-        let Value::Object(mut envelope) = serde_json::to_value(self)? else {
-            unreachable!("SglangGenerateRequest always serializes as an object")
-        };
-        envelope.remove("input_ids");
-        envelope.remove("priority");
+    /// Move the native request into its routed input and opaque worker envelope.
+    pub fn into_worker_envelope(self, request_id: &str) -> (Vec<u32>, Value) {
+        let mut envelope = self.passthrough;
+        envelope.insert(
+            "sampling_params".to_string(),
+            self.sampling_params
+                .map(Value::Object)
+                .unwrap_or(Value::Null),
+        );
         envelope.insert("rid".to_string(), Value::String(request_id.to_string()));
         envelope.insert("stream".to_string(), Value::Bool(true));
-        Ok(Value::Object(envelope))
+        (self.input_ids, Value::Object(envelope))
     }
 }
 
@@ -122,7 +124,8 @@ mod tests {
 
         assert_eq!(request.max_new_tokens().unwrap(), Some(7));
         assert!(request.validate().is_ok());
-        let envelope = request.worker_envelope("resolved-request").unwrap();
+        let (input_ids, envelope) = request.into_worker_envelope("resolved-request");
+        assert_eq!(input_ids, [1, 2, 3]);
         assert_eq!(envelope["rid"], "resolved-request");
         assert_eq!(envelope["stream"], true);
         assert_eq!(envelope["session_id"], "session-1");

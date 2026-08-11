@@ -169,15 +169,13 @@ fn preprocessed_request(
     let min_tokens = request.min_new_tokens().map_err(anyhow::Error::msg)?;
     let ignore_eos = request.ignore_eos().map_err(anyhow::Error::msg)?;
     let routing_priority = request.priority.unwrap_or_default();
+    let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
     let mut extra_args = serde_json::Map::new();
-    extra_args.insert(
-        "sglang_tito".to_string(),
-        request.worker_envelope(request_id)?,
-    );
+    extra_args.insert("sglang_tito".to_string(), worker_envelope);
 
     PreprocessedRequest::builder()
         .model(model.to_string())
-        .token_ids(request.input_ids)
+        .token_ids(input_ids)
         .stop_conditions(StopConditions {
             max_tokens,
             min_tokens,

@@ -33,7 +33,7 @@ impl SglangGenerateStream {
                 };
                 let response = output
                     .engine_data
-                    .and_then(|data| data.get("sglang_response").cloned())
+                    .and_then(|mut data| data.as_object_mut()?.remove("sglang_response"))
                     .ok_or_else(|| anyhow::anyhow!("missing opaque SGLang response"))?;
                 yield response;
             }

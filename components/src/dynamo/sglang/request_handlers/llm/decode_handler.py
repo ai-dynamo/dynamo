@@ -412,7 +412,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context,
                 priority,
             )
-            async for output in self._process_token_stream(stream, context):
+            async for output in self._process_native_generate_stream(stream, context):
                 yield output
             return
 
@@ -564,6 +564,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     metadata_uploader=metadata_uploader,
                 ):
                     yield out
+
+    async def _process_native_generate_stream(
+        self,
+        stream_source: AsyncIterator[Dict[str, Any]],
+        context: Context,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Forward opaque SGLang chunks while retaining engine cancellation."""
+        request_id_future: asyncio.Future[str] = asyncio.Future()
+        async with self._cancellation_monitor(request_id_future, context):
+            async for chunk in stream_source:
+                native_response = chunk["engine_data"]["sglang_response"]
+                if not request_id_future.done():
+                    sglang_request_id = native_response.get("meta_info", {}).get("id")
+                    if sglang_request_id:
+                        request_id_future.set_result(sglang_request_id)
+                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                if not context.is_stopped():
+                    yield chunk
 
     async def _process_token_stream(
         self,
