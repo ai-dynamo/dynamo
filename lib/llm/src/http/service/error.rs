@@ -179,6 +179,15 @@ impl ClassifiedHttpError {
             return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
         }
 
+        None
+    }
+
+    /// Preserve the untagged comment error shape recognized by the pre-commit
+    /// stream check without interpreting ordinary mid-stream comments as errors.
+    pub(crate) fn from_precommit_annotated<T>(event: &Annotated<T>) -> Option<Self> {
+        if let Some(problem) = Self::from_annotated(event) {
+            return Some(problem);
+        }
         if event.data.is_none()
             && event.event.is_none()
             && let Some(comments) = event.comment.as_ref()
@@ -666,6 +675,23 @@ mod tests {
         };
 
         assert!(ClassifiedHttpError::from_annotated(&event).is_none());
+    }
+
+    #[test]
+    fn untagged_comments_are_errors_only_during_precommit_inspection() {
+        let event = Annotated::<()> {
+            data: None,
+            id: None,
+            event: None,
+            comment: Some(vec!["Connection timeout".to_string()]),
+            error: None,
+        };
+
+        assert!(ClassifiedHttpError::from_annotated(&event).is_none());
+        let problem = ClassifiedHttpError::from_precommit_annotated(&event).unwrap();
+        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+        assert_eq!(problem.diagnostic(), "Connection timeout");
     }
 
     #[test]

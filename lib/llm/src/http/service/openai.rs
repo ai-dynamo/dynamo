@@ -1960,7 +1960,7 @@ where
             continue;
         }
 
-        if let Some(problem) = ClassifiedHttpError::from_annotated(&event) {
+        if let Some(problem) = ClassifiedHttpError::from_precommit_annotated(&event) {
             return Err(problem);
         }
 

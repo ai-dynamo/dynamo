@@ -61,7 +61,8 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClassifiedHttpError, HttpErrorKind, drain_converted_stream_events, invalid_argument,
+    ClassifiedHttpError, HttpErrorKind, INTERNAL_ERROR_MESSAGE, drain_converted_stream_events,
+    invalid_argument,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
@@ -909,9 +910,14 @@ fn apply_anthropic_header_routing_overrides(
 
 fn anthropic_error_from_anyhow(
     err: anyhow::Error,
-    fallback: &str,
+    context: &str,
 ) -> (Response, super::metrics::ErrorType) {
-    anthropic_problem(ClassifiedHttpError::from_error(err.as_ref(), fallback))
+    anthropic_problem(classify_anthropic_anyhow(err, context))
+}
+
+fn classify_anthropic_anyhow(err: anyhow::Error, context: &str) -> ClassifiedHttpError {
+    let err = err.context(context.to_string());
+    ClassifiedHttpError::from_error(err.as_ref(), INTERNAL_ERROR_MESSAGE)
 }
 
 fn anthropic_problem(problem: ClassifiedHttpError) -> (Response, super::metrics::ErrorType) {
@@ -1031,6 +1037,23 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_unknown_errors_keep_context_out_of_the_public_message() {
+        let problem = classify_anthropic_anyhow(
+            anyhow::anyhow!("worker failed at /srv/backend.py:42"),
+            "Failed to fold messages stream",
+        );
+
+        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+        assert!(
+            problem
+                .diagnostic()
+                .contains("Failed to fold messages stream")
+        );
+        assert!(problem.diagnostic().contains("/srv/backend.py:42"));
     }
 
     #[test]
