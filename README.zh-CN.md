@@ -58,7 +58,7 @@ limitations under the License.
 | [**分离式服务**](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) | ✅ | ✅ | ✅ |
 | [**KV 感知路由**](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md) | ✅ | ✅ | ✅ |
 | [**基于 SLA 的 Planner**](docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) | ✅ | ✅ | ✅ |
-| [**KVBM**](docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md) | 🚧 | ✅ | ✅ |
+| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
 | [**多模态**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
 | [**工具调用**](docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx) | ✅ | ✅ | ✅ |
 
@@ -91,7 +91,7 @@ limitations under the License.
 |------|------|------|
 | [**分离式预填充/解码**](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) | 将预填充和解码拆分为可独立扩缩容的 GPU 池 | 最大化 GPU 利用率；每个阶段都运行在针对其工作负载调优的硬件上 |
 | [**KV 感知路由**](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md) | 根据 worker 负载和 KV 缓存重叠度路由请求 | 消除冗余预填充计算，TTFT 快 2x |
-| [**KV Block Manager (KVBM)**](docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md) | 在 GPU → CPU → SSD → 远程存储之间卸载 KV 缓存 | 将有效上下文长度扩展到 GPU 显存之外 |
+| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | 在 GPU → CPU → SSD → 远程存储之间卸载 KV 缓存 | 将有效上下文长度扩展到 GPU 显存之外 |
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | 通过 NIXL/NVLink 在 GPU 之间流式传输模型权重 | 新副本冷启动快 7x |
 | [**Planner**](docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) | 由 SLA 驱动的自动扩缩容器，可分析工作负载并调整资源池规模 | 以最低总体拥有成本（TCO）满足延迟目标 |
 | [**Grove**](https://github.com/ai-dynamo/grove) | 面向拓扑感知 gang scheduling 的 K8s operator（NVL72） | 在机架、主机和 NUMA 节点之间优化放置工作负载 |
