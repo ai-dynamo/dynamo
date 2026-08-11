@@ -3,7 +3,8 @@
 
 //! Factory and registration for the `simple-stacked-score-pick` policy.
 
-mod selection;
+mod picker;
+mod scorer;
 
 use std::sync::Arc;
 
@@ -13,7 +14,8 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyRegistryError,
 };
 use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy};
-use selection::{ActiveRequestsScorer, LowestCostPicker, UncachedBlocksScorer};
+use picker::LowestCostPicker;
+use scorer::{ActiveRequestsScorer, UncachedBlocksScorer};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

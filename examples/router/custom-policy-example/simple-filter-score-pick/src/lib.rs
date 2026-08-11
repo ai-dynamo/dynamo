@@ -7,7 +7,8 @@
 //! workers by active requests.
 
 mod filter;
-mod selection;
+mod picker;
+mod scorer;
 
 use std::sync::Arc;
 
@@ -18,7 +19,8 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
 use filter::MinimumDeviceOverlapFilter;
-use selection::{ActiveRequestsScorer, RequestAwarePicker};
+use picker::RequestAwarePicker;
+use scorer::ActiveRequestsScorer;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

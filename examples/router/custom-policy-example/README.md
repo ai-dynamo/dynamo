@@ -52,6 +52,8 @@ A policy that lives in the Dynamo workspace can use the workspace dependencies s
 
 A filter receives one host-eligible worker and returns whether to keep it. Use filters for hard requirements. A scorer receives one kept worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
 
+Each example keeps its implemented stages in matching modules: `filter.rs`, `scorer.rs`, and `picker.rs`. The crate's `lib.rs` parses parameters, composes those stages, and registers the policy. The stacked example has no filter, so it omits `filter.rs`. Its [`scorer.rs`](simple-stacked-score-pick/src/scorer.rs) groups the scorer stage and re-exports each scorer from a separate file under [`scorer/`](simple-stacked-score-pick/src/scorer/).
+
 The [filter-score-pick policy](simple-filter-score-pick/src/lib.rs) is the shortest complete implementation. Its [filter](simple-filter-score-pick/src/filter.rs) uses raw device-overlap data. The [disaggregated policy](disagg-filter-score-pick/src/lib.rs) creates the complete flow for both worker types.
 
 The [stacked policy](simple-stacked-score-pick/src/lib.rs) shows why scorers use a `Vec`. The `Vec` stores an ordered stack. Each `Box<dyn WorkerScorer>` can hold a different scorer type:
