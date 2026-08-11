@@ -184,6 +184,9 @@ impl DisaggRequestState {
     pub(crate) fn build_prefill_request(&mut self) -> Result<DirectRequest> {
         let mut request = self.materialize_original_request()?.clone();
         request.max_output_tokens = request.max_output_tokens.min(1);
+        if let Some(output_token_ids) = request.output_token_ids.as_mut() {
+            output_token_ids.truncate(request.max_output_tokens);
+        }
         Ok(request)
     }
 
@@ -642,6 +645,11 @@ mod tests {
         let request = state.build_prefill_request().unwrap();
 
         assert_eq!(request.max_output_tokens, 1);
+        assert_eq!(
+            request.output_token_ids.as_ref().map(Vec::len),
+            Some(1),
+            "prefill request must retain only its one planned output token"
+        );
         assert!(request.tokens[..64].iter().all(|token| *token == 21));
         assert!(request.tokens[64..].iter().all(|token| *token == 22));
         assert!(state.materialized_tokens().unwrap().is_some());
