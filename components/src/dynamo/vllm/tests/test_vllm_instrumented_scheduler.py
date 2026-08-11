@@ -42,6 +42,7 @@ from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     InstrumentedScheduler,
     SkippedBenchmarkPoint,
     _BenchPhase,
+    _DecodePointStage,
 )
 
 pytestmark = [
@@ -268,6 +269,8 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     stub._schedule_times = deque([10.0])
     stub._last_update_time = 0.0
     stub._bench_active = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_decode_stage = _DecodePointStage.COMPLETE
     stub._bench_current_point = BenchmarkPoint(point_type="decode", benchmark_id=1)
     stub._extract_scheduled = MagicMock(
         return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
@@ -1139,6 +1142,7 @@ def test_benchmark_output_summary_must_match_point_before_go():
     # The synchronized output is the admission step, which runs one token
     # short per request (the steady step reads the full 128 afterwards).
     stub._bench_admission_kv_tokens = 126
+    stub._bench_decode_stage = _DecodePointStage.ADMITTING
     matching = {
         "total_num_scheduled_tokens": 2,
         "num_prefill_requests": 0,
@@ -1164,6 +1168,12 @@ def test_benchmark_output_summary_must_match_point_before_go():
         stub, point, full_context
     )
     assert error is not None, "the admission step must run one token short"
+
+    stub._bench_decode_stage = _DecodePointStage.MEASURING
+    assert (
+        InstrumentedScheduler._bench_output_validation_error(stub, point, full_context)
+        is None
+    )
 
 
 def test_dp_rank_falls_back_to_rank_when_index_absent():
@@ -1284,6 +1294,8 @@ def test_decode_sweep_empty_frame_attaches_kv_connector_metadata():
     out = InstrumentedScheduler.schedule(stub)
 
     assert out.kv_connector_metadata is sentinel
+    assert out.num_scheduled_tokens == {"__bench_0": 0}
+    stub._update_after_schedule.assert_not_called()
     connector.build_connector_meta.assert_called_once_with(out)
     # ec_connector is None on the stub; the ec field stays untouched.
     assert out.ec_connector_metadata is None
@@ -1302,6 +1314,8 @@ def test_decode_sweep_empty_frame_attaches_ec_connector_metadata_when_set():
 
     assert out.kv_connector_metadata is kv_meta
     assert out.ec_connector_metadata is ec_meta
+    assert out.num_scheduled_tokens == {"__bench_0": 0}
+    stub._update_after_schedule.assert_not_called()
     connector.build_connector_meta.assert_called_once_with(out)
     ec_connector.build_connector_meta.assert_called_once_with(out)
 
@@ -1317,6 +1331,57 @@ def test_decode_sweep_empty_frame_no_connector_leaves_metadata_none():
 
     assert out.kv_connector_metadata is None
     assert out.ec_connector_metadata is None
+    assert out.num_scheduled_tokens == {"__bench_0": 0}
+    stub._update_after_schedule.assert_not_called()
+
+
+def test_decode_retention_map_is_cleared_before_parent_output_update(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._last_update_time = 1.0
+    stub._cleanup_finished = MagicMock()
+    output = SimpleNamespace(
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={"__bench_0": 0},
+        finished_req_ids=set(),
+    )
+
+    def parent_update(_self, scheduler_output, _model_runner_output):
+        assert scheduler_output.num_scheduled_tokens == {}
+        return "parent-result"
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        parent_update,
+    )
+
+    result = InstrumentedScheduler._update_from_output(stub, output, object())
+
+    assert result == "parent-result"
+    assert stub._last_update_time == 0.0
+    stub._cleanup_finished.assert_called_once_with(output)
+
+
+def test_decode_retention_map_rejects_positive_work(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._last_update_time = 1.0
+    output = SimpleNamespace(
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={"__bench_0": 1},
+    )
+    parent_update = MagicMock()
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        parent_update,
+    )
+
+    with pytest.raises(RuntimeError, match="contains positive work"):
+        InstrumentedScheduler._update_from_output(stub, output, object())
+
+    parent_update.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -3217,6 +3282,7 @@ def test_decode_point_with_no_fpm_stops_waiting_at_deadline(monkeypatch):
     stub._bench_active_req_ids = {"request"}
     stub._bench_current_point = point
     stub._bench_current_fpms = []
+    stub._bench_decode_stage = _DecodePointStage.COMPLETE
     stub._bench_point_deadline = 1.0
     stub._bench_save_current_point = MagicMock(
         side_effect=RuntimeError("exactly one FPM")
@@ -3380,6 +3446,7 @@ def test_decode_injection_admits_one_token_short():
     assert stub._bench_admission_kv_tokens == 126
     assert stub._bench_extra_steps_left == 1
     assert stub._bench_expected_fpms == 2
+    assert stub._bench_decode_stage == _DecodePointStage.ADMITTING
     # No clamping: the point keeps its grid coordinate.
     assert stub._bench_current_point.total_kv_read_tokens == 128
     assert "context_clamped" not in stub._bench_current_point.sample_reasons
@@ -3413,20 +3480,26 @@ def test_steady_step_dispatch_then_wait_then_save():
     stub._bench_current_fpms = []
     stub._bench_extra_steps_left = 1
     stub._bench_expected_fpms = 2
+    stub._bench_decode_stage = _DecodePointStage.READY
     stub._bench_point_deadline = 0.0
-    steady_output = object()
+    stub._bench_current_point = BenchmarkPoint(point_type="decode", batch_size=1)
+    stub._bench_sync_pending = False
+    steady_output = SimpleNamespace(total_num_scheduled_tokens=1)
     stub._bench_make_steady_step = MagicMock(return_value=steady_output)
 
     assert InstrumentedScheduler._bench_step_decode(stub) is steady_output
     assert stub._bench_extra_steps_left == 0
+    assert stub._bench_decode_stage == _DecodePointStage.MEASURING
+    assert stub._bench_sync_pending is True
 
-    # Only the admission FPM has arrived: keep waiting, no save.
+    # The measured pass is in flight: keep waiting, no save.
     stub._bench_save_current_point = MagicMock()
     stub._bench_current_fpms = [{"admission": True}]
     assert InstrumentedScheduler._bench_step_decode(stub) is None
     stub._bench_save_current_point.assert_not_called()
 
-    # Second (steady) FPM arrived: save and enter drain.
+    # The measured pass completed: save and enter drain.
+    stub._bench_decode_stage = _DecodePointStage.COMPLETE
     stub._bench_current_fpms = [{"admission": True}, {"steady": True}]
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_transition_to_timeout_done = MagicMock(return_value=False)
@@ -3435,7 +3508,7 @@ def test_steady_step_dispatch_then_wait_then_save():
     assert stub._bench_drain_pending is True
 
 
-def test_steady_step_unavailable_waits_out_the_deadline():
+def test_steady_step_unavailable_fails_before_the_adp_measurement_barrier():
     import time
 
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
@@ -3444,12 +3517,15 @@ def test_steady_step_unavailable_waits_out_the_deadline():
     stub._bench_current_fpms = [{"admission": True}]
     stub._bench_extra_steps_left = 1
     stub._bench_expected_fpms = 2
+    stub._bench_decode_stage = _DecodePointStage.READY
     stub._bench_point_deadline = 0.0  # no deadline yet -> not timed out
     stub._bench_make_steady_step = MagicMock(return_value=None)
     stub._bench_save_current_point = MagicMock()
 
-    # Builder failed: no dispatch, no save, state intact for a retry.
-    assert InstrumentedScheduler._bench_step_decode(stub) is None
+    # Feasibility reserved this allocation. Fail fast so the schedule wrapper
+    # can abort peers instead of letting another rank wait at the barrier.
+    with pytest.raises(RuntimeError, match="reserved steady-state decode slots"):
+        InstrumentedScheduler._bench_step_decode(stub)
     stub._bench_save_current_point.assert_not_called()
     assert stub._bench_extra_steps_left == 1
 
@@ -3461,6 +3537,27 @@ def test_steady_step_unavailable_waits_out_the_deadline():
     stub._bench_transition_to_timeout_done = MagicMock(return_value=False)
     assert InstrumentedScheduler._bench_step_decode(stub) is None
     stub._bench_save_current_point.assert_called_once_with()
+
+
+def test_steady_step_rejects_a_partial_batch_before_dispatch():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_pending = False
+    stub._bench_active_req_ids = {"__bench_0", "__bench_1"}
+    stub._bench_current_point = BenchmarkPoint(point_type="decode", batch_size=2)
+    stub._bench_current_fpms = [{"admission": True}]
+    stub._bench_extra_steps_left = 1
+    stub._bench_expected_fpms = 2
+    stub._bench_decode_stage = _DecodePointStage.READY
+    stub._bench_point_deadline = 0.0
+    stub._bench_make_steady_step = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=1)
+    )
+
+    with pytest.raises(RuntimeError, match="scheduled 1 of 2 requests"):
+        InstrumentedScheduler._bench_step_decode(stub)
+
+    assert stub._bench_extra_steps_left == 1
+    assert stub._bench_decode_stage == _DecodePointStage.READY
 
 
 def test_make_steady_step_builds_production_shaped_output():
@@ -3625,25 +3722,30 @@ def test_two_step_group_skip_traverses_barrier_without_deadlock():
         ]
 
 
-def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
+def test_benchmark_stays_schedulable_while_decode_passes_are_in_flight():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._last_update_time = 100.0
-    stub._bench_current_point = BenchmarkPoint(point_type="decode")
-    stub._bench_expected_fpms = 2
-    stub._bench_current_fpms = [{"admission": True}]
-    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is True
+    stub._bench_active = True
 
-    stub._bench_current_fpms = []  # admission FPM not recorded yet
-    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+    for stage in (
+        _DecodePointStage.IDLE,
+        _DecodePointStage.ADMITTING,
+        _DecodePointStage.READY,
+        _DecodePointStage.MEASURING,
+        _DecodePointStage.COMPLETE,
+    ):
+        stub._bench_decode_stage = stage
+        assert InstrumentedScheduler.has_requests(stub) is True
 
-    stub._bench_current_fpms = [{"admission": True}]
-    stub._bench_expected_fpms = 1  # single-step point
-    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
 
-    stub._bench_expected_fpms = 2
-    stub._bench_current_point = BenchmarkPoint(point_type="prefill")
-    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+def test_completed_decode_outputs_advance_the_point_stage():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
 
-    stub._bench_current_point = BenchmarkPoint(point_type="decode")
-    stub._last_update_time = 0.0  # previous update was an empty step
-    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+    stub._bench_decode_stage = _DecodePointStage.ADMITTING
+    InstrumentedScheduler._bench_advance_decode_stage_after_output(stub)
+    assert stub._bench_decode_stage == _DecodePointStage.READY
+
+    stub._bench_decode_stage = _DecodePointStage.MEASURING
+    InstrumentedScheduler._bench_advance_decode_stage_after_output(stub)
+    assert stub._bench_decode_stage == _DecodePointStage.COMPLETE
