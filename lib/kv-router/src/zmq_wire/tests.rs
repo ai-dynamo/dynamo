@@ -114,6 +114,89 @@ fn test_deserialize_map_block_stored_cache_salt() {
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
+/// An empty-string `medium` is normalized to absent (like empty `cache_salt`),
+/// so an unset medium stays on the device tier and is indexed rather than
+/// failing closed as an unknown medium. Covers store and remove.
+#[test]
+fn test_deserialize_empty_medium_normalizes_to_absent_device() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    let stored = to_vec_named(&MapBlockStoredFixture {
+        medium: Some(String::new()),
+        ..Default::default()
+    })
+    .unwrap();
+    let stored: RawKvEvent = from_slice(&stored).unwrap();
+    assert_eq!(
+        stored.medium(),
+        None,
+        "empty medium must normalize to absent"
+    );
+    let placement =
+        convert_placement(stored, worker).expect("empty-medium store must be indexed, not dropped");
+    assert_eq!(placement.placement.tier, StorageTier::Device);
+
+    let removed = to_vec_named(&MapBlockRemovedFixtureWithMedium {
+        event_type: "BlockRemoved",
+        block_hashes: vec![BlockHashValue::Unsigned(11)],
+        medium: Some(String::new()),
+    })
+    .unwrap();
+    let removed: RawKvEvent = from_slice(&removed).unwrap();
+    assert_eq!(
+        removed.medium(),
+        None,
+        "empty medium must normalize to absent"
+    );
+}
+
+#[derive(Serialize)]
+struct MapBlockRemovedFixtureWithMedium {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    block_hashes: Vec<BlockHashValue>,
+    medium: Option<String>,
+}
+
+/// The empty-medium normalization must also cover legacy positional (tuple)
+/// events: an empty-string `medium` in the sequence slot decodes as absent and
+/// stays on the device tier. Covers store and remove.
+#[test]
+fn test_deserialize_legacy_sequence_empty_medium_normalizes_to_absent_device() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    let encoded_events = [
+        to_vec(&(
+            "BlockStored",
+            vec![BlockHashValue::Unsigned(11)],
+            Option::<BlockHashValue>::None,
+            vec![10u32, 11],
+            2usize,
+            Option::<u64>::None,
+            Some(String::new()),
+        ))
+        .unwrap(),
+        to_vec(&(
+            "BlockRemoved",
+            vec![BlockHashValue::Unsigned(11)],
+            Some(String::new()),
+        ))
+        .unwrap(),
+    ];
+
+    for encoded in encoded_events {
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+        assert_eq!(
+            event.medium(),
+            None,
+            "empty sequence medium must normalize to absent"
+        );
+        let placement = convert_placement(event, worker)
+            .expect("empty-medium legacy event must be indexed, not dropped");
+        assert_eq!(placement.placement.tier, StorageTier::Device);
+    }
+}
+
 #[test]
 fn test_deserialize_extra_keys_cache_namespace_fallback() {
     let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
@@ -1103,6 +1186,44 @@ fn test_preprocess_rejects_non_local_locality_for_every_tier() {
     }
 }
 
+/// Unrecognized media must be classified as filtered in `preprocess_with_reason`
+/// (reason `UnknownMedium`), so the listener records an intentional filter rather
+/// than accepting the event, burning a next_event_id, and dropping it only in
+/// conversion — an id gap the event processor misreads as an engine drop. This is
+/// the same trap the locality gate avoids. Recognized tiers are never filtered
+/// here: Device/HostPinned stay on the normalizer path and Disk/External bypass.
+#[test]
+fn test_preprocess_rejects_unknown_medium() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
+        for medium in ["FS", "OBJ", "XYZ"] {
+            let mut normalizer = ZmqEventNormalizer::new(2);
+            let raw = raw_placement_event(event_kind, Some(medium), Some(Locality::Local));
+            assert_eq!(
+                normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
+                ZmqEventFilterReason::UnknownMedium,
+                "medium={medium} must filter as unknown_medium"
+            );
+        }
+    }
+
+    // Recognized media are never rejected as unknown: GPU/CPU stay on the
+    // normalizer path and STORAGE takes the lower-tier bypass.
+    for medium in ["GPU", "CPU", "STORAGE"] {
+        let mut normalizer = ZmqEventNormalizer::new(2);
+        let raw = raw_placement_event(
+            TestEventKind::BlockStored,
+            Some(medium),
+            Some(Locality::Local),
+        );
+        assert!(
+            normalizer.preprocess_with_reason(raw, worker).is_ok(),
+            "recognized medium={medium} must pass preprocess"
+        );
+    }
+}
+
 /// Mixed-case locality (`"local"`, `"Remote"`) is not UPPERCASE, so it folds to
 /// `Unknown` and the event is dropped — it never decodes to a local placement.
 #[test]
@@ -1222,6 +1343,63 @@ fn test_lower_tier_events_do_not_pollute_cache_namespace_state() {
     let child = normalizer
         .preprocess(gpu_child, worker)
         .expect("STORAGE event must not make the parent ambiguous");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// Unrecognized media (e.g. vLLM 0.26.0 `FS` / `OBJ`, or any future string) must
+/// be dropped in conversion, never silently indexed on the device (G1) primary
+/// tree — for both store and remove, and regardless of locality.
+#[test]
+fn test_convert_event_rejects_unknown_medium_instead_of_defaulting_to_device() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
+        for medium in ["FS", "OBJ", "XYZ"] {
+            for locality in [None, Some(Locality::Local)] {
+                let raw = raw_placement_event(event_kind, Some(medium), locality);
+                assert!(
+                    convert_placement(raw, worker).is_none(),
+                    "unrecognized medium {medium} must be dropped (locality {locality:?})"
+                );
+            }
+        }
+    }
+}
+
+/// Unrecognized media (vLLM 0.26.0 `FS` / `OBJ`) fail closed in preprocess, so
+/// they never reach — let alone mutate — the salted-namespace state: a salted GPU
+/// hash stays `Namespaced` and later salted GPU children keep inheriting it.
+#[test]
+fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+
+    // An FS event reusing the same hash fails closed before any namespace work.
+    let fs_same_hash = namespaced_block_stored(1, None, None, "FS");
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(fs_same_hash, worker)
+            .unwrap_err(),
+        ZmqEventFilterReason::UnknownMedium
+    );
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    // The salted chain continuation still inherits the parent namespace.
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("unrecognized-media event must not make the parent ambiguous");
     let RawKvEvent::BlockStored {
         cache_namespace, ..
     } = child

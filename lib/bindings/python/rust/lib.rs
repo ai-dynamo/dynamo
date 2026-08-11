@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::{LocalModel, register_model_card};
+use dynamo_llm::local_model::{
+    LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
+};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
+#[cfg(feature = "custom-policy")]
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
@@ -34,6 +38,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -96,6 +103,9 @@ type PythonBidirectionalIngress = Ingress<
 
 static INIT: OnceCell<()> = OnceCell::new();
 
+#[cfg(feature = "custom-policy")]
+static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
+
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
 
@@ -150,13 +160,8 @@ fn create_request_context(
     }
 }
 
-/// A Python module implemented in Rust. The name of this function must match
-/// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
-/// import the module.
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // OTLP export no longer requires a pre-existing runtime
-    // so init unconditionally at import
+fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
     }
@@ -168,6 +173,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
+    m.add_function(wrap_pyfunction!(update_model_taints, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
@@ -252,6 +258,57 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+pub(crate) fn worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| registry.resolve(config))
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "custom-policy")]
+fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    dynamo_worker_selection_policy_catalog::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+    WORKER_SELECTION_POLICY_REGISTRY
+        .set(registry)
+        .map_err(|_| {
+            PyRuntimeError::new_err("worker-selection policy registry already installed")
+        })?;
+    register_core(m)
+}
+
+/// The extension-module entrypoint for a custom policy image.
+#[cfg(feature = "custom-policy")]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core_with_custom_worker_selection_policy(m)
+}
+
+/// The stock extension-module entrypoint.
+#[cfg(not(feature = "custom-policy"))]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core(m)
+}
+
 pub fn to_pyerr<E>(err: E) -> PyErr
 where
     E: Display,
@@ -305,6 +362,21 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 
 #[pyfunction(name = "run_select_service")]
 #[pyo3(signature = (argv=None))]
+#[cfg(feature = "select-service")]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || {
+        llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
+            argv,
+            worker_selection_policy_factory,
+        )
+    })
+    .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+#[cfg(not(feature = "select-service"))]
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_select_service_cli(argv))
@@ -689,6 +761,21 @@ fn unregister_model<'p>(
             .await
             .map_err(to_pyerr)?;
         Ok(())
+    })
+}
+
+/// Replace the caller-managed taints on this worker's registered model.
+#[pyfunction]
+#[pyo3(signature = (endpoint, taints))]
+fn update_model_taints<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    taints: std::collections::HashSet<String>,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        update_model_taints_rs(&endpoint.inner, taints)
+            .await
+            .map_err(to_pyerr)
     })
 }
 
