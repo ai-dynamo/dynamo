@@ -1,0 +1,22 @@
+{
+  "namespace": "dynamo-snapshot-poc",
+  "node": "replace-with-l40s-node",
+  "image_pull_secret": "replace-with-temporary-registry-secret-or-remove-this-field",
+  "source_image_digest": "registry.example/regolo-vllm@sha256:replace-with-64-hex",
+  "candidate_image_digest": "registry.example/regolo-vllm-snapshot@sha256:replace-with-64-hex",
+  "model_id": "replace-with-model-id",
+  "model_revision": "replace-with-model-commit",
+  "compatibility_hash": "replace-with-64-hex-compatibility-hash",
+  "original_command": [
+    "vllm",
+    "serve",
+    "replace-with-model-id",
+    "--revision",
+    "replace-with-model-commit",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8000"
+  ],
+  "snapshotctl": "/absolute/path/to/dist/snapshotctl"
+}

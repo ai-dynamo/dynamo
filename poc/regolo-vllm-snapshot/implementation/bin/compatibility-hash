@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+from snapshot_poc import compatibility_hash
+
+
+if len(sys.argv) != 2:
+    raise SystemExit(f"usage: {sys.argv[0]} IDENTITY.json")
+identity = json.loads(pathlib.Path(sys.argv[1]).read_text())
+print(compatibility_hash(identity))

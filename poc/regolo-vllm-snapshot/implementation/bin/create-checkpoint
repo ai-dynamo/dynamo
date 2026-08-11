@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--snapshotctl", type=pathlib.Path, required=True)
+parser.add_argument("--manifest", type=pathlib.Path, required=True)
+parser.add_argument("--namespace", required=True)
+parser.add_argument("--checkpoint-id", required=True)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+started = time.monotonic()
+command = [
+    str(args.snapshotctl), "checkpoint", "--manifest", str(args.manifest),
+    "--container", "server", "--namespace", args.namespace,
+    "--checkpoint-id", args.checkpoint_id, "--timeout", "45m",
+]
+result = subprocess.run(command, text=True, capture_output=True)
+duration = time.monotonic() - started
+if result.returncode:
+    raise SystemExit(result.stderr + result.stdout)
+fields = {}
+for line in result.stdout.splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        fields[key] = value
+
+agent = subprocess.run(
+    [
+        "kubectl", "-n", args.namespace, "get", "pod",
+        "-l", "app.kubernetes.io/component=snapshot-agent",
+        "-o", "jsonpath={.items[0].metadata.name}",
+    ], text=True, capture_output=True, check=True
+).stdout
+size_result = subprocess.run(
+    [
+        "kubectl", "-n", args.namespace, "exec", agent, "-c", "agent", "--",
+        "du", "-sb", fields.get("checkpoint_location", f"/checkpoints/{args.checkpoint_id}"),
+    ], text=True, capture_output=True
+)
+size_bytes = None
+if size_result.returncode == 0:
+    size_bytes = int(size_result.stdout.split()[0])
+metadata = {
+    "checkpoint_id": args.checkpoint_id,
+    "checkpoint_duration_s": duration,
+    "checkpoint_size_bytes": size_bytes,
+    "snapshotctl": fields,
+}
+args.output.parent.mkdir(parents=True, exist_ok=True)
+args.output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+json.dump(metadata, sys.stdout, sort_keys=True)
+sys.stdout.write("\n")

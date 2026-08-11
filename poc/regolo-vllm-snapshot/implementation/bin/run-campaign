@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Execute the frozen 20-run A/B order and retain every black-box result."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def checked(command, **kwargs):
+    result = subprocess.run(command, text=True, capture_output=True, **kwargs)
+    if result.returncode:
+        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(command)}\n{result.stderr}")
+    return result.stdout
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--campaign", type=pathlib.Path, required=True)
+parser.add_argument("--run-plan", type=pathlib.Path, required=True)
+parser.add_argument("--key", type=pathlib.Path, required=True)
+parser.add_argument("--checkpoint-metadata", type=pathlib.Path, required=True)
+parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+campaign = json.loads(args.campaign.read_text())
+plan = json.loads(args.run_plan.read_text())
+key = json.loads(args.key.read_text())
+checkpoint = json.loads(args.checkpoint_metadata.read_text())
+if campaign.get("compatibility_hash") != checkpoint.get("checkpoint_id"):
+    raise SystemExit("campaign compatibility_hash does not match checkpoint_id")
+args.output_dir.mkdir(parents=True, exist_ok=True)
+events_dir = args.output_dir / "events"
+manifests_dir = args.output_dir / "manifests"
+events_dir.mkdir(exist_ok=True)
+manifests_dir.mkdir(exist_ok=True)
+results_path = args.output_dir / "results.jsonl"
+if results_path.exists() and results_path.read_text().strip():
+    raise SystemExit("refusing to append to a non-empty results.jsonl")
+
+for index, run in enumerate(plan):
+    mode = key[run["opaque_arm"]]
+    pod = run["run_id"]
+    manifest = manifests_dir / f"{run['run_id']}.json"
+    image = campaign["source_image_digest"] if mode == "cold" else campaign["candidate_image_digest"]
+    render_command = [
+            str(ROOT / "implementation/bin/render-pod"), "--mode", mode if mode == "cold" else "snapshot",
+            "--namespace", campaign["namespace"], "--pod-name", pod, "--run-id", run["run_id"],
+            "--node", campaign["node"], "--image", image, "--model", campaign["model_id"],
+            "--model-revision", campaign["model_revision"], "--original-command-json",
+            json.dumps(campaign["original_command"]), "--output", str(manifest),
+        ]
+    if campaign.get("image_pull_secret"):
+        render_command.extend(["--image-pull-secret", campaign["image_pull_secret"]])
+    checked(render_command)
+    try:
+        if mode == "cold":
+            checked(["kubectl", "create", "-f", str(manifest)])
+        else:
+            checked(
+                [
+                    campaign["snapshotctl"], "restore", "--manifest", str(manifest),
+                    "--containers", "server", "--namespace", campaign["namespace"],
+                    "--checkpoint-id", checkpoint["checkpoint_id"],
+                ]
+            )
+        checked(
+            [
+                "kubectl", "-n", campaign["namespace"], "wait",
+                "--for=jsonpath={.status.phase}=Running", f"pod/{pod}", "--timeout=30m",
+            ]
+        )
+        observer = subprocess.run(
+            [
+                sys.executable, str(ROOT / "verification/v0/harness/blackbox.py"),
+                "--namespace", campaign["namespace"], "--pod", pod, "--container", "server",
+                "--run-id", run["run_id"], "--block", str(run["block"]),
+                "--opaque-arm", run["opaque_arm"], "--model", campaign["model_id"],
+                "--local-port", str(18000 + index), "--events-out",
+                str(events_dir / f"{run['run_id']}.json"),
+            ], text=True, capture_output=True
+        )
+        try:
+            record = json.loads(observer.stdout.splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            record = {
+                "run_id": run["run_id"], "block": run["block"],
+                "opaque_arm": run["opaque_arm"], "valid_response": False,
+                "excluded": False, "error": observer.stderr or "observer produced no record",
+            }
+        if mode == "restore":
+            status = subprocess.run(
+                [
+                    "kubectl", "-n", campaign["namespace"], "get", "pod", pod,
+                    "-o", "jsonpath={.metadata.annotations.nvidia\\.com/snapshot-restore-status\\.server}",
+                ], text=True, capture_output=True
+            ).stdout
+            record["restore_success"] = status == "completed"
+        else:
+            record["restore_success"] = None
+        if index == 0:
+            record["checkpoint_duration_s"] = checkpoint.get("checkpoint_duration_s")
+            record["checkpoint_size_bytes"] = checkpoint.get("checkpoint_size_bytes")
+        else:
+            record["checkpoint_duration_s"] = None
+            record["checkpoint_size_bytes"] = None
+    except Exception as error:
+        raw_events = subprocess.run(
+            [
+                "kubectl", "-n", campaign["namespace"], "get", "events",
+                "--field-selector", f"involvedObject.name={pod}", "-o", "json",
+            ], text=True, capture_output=True
+        )
+        if raw_events.stdout:
+            (events_dir / f"{run['run_id']}.json").write_text(raw_events.stdout)
+        record = {
+            "run_id": run["run_id"], "block": run["block"], "opaque_arm": run["opaque_arm"],
+            "valid_response": False, "restore_success": False if mode == "restore" else None,
+            "excluded": False, "exclusion_reason": None, "cluster_incident_evidence": None,
+            "error": type(error).__name__ + ": " + str(error),
+            "checkpoint_duration_s": checkpoint.get("checkpoint_duration_s") if index == 0 else None,
+            "checkpoint_size_bytes": checkpoint.get("checkpoint_size_bytes") if index == 0 else None,
+        }
+    with results_path.open("a") as stream:
+        stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    subprocess.run(
+        [
+            "kubectl", "-n", campaign["namespace"], "delete", "pod", pod,
+            "--ignore-not-found=true", "--wait=true", "--timeout=5m",
+        ], text=True, capture_output=True
+    )
+
+print(results_path)

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${NAMESPACE:?set the exact PoC namespace}"
+: "${CONFIRM_DELETE_NAMESPACE:?set CONFIRM_DELETE_NAMESPACE to the same namespace after retention approval}"
+if [[ "$NAMESPACE" != "$CONFIRM_DELETE_NAMESPACE" ]] || [[ ! "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+  echo "namespace confirmation mismatch or invalid namespace" >&2
+  exit 64
+fi
+kubectl get namespace "$NAMESPACE" -o json
+kubectl delete namespace "$NAMESPACE" --wait=true --timeout=30m
+echo "Deleted namespace $NAMESPACE, including its namespace-local PVC and checkpoint. Recovery depends on storage-provider retention policy."

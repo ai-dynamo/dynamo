@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Read-only hard gates for an already prepared PoC namespace."""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+
+
+def run(*command):
+    result = subprocess.run(command, text=True, capture_output=True)
+    if result.returncode:
+        raise SystemExit(f"{' '.join(command)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--namespace", required=True)
+parser.add_argument("--node", required=True)
+parser.add_argument("--gpu-probe-pod", required=True)
+parser.add_argument("--pvc", default="snapshot-pvc")
+parser.add_argument("--storage-encryption-confirmed", action="store_true")
+args = parser.parse_args()
+
+failures = []
+node = json.loads(run("kubectl", "get", "node", args.node, "-o", "json"))
+if node["status"]["nodeInfo"]["architecture"] != "amd64":
+    failures.append("node architecture is not amd64")
+runtime = node["status"]["nodeInfo"].get("containerRuntimeVersion", "")
+if not (runtime.startswith("containerd://") or runtime.startswith("cri-o://")):
+    failures.append(f"unsupported CRI runtime {runtime!r}")
+
+gpu = run(
+    "kubectl", "-n", args.namespace, "exec", args.gpu_probe_pod, "-c", "server", "--",
+    "nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"
+).strip().splitlines()
+if len(gpu) != 1:
+    failures.append(f"expected exactly one visible GPU, got {len(gpu)}")
+else:
+    product, driver = [part.strip() for part in gpu[0].split(",", 1)]
+    if product != "NVIDIA L40S":
+        failures.append(f"GPU is {product!r}, expected 'NVIDIA L40S'")
+    major = int(re.match(r"\d+", driver).group()) if re.match(r"\d+", driver) else 0
+    if major < 580:
+        failures.append(f"NVIDIA driver {driver} is below the pinned minimum 580")
+
+pvc = json.loads(run("kubectl", "-n", args.namespace, "get", "pvc", args.pvc, "-o", "json"))
+if pvc.get("status", {}).get("phase") != "Bound":
+    failures.append("checkpoint PVC is not Bound")
+if pvc["spec"]["resources"]["requests"].get("storage") != "1Ti":
+    failures.append("checkpoint PVC request is not exactly 1Ti")
+if not args.storage_encryption_confirmed:
+    failures.append("storage encryption was not explicitly confirmed")
+
+daemonset = json.loads(
+    run("kubectl", "-n", args.namespace, "get", "daemonset", "snapshot-agent", "-o", "json")
+)
+if daemonset["status"].get("desiredNumberScheduled") != 1:
+    failures.append("snapshot-agent is not restricted to exactly one node")
+if daemonset["status"].get("numberReady") != 1:
+    failures.append("snapshot-agent is not Ready")
+
+auth = run(
+    "kubectl", "auth", "can-i", "list", "pods", "--as",
+    f"system:serviceaccount:{args.namespace}:snapshot-agent", "--all-namespaces"
+).strip()
+if auth == "yes":
+    failures.append("snapshot-agent service account can list pods cluster-wide")
+
+result = {"passed": not failures, "failures": failures, "runtime": runtime, "gpu": gpu}
+json.dump(result, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+raise SystemExit(0 if not failures else 1)

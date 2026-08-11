@@ -1,0 +1,31 @@
+{
+  "protocol_version": "V0.1",
+  "seed": 20260811,
+  "paired_blocks": 10,
+  "runs_per_arm": 10,
+  "timeout_seconds": 1800,
+  "primary_metric": "pod_creation_to_first_token_seconds",
+  "null_hypothesis": "restore does not improve cold-start latency",
+  "outlier_policy": "none",
+  "exclusion_policy": "documented_cluster_incident_only_repeat_complete_pair",
+  "go": {
+    "restore_successes_required": 10,
+    "valid_responses_required": 20,
+    "max_paired_gpu_memory_relative_delta": 0.05,
+    "minimum_median_speedup": 3.0
+  },
+  "pinned": {
+    "dynamo_version": "v1.3.0",
+    "dynamo_commit": "8ce9e22f11576402102ea9d8b8e46233f5430a0d",
+    "gpu_count": 1,
+    "gpu_product": "NVIDIA L40S",
+    "workload_container": "server"
+  },
+  "scope_exclusions": [
+    "GMS",
+    "multi-GPU",
+    "cross-node restore",
+    "autoscaling",
+    "customer traffic"
+  ]
+}

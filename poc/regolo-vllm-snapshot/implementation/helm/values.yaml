@@ -1,0 +1,35 @@
+runtime:
+  type: containerd
+
+storage:
+  type: pvc
+  accessMode: agentMount
+  pvc:
+    create: true
+    name: snapshot-pvc
+    size: 1Ti
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    basePath: /checkpoints
+
+daemonset:
+  image:
+    repository: nvcr.io/nvidia/ai-dynamo/snapshot-agent@sha256
+    tag: f329bdb3d8fd6b8780d6a0af55da2e5b4ee7b8c6e82d3e1ba5ee1c73fccb59dc
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  nodeSelector: {}
+  initContainer:
+    image: docker.io/library/busybox@sha256:7a3ebe5bfd1a4a19797d20b0c0bb39d44393e9a03fd852c0865b0f540d868df0
+
+serviceAccount:
+  create: true
+  name: snapshot-agent
+
+# Supplied separately so no cluster-scoped ResourceSlice role is rendered.
+rbac:
+  create: false
+  namespaceRestricted: true
+
+seccomp:
+  deploy: true

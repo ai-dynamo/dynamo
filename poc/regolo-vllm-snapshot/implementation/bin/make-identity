@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import pathlib
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--manifest", type=pathlib.Path, required=True)
+parser.add_argument("--image-digest", required=True)
+parser.add_argument("--model-revision", required=True)
+parser.add_argument("--gpu-product", default="NVIDIA L40S")
+parser.add_argument("--driver-version", required=True)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+manifest = json.loads(args.manifest.read_text())
+spec = manifest["spec"]
+containers = [item for item in spec["containers"] if item["name"] == "server"]
+if len(containers) != 1:
+    raise SystemExit("manifest must contain exactly one container named server")
+container = containers[0]
+if container.get("image") != args.image_digest:
+    raise SystemExit("manifest server image does not equal --image-digest")
+container_args = container.get("args", [])
+if "--revision" not in container_args:
+    raise SystemExit("manifest command does not pin --revision")
+revision_index = container_args.index("--revision")
+if revision_index + 1 >= len(container_args) or container_args[revision_index + 1] != args.model_revision:
+    raise SystemExit("manifest --revision does not equal --model-revision")
+identity = {
+    "image_digest": args.image_digest,
+    "model_revision": args.model_revision,
+    "gpu_product": args.gpu_product,
+    "driver_version": args.driver_version,
+    "command": container.get("command", []),
+    "args": container.get("args", []),
+    "pod_spec": spec,
+}
+args.output.parent.mkdir(parents=True, exist_ok=True)
+args.output.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")

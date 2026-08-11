@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import pathlib
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=("cold", "snapshot"), required=True)
+parser.add_argument("--namespace", required=True)
+parser.add_argument("--pod-name", required=True)
+parser.add_argument("--run-id", required=True)
+parser.add_argument("--node", required=True)
+parser.add_argument("--image", required=True)
+parser.add_argument("--model", required=True)
+parser.add_argument("--model-revision", required=True)
+parser.add_argument("--original-command-json", required=True)
+parser.add_argument("--image-pull-secret")
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+manifest = json.loads((ROOT / "implementation/k8s/pod.template.json").read_text())
+replacements = {
+    "__NAMESPACE__": args.namespace,
+    "__POD_NAME__": args.pod_name,
+    "__RUN_ID__": args.run_id,
+    "__NODE_NAME__": args.node,
+    "__IMAGE__": args.image,
+    "__MODEL_ID__": args.model,
+    "__MODEL_REVISION__": args.model_revision,
+}
+
+
+def replace(value):
+    if isinstance(value, str):
+        for old, new in replacements.items():
+            value = value.replace(old, new)
+        return value
+    if isinstance(value, list):
+        return [replace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: replace(item) for key, item in value.items()}
+    return value
+
+
+manifest = replace(manifest)
+if args.image_pull_secret:
+    manifest["spec"]["imagePullSecrets"] = [{"name": args.image_pull_secret}]
+command = json.loads(args.original_command_json)
+if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
+    raise SystemExit("--original-command-json must be a non-empty JSON string array")
+container = manifest["spec"]["containers"][0]
+if args.mode == "cold":
+    container["command"] = [command[0]]
+    container["args"] = command[1:]
+    container["env"] = []
+    container["readinessProbe"] = {
+        "httpGet": {"path": "/health", "port": 8000},
+        "periodSeconds": 1,
+        "failureThreshold": 1800,
+    }
+else:
+    container["command"] = ["/usr/local/bin/snapshot-entrypoint", "--"]
+    container["args"] = command
+args.output.parent.mkdir(parents=True, exist_ok=True)
+args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

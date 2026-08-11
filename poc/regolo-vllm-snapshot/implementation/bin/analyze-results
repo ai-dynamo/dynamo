@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import math
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+from snapshot_poc import summarize, summarize_blinded
+
+
+def json_safe(value):
+    if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
+        return "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    return value
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--results", type=pathlib.Path, required=True)
+parser.add_argument("--key", type=pathlib.Path, required=True)
+parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+args = parser.parse_args()
+records = [json.loads(line) for line in args.results.read_text().splitlines() if line.strip()]
+args.output_dir.mkdir(parents=True, exist_ok=True)
+
+# Seal the blinded aggregation on disk before the key is opened.
+blinded = json.dumps(summarize_blinded(records), indent=2, sort_keys=True) + "\n"
+blinded_path = args.output_dir / "blinded-summary.json"
+blinded_path.write_text(blinded)
+(args.output_dir / "blinded-summary.sha256").write_text(
+    hashlib.sha256(blinded.encode()).hexdigest() + "  blinded-summary.json\n"
+)
+
+key = json.loads(args.key.read_text())
+report = summarize(records, key)
+(args.output_dir / "final-report.json").write_text(
+    json.dumps(json_safe(report), indent=2, sort_keys=True, allow_nan=False) + "\n"
+)
+print(report["decision"])

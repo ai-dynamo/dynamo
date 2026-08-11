@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Collect the 10 pre-I1 cold starts with the frozen observer."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+parser = argparse.ArgumentParser()
+parser.add_argument("--campaign", type=pathlib.Path, required=True)
+parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+args = parser.parse_args()
+campaign = json.loads(args.campaign.read_text())
+args.output_dir.mkdir(parents=True, exist_ok=True)
+events = args.output_dir / "events"
+manifests = args.output_dir / "manifests"
+events.mkdir(exist_ok=True)
+manifests.mkdir(exist_ok=True)
+results = args.output_dir / "baseline.jsonl"
+if results.exists() and results.read_text().strip():
+    raise SystemExit("refusing to append to non-empty baseline.jsonl")
+
+for index in range(1, 11):
+    run_id = f"v0-cold-{index:02d}"
+    pod = run_id
+    manifest = manifests / f"{run_id}.json"
+    render_command = [
+            str(ROOT / "implementation/bin/render-pod"), "--mode", "cold",
+            "--namespace", campaign["namespace"], "--pod-name", pod, "--run-id", run_id,
+            "--node", campaign["node"], "--image", campaign["source_image_digest"],
+            "--model", campaign["model_id"], "--model-revision", campaign["model_revision"],
+            "--original-command-json", json.dumps(campaign["original_command"]),
+            "--output", str(manifest),
+        ]
+    if campaign.get("image_pull_secret"):
+        render_command.extend(["--image-pull-secret", campaign["image_pull_secret"]])
+    render = subprocess.run(render_command, text=True, capture_output=True)
+    if render.returncode:
+        raise SystemExit(render.stderr)
+    create = subprocess.run(["kubectl", "create", "-f", str(manifest)], text=True, capture_output=True)
+    if create.returncode:
+        raise SystemExit(create.stderr)
+    running = subprocess.run(
+        [
+            "kubectl", "-n", campaign["namespace"], "wait",
+            "--for=jsonpath={.status.phase}=Running", f"pod/{pod}", "--timeout=30m",
+        ], text=True, capture_output=True
+    )
+    if running.returncode:
+        raw_events = subprocess.run(
+            [
+                "kubectl", "-n", campaign["namespace"], "get", "events",
+                "--field-selector", f"involvedObject.name={pod}", "-o", "json",
+            ], text=True, capture_output=True
+        )
+        (events / f"{run_id}.json").write_text(raw_events.stdout)
+        raise SystemExit(running.stderr)
+    observed = subprocess.run(
+        [
+            sys.executable, str(ROOT / "verification/v0/harness/blackbox.py"),
+            "--namespace", campaign["namespace"], "--pod", pod, "--run-id", run_id,
+            "--block", str(index), "--opaque-arm", "A", "--model", campaign["model_id"],
+            "--local-port", str(17000 + index), "--events-out", str(events / f"{run_id}.json"),
+        ], text=True, capture_output=True
+    )
+    if not observed.stdout.strip():
+        raise SystemExit(observed.stderr or "observer produced no baseline record")
+    with results.open("a") as stream:
+        stream.write(observed.stdout.splitlines()[-1] + "\n")
+    subprocess.run(
+        [
+            "kubectl", "-n", campaign["namespace"], "delete", "pod", pod,
+            "--ignore-not-found=true", "--wait=true", "--timeout=5m",
+        ], text=True, capture_output=True
+    )
+print(results)

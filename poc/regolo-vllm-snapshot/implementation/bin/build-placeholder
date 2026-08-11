@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+dynamo_commit=8ce9e22f11576402102ea9d8b8e46233f5430a0d
+snapshot_agent_image=nvcr.io/nvidia/ai-dynamo/snapshot-agent@sha256:f329bdb3d8fd6b8780d6a0af55da2e5b4ee7b8c6e82d3e1ba5ee1c73fccb59dc
+cuda_checkpoint_source_commit=00d5cce84c628088d6caa203fc4af40c1538b6f7
+: "${REGOLO_IMAGE_DIGEST:?set REGOLO_IMAGE_DIGEST to the exact image@sha256 digest}"
+: "${PLACEHOLDER_IMAGE:?set PLACEHOLDER_IMAGE to the output registry tag}"
+
+if [[ ! "$REGOLO_IMAGE_DIGEST" =~ @sha256:[0-9a-f]{64}$ ]]; then
+  echo "REGOLO_IMAGE_DIGEST must be immutable image@sha256:<64 lowercase hex>" >&2
+  exit 64
+fi
+
+source_dir=$(mktemp -d)
+trap 'rm -rf -- "$source_dir"' EXIT
+git -C "$source_dir" init -q
+git -C "$source_dir" remote add origin https://github.com/ai-dynamo/dynamo.git
+git -C "$source_dir" fetch --depth 1 origin "$dynamo_commit"
+git -C "$source_dir" checkout -q FETCH_HEAD
+test "$(git -C "$source_dir" rev-parse HEAD)" = "$dynamo_commit"
+python3 - "$source_dir/deploy/snapshot/Dockerfile" "$cuda_checkpoint_source_commit" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+revision = sys.argv[2]
+old = "RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint"
+new = (
+    "RUN git init /tmp/cuda-checkpoint "
+    "&& cd /tmp/cuda-checkpoint "
+    "&& git remote add origin https://github.com/NVIDIA/cuda-checkpoint.git "
+    f"&& git fetch --depth 1 origin {revision} "
+    "&& git checkout FETCH_HEAD"
+)
+body = path.read_text()
+if body.count(old) != 1:
+    raise SystemExit("unexpected upstream cuda-checkpoint clone instruction")
+path.write_text(body.replace(old, new))
+PY
+
+tools_image="dynamo-snapshot-placeholder-tools:${dynamo_commit:0:12}"
+docker build --platform linux/amd64 \
+  --target placeholder \
+  --build-arg "BASE_IMAGE=$REGOLO_IMAGE_DIGEST" \
+  --tag "$tools_image" \
+  --file "$source_dir/deploy/snapshot/Dockerfile" \
+  "$source_dir/deploy/snapshot"
+
+docker build --platform linux/amd64 \
+  --build-arg "SNAPSHOT_TOOLS_IMAGE=$tools_image" \
+  --build-arg "SNAPSHOT_AGENT_IMAGE=$snapshot_agent_image" \
+  --label "org.opencontainers.image.base.name=$REGOLO_IMAGE_DIGEST" \
+  --label "org.opencontainers.image.revision=$dynamo_commit" \
+  --tag "$PLACEHOLDER_IMAGE" \
+  "$project_dir/implementation/image"
+
+docker image inspect "$PLACEHOLDER_IMAGE" \
+  --format 'candidate={{index .RepoTags 0}} local_image_id={{.Id}}'

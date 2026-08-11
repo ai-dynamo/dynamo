@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import pathlib
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("directory", type=pathlib.Path)
+args = parser.parse_args()
+root = args.directory.resolve()
+checksum = root / "SHA256SUMS"
+files = sorted(path for path in root.rglob("*") if path.is_file() and path != checksum)
+lines = []
+for path in files:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    lines.append(f"{digest}  {path.relative_to(root)}")
+checksum.write_text("\n".join(lines) + "\n")
+print(checksum)

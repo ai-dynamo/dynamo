@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+control_dir=${DYN_SNAPSHOT_CONTROL_DIR:-/snapshot-control}
+
+if [ "${DYN_SNAPSHOT_RESTORE_STANDBY:-0}" = "1" ]; then
+    exec sleep infinity
+fi
+
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+if [ "$#" -eq 0 ]; then
+    echo "snapshot-entrypoint: missing original vLLM command after --" >&2
+    exit 64
+fi
+if [ -z "${SNAPSHOT_READY_URL:-}" ]; then
+    echo "snapshot-entrypoint: SNAPSHOT_READY_URL is required" >&2
+    exit 64
+fi
+
+mkdir -p "$control_dir"
+rm -f "$control_dir/ready-for-snapshot"
+"$@" &
+child_pid=$!
+trap 'kill -TERM "$child_pid" 2>/dev/null || true' INT TERM
+
+python3 - "$SNAPSHOT_READY_URL" "${SNAPSHOT_READY_TIMEOUT_SECONDS:-1800}" "$child_pid" <<'PY'
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url, timeout, pid = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+deadline = time.monotonic() + timeout
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit("vLLM exited before snapshot readiness")
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            if response.status == 200:
+                raise SystemExit(0)
+    except (urllib.error.URLError, TimeoutError):
+        pass
+    time.sleep(0.25)
+raise SystemExit(f"snapshot readiness timed out after {timeout:g}s")
+PY
+
+touch "$control_dir/ready-for-snapshot"
+wait "$child_pid"

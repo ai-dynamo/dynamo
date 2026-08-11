@@ -1,0 +1,61 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "snapshot-agent",
+        "namespace": "__NAMESPACE__"
+      },
+      "rules": [
+        {
+          "apiGroups": [""],
+          "resources": ["pods"],
+          "verbs": ["get", "list", "watch", "patch", "update"]
+        },
+        {
+          "apiGroups": ["batch"],
+          "resources": ["jobs"],
+          "verbs": ["get", "patch", "update"]
+        },
+        {
+          "apiGroups": ["coordination.k8s.io"],
+          "resources": ["leases"],
+          "verbs": ["get", "create", "update", "delete"]
+        },
+        {
+          "apiGroups": [""],
+          "resources": ["events"],
+          "verbs": ["create"]
+        },
+        {
+          "apiGroups": ["resource.k8s.io"],
+          "resources": ["resourceclaims"],
+          "verbs": ["get", "list"]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "snapshot-agent",
+        "namespace": "__NAMESPACE__"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "snapshot-agent"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "snapshot-agent",
+          "namespace": "__NAMESPACE__"
+        }
+      ]
+    }
+  ]
+}

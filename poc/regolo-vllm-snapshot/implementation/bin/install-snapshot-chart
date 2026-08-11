@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+dynamo_commit=8ce9e22f11576402102ea9d8b8e46233f5430a0d
+: "${NAMESPACE:?set the temporary PoC namespace}"
+: "${NODE_NAME:?set the single L40S node name}"
+runtime_type=${RUNTIME_TYPE:-containerd}
+storage_class=${STORAGE_CLASS:-}
+
+case "$NAMESPACE$NODE_NAME" in
+  *[!a-zA-Z0-9._-]*) echo "namespace/node contains unsupported characters" >&2; exit 64 ;;
+esac
+
+source_dir=$(mktemp -d)
+rbac_file=$(mktemp)
+trap 'rm -rf -- "$source_dir"; rm -f -- "$rbac_file"' EXIT
+git -C "$source_dir" init -q
+git -C "$source_dir" remote add origin https://github.com/ai-dynamo/dynamo.git
+git -C "$source_dir" fetch --depth 1 origin "$dynamo_commit"
+git -C "$source_dir" checkout -q FETCH_HEAD
+test "$(git -C "$source_dir" rev-parse HEAD)" = "$dynamo_commit"
+
+kubectl create namespace "$NAMESPACE" --dry-run=client -o json | kubectl apply -f -
+python3 - "$project_dir/implementation/k8s/rbac.json" "$NAMESPACE" "$rbac_file" <<'PY'
+import pathlib, sys
+source, namespace, output = sys.argv[1:]
+pathlib.Path(output).write_text(pathlib.Path(source).read_text().replace("__NAMESPACE__", namespace))
+PY
+kubectl apply -f "$rbac_file"
+
+helm_args=(
+  upgrade --install snapshot "$source_dir/deploy/helm/charts/snapshot"
+  --namespace "$NAMESPACE"
+  --values "$project_dir/implementation/helm/values.yaml"
+  --set-string "runtime.type=$runtime_type"
+  --set-string "storage.pvc.storageClass=$storage_class"
+  --set-string "daemonset.nodeSelector.kubernetes\.io/hostname=$NODE_NAME"
+  --wait --timeout 10m
+)
+if [[ -n "${IMAGE_PULL_SECRET:-}" ]]; then
+  helm_args+=(--set-string "daemonset.imagePullSecrets[0].name=$IMAGE_PULL_SECRET")
+fi
+helm "${helm_args[@]}"
+
+kubectl -n "$NAMESPACE" rollout status daemonset/snapshot-agent --timeout=10m
+kubectl -n "$NAMESPACE" get daemonset,pod,pvc -o wide

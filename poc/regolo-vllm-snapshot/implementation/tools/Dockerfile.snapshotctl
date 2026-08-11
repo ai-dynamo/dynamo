@@ -1,0 +1,9 @@
+ARG GO_VERSION=1.26.3
+FROM golang:${GO_VERSION} AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-w -s" -o /snapshotctl ./cmd/snapshotctl
+
+FROM scratch AS export
+COPY --from=builder /snapshotctl /snapshotctl
