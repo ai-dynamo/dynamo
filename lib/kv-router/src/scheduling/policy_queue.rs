@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::queue_admission::{
-    PolicyQueueDecision, PolicyQueueEvent, PolicyQueueId, PolicyQueuePolicy, PolicyQueueRequest,
-    PolicyQueueWorker, WorkerPlacement,
+    QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
+    QueueAdmissionRequest, QueueAdmissionWorker, WorkerPlacement,
 };
 use super::types::SessionContext;
 use crate::protocols::WorkerWithDpRank;
@@ -418,10 +418,10 @@ impl<T> PolicyClassQueue<T> {
 
 pub struct PolicyQueue<T> {
     classes: Vec<PolicyClassQueue<T>>,
-    deferred: FxHashMap<PolicyQueueId, DeferredPolicyEntry<T>>,
-    policy: Option<Box<dyn PolicyQueuePolicy>>,
-    policy_ready: Vec<PolicyQueueId>,
-    next_policy_id: u64,
+    deferred: FxHashMap<QueueAdmissionId, DeferredAdmissionEntry<T>>,
+    admission_policy: Option<Box<dyn QueueAdmissionPolicy>>,
+    admission_ready: Vec<QueueAdmissionId>,
+    next_admission_id: u64,
     round_cursor: usize,
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
@@ -429,7 +429,7 @@ pub struct PolicyQueue<T> {
     candidates: Vec<Option<DispatchCandidate>>,
 }
 
-struct DeferredPolicyEntry<T> {
+struct DeferredAdmissionEntry<T> {
     placement: WorkerPlacement,
     entry: PolicyQueueEntry<T>,
 }
@@ -454,9 +454,9 @@ impl<T> PolicyQueue<T> {
                 })
                 .collect(),
             deferred: FxHashMap::default(),
-            policy: None,
-            policy_ready: Vec::new(),
-            next_policy_id: 0,
+            admission_policy: None,
+            admission_ready: Vec::new(),
+            next_admission_id: 0,
             round_cursor: 0,
             carry_class: None,
             next_enqueue_seq: 0,
@@ -465,55 +465,58 @@ impl<T> PolicyQueue<T> {
         }
     }
 
-    pub(crate) fn with_policy(mut self, policy: Box<dyn PolicyQueuePolicy>) -> Self {
-        self.policy = Some(policy);
+    pub(crate) fn with_admission_policy(mut self, policy: Box<dyn QueueAdmissionPolicy>) -> Self {
+        self.admission_policy = Some(policy);
         self
     }
 
-    pub(crate) fn has_policy(&self) -> bool {
-        self.policy.is_some()
+    pub(crate) fn has_admission_policy(&self) -> bool {
+        self.admission_policy.is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn admit_policy(
+    pub(crate) fn admit_with_admission_policy(
         &mut self,
         request_id: &str,
         context_tokens: usize,
         session_context: Option<&SessionContext>,
-        workers: &[PolicyQueueWorker],
-    ) -> Option<(PolicyQueueId, PolicyQueueDecision)> {
-        let policy = self.policy.as_mut()?;
-        let id = PolicyQueueId::new(self.next_policy_id);
-        self.next_policy_id = self.next_policy_id.wrapping_add(1);
-        let decision = policy.admit(PolicyQueueRequest::new(
+        workers: &[QueueAdmissionWorker],
+    ) -> Option<(QueueAdmissionId, QueueAdmissionDecision)> {
+        let policy = self.admission_policy.as_mut()?;
+        let id = QueueAdmissionId::new(self.next_admission_id);
+        self.next_admission_id = self.next_admission_id.wrapping_add(1);
+        let decision = policy.admit(QueueAdmissionRequest::new(
             id,
             request_id,
             context_tokens,
             session_context,
             workers,
         ));
-        (!matches!(decision, PolicyQueueDecision::Bypass)).then_some((id, decision))
+        (!matches!(decision, QueueAdmissionDecision::Bypass)).then_some((id, decision))
     }
 
-    pub(crate) fn policy_event(&mut self, event: PolicyQueueEvent<'_>) -> bool {
-        let Some(policy) = self.policy.as_mut() else {
+    pub(crate) fn admission_event(&mut self, event: QueueAdmissionEvent<'_>) -> bool {
+        let Some(policy) = self.admission_policy.as_mut() else {
             return false;
         };
-        let mut ready = std::mem::take(&mut self.policy_ready);
+        let mut ready = std::mem::take(&mut self.admission_ready);
         ready.clear();
         policy.on_event(event, &mut ready);
 
         let mut made_ready = false;
         for id in ready.drain(..) {
             let Some(deferred) = self.deferred.remove(&id) else {
-                tracing::debug!(policy_queue_id = id.get(), "Ignoring unknown queue wake-up");
+                tracing::debug!(
+                    queue_admission_id = id.get(),
+                    "Ignoring unknown queue wake-up"
+                );
                 continue;
             };
             let class_index = deferred.entry.class_index;
             self.classes[class_index].push_ready(deferred.placement, deferred.entry);
             made_ready = true;
         }
-        self.policy_ready = ready;
+        self.admission_ready = ready;
         made_ready
     }
 
@@ -631,7 +634,7 @@ impl<T> PolicyQueue<T> {
         priority_jump: f64,
         strict_priority: u32,
         placement: WorkerPlacement,
-        id: PolicyQueueId,
+        id: QueueAdmissionId,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
@@ -653,8 +656,8 @@ impl<T> PolicyQueue<T> {
         add_stats(&mut class.stats, snapshot);
         let replaced = self
             .deferred
-            .insert(id, DeferredPolicyEntry { placement, entry });
-        debug_assert!(replaced.is_none(), "duplicate deferred policy queue ID");
+            .insert(id, DeferredAdmissionEntry { placement, entry });
+        debug_assert!(replaced.is_none(), "duplicate queue admission ID");
         self.pending_count += 1;
         Ok(())
     }
@@ -670,7 +673,7 @@ impl<T> PolicyQueue<T> {
             .filter(|entry| predicate(entry.payload()))
             .map(|entry| entry.enqueue_seq)
             .collect();
-        let remove_deferred: Vec<PolicyQueueId> = self
+        let remove_deferred: Vec<QueueAdmissionId> = self
             .deferred
             .iter()
             .filter(|(_, deferred)| {
@@ -964,21 +967,21 @@ mod tests {
 
     #[derive(Default)]
     struct WakeOnReconcile {
-        deferred: Option<PolicyQueueId>,
+        deferred: Option<QueueAdmissionId>,
     }
 
-    impl PolicyQueuePolicy for WakeOnReconcile {
-        fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+    impl QueueAdmissionPolicy for WakeOnReconcile {
+        fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
             assert_eq!(request.request_id(), "request-1");
             assert_eq!(request.context_tokens(), 32);
             assert!(request.session_context().is_none());
             assert_eq!(request.workers().len(), 1);
             self.deferred = Some(request.id());
-            PolicyQueueDecision::Defer
+            QueueAdmissionDecision::Defer
         }
 
-        fn on_event(&mut self, event: PolicyQueueEvent<'_>, ready: &mut Vec<PolicyQueueId>) {
-            if matches!(event, PolicyQueueEvent::Reconcile { .. })
+        fn on_event(&mut self, event: QueueAdmissionEvent<'_>, ready: &mut Vec<QueueAdmissionId>) {
+            if matches!(event, QueueAdmissionEvent::Reconcile { .. })
                 && let Some(id) = self.deferred.take()
             {
                 ready.push(id);
@@ -1010,17 +1013,19 @@ policy_classes:
     }
 
     #[test]
-    fn queue_policy_defers_host_owned_request_until_wake() {
-        let mut queue =
-            PolicyQueue::new(admission_profile()).with_policy(Box::new(WakeOnReconcile::default()));
-        let workers = [PolicyQueueWorker::new(
+    fn admission_policy_defers_host_owned_request_until_wake() {
+        let mut queue = PolicyQueue::new(admission_profile())
+            .with_admission_policy(Box::new(WakeOnReconcile::default()));
+        let workers = [QueueAdmissionWorker::new(
             WorkerWithDpRank::new(7, 0),
             Some(1_024),
             true,
             true,
         )];
-        let (id, decision) = queue.admit_policy("request-1", 32, None, &workers).unwrap();
-        assert_eq!(decision, PolicyQueueDecision::Defer);
+        let (id, decision) = queue
+            .admit_with_admission_policy("request-1", 32, None, &workers)
+            .unwrap();
+        assert_eq!(decision, QueueAdmissionDecision::Defer);
 
         queue
             .enqueue_deferred(
@@ -1038,7 +1043,7 @@ policy_classes:
         assert_eq!(queue.pending_count(), 1);
         assert!(queue.pop_next(|_, _, _| true).is_none());
 
-        assert!(queue.policy_event(PolicyQueueEvent::Reconcile { workers: &workers }));
+        assert!(queue.admission_event(QueueAdmissionEvent::Reconcile { workers: &workers }));
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "payload"

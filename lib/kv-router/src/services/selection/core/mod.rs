@@ -1033,9 +1033,9 @@ impl SelectionCore {
             lora_name,
         } = booking;
 
-        if entry.scheduler.has_queue_policy() {
+        if entry.scheduler.has_admission_policy() {
             return Err(SelectionError::BadRequest(
-                "create_reservation is not supported with a queue policy; use select_and_reserve"
+                "create_reservation is not supported with a queue admission policy; use select_and_reserve"
                     .to_string(),
             ));
         }

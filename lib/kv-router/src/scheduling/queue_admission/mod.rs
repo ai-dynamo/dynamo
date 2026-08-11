@@ -8,12 +8,12 @@ use std::time::Duration;
 use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::types::SessionContext;
 
-/// Scheduler-assigned identity for one request managed by a [`PolicyQueuePolicy`].
+/// Scheduler-assigned identity for one request managed by a [`QueueAdmissionPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PolicyQueueId(u64);
+pub struct QueueAdmissionId(u64);
 
-impl PolicyQueueId {
-    /// Create an identity for testing a queue policy outside the scheduler host.
+impl QueueAdmissionId {
+    /// Create an identity for testing an admission policy outside the scheduler host.
     pub fn new(value: u64) -> Self {
         Self(value)
     }
@@ -25,15 +25,15 @@ impl PolicyQueueId {
 
 /// One worker/rank visible to queue admission for this request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyQueueWorker {
+pub struct QueueAdmissionWorker {
     worker: WorkerWithDpRank,
     capacity_tokens: Option<usize>,
     available: bool,
     eligible: bool,
 }
 
-impl PolicyQueueWorker {
-    /// Create a worker snapshot for testing a queue policy outside the scheduler host.
+impl QueueAdmissionWorker {
+    /// Create a worker snapshot for testing an admission policy outside the scheduler host.
     pub fn new(
         worker: WorkerWithDpRank,
         capacity_tokens: Option<usize>,
@@ -83,22 +83,22 @@ impl PolicyQueueWorker {
 }
 
 /// Read-only request facts supplied to a queue admission policy.
-pub struct PolicyQueueRequest<'a> {
-    id: PolicyQueueId,
+pub struct QueueAdmissionRequest<'a> {
+    id: QueueAdmissionId,
     request_id: &'a str,
     context_tokens: usize,
     session_context: Option<&'a SessionContext>,
-    workers: &'a [PolicyQueueWorker],
+    workers: &'a [QueueAdmissionWorker],
 }
 
-impl<'a> PolicyQueueRequest<'a> {
-    /// Create a request view for testing a queue policy outside the scheduler host.
+impl<'a> QueueAdmissionRequest<'a> {
+    /// Create a request view for testing an admission policy outside the scheduler host.
     pub fn new(
-        id: PolicyQueueId,
+        id: QueueAdmissionId,
         request_id: &'a str,
         context_tokens: usize,
         session_context: Option<&'a SessionContext>,
-        workers: &'a [PolicyQueueWorker],
+        workers: &'a [QueueAdmissionWorker],
     ) -> Self {
         Self {
             id,
@@ -109,7 +109,7 @@ impl<'a> PolicyQueueRequest<'a> {
         }
     }
 
-    pub fn id(&self) -> PolicyQueueId {
+    pub fn id(&self) -> QueueAdmissionId {
         self.id
     }
 
@@ -128,10 +128,10 @@ impl<'a> PolicyQueueRequest<'a> {
     /// Return the routing partition's current workers.
     ///
     /// Transient overload and hard availability are reported by
-    /// [`PolicyQueueWorker::is_available`]. Request eligibility is reported by
-    /// [`PolicyQueueWorker::is_eligible`]. The worker picker validates eligibility
+    /// [`QueueAdmissionWorker::is_available`]. Request eligibility is reported by
+    /// [`QueueAdmissionWorker::is_eligible`]. The worker picker validates eligibility
     /// again before final selection.
-    pub fn workers(&self) -> &[PolicyQueueWorker] {
+    pub fn workers(&self) -> &[QueueAdmissionWorker] {
         self.workers
     }
 }
@@ -139,10 +139,10 @@ impl<'a> PolicyQueueRequest<'a> {
 /// Initial queue admission decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PolicyQueueDecision {
-    /// Do not track this request in the custom queue policy.
+pub enum QueueAdmissionDecision {
+    /// Do not track this request in the custom admission policy.
     Bypass,
-    /// Allow normal queue ordering and worker selection.
+    /// Make the request runnable under Dynamo's built-in queue ordering.
     Ready,
     /// Keep the request in host-owned deferred storage until the policy wakes it.
     Defer,
@@ -151,9 +151,9 @@ pub enum PolicyQueueDecision {
 /// Lifecycle input delivered serially by the scheduler queue actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PolicyQueueEvent<'a> {
+pub enum QueueAdmissionEvent<'a> {
     Dispatched {
-        id: PolicyQueueId,
+        id: QueueAdmissionId,
         worker: WorkerWithDpRank,
     },
     Completed {
@@ -166,18 +166,21 @@ pub enum PolicyQueueEvent<'a> {
     },
     /// Periodic or topology-driven opportunity to reconsider deferred work.
     Reconcile {
-        workers: &'a [PolicyQueueWorker],
+        workers: &'a [QueueAdmissionWorker],
     },
 }
 
-/// Optional admission policy hosted by [`super::policy_queue::PolicyQueue`].
+/// Optional programmatic admission policy hosted by [`super::policy_queue::PolicyQueue`].
 ///
 /// Dynamo keeps ownership of requests and deferred storage. Implementations retain only
 /// policy state and append IDs of previously deferred requests that should become ready.
-pub trait PolicyQueuePolicy: Send {
-    fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision;
+/// A policy can implement session or program fairness by controlling which requests become
+/// runnable. It does not reorder or pop runnable requests: policy-class ordering and cross-class
+/// deficit round robin remain owned by Dynamo.
+pub trait QueueAdmissionPolicy: Send {
+    fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision;
 
-    fn on_event(&mut self, _event: PolicyQueueEvent<'_>, _ready: &mut Vec<PolicyQueueId>) {}
+    fn on_event(&mut self, _event: QueueAdmissionEvent<'_>, _ready: &mut Vec<QueueAdmissionId>) {}
 
     /// Return the maximum interval between reconciliation events.
     ///

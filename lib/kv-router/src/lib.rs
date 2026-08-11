@@ -72,9 +72,9 @@ pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{
-    KvSchedulerError, PolicyQueueDecision, PolicyQueueEvent, PolicyQueueId, PolicyQueuePolicy,
-    PolicyQueueRequest, PolicyQueueWorker, PotentialLoad, SchedulingRequest, SchedulingResponse,
-    SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints,
+    KvSchedulerError, PotentialLoad, QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId,
+    QueueAdmissionPolicy, QueueAdmissionRequest, QueueAdmissionWorker, SchedulingRequest,
+    SchedulingResponse, SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints,
     WorkerSelectionPolicyError,
 };
 pub use selector::{

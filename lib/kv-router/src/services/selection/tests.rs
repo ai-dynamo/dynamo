@@ -29,7 +29,7 @@ use crate::scheduling::selector::{
     WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use crate::scheduling::{
-    PolicyQueueDecision, PolicyQueuePolicy, PolicyQueueRequest, WorkerSelectionPolicyError,
+    QueueAdmissionDecision, QueueAdmissionPolicy, QueueAdmissionRequest, WorkerSelectionPolicyError,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -125,14 +125,14 @@ impl WorkerFilter for RejectWorker {
     }
 }
 
-struct CountingQueuePolicy {
+struct CountingAdmissionPolicy {
     admissions: Arc<AtomicUsize>,
 }
 
-impl PolicyQueuePolicy for CountingQueuePolicy {
-    fn admit(&mut self, _request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+impl QueueAdmissionPolicy for CountingAdmissionPolicy {
+    fn admit(&mut self, _request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
         self.admissions.fetch_add(1, Ordering::Relaxed);
-        PolicyQueueDecision::Ready
+        QueueAdmissionDecision::Ready
     }
 }
 
@@ -385,7 +385,7 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
 }
 
 #[tokio::test]
-async fn queue_policy_admits_atomic_reservations_and_rejects_two_step_booking() {
+async fn admission_policy_supports_atomic_reservations_and_rejects_two_step_booking() {
     let admissions = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&admissions);
     let app = native_policy_app(move |config, worker_type, _partition| {
@@ -395,7 +395,7 @@ async fn queue_policy_admits_atomic_reservations_and_rejects_two_step_booking() 
             vec![Box::new(WorkerIdScorer)],
             Box::new(LowestCostPicker),
         )
-        .with_queue_policy(Box::new(CountingQueuePolicy {
+        .with_admission_policy(Box::new(CountingAdmissionPolicy {
             admissions: Arc::clone(&observed),
         }))
     })
