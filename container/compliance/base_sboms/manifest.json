@@ -160,10 +160,11 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:8531fea19c72a7a16dd08972448316133d8c6ad708a1970a9a58073810e153f8",
-      "baseline_image": "vllm/vllm-openai",
-      "baseline_sbom": "vllm-openai@8531fea1-amd64.cdx.json",
-      "baseline_tag": "nightly-cb8104839c141609d99f1254459ef3a4f1bd4263",
+      "baseline_digest": "sha256:21a04d376f3a29c7cf7773bbe08e8ad45bf6711bd82e05b71cb1cb67004b0921",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@21a04d37-amd64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu22.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
       "from_digest": "sha256:8531fea19c72a7a16dd08972448316133d8c6ad708a1970a9a58073810e153f8",
       "from_image": "vllm/vllm-openai",
       "from_tag": "nightly-cb8104839c141609d99f1254459ef3a4f1bd4263",
@@ -171,10 +172,11 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:8531fea19c72a7a16dd08972448316133d8c6ad708a1970a9a58073810e153f8",
-      "baseline_image": "vllm/vllm-openai",
-      "baseline_sbom": "vllm-openai@8531fea1-arm64.cdx.json",
-      "baseline_tag": "nightly-cb8104839c141609d99f1254459ef3a4f1bd4263",
+      "baseline_digest": "sha256:21a04d376f3a29c7cf7773bbe08e8ad45bf6711bd82e05b71cb1cb67004b0921",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@21a04d37-arm64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu22.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
       "from_digest": "sha256:8531fea19c72a7a16dd08972448316133d8c6ad708a1970a9a58073810e153f8",
       "from_image": "vllm/vllm-openai",
       "from_tag": "nightly-cb8104839c141609d99f1254459ef3a4f1bd4263",
@@ -214,6 +216,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-08-07T23:02:25+00:00",
+  "generated_at": "2026-08-11T00:36:26+00:00",
   "schema_version": 2
 }

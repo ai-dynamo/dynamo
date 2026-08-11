@@ -67,11 +67,14 @@ vllm:
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: nightly-cb8104839c141609d99f1254459ef3a4f1bd4263
-    # The pinned nightly tag is Jammy-based and does not have an ubuntu2404
-    # variant. Use a self-baseline for this exact upstream image so compliance
-    # attributes only what Dynamo adds on top of the pinned vLLM nightly.
-    # Per-arch stem; the licenses stage appends -${TARGETARCH}.cdx.json.
-    baseline_sbom: vllm-openai@8531fea1
+    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu22.04
+    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
+    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
+    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
+    # rather than hiding it. Per-arch stem; the licenses stage appends
+    # -${TARGETARCH}.cdx.json. GPL media codecs from vllm-openai are purged in
+    # vllm_runtime.Dockerfile before the final runtime compliance check.
+    baseline_sbom: cuda@21a04d37
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
