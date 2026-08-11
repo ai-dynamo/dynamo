@@ -33,8 +33,10 @@ do not delete the assertions with them.
 from __future__ import annotations
 
 import ctypes
+import importlib.metadata
 import importlib.util
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -228,6 +230,31 @@ def _assert_bundled_libavcodecs_carry_no_software_codecs() -> None:
         )
 
 
+def _assert_trtllm_uses_vetted_pynvvideocodec() -> None:
+    """TRT-LLM must use only Dynamo's reviewed venv PyNvVideoCodec wheel."""
+    system_root = pathlib.Path("/usr/local/lib/python3.12/dist-packages")
+    leftovers = [system_root / "PyNvVideoCodec"]
+    leftovers.extend(system_root.glob("pynvvideocodec-*.dist-info"))
+    leftovers = [path for path in leftovers if path.exists()]
+    assert not leftovers, (
+        f"stale system PyNvVideoCodec artifacts remain: {leftovers}; "
+        "trtllm_runtime.Dockerfile must purge them in runtime_full and the "
+        "pre_runtime whiteout"
+    )
+
+    version = importlib.metadata.version("PyNvVideoCodec")
+    assert version == "2.2.0", (
+        f"expected reviewed PyNvVideoCodec 2.2.0, found {version}; re-audit its "
+        "bundled FFmpeg libraries before changing the pin"
+    )
+
+    spec = importlib.util.find_spec("PyNvVideoCodec")
+    assert spec is not None and spec.origin is not None
+    assert pathlib.Path(spec.origin).is_relative_to("/opt/dynamo/venv"), (
+        f"PyNvVideoCodec resolved outside the Dynamo venv: {spec.origin}"
+    )
+
+
 def _check_image() -> None:
     surfaces = _surfaces()
     _assert_required_codecs_present(surfaces)
@@ -254,4 +281,5 @@ def test_sglang_image_ships_no_software_video_codecs() -> None:
 
 @pytest.mark.trtllm
 def test_trtllm_image_ships_no_software_video_codecs() -> None:
+    _assert_trtllm_uses_vetted_pynvvideocodec()
     _check_image()

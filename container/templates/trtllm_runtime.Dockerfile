@@ -186,13 +186,23 @@ RUN set -eu; \
 # cv2 an optional video extra (NVIDIA/TensorRT-LLM#16206) and its imports are
 # already function-local in 1.3.x, so nothing in the image needs it at import
 # time; video-decode users can install it explicitly per upstream docs.
+#
+# TensorRT-LLM 1.3.0rc24 also preinstalls PyNvVideoCodec 2.1.0 system-wide. Its
+# wheel vendors a full FFmpeg including libavcodec, while Dynamo installs the
+# reviewed 2.2.0 wheel (libavformat + libavutil only) in /opt/dynamo/venv above.
+# Remove the stale system copy so it cannot add an unreviewed software-codec
+# surface or shadow the venv copy for callers that bypass the venv interpreter.
 # Must run via the system interpreter: with VIRTUAL_ENV set, plain `pip`
 # targets the venv and exits 0 WITHOUT touching the system-site install.
-# The guards fail the build if the package survives. Mirrored by the
-# pre_runtime whiteout below — the squash COPY cannot represent deletions.
-RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-headless && \
+# The guards fail the build if either package survives. Mirrored by the
+# pre_runtime whiteouts below — the squash COPY cannot represent deletions.
+RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages \
+        opencv-python-headless PyNvVideoCodec && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
-    [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
+    [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ] && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec ] && \
+    test -z "$(find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
+        -iname 'pynvvideocodec-*.dist-info' -print -quit)"
 
 # Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
 # vendored ffmpeg build to drop the software h264/hevc/aac decoders
@@ -286,8 +296,9 @@ CMD ["/bin/bash"]
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, single-file
-# /usr/local/bin/etcd, and preinstalled opencv (cv2/ + vendored
-# opencv_python_headless.libs/ + dist-info) would leak alongside our content.
+# /usr/local/bin/etcd, preinstalled opencv (cv2/ + vendored
+# opencv_python_headless.libs/ + dist-info), and the system PyNvVideoCodec 2.1.0
+# package would leak alongside our content.
 # Keep this list in sync with any deletion RUNs in the stages above.
 #
 # DALI is here for a different reason: runtime_full UPGRADES it rather than
@@ -299,19 +310,22 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
     /usr/local/lib/python3.12/dist-packages/cv2 \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
+    /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+    /usr/local/lib/python3.12/dist-packages/pynvvideocodec-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null
 COPY --from=runtime_full / /
 
-# Post-overlay guard for the DALI whiteout above. This is the only stage where
-# the failure can appear: runtime_full holds exactly one DALI, and the whiteout
-# is what keeps the overlay from re-adding the base image's copy beside it.
+# Post-overlay guard for the DALI and PyNvVideoCodec whiteouts above. This is the
+# only stage where the failure can appear: runtime_full holds the cleaned state,
+# and the whiteout is what keeps the overlay from re-adding the base image's copy.
 # Because those libraries are hash-named, a missed whiteout leaves TWO -- the
-# upgraded one and the 2.1.0 one that registers h264/hevc/aac -- and the image
-# then reports version 2.1.0 while carrying both. Verified by building this
-# stage with and without the rm -rf: without it, two copies and the codecs are
-# back; with it, one copy and clean.
+# upgraded DALI and the 2.1.0 one that registers h264/hevc/aac -- and the image
+# then reports version 2.1.0 while carrying both. PyNvVideoCodec has the same
+# shape: its reviewed 2.2.0 venv wheel does not overwrite the system 2.1.0 tree.
+# Verified for DALI by building this stage with and without the rm -rf: without
+# it, two copies and the codecs are back; with it, one copy and clean.
 #
 # Every match is checked, not just the first: the whole point is catching the
 # case where more than one exists.
@@ -319,7 +333,26 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     set -eu; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
-    done
+    done; \
+    stale=$(find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
+        \( -name PyNvVideoCodec -o -iname 'pynvvideocodec-*.dist-info' \) -print); \
+    if [ -n "$stale" ]; then \
+        echo "ERROR: stale system PyNvVideoCodec survived the pre_runtime whiteout:" >&2; \
+        echo "$stale" >&2; \
+        exit 1; \
+    fi; \
+    v=$(/opt/dynamo/venv/bin/python3 -c \
+        'import importlib.metadata as m; print(m.version("PyNvVideoCodec"))'); \
+    [ "$v" = "2.2.0" ] || { echo "ERROR: wanted PyNvVideoCodec 2.2.0, got $v" >&2; exit 1; }; \
+    bundled=$(find \
+        /usr/local/lib/python3.12/dist-packages \
+        /opt/dynamo/venv/lib/python3.12/site-packages \
+        -path '*/PyNvVideoCodec/libavcodec*.so*' -print); \
+    if [ -n "$bundled" ]; then \
+        echo "ERROR: PyNvVideoCodec bundles an unreviewed libavcodec:" >&2; \
+        echo "$bundled" >&2; \
+        exit 1; \
+    fi
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
