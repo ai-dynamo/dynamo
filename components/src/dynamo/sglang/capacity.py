@@ -154,7 +154,7 @@ def get_hicache_native_offloading_capacity(
             return None
         page_size = getattr(server_args, "page_size", None)
         ratio = getattr(server_args, "hicache_ratio", None)
-        if not page_size:
+        if not page_size or ratio is None:
             return None
         try:
             host_tokens = int(device_capacity["total_tokens"] * ratio)
