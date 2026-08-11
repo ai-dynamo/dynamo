@@ -73,6 +73,12 @@ impl HttpFrontend {
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
+        if self.worker_selection_policy_factory.is_some()
+            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        {
+            anyhow::bail!("custom worker-selection policies require a dynamic engine");
+        }
+
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
         match self.worker_selection_policy_factory {

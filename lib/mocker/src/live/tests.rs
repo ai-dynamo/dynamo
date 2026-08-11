@@ -68,6 +68,49 @@ async fn wait_for_idle(engine: &LiveEngine) {
     .expect("live request state should return to idle");
 }
 
+async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
+    let mut request = engine
+        .submit(DirectRequest {
+            tokens,
+            max_output_tokens: 4,
+            uuid: Some(uuid),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(signal) = request.recv().await {
+            if signal.completed {
+                return;
+            }
+        }
+        panic!("request output closed before completion");
+    })
+    .await
+    .expect("request should complete");
+    wait_for_idle(engine).await;
+}
+
+#[tokio::test]
+async fn sglang_live_metrics_retain_the_last_prefill_cache_observation() {
+    let engine = LiveEngine::start(args(EngineType::Sglang), 0).unwrap();
+    let repeated_prompt = (1..=8).collect::<Vec<_>>();
+
+    submit_and_finish(&engine, repeated_prompt.clone(), Uuid::from_u128(30)).await;
+    submit_and_finish(&engine, repeated_prompt, Uuid::from_u128(31)).await;
+
+    let hit = engine.metrics_receiver().borrow().clone();
+    assert!(hit.sglang_cache_hit_tokens > 0);
+    assert!(hit.sglang_cache_total_tokens >= hit.sglang_cache_hit_tokens);
+
+    submit_and_finish(&engine, (101..=108).collect(), Uuid::from_u128(32)).await;
+
+    let miss = engine.metrics_receiver().borrow().clone();
+    assert_eq!(miss.sglang_cache_hit_tokens, 0);
+    assert!(miss.sglang_cache_total_tokens > 0);
+    engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn streams_planned_tokens_to_the_owning_request() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {

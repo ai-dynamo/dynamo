@@ -11,6 +11,7 @@ after save so the Job completes once tensors are on disk.
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
 import time
@@ -120,8 +121,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--use-v1", action="store_true")
+    options, remaining = selector.parse_known_args(argv)
+    if options.use_v1:
+        v1_saver = importlib.import_module("gpu_memory_service.v1.snapshot.saver")
+        v1_saver.main(remaining)
+        return
+
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining)
     if not args.checkpoint_dir:
         parser.error("--checkpoint-dir is required for directory-backed saves")
     checkpoint_dir = args.checkpoint_dir
