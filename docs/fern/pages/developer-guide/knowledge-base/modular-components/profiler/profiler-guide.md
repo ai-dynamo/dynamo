@@ -491,7 +491,7 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    min_endpoint: 2                            # Minimum endpoints to maintain
+    min_endpoint: 2                            # Agg minimum, or same P/D minimum in disagg
     load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
     throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
     load_predictor: arima                      # Load prediction method
