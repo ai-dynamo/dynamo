@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -23,7 +23,7 @@ The disaggregated policy keeps the algorithm deliberately small:
 | Prefill | Active prefill tokens | Lowest score |
 | Decode | Projected decode blocks | Lowest score |
 
-The factory receives `worker_type` from Dynamo. It builds `DecodeLoadScorer` and `DecodePicker` for `decode`; every other worker type uses `PrefillLoadScorer` and `PrefillPicker`.
+The Python frontend supplies `prefill` or `decode` as `worker_type`. Standalone EPP supplies `select` because it selects from one worker pool.
 
 ## Build and Test
 
@@ -86,15 +86,16 @@ For a private catalog, run the same `cargo add` command with your catalog path a
 
 ## Run With EPP
 
-The example EPP already links the example catalog. Run it with the normal standalone EPP environment and the policy file:
+The example EPP already links the example catalog. Use the basic policy for its single worker pool:
 
 ```bash
 DYN_EPP_MODE=standalone \
 DYN_ROUTER_POLICY_CONFIG=/path/to/worker-selection.yaml \
+DYN_ROUTER_WORKER_SELECTION_POLICY=least-busy \
 cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
-Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes setup. Use this binary instead of the stock EPP executable.
+Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes setup. Use this binary instead of the stock EPP executable. Policies that branch on `worker_type` must handle `select` for this path.
 
 ## Add a Policy
 
