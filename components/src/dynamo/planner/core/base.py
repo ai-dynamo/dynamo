@@ -24,9 +24,9 @@ from prometheus_client import start_http_server
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import (
-    MinimumEndpointUnavailableError,
-    MinimumEndpointValidationError,
-    start_control_api,
+    _MinimumEndpointUnavailableError,
+    _MinimumEndpointValidationError,
+    _start_control_api,
 )
 from dynamo.planner.core import util
 from dynamo.planner.core.budget import minimum_power_footprint_fits
@@ -170,7 +170,7 @@ class NativePlannerBase:
 
             if self.config.control_api_port:
                 try:
-                    self._control_api_runner = await start_control_api(
+                    self._control_api_runner = await _start_control_api(
                         self, self.config.control_api_port
                     )
                 except OSError as exc:
@@ -327,7 +327,7 @@ class NativePlannerBase:
                 self._config_lock.acquire(), timeout=_CONFIG_LOCK_TIMEOUT_SECONDS
             )
         except TimeoutError:
-            raise MinimumEndpointUnavailableError(
+            raise _MinimumEndpointUnavailableError(
                 "planner decision in progress; retry the request"
             ) from None
         try:
@@ -346,7 +346,7 @@ class NativePlannerBase:
         }[self.config.mode]
         inactive_fields = sorted(set(updates) - allowed_fields)
         if inactive_fields:
-            raise MinimumEndpointValidationError(
+            raise _MinimumEndpointValidationError(
                 f"fields are not active in mode='{self.config.mode}': "
                 + ", ".join(inactive_fields)
             )
@@ -367,7 +367,7 @@ class NativePlannerBase:
                 prefill_min_endpoint, decode_min_endpoint
             )
             if errors:
-                raise MinimumEndpointValidationError("; ".join(errors))
+                raise _MinimumEndpointValidationError("; ".join(errors))
 
             before = self._min_endpoint_response()
             for field, value in updates.items():

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.control_api import MinimumEndpointUnavailableError, _build_app
+from dynamo.planner.control_api import _build_app, _MinimumEndpointUnavailableError
 from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.errors import DeploymentValidationError
@@ -219,7 +219,7 @@ async def test_runtime_api_returns_503_when_decision_lock_times_out():
     try:
         with patch(
             "dynamo.planner.core.base._CONFIG_LOCK_TIMEOUT_SECONDS", 0
-        ), pytest.raises(MinimumEndpointUnavailableError):
+        ), pytest.raises(_MinimumEndpointUnavailableError):
             async with planner._config_lock:
                 await planner.get_min_endpoints()
 
@@ -253,7 +253,7 @@ async def test_control_api_port_zero_disables_server_startup():
     planner._bootstrap_engine_plugins_if_needed = AsyncMock()
 
     with patch(
-        "dynamo.planner.core.base.start_control_api", new_callable=AsyncMock
+        "dynamo.planner.core.base._start_control_api", new_callable=AsyncMock
     ) as start_api:
         await planner._async_init()
 
@@ -291,7 +291,7 @@ async def test_async_init_control_api_failure_disables_api_only():
     planner._bootstrap_engine_plugins_if_needed = AsyncMock()
 
     with patch(
-        "dynamo.planner.core.base.start_control_api",
+        "dynamo.planner.core.base._start_control_api",
         new_callable=AsyncMock,
         side_effect=OSError("address already in use"),
     ):

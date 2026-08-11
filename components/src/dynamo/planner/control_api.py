@@ -15,15 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 logger = logging.getLogger(__name__)
 
 
-class MinimumEndpointValidationError(ValueError):
+class _MinimumEndpointValidationError(ValueError):
     """Raised when a well-formed runtime update is invalid for the planner."""
 
 
-class MinimumEndpointUnavailableError(RuntimeError):
+class _MinimumEndpointUnavailableError(RuntimeError):
     """Raised when a runtime update cannot safely run before its deadline."""
 
 
-class MinimumEndpointController(Protocol):
+class _MinimumEndpointController(Protocol):
     async def get_min_endpoints(self) -> dict[str, Any]:
         ...
 
@@ -43,11 +43,11 @@ def _error(message: str, status: int) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
-def _build_app(controller: MinimumEndpointController) -> web.Application:
+def _build_app(controller: _MinimumEndpointController) -> web.Application:
     async def handle_get(_request: web.Request) -> web.Response:
         try:
             response = await controller.get_min_endpoints()
-        except MinimumEndpointUnavailableError as exc:
+        except _MinimumEndpointUnavailableError as exc:
             return _error(str(exc), 503)
         return web.json_response(response)
 
@@ -81,9 +81,9 @@ def _build_app(controller: MinimumEndpointController) -> web.Application:
         updates = {field: int(getattr(patch, field)) for field in fields}
         try:
             response = await controller.patch_min_endpoints(updates)
-        except MinimumEndpointUnavailableError as exc:
+        except _MinimumEndpointUnavailableError as exc:
             return _error(str(exc), 503)
-        except MinimumEndpointValidationError as exc:
+        except _MinimumEndpointValidationError as exc:
             return _error(str(exc), 422)
         return web.json_response(response)
 
@@ -93,8 +93,8 @@ def _build_app(controller: MinimumEndpointController) -> web.Application:
     return app
 
 
-async def start_control_api(
-    controller: MinimumEndpointController, port: int
+async def _start_control_api(
+    controller: _MinimumEndpointController, port: int
 ) -> web.AppRunner:
     """Start the localhost-only runtime configuration API."""
 
