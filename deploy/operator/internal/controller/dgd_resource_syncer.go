@@ -18,7 +18,7 @@
 package controller
 
 import (
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,13 +27,13 @@ import (
 // DGD orchestration or provider behavior.
 type dgdResourceSyncer struct {
 	client.Client
-	recorder record.EventRecorder
+	recorder events.EventRecorder
 }
 
-func newDGDResourceSyncer(kubeClient client.Client, recorder record.EventRecorder) dgdResourceSyncer {
+func newDGDResourceSyncer(kubeClient client.Client, recorder events.EventRecorder) dgdResourceSyncer {
 	return dgdResourceSyncer{Client: kubeClient, recorder: recorder}
 }
 
-func (s *dgdResourceSyncer) GetRecorder() record.EventRecorder {
+func (s *dgdResourceSyncer) GetRecorder() events.EventRecorder {
 	return s.recorder
 }

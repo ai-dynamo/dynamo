@@ -10,8 +10,14 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::protocols::KvTransferEnforcement;
-use dynamo_runtime::protocols::EndpointId;
+use dynamo_kv_router::{
+    protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
+    router_hint::{
+        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+    },
+};
+use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
@@ -19,6 +25,23 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
+
+/// Runtime-data key for an engine-published token-overflow contract.
+pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Describes which request-token overflows the frontend may reject early.
+///
+/// The combined limit already accounts for engine-reserved tokens. A false
+/// flag delegates that overflow dimension to the backend, which remains
+/// responsible for any clamping, truncation, or rejection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenBudget {
+    pub combined_limit: u32,
+    #[serde(default)]
+    pub reject_prompt_overflow: bool,
+    #[serde(default)]
+    pub reject_total_overflow: bool,
+}
 
 /// Canonical worker-taint form for topology metadata.
 ///
@@ -119,6 +142,19 @@ pub struct DisaggregatedEndpoint {
     pub bootstrap_port: Option<u16>,
 }
 
+/// Controls how historical `function.arguments` are serialized before being
+/// passed to the MiniJinja chat template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallArgumentsFormat {
+    /// Preserve arguments as a raw JSON string (default, backward-compatible).
+    #[default]
+    JsonString,
+    /// Parse arguments into a JSON object before rendering.  Required for
+    /// templates that iterate over key-value pairs (e.g. GLM-5.2).
+    JsonObject,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
 /// Runtime-resolved metadata published by a worker after its engine starts.
@@ -141,6 +177,15 @@ pub struct ModelRuntimeConfig {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Controls how historical `function.arguments` are presented to the MiniJinja
+    /// chat template.  `JsonString` (default) preserves the raw JSON string, which
+    /// is backward-compatible with all models.  `JsonObject` normalizes the string
+    /// to a parsed object before rendering; required for models whose template
+    /// iterates over argument key-value pairs (e.g. GLM-5.2).
+    /// Also set to `JsonObject` automatically when `tool_call_parser` is `"glm47"`.
+    #[serde(default)]
+    pub tool_call_arguments_format: ToolCallArgumentsFormat,
 
     /// Frontend tokenizer backend override. When unset, direct Rust callers can still use
     /// `DYN_TOKENIZER`; when set, this explicit value wins over process environment.
@@ -278,6 +323,7 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
@@ -302,6 +348,29 @@ impl Default for ModelRuntimeConfig {
     }
 }
 
+impl ModelRuntimeConfig {
+    fn router_hints_enabled(&self) -> bool {
+        match self.runtime_data.get(ROUTER_HINT_RUNTIME_CAPABILITY_KEY) {
+            Some(serde_json::Value::Bool(true)) => true,
+            // Python ModelRuntimeConfig.set_engine_specific currently stores
+            // engine-specific values as strings.
+            Some(serde_json::Value::String(value)) => is_truthy(value),
+            _ => false,
+        }
+    }
+
+    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+        let dp_rank = dp_rank.to_string();
+        let endpoint = self
+            .runtime_data
+            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .as_object()?
+            .get(&dp_rank)?
+            .as_str()?;
+        (!endpoint.is_empty()).then_some(endpoint)
+    }
+}
+
 impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
@@ -317,6 +386,28 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn router_hint_metadata_for_dp_rank(
+        &self,
+        dp_rank: u32,
+    ) -> Option<RouterHintWorkerMetadata<'_>> {
+        if !self.router_hints_enabled() {
+            return None;
+        }
+
+        let worker_type = self
+            .runtime_data
+            .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
+            .as_str()?;
+        if worker_type.is_empty() {
+            return None;
+        }
+
+        Some(RouterHintWorkerMetadata {
+            worker_type,
+            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
+        })
     }
 
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
@@ -788,6 +879,59 @@ mod tests {
     }
 
     #[test]
+    fn router_hint_support_requires_explicit_true() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, true)
+            .unwrap();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+
+        config
+            .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .unwrap();
+        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        assert_eq!(info.worker_type, "prefill");
+        assert!(info.source_control_endpoint.is_none());
+
+        config
+            .set_engine_specific(
+                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
+            )
+            .unwrap();
+        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        assert_eq!(info.worker_type, "prefill");
+        assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
+        assert_eq!(
+            config
+                .router_hint_metadata_for_dp_rank(1)
+                .unwrap()
+                .source_control_endpoint,
+            None
+        );
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+            .unwrap();
+        assert_eq!(
+            config
+                .router_hint_metadata_for_dp_rank(0)
+                .unwrap()
+                .worker_type,
+            "prefill"
+        );
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
+            .unwrap();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+    }
+
+    #[test]
     fn test_serde_empty_topology_domains_omitted() {
         let config = ModelRuntimeConfig::default();
         let serialized = serde_json::to_string(&config).unwrap();
@@ -807,7 +951,8 @@ mod tests {
             "max_num_seqs": 32,
             "max_num_batched_tokens": null,
             "tool_call_parser": null,
-            "reasoning_parser": null
+            "reasoning_parser": null,
+            "tool_call_arguments_format": "json_string"
         }"#;
 
         let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();

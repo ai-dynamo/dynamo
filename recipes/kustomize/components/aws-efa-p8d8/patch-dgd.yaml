@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: disagg-workers
+spec:
+  services:
+    PrefillWorker:
+      resources:
+        limits:
+          custom:
+            vpc.amazonaws.com/efa: "8"
+        requests:
+          custom:
+            vpc.amazonaws.com/efa: "8"
+    DecodeWorker:
+      resources:
+        limits:
+          custom:
+            vpc.amazonaws.com/efa: "8"
+        requests:
+          custom:
+            vpc.amazonaws.com/efa: "8"

@@ -2043,7 +2043,9 @@ where
     fn drive_prefill_workers(&mut self) -> Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self.prefill_engine.drive_ready(self.now_ms, None)?;
+            let effects = self
+                .prefill_engine
+                .drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);
@@ -2059,7 +2061,7 @@ where
         loop {
             let effects = self
                 .decode_engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+                .drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 #[cfg(test)]
@@ -2090,7 +2092,7 @@ where
 
     fn record_prefill_admissions(&mut self, admissions: Vec<AdmissionEvent>) {
         for admission in admissions {
-            self.collector.on_prefill_admit(
+            self.collector.on_prefill_pool_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,
@@ -2100,7 +2102,7 @@ where
 
     fn record_decode_admissions(&mut self, admissions: Vec<AdmissionEvent>) -> Result<()> {
         for admission in admissions {
-            self.collector.on_decode_admit(
+            self.collector.on_decode_pool_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,

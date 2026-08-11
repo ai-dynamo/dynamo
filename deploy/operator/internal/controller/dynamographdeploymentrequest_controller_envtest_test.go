@@ -41,7 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,11 +72,11 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 
 	var (
 		reconciler *DynamoGraphDeploymentRequestReconciler
-		recorder   *record.FakeRecorder
+		recorder   *events.FakeRecorder
 	)
 
 	BeforeEach(func() {
-		recorder = record.NewFakeRecorder(100)
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:   k8sClient,
 			Recorder: recorder,
@@ -1730,7 +1730,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 	BeforeEach(func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:   k8sClient,
-			Recorder: record.NewFakeRecorder(100),
+			Recorder: events.NewFakeRecorder(100),
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
 					Restricted: "",
@@ -1944,10 +1944,10 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 
 var _ = Describe("DGDR Error Handling", func() {
 	var reconciler *DynamoGraphDeploymentRequestReconciler
-	var recorder *record.FakeRecorder
+	var recorder *events.FakeRecorder
 
 	BeforeEach(func() {
-		recorder = record.NewFakeRecorder(100)
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:    k8sClient,
 			APIReader: k8sClient,
@@ -3327,11 +3327,11 @@ var _ = Describe("DGDR Output ConfigMap Naming", func() {
 var _ = Describe("DGDR Profiling Failure Attribution", func() {
 	var (
 		reconciler *DynamoGraphDeploymentRequestReconciler
-		recorder   *record.FakeRecorder
+		recorder   *events.FakeRecorder
 	)
 
 	BeforeEach(func() {
-		recorder = record.NewFakeRecorder(100)
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:    k8sClient,
 			APIReader: k8sClient,
@@ -3821,11 +3821,11 @@ var _ = Describe("DGDR Image Pull Error Detection", func() {
 
 	var (
 		reconciler *DynamoGraphDeploymentRequestReconciler
-		recorder   *record.FakeRecorder
+		recorder   *events.FakeRecorder
 	)
 
 	BeforeEach(func() {
-		recorder = record.NewFakeRecorder(100)
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:   k8sClient,
 			Recorder: recorder,

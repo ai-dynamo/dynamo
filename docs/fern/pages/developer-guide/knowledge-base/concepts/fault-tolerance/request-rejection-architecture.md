@@ -38,8 +38,9 @@ The router distinguishes two failure classes:
   HTTP 529 by default.
 - **Unavailable** means no usable service path exists. The Frontend returns HTTP 503.
 
-`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. It is
-read once and cached; invalid or out-of-range values fall back to 529.
+`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. Values
+from 200 through 999 are accepted. Informational values from 100 through 199, invalid values, and
+out-of-range values fall back to 529. The value is read and cached on first use.
 
 ## Independently Enabled Signals
 
@@ -104,7 +105,16 @@ A worker can impose a hard cap independently of Frontend busy detection. Setting
 `--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
 enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
 returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
-`ResourceExhausted` error to HTTP 529 and temporarily skips that worker on the next routing decision.
+rejection to the worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can
+retry the request without changing its allowlist or routing constraints.
+
+The worker rejection does not add a failed-worker exclusion to the routing request or change the
+standalone router protocol. An in-process router can exclude the failed worker with request-local
+state while retrying. In a split or standalone deployment, selection uses the router's current global
+overload and fault state, so a retry can select the same worker again. Worker-local overload
+migration is therefore best-effort in that topology. Pool-scoped `ResourceExhausted` remains
+non-migratable because no eligible worker has known capacity. If either overload error reaches the
+client, the Frontend returns the configured overload status, HTTP 529 by default.
 
 The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
 advanced override, must be at least `2`, and is read only when the engine limit is enabled.

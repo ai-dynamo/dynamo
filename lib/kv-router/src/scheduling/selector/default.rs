@@ -266,7 +266,12 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             let overlap_adjusted_decode_blocks =
                 (decode_cost_blocks - overlap_credit_blocks).max(0.0);
             let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            // Stamped for the same reason as the two rows below: this row is emitted from the
+            // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
+            // it, and this branch returns early without reaching them.
             tracing::debug!(
+                request_id = context.request_id,
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
                  = max(0, {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}) + {active_request_cost_blocks:.3}",
@@ -697,6 +702,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1002,6 +1009,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1053,6 +1062,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1122,6 +1133,8 @@ mod tests {
                     effective_overlap_blocks: HashMap::default(),
                     effective_cached_tokens: HashMap::default(),
                 },
+                router_hint_candidates: None,
+                retain_router_hint_chain: false,
                 worker_loads: worker_loads_with_active_decode(decode_blocks),
                 track_prefill_tokens: true,
                 router_config_override: None,
@@ -1189,6 +1202,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1252,6 +1267,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1331,6 +1348,8 @@ mod tests {
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1401,6 +1420,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::new(),
                 effective_cached_tokens,
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1675,6 +1696,8 @@ mod tests {
                 effective_overlap_blocks,
                 effective_cached_tokens: HashMap::new(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1730,6 +1753,8 @@ mod tests {
                 effective_overlap_blocks,
                 effective_cached_tokens: HashMap::new(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,

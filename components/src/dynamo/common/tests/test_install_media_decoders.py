@@ -441,41 +441,138 @@ def test_cli_pip_args_reach_pip(sandboxed):
 # Nothing implicit: the env-var/startup pathway must not creep back.
 # ---------------------------------------------------------------------------
 
-_COMPONENTS_ROOT = Path(__file__).resolve().parents[3]
+# The dynamo package root (parents[2] = .../dynamo). parents[3] would be
+# components/src in the repo but site-packages in an installed layout, where
+# the sweep then walks every third-party package -- including files with
+# Python 2 syntax that ast.parse cannot read.
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_no_production_code_invokes_the_installer():
+def test_no_entrypoint_references_the_installer():
     """The installer is operator-run only.
 
     Reviewers rejected implicit installation at worker startup (env-var gated
     hooks in entrypoints): an install that changes the container's codec
-    surface has to be a visible, deliberate step. This sweep keeps any
-    `__main__.py` from calling the installer and the retired env switch from
-    coming back anywhere under components/src.
+    surface has to be a visible, deliberate step. Entrypoints are where
+    startup happens, so no `__main__.py` may reference the installer at all.
+
+    Other production code MAY import its constants -- the actionable
+    unsupported-codec errors single-source their version bounds from
+    VALIDATED_SPECS -- so this sweep is scoped to entrypoints, and the two
+    sweeps below cover the rest: nothing may CALL the installer, and the
+    retired env switch must not come back anywhere.
+    """
+    offenders: list[str] = []
+    for path in sorted(_PACKAGE_ROOT.rglob("__main__.py")):
+        text = path.read_text(encoding="utf-8")
+        if "install_media_decoders" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
+            offenders.append(str(path.relative_to(_PACKAGE_ROOT)))
+    assert not offenders, (
+        f"{offenders} reference the media-decoder installer from an entrypoint; "
+        "it must stay an explicit operator command, never wired into startup"
+    )
+
+
+def _source_calls_installer(source: str) -> bool:
+    """AST-based detection of a call into the installer, aliases included.
+
+    A literal `install_media_decoders(` grep misses
+    `from ... import install_media_decoders as x; x()` and
+    `import ...install_media_decoders as m; m.main()`. Walk the AST instead:
+    collect every name the installer module (or its functions) is bound to,
+    then flag any Call through one of those bindings.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # Not parseable as this interpreter's Python (vendored/py2-era file);
+        # it cannot be importing our installer through the import system.
+        return False
+    fn_aliases: set[str] = set()  # names bound to installer functions
+    mod_aliases: set[str] = set()  # names bound to the installer module
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.endswith("install_media_decoders"):
+                for a in node.names:
+                    if a.name in ("install_media_decoders", "main"):
+                        fn_aliases.add(a.asname or a.name)
+            elif node.module.endswith("common.utils") or node.module == "utils":
+                for a in node.names:
+                    if a.name == "install_media_decoders":
+                        mod_aliases.add(a.asname or a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.endswith("install_media_decoders"):
+                    mod_aliases.add(a.asname or a.name.split(".")[0])
+    if not fn_aliases and not mod_aliases:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name) and f.id in fn_aliases:
+            return True
+        if isinstance(f, ast.Attribute) and f.attr in (
+            "install_media_decoders",
+            "main",
+        ):
+            root = f.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in mod_aliases:
+                return True
+    return False
+
+
+def test_no_production_code_calls_the_installer():
+    """Importing constants is fine; invoking the install is not.
+
+    Calls into the installer (through any import alias) and the retired
+    DYN_ENABLE_MEDIA_DECODERS switch must appear nowhere outside the
+    installer module and its test.
     """
     allowed = {
-        Path("dynamo/common/utils/install_media_decoders.py"),  # the installer itself
-        Path("dynamo/common/tests/test_install_media_decoders.py"),  # this test
+        Path("common/utils/install_media_decoders.py"),  # the installer itself
+        Path("common/tests/test_install_media_decoders.py"),  # this test
     }
     offenders: list[str] = []
-    for path in sorted(_COMPONENTS_ROOT.rglob("*.py")):
-        rel = path.relative_to(_COMPONENTS_ROOT)
+    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+        rel = path.relative_to(_PACKAGE_ROOT)
         if rel in allowed:
             continue
         text = path.read_text(encoding="utf-8")
-        if "install_media_decoders" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
+        if "DYN_ENABLE_MEDIA_DECODERS" in text or _source_calls_installer(text):
             offenders.append(str(rel))
     assert not offenders, (
-        f"{offenders} reference the media-decoder installer; it must stay an "
-        "explicit operator command, never wired into worker startup"
+        f"{offenders} invoke the media-decoder installer (or resurrect its env "
+        "switch); only an operator may run it"
     )
+
+
+def test_call_detector_sees_through_aliases():
+    """The detector must catch aliased calls and ignore constant imports."""
+    calls = _source_calls_installer
+    direct = "from dynamo.common.utils.install_media_decoders import install_media_decoders\ninstall_media_decoders('vllm')\n"
+    aliased = "from dynamo.common.utils.install_media_decoders import install_media_decoders as x\nx('vllm')\n"
+    mod_alias = (
+        "import dynamo.common.utils.install_media_decoders as m\nm.main(['vllm'])\n"
+    )
+    from_pkg = "from dynamo.common.utils import install_media_decoders as imd\nimd.install_media_decoders('vllm')\n"
+    constants_only = "from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS\nprint(VALIDATED_SPECS)\n"
+    assert calls(direct)
+    assert calls(aliased)
+    assert calls(mod_alias)
+    assert calls(from_pkg)
+    assert not calls(constants_only)
 
 
 def test_installer_module_has_no_env_switches():
     """The module reads no environment variables at all."""
-    source = (
-        _COMPONENTS_ROOT / "dynamo/common/utils/install_media_decoders.py"
-    ).read_text(encoding="utf-8")
+    source = (_PACKAGE_ROOT / "common/utils/install_media_decoders.py").read_text(
+        encoding="utf-8"
+    )
     assert "os.environ" not in source and "getenv" not in source, (
         "install_media_decoders.py reads the environment; configuration belongs in "
         "CLI flags so the install stays explicit and self-describing"

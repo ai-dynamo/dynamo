@@ -10,8 +10,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import pytest
 
@@ -272,6 +273,33 @@ def _prepare_deployment(
     )
 
 
+def _cleanup_prepared_deployment(prep: _PreparedDeployment) -> None:
+    if prep.disagg_bootstrap_port is not None:
+        deallocate_port(prep.disagg_bootstrap_port)
+    for port in prep.extra_allocated_ports:
+        deallocate_port(port)
+
+
+@contextmanager
+def managed_serve_deployment(
+    config: EngineConfig,
+    request: Any,
+    *,
+    ports: ServicePorts | None = None,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Iterator[EngineProcess]:
+    """Launch a port-isolated Dynamo deployment and guarantee port cleanup."""
+    prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
+
+    try:
+        with EngineProcess.from_config(
+            prep.config, request, extra_env=prep.merged_env
+        ) as server_process:
+            yield server_process
+    finally:
+        _cleanup_prepared_deployment(prep)
+
+
 # EngineConfig.env key naming a whitespace-separated list of pip packages to
 # install into the runtime container before the server launches. Some runtime
 # images intentionally omit certain media-decoder libraries; the few serve tests
@@ -342,8 +370,6 @@ def run_serve_deployment(
     merged_env = prep.merged_env
     dynamic_frontend_port = prep.frontend_port
     dynamic_system_ports = prep.system_ports
-    disagg_bootstrap_port = prep.disagg_bootstrap_port
-    extra_allocated_ports = prep.extra_allocated_ports
 
     try:
         with EngineProcess.from_script(
@@ -467,10 +493,7 @@ def run_serve_deployment(
             if post_validation is not None:
                 post_validation()
     finally:
-        if disagg_bootstrap_port is not None:
-            deallocate_port(disagg_bootstrap_port)
-        for p in extra_allocated_ports:
-            deallocate_port(p)
+        _cleanup_prepared_deployment(prep)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):
