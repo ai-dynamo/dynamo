@@ -100,7 +100,7 @@ python -m dynamo.frontend \
 ## Kubernetes deployment
 
 In Kubernetes, TLS certificates are typically delivered by a certificate
-management system (e.g., cert-manager) and mounted into pods. Set the
+management system and mounted into pods. Set the
 environment variables on each component's pod template in the
 `DynamoGraphDeployment` spec:
 
@@ -153,11 +153,16 @@ When TLS is configured, the following frontend↔worker streams are encrypted:
 
 ## Design notes
 
+- Server certificates hot-reload: the request-plane and response-stream servers
+  serve their leaf cert/key through a resolver that re-reads the files from disk
+  when their contents change (detected by a content hash, so rotations done by
+  an atomic symlink swap are handled too), so certificate rotation
+  takes effect **without a process restart**. The check is rate-limited (at most
+  once every 30s, sooner after a failed reload) and never blocks a handshake; a
+  failed reload keeps serving the last valid certificate. Client trust anchors
+  (the CA) are still loaded once, so rotating the CA itself requires a restart.
 - Client TLS connectors are built once and cached via `OnceCell` on the first
-  outbound connection; the request-plane and response-stream servers build their
-  TLS acceptor eagerly at startup. Because the config is cached, certificate
-  rotation currently requires a process restart — hot-reloading certificates
-  from disk via a rustls certificate resolver is a possible future enhancement.
+  outbound connection.
 - The TLS handshake is spawned per-connection on both the request plane and
   response stream servers so the accept loop is never blocked.
 - Invalid TLS configuration on the request plane (e.g. bad cert path) prevents
