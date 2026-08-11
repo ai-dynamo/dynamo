@@ -61,7 +61,7 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClassifiedHttpError, HttpErrorKind, invalid_argument, take_converted_stream_events,
+    ClassifiedHttpError, HttpErrorKind, drain_converted_stream_events, invalid_argument,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
@@ -480,16 +480,15 @@ async fn anthropic_messages(
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
-            let start_events = match take_converted_stream_events(&mut events, "Anthropic") {
-                Ok(events) => events,
-                Err(problem) => {
-                    yield Ok(converter.error_event(anthropic_problem_body(&problem)));
-                    yield Err(axum::Error::new(problem));
-                    return;
+            for event in drain_converted_stream_events(&mut events, "Anthropic") {
+                match event {
+                    Ok(event) => yield Ok(event),
+                    Err(problem) => {
+                        yield Ok(converter.error_event(anthropic_problem_body(&problem)));
+                        yield Err(axum::Error::new(problem));
+                        return;
+                    }
                 }
-            };
-            for event in start_events {
-                yield Ok(event);
             }
 
             let mut cancelled = false;
@@ -528,16 +527,15 @@ async fn anthropic_messages(
                         };
 
                         converter.append_chunk_events(&stream_resp, &mut events);
-                        let chunk_events = match take_converted_stream_events(&mut events, "Anthropic") {
-                            Ok(events) => events,
-                            Err(problem) => {
-                                yield Ok(converter.error_event(anthropic_problem_body(&problem)));
-                                yield Err(axum::Error::new(problem));
-                                return;
+                        for event in drain_converted_stream_events(&mut events, "Anthropic") {
+                            match event {
+                                Ok(event) => yield Ok(event),
+                                Err(problem) => {
+                                    yield Ok(converter.error_event(anthropic_problem_body(&problem)));
+                                    yield Err(axum::Error::new(problem));
+                                    return;
+                                }
                             }
-                        };
-                        for event in chunk_events {
-                            yield Ok(event);
                         }
                     }
                     _ = &mut stopped => {
@@ -552,16 +550,15 @@ async fn anthropic_messages(
             }
 
             converter.append_end_events(&mut events);
-            let end_events = match take_converted_stream_events(&mut events, "Anthropic") {
-                Ok(events) => events,
-                Err(problem) => {
-                    yield Ok(converter.error_event(anthropic_problem_body(&problem)));
-                    yield Err(axum::Error::new(problem));
-                    return;
+            for event in drain_converted_stream_events(&mut events, "Anthropic") {
+                match event {
+                    Ok(event) => yield Ok(event),
+                    Err(problem) => {
+                        yield Ok(converter.error_event(anthropic_problem_body(&problem)));
+                        yield Err(axum::Error::new(problem));
+                        return;
+                    }
                 }
-            };
-            for event in end_events {
-                yield Ok(event);
             }
 
             if cancelled {

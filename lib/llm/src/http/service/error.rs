@@ -3,7 +3,7 @@
 
 use std::sync::LazyLock;
 
-use axum::{http::StatusCode, response::sse::Event};
+use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use serde_json::Value;
@@ -73,19 +73,18 @@ pub(crate) struct ClassifiedHttpError {
     details: Option<Box<Value>>,
 }
 
-pub(crate) fn take_converted_stream_events(
-    events: &mut Vec<Result<Event, anyhow::Error>>,
-    protocol: &str,
-) -> Result<Vec<Event>, ClassifiedHttpError> {
-    std::mem::take(events)
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
+pub(crate) fn drain_converted_stream_events<'a, T>(
+    events: &'a mut Vec<Result<T, anyhow::Error>>,
+    protocol: &'a str,
+) -> impl Iterator<Item = Result<T, ClassifiedHttpError>> + 'a {
+    events.drain(..).map(move |event| {
+        event.map_err(|error| {
             ClassifiedHttpError::internal(
                 INTERNAL_ERROR_MESSAGE,
                 format!("{protocol} stream event conversion failed: {error:#}"),
             )
         })
+    })
 }
 
 /// Construct a typed invalid-argument error for validation performed at an
@@ -482,13 +481,18 @@ mod tests {
     use dynamo_runtime::protocols::maybe_error::MaybeError;
 
     #[test]
-    fn stream_event_conversion_failures_are_classified_and_drained() {
-        let mut events: Vec<Result<Event, anyhow::Error>> =
-            vec![Err(anyhow::anyhow!("serializer failed"))];
+    fn stream_event_conversion_failures_are_classified_without_reallocation() {
+        let mut events: Vec<Result<(), anyhow::Error>> = Vec::with_capacity(4);
+        events.push(Err(anyhow::anyhow!("serializer failed")));
+        let capacity = events.capacity();
 
-        let problem = take_converted_stream_events(&mut events, "Responses").unwrap_err();
+        let problem = {
+            let mut drained = drain_converted_stream_events(&mut events, "Responses");
+            drained.next().unwrap().unwrap_err()
+        };
 
         assert!(events.is_empty());
+        assert_eq!(events.capacity(), capacity);
         assert_eq!(problem.kind(), HttpErrorKind::Internal);
         assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
         assert_eq!(

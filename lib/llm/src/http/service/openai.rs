@@ -38,8 +38,8 @@ use super::{
         monitor_for_disconnects_with_rendered_errors,
     },
     error::{
-        ClassifiedHttpError, HttpError, HttpErrorKind, invalid_argument,
-        take_converted_stream_events,
+        ClassifiedHttpError, HttpError, HttpErrorKind, drain_converted_stream_events,
+        invalid_argument,
     },
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
@@ -2877,16 +2877,15 @@ async fn responses(
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
-            let start_events = match take_converted_stream_events(&mut events, "Responses") {
-                Ok(events) => events,
-                Err(problem) => {
-                    yield Ok(converter.error_event(responses_error_object(&problem)));
-                    yield Err(axum::Error::new(problem));
-                    return;
+            for event in drain_converted_stream_events(&mut events, "Responses") {
+                match event {
+                    Ok(event) => yield Ok(event),
+                    Err(problem) => {
+                        yield Ok(converter.error_event(responses_error_object(&problem)));
+                        yield Err(axum::Error::new(problem));
+                        return;
+                    }
                 }
-            };
-            for event in start_events {
-                yield Ok(event);
             }
 
             while let Some(annotated_chunk) = engine_stream.next().await {
@@ -2909,30 +2908,28 @@ async fn responses(
                 };
 
                 converter.append_chunk_events(&stream_resp, &mut events);
-                let chunk_events = match take_converted_stream_events(&mut events, "Responses") {
-                    Ok(events) => events,
+                for event in drain_converted_stream_events(&mut events, "Responses") {
+                    match event {
+                        Ok(event) => yield Ok(event),
+                        Err(problem) => {
+                            yield Ok(converter.error_event(responses_error_object(&problem)));
+                            yield Err(axum::Error::new(problem));
+                            return;
+                        }
+                    }
+                }
+            }
+
+            converter.append_end_events(&mut events);
+            for event in drain_converted_stream_events(&mut events, "Responses") {
+                match event {
+                    Ok(event) => yield Ok(event),
                     Err(problem) => {
                         yield Ok(converter.error_event(responses_error_object(&problem)));
                         yield Err(axum::Error::new(problem));
                         return;
                     }
-                };
-                for event in chunk_events {
-                    yield Ok(event);
                 }
-            }
-
-            converter.append_end_events(&mut events);
-            let end_events = match take_converted_stream_events(&mut events, "Responses") {
-                Ok(events) => events,
-                Err(problem) => {
-                    yield Ok(converter.error_event(responses_error_object(&problem)));
-                    yield Err(axum::Error::new(problem));
-                    return;
-                }
-            };
-            for event in end_events {
-                yield Ok(event);
             }
         };
 
