@@ -1497,27 +1497,40 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 await _scale_engine(new_dp_size)
             except Exception as grow_err:
                 logger.error(
-                    f"[ElasticEP] Scaling to dp={new_dp_size} failed: {grow_err}"
+                    "[ElasticEP] Scaling to dp=%s failed: %s", new_dp_size, grow_err
                 )
                 if new_dp_size == prev_dp:
                     # No size change was applied; nothing to roll back.
                     raise
+                # vLLM records parallel_config.data_parallel_size only *after* a
+                # successful reconfigure, so after a failed grow the engine still
+                # believes it is at prev_dp. A rollback call to prev_dp would then
+                # hit vLLM's "already at this size, skipping scale" guard and be a
+                # silent no-op -- leaving the half-created ranks in place while we
+                # falsely report recovery. Advance the recorded size to the
+                # attempted target so the rollback drives a real scale-down.
+                self.engine_client.vllm_config.parallel_config.data_parallel_size = (
+                    new_dp_size
+                )
                 # Roll back to the last good dp: "either it grows, or nothing
                 # changes" for the engine, not just the pod.
                 try:
                     logger.warning(
-                        f"[ElasticEP] Rolling back to data_parallel_size={prev_dp}"
+                        "[ElasticEP] Rolling back to data_parallel_size=%s", prev_dp
                     )
                     await _scale_engine(prev_dp)
                 except Exception as rollback_err:
                     # Rollback itself failed: the engine is unrecoverable in
                     # process (e.g. an uncorrectable NVLink error poisoned the
-                    # CUDA/NCCL context). Signal that the worker must be restarted
-                    # rather than report a false recovery.
+                    # CUDA/NCCL context, or the grow died before the new ranks were
+                    # registered so there is nothing left to scale back down).
+                    # Signal that the worker must be restarted rather than report a
+                    # false recovery.
                     logger.error(
-                        f"[ElasticEP] Rollback to dp={prev_dp} also failed: "
-                        f"{rollback_err}. Engine is unrecoverable and must be "
-                        "restarted."
+                        "[ElasticEP] Rollback to dp=%s also failed: %s. Engine is "
+                        "unrecoverable and must be restarted.",
+                        prev_dp,
+                        rollback_err,
                     )
                     return {
                         "status": "error",
@@ -1530,7 +1543,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         ),
                     }
                 logger.info(
-                    f"[ElasticEP] Rolled back to dp={prev_dp}; engine still serving"
+                    "[ElasticEP] Rolled back to dp=%s; engine still serving", prev_dp
                 )
                 return {
                     "status": "error",
