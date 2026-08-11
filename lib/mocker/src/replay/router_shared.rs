@@ -144,11 +144,13 @@ pub(super) fn replay_slots_with_block_size(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
+    // The opt-in replay-bench feature promises repeatable offline experiments,
+    // including externally controlled replays that do not enter the canonical
+    // report guard. Normal builds retain the production selector below.
     #[cfg(feature = "replay-bench")]
-    if super::canonical_replay_active() {
-        return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
-    }
+    return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
 
+    #[cfg(not(feature = "replay-bench"))]
     DefaultWorkerSelector::new(Some(config.clone()), "replay")
 }
 

@@ -540,6 +540,49 @@ mod tests {
         assert_eq!(workers["low"], 1);
     }
 
+    #[cfg(feature = "replay-bench")]
+    #[test]
+    fn controlled_kv_router_replay_is_reproducible() {
+        fn run() -> (f64, Vec<(String, usize, f64)>) {
+            let trace = Trace {
+                block_size: 64,
+                sessions: (0..32)
+                    .map(|index| SessionTrace {
+                        session_id: format!("session-{index}"),
+                        first_arrival_timestamp_ms: Some(0.0),
+                        turns: vec![turn(index + 1, None)],
+                    })
+                    .collect(),
+            };
+            let mut source = DriverSource::new(trace);
+            let report = simulate_controlled_aggregated_kv_router_with_options(
+                &args(),
+                4,
+                &mut source,
+                ControlledReplayOptions {
+                    capture_per_request: true,
+                    ..ControlledReplayOptions::default()
+                },
+            )
+            .unwrap();
+            let mut requests = report
+                .per_request
+                .into_iter()
+                .map(|request| {
+                    (
+                        request.session_id.unwrap(),
+                        request.decode_worker_idx.unwrap(),
+                        request.terminal_time_ms,
+                    )
+                })
+                .collect::<Vec<_>>();
+            requests.sort_by(|left, right| left.0.cmp(&right.0));
+            (report.throughput.duration_ms, requests)
+        }
+
+        assert_eq!(run(), run());
+    }
+
     #[test]
     fn controlled_kv_router_supports_heterogeneous_worker_topologies() {
         let trace = Trace {
