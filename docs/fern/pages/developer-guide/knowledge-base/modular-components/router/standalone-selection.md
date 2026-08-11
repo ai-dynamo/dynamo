@@ -207,11 +207,12 @@ hash producer with the same algorithm, key, and key ID as the selector.
 ### `session_id`
 
 Both `POST /select` and `POST /select_and_reserve` accept an optional
-`session_id` string. It defaults to absent, and omitting it does not change
-selection. The selector carries the value through scheduling and exposes it to
-worker-selection policy as `WorkerSelectionContext::session_id()`, so a custom
-picker or scorer can implement session affinity by preferring the worker a
-session used previously.
+`session_id` string. It defaults to absent. Under the built-in selector,
+omitting it does not change selection; a custom policy that reads the field can
+select differently depending on whether it is present. The selector carries the
+value through scheduling and exposes it to worker-selection policy as
+`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
+implement session affinity by preferring the worker a session used previously.
 
 > [!NOTE]
 > `session_id` is an input to policy, not an affinity mechanism in itself. The
