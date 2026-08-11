@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated vLLM deployment for Nemotron 3.5 Nano NVFP4 on 1x H100 with built-in MTP speculative decoding.
+# Aggregated vLLM deployment for Nemotron 3.5 Lightning NVFP4 on 1x H100 with built-in MTP speculative decoding.
 # The model must already be present in shared-model-cache.
 apiVersion: v1
 kind: ConfigMap

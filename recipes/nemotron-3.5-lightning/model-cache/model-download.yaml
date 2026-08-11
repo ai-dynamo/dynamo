@@ -11,16 +11,23 @@ spec:
   backoffLimit: 3
   completions: 1
   parallelism: 1
+  activeDeadlineSeconds: 3600
   template:
     metadata:
       labels:
         app: model-download
     spec:
       restartPolicy: Never
+      imagePullSecrets:
+        - name: your-image-pull-secret
       containers:
         - name: model-download
-          image: python:3.10-slim
-          command: ["sh", "-c"]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+          command: ["python3", "-c"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - secretRef:
                 name: hf-token-secret
@@ -37,12 +44,17 @@ spec:
               value: "1"
           args:
             - |
-              set -eux
-              pip install --no-cache-dir huggingface_hub==1.16.4
-              hf download "$BASE_MODEL"
-              hf download "$DFLASH_MODEL"
-              hf download "$DSPARK_MODEL"
-              find /model-cache/hub -maxdepth 3 -type d -name snapshots -print
+              import os
+              from pathlib import Path
+              from huggingface_hub import snapshot_download
+
+              for env_name in ("BASE_MODEL", "DFLASH_MODEL", "DSPARK_MODEL"):
+                  repo_id = os.environ[env_name]
+                  print(f"Downloading {repo_id}", flush=True)
+                  snapshot_download(repo_id=repo_id)
+
+              for path in Path("/model-cache/hub").glob("*/snapshots"):
+                  print(path)
           volumeMounts:
             - name: shared-model-cache
               mountPath: /model-cache

@@ -18,7 +18,7 @@ hardware and speculative decoding combinations.
 | H100 | `agg-h100-{mtp,dflash,dspark}` | `disagg-h100-{mtp,dflash,dspark}` | AWS EFA / Libfabric |
 | H200 | `agg-h200-{mtp,dflash,dspark}` | `disagg-h200-{mtp,dflash,dspark}` | UCX over IB/RDMA |
 | B200 | `agg-b200-{mtp,dflash,dspark}` | `disagg-b200-dspark` | UCX over IB/RDMA |
-| GB200 | `agg-gb200-{mtp,dflash,dspark}` | `disagg-gb200-{dflash,dspark}` | UCX |
+| GB200 | `agg-gb200-{mtp,dflash,dspark}` | `disagg-gb200-{dflash,dspark}` | UCX/NIXL, cluster-specific fabric resources |
 
 Each recipe identifier corresponds to `identifier/deploy.yaml` in this directory.
 
@@ -58,6 +58,18 @@ more GPUs.
    populated with `../model-cache/model-download.yaml`.
 3. A Hugging Face secret named `hf-token-secret` and an image-pull secret when
    required by the cluster.
+4. For H100 disaggregated recipes, AWS EFA userspace must already be available
+   in the runtime image or installed through your cluster's approved bootstrap
+   flow. These manifests request `vpc.amazonaws.com/efa` and select the NIXL
+   LIBFABRIC backend, but they do not install EFA packages during pod startup.
+   Use `check-efa-userspace.sh` to validate a prepared image or running pod. If
+   you use its install mode, set `EFA_INSTALLER_VERSION` and
+   `EFA_INSTALLER_SHA256` to pin and verify the installer archive.
+
+```bash
+kubectl exec -i -n "${NAMESPACE}" <h100-worker-pod> -- \
+  bash -s -- check < check-efa-userspace.sh
+```
 
 ## Quick start
 
@@ -113,5 +125,6 @@ ConfigMap key.
 - B200 DFlash recipes disable the FlashInfer FP8 ScaledMM linear kernel.
 - Disaggregated recipes require matching speculative-decoding settings on the
   prefill and decode workers for compatible NIXL cache metadata.
+- H100 disaggregated recipes require the EFA userspace stack before deployment.
 - Replace `your-image-pull-secret` and any cluster-specific networking resource
   names with values available in the target cluster.

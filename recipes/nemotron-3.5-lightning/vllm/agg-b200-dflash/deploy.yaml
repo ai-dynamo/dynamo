@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated vLLM deployment for Nemotron 3.5 Nano NVFP4 on 1x B200.
+# Aggregated vLLM deployment for Nemotron 3.5 Lightning NVFP4 on 1x B200.
 # The B200 recipes in this repo disable the FlashInfer FP8 ScaledMM path to
 # keep CUDA graphs enabled for this configuration.
 apiVersion: v1

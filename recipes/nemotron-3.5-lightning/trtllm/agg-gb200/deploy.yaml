@@ -39,7 +39,6 @@ spec:
     - name: Frontend
       type: frontend
       replicas: 1
-      runtimeVersionOverride: 1.4.0
       podTemplate:
         spec:
           imagePullSecrets:
@@ -89,7 +88,6 @@ spec:
     - name: agg
       type: worker
       replicas: 1
-      runtimeVersionOverride: 1.4.0
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
