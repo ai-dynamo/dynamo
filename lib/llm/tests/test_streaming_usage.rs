@@ -19,12 +19,14 @@ use dynamo_protocols::types::{
     PromptTokensDetails,
 };
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineStream};
+use dynamo_runtime::metrics::frontend_perf::{DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
 use futures::stream;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 // Mock context for testing
 #[derive(Debug)]
@@ -270,6 +272,52 @@ async fn test_streaming_without_usage() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_detokenize_metrics_flush_once_at_stream_completion() {
+    let request = create_chat_request(None, None);
+    let response_generator = request.response_generator("test-detokenize-metrics".to_string());
+    let tracker = response_generator.tracker();
+
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let tracked = tracker.clone();
+    let outputs = build_backend_outputs_with_cached_tokens(None);
+    let stream = stream::iter(outputs.into_iter().map(move |output| {
+        tracked.record_detokenize_latency(Duration::from_micros(10));
+        Annotated::from_data(output)
+    }));
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        ctx,
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    futures::pin_mut!(transformed_stream);
+
+    for _ in 0..3 {
+        assert!(transformed_stream.next().await.is_some());
+        assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+        assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+    }
+
+    // Polling past the final backend chunk reaches stream completion and emits the
+    // internal usage item. The per-request totals must be flushed exactly once here.
+    assert!(transformed_stream.next().await.is_some());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
+
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
 }
 
 #[tokio::test]

@@ -3321,15 +3321,6 @@ impl OpenAIPreprocessor {
                         );
                     }
 
-                    // Flush per-request detokenize accumulators to global Prometheus counters
-                    // (once per request instead of per-token).
-                    if let Some(t) = tracker.as_ref() {
-                        if let Some(total) = t.detokenize_total_latency() {
-                            DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
-                        }
-                        DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
-                    }
-
                     attach_llm_metrics(&mut response, llm_metrics);
 
                     // Mark if we've seen a finish_reason
@@ -3348,6 +3339,15 @@ impl OpenAIPreprocessor {
                     // Stream has ended - must set finished to true to prevent unfold from polling
                     // again. The stream is exhausted and will panic if polled after None.
                     inner.finished = true;
+
+                    // Flush per-request detokenize accumulators to global Prometheus counters
+                    // once, after the backend response stream completes.
+                    if let Some(t) = inner.response_generator.tracker().as_ref() {
+                        if let Some(total) = t.detokenize_total_latency() {
+                            DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                        }
+                        DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
+                    }
 
                     if inner.finish_reason_sent && !inner.usage_chunk_sent {
                         inner.usage_chunk_sent = true;
@@ -3400,15 +3400,6 @@ impl OpenAIPreprocessor {
                                 usage.completion_tokens as usize,
                                 cached_tokens,
                             );
-                        }
-
-                        // Flush per-request detokenize accumulators to global Prometheus counters
-                        // (once per request instead of per-token).
-                        if let Some(t) = tracker.as_ref() {
-                            if let Some(total) = t.detokenize_total_latency() {
-                                DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
-                            }
-                            DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
                         let usage_requested = inner.response_generator.is_usage_enabled();
