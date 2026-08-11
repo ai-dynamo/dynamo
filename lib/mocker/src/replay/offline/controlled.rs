@@ -18,7 +18,9 @@ use super::core::{AdmissionSource, NoEngineEvents, ReadyArrival};
 use super::extensions::kv_events::RouterEventObservation;
 use super::extensions::kv_router::KvRouterPlacement;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use crate::loadgen::{
+    CascadedWorkloadTerminal, ReplayRequestHashes, ReplayRequestPayload, WorkloadTerminalStatus,
+};
 use crate::replay::{ReplayTerminalStatus, TraceSimulationReport};
 
 /// Runtime state visible to a work source when Dynamo asks for ready requests.
@@ -95,6 +97,8 @@ where
 {
     type Request = ReplayRequestPayload;
     type Metadata = Metadata;
+    type TerminalStatus = WorkloadTerminalStatus;
+    type CascadedTerminal = CascadedWorkloadTerminal;
 
     fn next_internal_event_ms(&mut self) -> Option<f64> {
         self.source.next_internal_event_ms()
@@ -134,6 +138,8 @@ where
                     metadata: Metadata::from_hashes(submission.replay_hashes),
                     session_id: submission.session_id,
                     turn_index: submission.turn_index,
+                    logical_request_id: None,
+                    authored_turn_index: None,
                 })
             })
             .collect()
@@ -143,13 +149,14 @@ where
         self.source.on_output_token(request_id, token_id)
     }
 
-    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
-        let status = if rejected {
-            ReplayTerminalStatus::Rejected
-        } else {
-            ReplayTerminalStatus::Completed
-        };
-        self.source.on_terminal(request_id, now_ms, status)
+    fn on_terminal(
+        &mut self,
+        request_id: Uuid,
+        now_ms: f64,
+        status: WorkloadTerminalStatus,
+    ) -> Result<Vec<CascadedWorkloadTerminal>> {
+        self.source.on_terminal(request_id, now_ms, status.into())?;
+        Ok(Vec::new())
     }
 
     fn is_drained(&self) -> bool {
@@ -242,7 +249,15 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
-    use crate::loadgen::{SessionTrace, Trace, TurnTrace, WorkloadDriver};
+    use crate::loadgen::{
+        AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace, WorkloadDriver,
+    };
+    use crate::replay::offline::{
+        OfflineReplaySession, ReplayAgenticRequest, ReplayAgenticWorkflow, ReplayRequestSpec,
+        ReplayRoutingConstraints, ReplaySessionRouter, ReplayStepStatus,
+        simulate_agentic_trace_workload,
+    };
+    use crate::replay::{ReplayRouterMode, SlaThresholds};
 
     struct DriverSource {
         driver: WorkloadDriver,
@@ -258,6 +273,19 @@ mod tests {
                 driver: WorkloadDriver::new_concurrency(trace, engine_block_size, usize::MAX)
                     .unwrap()
                     .with_deterministic_request_ids(7),
+                turns: HashMap::new(),
+                submissions: Vec::new(),
+                terminals: Vec::new(),
+            }
+        }
+
+        fn new_agentic(trace: AgenticTrace, engine_block_size: usize) -> Self {
+            Self {
+                driver: WorkloadDriver::new_agentic_trace_without_replay_hashes(
+                    trace,
+                    engine_block_size,
+                )
+                .unwrap(),
                 turns: HashMap::new(),
                 submissions: Vec::new(),
                 terminals: Vec::new(),
@@ -312,8 +340,12 @@ mod tests {
         ) -> Result<()> {
             let (session_id, turn_index) = self.turns.remove(&request_id).unwrap();
             self.terminals.push((session_id, turn_index, now_ms));
-            self.driver
-                .on_terminal(request_id, now_ms, status == ReplayTerminalStatus::Rejected)
+            let cascaded = self.driver.on_terminal(request_id, now_ms, status.into())?;
+            ensure!(
+                cascaded.is_empty(),
+                "non-agentic controlled test source unexpectedly cascaded terminals"
+            );
+            Ok(())
         }
 
         fn is_drained(&self) -> bool {
@@ -351,6 +383,187 @@ mod tests {
                 .insert(taint.to_string());
         }
         turn
+    }
+
+    fn adapter_conformance_trace() -> AgenticTrace {
+        AgenticTrace {
+            block_size: 64,
+            turns: vec![
+                AgenticTurnTrace {
+                    request_id: "adapter-a".to_string(),
+                    session_id: "adapter-session-a".to_string(),
+                    authored_turn_index: 0,
+                    internal_uuid: Some(Uuid::from_u128(0xa1)),
+                    input_length: 128,
+                    max_output_tokens: 4,
+                    output_token_ids: Some(vec![101, 102, 103, 104]),
+                    hash_ids: vec![11, 12],
+                    first_ready_timestamp_ms: Some(0.0),
+                    prefix_reset: false,
+                    ..Default::default()
+                },
+                AgenticTurnTrace {
+                    request_id: "adapter-b".to_string(),
+                    session_id: "adapter-session-b".to_string(),
+                    authored_turn_index: 0,
+                    internal_uuid: Some(Uuid::from_u128(0xb2)),
+                    input_length: 64,
+                    max_output_tokens: 3,
+                    output_token_ids: Some(vec![201, 202, 203]),
+                    hash_ids: vec![21],
+                    first_ready_timestamp_ms: Some(0.0),
+                    prefix_reset: false,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    fn run_interactive_conformance(trace: &AgenticTrace) -> TraceSimulationReport {
+        let mut replay = OfflineReplaySession::new(
+            &args(),
+            2,
+            trace.block_size,
+            ReplaySessionRouter::RoundRobin,
+        )
+        .unwrap();
+        replay
+            .append_agentic_workflow(
+                ReplayAgenticWorkflow {
+                    trace_block_size: trace.block_size,
+                    requests: trace
+                        .turns
+                        .iter()
+                        .map(|turn| ReplayAgenticRequest {
+                            request: ReplayRequestSpec {
+                                logical_request_id: turn.request_id.clone(),
+                                attempt_id: "0".to_string(),
+                                group_id: turn.session_id.clone(),
+                                internal_uuid: turn.internal_uuid,
+                                session_id: turn.session_id.clone(),
+                                authored_turn_index: turn.authored_turn_index,
+                                ready_time_ms: turn.first_ready_timestamp_ms.unwrap_or_default(),
+                                input_length: turn.input_length,
+                                hash_ids: turn.hash_ids.clone(),
+                                trace_block_size: trace.block_size,
+                                output_length: turn.max_output_tokens,
+                                output_token_ids: turn.output_token_ids.clone(),
+                                priority: turn.priority,
+                                strict_priority: turn.strict_priority,
+                                policy_class: turn.policy_class.clone(),
+                                routing_constraints: ReplayRoutingConstraints::default(),
+                                target: None,
+                            },
+                            wait_for: turn.wait_for.clone(),
+                            dependency_delay_ms: turn.delay_after_dependencies_ms,
+                            prefix_reset: turn.prefix_reset,
+                        })
+                        .collect(),
+                },
+                0.0,
+            )
+            .unwrap();
+        replay.close_admission().unwrap();
+        for _ in 0..10_000 {
+            replay.settle_current_time().unwrap();
+            replay.drain_events().unwrap();
+            if replay.is_drained().unwrap() {
+                return replay.finalize().unwrap();
+            }
+            assert!(!matches!(
+                replay.advance_next().unwrap(),
+                ReplayStepStatus::Quiescent { .. }
+            ));
+            replay.drain_events().unwrap();
+        }
+        panic!("interactive conformance fixture did not drain")
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct AdapterPhysicsRecord {
+        uuid: String,
+        arrival_time_ms: f64,
+        first_admit_ms: Option<f64>,
+        terminal_time_ms: f64,
+        first_token_ms: Option<f64>,
+        last_token_ms: Option<f64>,
+        input_length: usize,
+        requested_output_length: usize,
+        output_length: usize,
+        reused_input_tokens: usize,
+        decode_worker_idx: Option<usize>,
+        terminal_status: ReplayTerminalStatus,
+    }
+
+    fn physics_records(report: &TraceSimulationReport) -> Vec<AdapterPhysicsRecord> {
+        let mut records = report
+            .per_request
+            .iter()
+            .map(|record| AdapterPhysicsRecord {
+                uuid: record.uuid.clone(),
+                arrival_time_ms: record.arrival_time_ms,
+                first_admit_ms: record.first_admit_ms,
+                terminal_time_ms: record.terminal_time_ms,
+                first_token_ms: record.first_token_ms,
+                last_token_ms: record.last_token_ms,
+                input_length: record.input_length,
+                requested_output_length: record.requested_output_length,
+                output_length: record.output_length,
+                reused_input_tokens: record.reused_input_tokens,
+                decode_worker_idx: record.decode_worker_idx,
+                terminal_status: record.terminal_status,
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.uuid.cmp(&right.uuid));
+        records
+    }
+
+    #[test]
+    fn one_shot_work_source_and_interactive_share_fixed_placement_physics() {
+        let trace = adapter_conformance_trace();
+        let one_shot = simulate_agentic_trace_workload(
+            args(),
+            None,
+            None,
+            trace.clone(),
+            2,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+        let mut source = DriverSource::new_agentic(trace.clone(), 64);
+        let controlled = simulate_controlled_aggregated_with_options(
+            &args(),
+            2,
+            &mut source,
+            ControlledReplayOptions {
+                capture_per_request: true,
+            },
+        )
+        .unwrap();
+        let interactive = run_interactive_conformance(&trace);
+
+        assert_eq!(physics_records(&one_shot), physics_records(&controlled));
+        assert_eq!(physics_records(&one_shot), physics_records(&interactive));
+        assert_eq!(one_shot.request_counts.num_requests, 2);
+        assert_eq!(controlled.request_counts.completed_requests, 2);
+        assert_eq!(interactive.request_counts.completed_requests, 2);
+        assert_eq!(
+            one_shot.throughput.decode_worker_seconds,
+            controlled.throughput.decode_worker_seconds
+        );
+        assert_eq!(
+            one_shot.throughput.decode_worker_seconds,
+            interactive.throughput.decode_worker_seconds
+        );
+        assert_eq!(
+            physics_records(&one_shot)
+                .iter()
+                .map(|record| record.decode_worker_idx)
+                .collect::<Vec<_>>(),
+            [Some(0), Some(1)]
+        );
     }
 
     #[test]

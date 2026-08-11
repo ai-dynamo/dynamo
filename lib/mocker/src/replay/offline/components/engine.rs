@@ -131,20 +131,40 @@ where
 
     /// Build one scheduler core per DP rank while retaining the live mocker's
     /// `(worker_id, dp_rank)` topology.
+    #[cfg(test)]
     pub(in crate::replay::offline) fn new_ranked(
         stage: SimulationWorkerStage,
         pass_mode: EnginePassMode,
         args: MockEngineArgs,
         num_workers: usize,
     ) -> Self {
-        let dp_size = args.dp_size.max(1) as usize;
+        let worker_args = (0..num_workers)
+            .map(|worker_id| {
+                let mut worker_args = args.clone();
+                if let Some(&max_num_seqs) = args.worker_max_num_seqs.get(worker_id) {
+                    worker_args.max_num_seqs = Some(max_num_seqs);
+                }
+                worker_args
+            })
+            .collect();
+        Self::new_ranked_heterogeneous(stage, pass_mode, args, worker_args)
+    }
+
+    /// Build a static set of logical workers whose scheduler/performance/KV
+    /// configuration may differ. Every worker still participates in this
+    /// component's single timestamp frontier and completion heap.
+    pub(in crate::replay::offline) fn new_ranked_heterogeneous(
+        stage: SimulationWorkerStage,
+        pass_mode: EnginePassMode,
+        scaling_args: MockEngineArgs,
+        worker_args: Vec<MockEngineArgs>,
+    ) -> Self {
+        let dp_size = scaling_args.dp_size.max(1) as usize;
+        let num_workers = worker_args.len();
         let mut workers = Vec::with_capacity(num_workers.saturating_mul(dp_size));
         let mut worker_groups = Vec::with_capacity(num_workers);
-        for worker_id in 0..num_workers {
-            let mut worker_args = args.clone();
-            if let Some(&max_num_seqs) = args.worker_max_num_seqs.get(worker_id) {
-                worker_args.max_num_seqs = Some(max_num_seqs);
-            }
+        for (worker_id, worker_args) in worker_args.into_iter().enumerate() {
+            debug_assert_eq!(worker_args.dp_size.max(1) as usize, dp_size);
             let mut rank_ids = Vec::with_capacity(dp_size);
             for dp_rank in 0..dp_size {
                 let rank_id = worker_id * dp_size + dp_rank;
@@ -172,7 +192,7 @@ where
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
-            args,
+            args: scaling_args,
             capture_raw: Observation::CAPTURE_RAW,
             observation: PhantomData,
         };
@@ -379,6 +399,14 @@ where
         self.pending_removal.insert(worker_id);
     }
 
+    /// Mark a statically configured worker inactive without scheduling a
+    /// startup transition. The worker remains visible in controller snapshots
+    /// but is ineligible for placement for the lifetime of the P0 session.
+    pub(in crate::replay::offline) fn mark_static_inactive(&mut self, worker_id: usize) {
+        self.pending_startup.insert(worker_id);
+        self.refresh_group(worker_id);
+    }
+
     /// Remove all marked workers that have fully drained, returning their IDs.
     pub(in crate::replay::offline) fn try_remove_drained(&mut self) -> Vec<usize> {
         let mut removed = Vec::new();
@@ -527,6 +555,14 @@ where
             .collect()
     }
 
+    pub(in crate::replay::offline) fn all_topology(&self) -> Vec<WorkerTopology> {
+        self.worker_groups
+            .iter()
+            .enumerate()
+            .filter_map(|(worker_id, _)| self.worker_topology(worker_id))
+            .collect()
+    }
+
     pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
         self.args.dp_size.max(1)
     }
@@ -538,9 +574,9 @@ where
         Some((usize::try_from(worker_id).ok()?, dp_rank))
     }
 
-    /// Read-only controller view of live worker/rank state. Queue/token fields
-    /// remain absent until the shared scheduler exposes them without leaking
-    /// implementation-specific completion predictions.
+    /// Read-only controller view of live worker/rank state. vLLM observations
+    /// contain only current scheduler state and materialized sequence tokens;
+    /// unsupported backends remain `None` rather than reporting fake zeroes.
     pub(in crate::replay::offline) fn interactive_snapshots(&self) -> Vec<ReplayWorkerSnapshot> {
         let mut snapshots = Vec::new();
         for (worker_id, rank_ids) in self.worker_groups.iter().enumerate() {
@@ -553,19 +589,37 @@ where
                 let Some(worker) = self.worker(rank_id) else {
                     continue;
                 };
+                let observation = worker.scheduler_observation();
                 snapshots.push(ReplayWorkerSnapshot {
+                    pool_id: crate::replay::offline::topology::DEFAULT_REPLAY_POOL_ID.to_string(),
                     worker_id,
                     dp_rank,
                     active: !starting && !draining,
                     draining,
                     in_flight_requests: worker.in_flight(),
-                    queued_requests: None,
-                    queued_tokens: None,
-                    running_tokens: None,
+                    queued_requests: observation.map(|state| state.queued_requests),
+                    running_requests: observation.map(|state| state.running_requests),
+                    queued_tokens: observation.map(|state| state.queued_tokens),
+                    running_tokens: observation.map(|state| state.running_tokens),
+                    max_num_seqs: observation.and_then(|state| state.max_num_seqs),
+                    kv_capacity_blocks: observation.map(|state| state.kv_capacity_blocks),
+                    kv_occupied_blocks: observation.map(|state| state.kv_occupied_blocks),
+                    kv_free_blocks: observation.map(|state| state.kv_free_blocks),
+                    tags: Vec::new(),
+                    taints: Vec::new(),
+                    capabilities: Vec::new(),
                 });
             }
         }
         snapshots
+    }
+
+    pub(in crate::replay::offline) fn native_prefix_overlap_tokens(
+        &self,
+        rank_id: usize,
+        tokens: &[u32],
+    ) -> Option<usize> {
+        self.worker(rank_id)?.native_prefix_overlap_tokens(tokens)
     }
 
     pub(in crate::replay::offline) fn has_active_workers(&self) -> bool {
@@ -1091,6 +1145,104 @@ mod tests {
             uuid: Some(uuid),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn interactive_vllm_snapshot_matches_materialized_scheduler_state() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(false)
+            .speedup_ratio(1.0)
+            .perf_model(Arc::new(PerfModel::from_aic_callback(Arc::new(
+                LengthLatency,
+            ))))
+            .build()
+            .unwrap();
+        let worker = OfflineWorkerState::new(0, args, false);
+        let mut engine = EngineComponent::<NoEngineEvents>::new(
+            SimulationWorkerStage::Aggregated,
+            EnginePassMode::Visible,
+            vec![worker],
+        );
+
+        engine
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![1; 4],
+                    // This large future target must not enter the token-load
+                    // observation before those tokens are generated.
+                    max_output_tokens: 100,
+                    uuid: Some(Uuid::from_u128(60)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        engine
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![2; 6],
+                    max_output_tokens: 3,
+                    uuid: Some(Uuid::from_u128(61)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let queued = engine.interactive_snapshots().pop().unwrap();
+        assert_eq!(queued.in_flight_requests, 2);
+        assert_eq!(queued.queued_requests, Some(2));
+        assert_eq!(queued.running_requests, Some(0));
+        assert_eq!(queued.queued_tokens, Some(10));
+        assert_eq!(queued.running_tokens, Some(0));
+        assert_eq!(queued.max_num_seqs, Some(1));
+        assert_eq!(queued.kv_capacity_blocks, Some(16));
+        assert_eq!(queued.kv_occupied_blocks, Some(0));
+        assert_eq!(queued.kv_free_blocks, Some(16));
+
+        engine
+            .drive_ready(0.0, &mut TraceCollector::default())
+            .unwrap();
+
+        // The one-sequence cap admits only the first request. Its four-token
+        // prompt is the current pass-start work; the eagerly generated token
+        // remains hidden until the scheduled completion boundary. The second
+        // request's six prompt tokens remain queued.
+        let live = engine.interactive_snapshots().pop().unwrap();
+        assert_eq!(live.in_flight_requests, 2);
+        assert_eq!(live.queued_requests, Some(1));
+        assert_eq!(live.running_requests, Some(1));
+        assert_eq!(live.queued_tokens, Some(6));
+        assert_eq!(live.running_tokens, Some(4));
+        assert_eq!(live.max_num_seqs, Some(1));
+        assert_eq!(live.kv_capacity_blocks, Some(16));
+        assert!(live.kv_occupied_blocks.unwrap() > 0);
+        assert_eq!(
+            live.kv_occupied_blocks.unwrap() + live.kv_free_blocks.unwrap(),
+            live.kv_capacity_blocks.unwrap()
+        );
+
+        engine
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![3; 3],
+                    max_output_tokens: 50,
+                    uuid: Some(Uuid::from_u128(62)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let with_mid_pass_arrival = engine.interactive_snapshots().pop().unwrap();
+        assert_eq!(with_mid_pass_arrival.in_flight_requests, 3);
+        assert_eq!(with_mid_pass_arrival.queued_requests, Some(2));
+        assert_eq!(with_mid_pass_arrival.queued_tokens, Some(9));
+        assert_eq!(with_mid_pass_arrival.running_requests, Some(1));
+        assert_eq!(with_mid_pass_arrival.running_tokens, Some(4));
     }
 
     #[test]

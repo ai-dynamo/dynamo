@@ -172,6 +172,26 @@ pub(crate) struct AdmissionEvent {
     pub(crate) reused_input_tokens: usize,
 }
 
+/// Read-only scheduler facts safe to expose at an external placement boundary.
+///
+/// Token counters contain only tokens already materialized in each request's
+/// current sequence (prompt plus generated tokens visible to the scheduler).
+/// They deliberately exclude maximum/recorded output lengths and all future
+/// timing. KV counters are physical G1 blocks; active and inactive cached
+/// blocks both occupy capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SchedulerObservation {
+    pub(crate) queued_requests: usize,
+    pub(crate) running_requests: usize,
+    pub(crate) queued_tokens: usize,
+    pub(crate) running_tokens: usize,
+    /// `None` means the scheduler has no configured finite sequence cap.
+    pub(crate) max_num_seqs: Option<usize>,
+    pub(crate) kv_capacity_blocks: usize,
+    pub(crate) kv_occupied_blocks: usize,
+    pub(crate) kv_free_blocks: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EnginePassResult {
     pub(crate) end_ms: f64,
@@ -303,6 +323,38 @@ impl EngineCore {
         match self {
             Self::Vllm(core) => core.num_requests(),
             Self::Sglang(core) => core.num_requests(),
+        }
+    }
+
+    /// Return scheduler-safe placement facts when the backend implements the
+    /// observation contract. The P0 contract is implemented for the shared
+    /// vLLM/TRT-LLM core; unsupported backends remain explicit rather than
+    /// synthesizing zero-valued load or KV state.
+    pub(crate) fn scheduler_observation(&self) -> Option<SchedulerObservation> {
+        match self {
+            Self::Vllm(core) => Some(core.scheduler_observation()),
+            Self::Sglang(_) => None,
+        }
+    }
+
+    pub(crate) fn native_prefix_overlap_tokens(&self, tokens: &[u32]) -> Option<usize> {
+        match self {
+            Self::Vllm(core) => core.native_prefix_overlap_tokens(tokens),
+            Self::Sglang(_) => None,
+        }
+    }
+
+    pub(crate) fn native_prefix_snapshot(&self) -> Option<crate::kv_manager::NativePrefixSnapshot> {
+        match self {
+            Self::Vllm(core) => core.native_prefix_snapshot(),
+            Self::Sglang(_) => None,
+        }
+    }
+
+    pub(crate) fn pass_start_observation(&self) -> Option<SchedulerObservation> {
+        match self {
+            Self::Vllm(core) => core.pass_start_observation(),
+            Self::Sglang(_) => None,
         }
     }
 

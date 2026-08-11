@@ -46,7 +46,9 @@ use crate::common::handoff::{
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
+use crate::loadgen::{
+    ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver, WorkloadTerminalStatus,
+};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
 use crate::replay::{
@@ -1689,17 +1691,27 @@ where
                     .on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Canceled);
                 self.cancel_prefill_route(uuid)?;
                 self.cancel_decode_route(uuid)?;
-                self.finish_logical_request(uuid, true)?;
+                self.finish_logical_request(uuid, true, WorkloadTerminalStatus::Canceled)?;
             }
             None => bail!("handoff completed without a terminal coordinator outcome"),
         }
         Ok(())
     }
 
-    fn finish_logical_request(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
+    fn finish_logical_request(
+        &mut self,
+        uuid: Uuid,
+        remove_actions: bool,
+        status: WorkloadTerminalStatus,
+    ) -> Result<()> {
         self.flow.prepare_logical_finish(uuid, remove_actions)?;
-        CoreAdmissionSource::on_terminal(&mut self.admission, uuid, self.now_ms, false)?;
+        let cascaded =
+            CoreAdmissionSource::on_terminal(&mut self.admission, uuid, self.now_ms, status)?;
         self.progress.inc_completed();
+        for terminal in &cascaded {
+            self.collector.on_cascaded_terminal(terminal, self.now_ms)?;
+            self.progress.inc_completed();
+        }
         #[cfg(test)]
         {
             self.stats
@@ -1891,7 +1903,12 @@ where
             &mut self.collector,
             &mut self.traffic,
         )?;
-        self.finish_logical_request(signal.uuid, false)?;
+        let status = if signal.rejected {
+            WorkloadTerminalStatus::Rejected
+        } else {
+            WorkloadTerminalStatus::Completed
+        };
+        self.finish_logical_request(signal.uuid, false, status)?;
         self.dispatch_decode_placements(placements)?;
         Ok(())
     }

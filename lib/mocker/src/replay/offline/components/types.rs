@@ -9,7 +9,7 @@ use super::super::evidence::{KvIngestBoundary, WorkerPool};
 use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
 use crate::loadgen::ReplayRequestPayload;
-use crate::replay::offline::core::RequestIdentity;
+use crate::replay::offline::core::{PlacementRequest, RequestIdentity};
 use crate::scheduler::{
     AdmissionEvent, EnginePassResult, SchedulerCommandEffects, SchedulerCommandResult,
     SchedulerLifecycleEvent,
@@ -39,6 +39,16 @@ impl RequestIdentity for DirectRequest {
 impl RequestIdentity for ReplayRequestPayload {
     fn request_id(&self) -> Option<Uuid> {
         self.metadata().uuid
+    }
+}
+
+impl PlacementRequest for ReplayRequestPayload {
+    fn required_taints(&self) -> std::collections::BTreeSet<String> {
+        self.routing_constraints()
+            .required_taints
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 

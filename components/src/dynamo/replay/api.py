@@ -4,13 +4,15 @@
 import json
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict, cast, overload
 
 from typing_extensions import Unpack
 
 from dynamo._core import MockEngineArgs
 from dynamo._core import _OfflineReplaySession as _NativeOfflineReplaySession
+from dynamo._core import _ReplayPoolSpec as _NativeReplayPoolSpec
+from dynamo._core import _ReplayWorkerSpec as _NativeReplayWorkerSpec
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
@@ -19,6 +21,7 @@ from dynamo.replay.report import PlannerReplayDetails, ReplayReport
 
 
 InteractiveRouter = Literal["external", "round_robin", "kv_router"]
+PoolRouter = Literal["round_robin"]
 TerminalStatus = Literal["completed", "rejected", "canceled", "failed"]
 
 
@@ -27,21 +30,64 @@ class ReplayStepStatus(TypedDict):
     now_ms: float
 
 
+class ReplayWorkerTargetData(TypedDict):
+    pool_id: str
+    worker_id: int
+    dp_rank: int
+
+
+class ReplayRoutingConstraintsData(TypedDict):
+    required_taints: list[str]
+    preferred_taints: dict[str, float]
+
+
+class ReplayPlacementCandidate(TypedDict):
+    target: ReplayWorkerTargetData
+    active: bool
+    draining: bool
+    eligible: bool
+    constraint_reason: str | None
+    in_flight_requests: int
+    queued_requests: int | None
+    running_requests: int | None
+    queued_tokens: int | None
+    running_tokens: int | None
+    max_num_seqs: int | None
+    kv_prefix_overlap_tokens: int | None
+    kv_capacity_blocks: int | None
+    kv_occupied_blocks: int | None
+    kv_free_blocks: int | None
+    tags: list[str]
+    taints: list[str]
+    capabilities: list[str]
+
+
 class ReplayEventData(TypedDict):
     logical_request_id: str
+    attempt_id: str
+    group_id: str
     internal_uuid: str
     session_id: str
     authored_turn_index: int
     timestamp_ms: float
+    pool_id: str | None
     worker_id: int | None
     dp_rank: int | None
     terminal_status: TerminalStatus | None
     input_length: int
-    requested_output_length: int
+    # Redacted at placement time so ordinary routing policies cannot inspect
+    # future work. Terminal/final lifecycle records may populate it.
+    requested_output_length: int | None
     emitted_output_count: int
     reused_input_tokens: int | None
     ttft_ms: float | None
     e2e_latency_ms: float | None
+    priority: int
+    strict_priority: int
+    policy_class: str | None
+    routing_constraints: ReplayRoutingConstraintsData
+    eligible_pool_ids: list[str]
+    candidates: list[ReplayPlacementCandidate]
 
 
 class ReplayEvent(TypedDict):
@@ -58,21 +104,34 @@ class ReplayEvent(TypedDict):
 
 class ReplayPendingPlacement(TypedDict):
     logical_request_id: str
+    attempt_id: str
+    group_id: str
     internal_uuid: str
     session_id: str
     authored_turn_index: int
     ready_at_ms: float
+    eligible_pool_ids: list[str]
+    candidates: list[ReplayPlacementCandidate]
 
 
 class ReplayWorkerSnapshot(TypedDict):
+    pool_id: str
     worker_id: int
     dp_rank: int
     active: bool
     draining: bool
     in_flight_requests: int
     queued_requests: int | None
+    running_requests: int | None
     queued_tokens: int | None
     running_tokens: int | None
+    max_num_seqs: int | None
+    kv_capacity_blocks: int | None
+    kv_occupied_blocks: int | None
+    kv_free_blocks: int | None
+    tags: list[str]
+    taints: list[str]
+    capabilities: list[str]
 
 
 class ReplaySnapshot(TypedDict):
@@ -89,9 +148,116 @@ class WorkerTarget:
 
     worker_id: int
     dp_rank: int = 0
+    pool_id: str = "default"
 
-    def to_native(self) -> dict[str, int]:
-        return {"worker_id": self.worker_id, "dp_rank": self.dp_rank}
+    def to_native(self) -> dict[str, Any]:
+        return {
+            "pool_id": self.pool_id,
+            "worker_id": self.worker_id,
+            "dp_rank": self.dp_rank,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayRoutingConstraints:
+    """Placement constraints visible to and enforced for every router mode."""
+
+    required_taints: Sequence[str] = ()
+    preferred_taints: Mapping[str, float] = field(default_factory=dict)
+
+    def to_native(self) -> dict[str, Any]:
+        return {
+            "required_taints": list(self.required_taints),
+            "preferred_taints": dict(self.preferred_taints),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerSpec:
+    """One stable worker in a static replay pool."""
+
+    worker_id: int
+    max_num_seqs: int | None = None
+    tags: Sequence[str] = ()
+    taints: Sequence[str] = ()
+    capabilities: Sequence[str] = ()
+    active: bool = True
+    draining: bool = False
+
+    def to_native(self) -> Any:
+        return _NativeReplayWorkerSpec(
+            worker_id=self.worker_id,
+            max_num_seqs=self.max_num_seqs,
+            tags=list(self.tags),
+            taints=list(self.taints),
+            capabilities=list(self.capabilities),
+            active=self.active,
+            draining=self.draining,
+        )
+
+
+_WORKER_SPEC_FIELDS = frozenset(
+    {
+        "worker_id",
+        "max_num_seqs",
+        "tags",
+        "taints",
+        "capabilities",
+        "active",
+        "draining",
+    }
+)
+
+
+def _worker_spec_native(spec: WorkerSpec | Mapping[str, Any]) -> Any:
+    if isinstance(spec, WorkerSpec):
+        return spec.to_native()
+    payload = dict(spec)
+    unknown_fields = payload.keys() - _WORKER_SPEC_FIELDS
+    if unknown_fields:
+        raise ValueError(
+            "unknown replay worker topology fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    return _NativeReplayWorkerSpec(**payload)
+
+
+@dataclass(frozen=True, slots=True)
+class PoolSpec:
+    """A static aggregated-vLLM pool with its own engine configuration."""
+
+    pool_id: str
+    engine_args: MockEngineArgs
+    workers: Sequence[WorkerSpec | Mapping[str, Any]]
+    router: PoolRouter = "round_robin"
+
+    def to_native(self) -> Any:
+        return _NativeReplayPoolSpec(
+            pool_id=self.pool_id,
+            engine_args=self.engine_args,
+            workers=[_worker_spec_native(worker) for worker in self.workers],
+            router=self.router,
+        )
+
+
+_POOL_SPEC_FIELDS = frozenset({"pool_id", "engine_args", "workers", "router"})
+
+
+def _pool_spec_native(spec: PoolSpec | Mapping[str, Any]) -> Any:
+    if isinstance(spec, PoolSpec):
+        return spec.to_native()
+    payload = dict(spec)
+    unknown_fields = payload.keys() - _POOL_SPEC_FIELDS
+    if unknown_fields:
+        raise ValueError(
+            "unknown replay pool topology fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    workers = payload.get("workers")
+    if workers is None:
+        raise ValueError("replay pool topology requires workers")
+    payload["workers"] = [_worker_spec_native(worker) for worker in workers]
+    return _NativeReplayPoolSpec(**payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +265,8 @@ class ReplayRequestSpec:
     """Compact authored request admitted to an interactive replay session."""
 
     logical_request_id: str
+    attempt_id: str
+    group_id: str
     session_id: str
     authored_turn_index: int
     input_length: int
@@ -111,11 +279,16 @@ class ReplayRequestSpec:
     priority: int = 0
     strict_priority: int = 0
     policy_class: str | None = None
+    routing_constraints: ReplayRoutingConstraints = field(
+        default_factory=ReplayRoutingConstraints
+    )
     target: WorkerTarget | None = None
 
     def to_native(self) -> dict[str, Any]:
         return {
             "logical_request_id": self.logical_request_id,
+            "attempt_id": self.attempt_id,
+            "group_id": self.group_id,
             "internal_uuid": self.internal_uuid,
             "session_id": self.session_id,
             "authored_turn_index": self.authored_turn_index,
@@ -130,6 +303,7 @@ class ReplayRequestSpec:
             "priority": self.priority,
             "strict_priority": self.strict_priority,
             "policy_class": self.policy_class,
+            "routing_constraints": self.routing_constraints.to_native(),
             "target": None if self.target is None else self.target.to_native(),
         }
 
@@ -260,7 +434,7 @@ def _workflow_payload(
     return dict(workflow)
 
 
-def _target_payload(target: WorkerTarget | Mapping[str, int]) -> dict[str, int]:
+def _target_payload(target: WorkerTarget | Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(target, WorkerTarget):
         return target.to_native()
     return dict(target)
@@ -276,16 +450,40 @@ class OfflineReplaySession:
 
     def __init__(
         self,
-        engine_args: MockEngineArgs,
-        trace_block_size: int,
+        engine_args: MockEngineArgs | None = None,
+        trace_block_size: int | None = None,
         num_workers: int = 1,
         router: InteractiveRouter = "external",
+        *,
+        pools: Sequence[PoolSpec | Mapping[str, Any]] | None = None,
+        session_affinity: bool = False,
     ) -> None:
+        if trace_block_size is None:
+            raise ValueError("interactive replay requires trace_block_size")
+        if pools is not None:
+            if engine_args is not None:
+                raise ValueError(
+                    "interactive replay accepts either engine_args or pools, not both"
+                )
+            if num_workers != 1:
+                raise ValueError(
+                    "num_workers is configured by WorkerSpec when pools are supplied"
+                )
+            self._native = _NativeOfflineReplaySession.from_pools(
+                pools=[_pool_spec_native(pool) for pool in pools],
+                trace_block_size=trace_block_size,
+                router=router,
+                session_affinity=session_affinity,
+            )
+            return
+        if engine_args is None:
+            raise ValueError("interactive replay requires engine_args or pools")
         self._native = _NativeOfflineReplaySession(
             engine_args=engine_args,
             trace_block_size=trace_block_size,
             num_workers=num_workers,
             router=router,
+            session_affinity=session_affinity,
         )
 
     def submit(self, request: ReplayRequestSpec | Mapping[str, Any]) -> None:
@@ -330,9 +528,13 @@ class OfflineReplaySession:
     def assign(
         self,
         logical_request_id: str,
-        target: WorkerTarget | Mapping[str, int],
+        target: WorkerTarget | Mapping[str, Any],
     ) -> None:
         self._native.assign(logical_request_id, _target_payload(target))
+
+    def assign_pool(self, logical_request_id: str, pool_id: str) -> None:
+        """Assign pending work to a pool's deterministic internal router."""
+        self._native.assign_pool(logical_request_id, pool_id)
 
     def snapshot(self) -> ReplaySnapshot:
         return cast(ReplaySnapshot, self._native.snapshot())

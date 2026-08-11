@@ -6,10 +6,13 @@ import pytest
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import (
     OfflineReplaySession,
+    PoolSpec,
     ReplayAgenticRequest,
     ReplayAgenticWorkflow,
     ReplayReport,
     ReplayRequestSpec,
+    ReplayRoutingConstraints,
+    WorkerSpec,
     WorkerTarget,
 )
 
@@ -22,13 +25,25 @@ pytestmark = [
 ]
 
 
-def _engine_args() -> MockEngineArgs:
+def _engine_args(*, max_model_len: int | None = None) -> MockEngineArgs:
     return MockEngineArgs(
         block_size=4,
         num_gpu_blocks=64,
         max_num_seqs=4,
         max_num_batched_tokens=64,
         speedup_ratio=1000.0,
+        g1_backend="native",
+        max_model_len=max_model_len,
+    )
+
+
+def _pool_engine_args(*, speedup_ratio: float, num_gpu_blocks: int) -> MockEngineArgs:
+    return MockEngineArgs(
+        block_size=4,
+        num_gpu_blocks=num_gpu_blocks,
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        speedup_ratio=speedup_ratio,
         g1_backend="native",
     )
 
@@ -41,6 +56,8 @@ def _request(
 ) -> ReplayRequestSpec:
     return ReplayRequestSpec(
         logical_request_id=logical_request_id,
+        attempt_id=f"attempt-{logical_request_id}",
+        group_id="group-0",
         session_id="session-0",
         authored_turn_index=authored_turn_index,
         input_length=4,
@@ -108,9 +125,25 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
     assert event_types.count("admitted") == 1
     assert event_types.count("first_token") == 1
     assert event_types.count("terminal") == 1
+    assert {
+        (event["event"]["attempt_id"], event["event"]["group_id"])
+        for event in events
+    } == {("attempt-request-0", "group-0")}
+
+    placement = next(
+        event["event"] for event in events if event["event_type"] == "placement_needed"
+    )
+    assert placement["requested_output_length"] is None
+    assert placement["attempt_id"] == "attempt-request-0"
+    assert placement["group_id"] == "group-0"
+    assert placement["emitted_output_count"] == 0
+    assert placement["ttft_ms"] is None
+    assert placement["e2e_latency_ms"] is None
 
     terminal = next(event["event"] for event in events if event["event_type"] == "terminal")
     assert terminal["logical_request_id"] == "request-0"
+    assert terminal["attempt_id"] == "attempt-request-0"
+    assert terminal["group_id"] == "group-0"
     assert terminal["session_id"] == "session-0"
     assert terminal["authored_turn_index"] == 0
     assert terminal["worker_id"] == 0
@@ -119,7 +152,17 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
     assert terminal["emitted_output_count"] == 1
 
     assert session.pending_placements() == []
-    assert session.snapshot()["workers"][0]["in_flight_requests"] == 0
+    worker = session.snapshot()["workers"][0]
+    assert worker["in_flight_requests"] == 0
+    assert worker["queued_requests"] == 0
+    assert worker["running_requests"] == 0
+    assert worker["queued_tokens"] == 0
+    assert worker["running_tokens"] == 0
+    assert worker["max_num_seqs"] == 4
+    assert worker["kv_capacity_blocks"] == 64
+    assert worker["kv_occupied_blocks"] is not None
+    assert worker["kv_free_blocks"] is not None
+    assert worker["kv_occupied_blocks"] + worker["kv_free_blocks"] == 64
     session.close_admission()
     assert session.settle_current_time()["status"] == "drained"
 
@@ -129,6 +172,8 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
     assert report.per_request is not None
     assert len(report.per_request) == 1
     assert report.per_request[0]["logical_request_id"] == "request-0"
+    assert report.per_request[0]["attempt_id"] == "attempt-request-0"
+    assert report.per_request[0]["group_id"] == "group-0"
     assert report.per_request[0]["uuid"] == terminal["internal_uuid"]
     assert report.coverage["capture_per_request"] is True
 
@@ -195,6 +240,27 @@ def test_interactive_assignment_and_admission_errors_preserve_session_state():
     with pytest.raises(Exception, match="hash capacity"):
         session.submit(invalid)
 
+    unknown_field = _request("unknown", 0).to_native()
+    unknown_field["recorded_e2e_ms"] = 123.0
+    with pytest.raises(Exception, match="unknown field"):
+        session.submit(unknown_field)
+
+    missing_attempt = _request("missing-attempt", 0).to_native()
+    del missing_attempt["attempt_id"]
+    with pytest.raises(Exception, match="attempt_id"):
+        session.submit(missing_attempt)
+
+    missing_group = _request("missing-group", 0).to_native()
+    del missing_group["group_id"]
+    with pytest.raises(Exception, match="group_id"):
+        session.submit(missing_group)
+
+    unknown_constraint = _request("unknown-constraint", 0).to_native()
+    unknown_constraint["routing_constraints"]["recorded_queue_ms"] = 12.0
+    with pytest.raises(Exception, match="unknown field"):
+        session.submit(unknown_constraint)
+    assert session.snapshot()["pending_request_count"] == 0
+
     session.submit(_request("valid", 0))
     session.settle_current_time()
     placement_events = session.drain_events()
@@ -202,6 +268,20 @@ def test_interactive_assignment_and_admission_errors_preserve_session_state():
 
     with pytest.raises(Exception, match="DP rank 1"):
         session.assign("valid", WorkerTarget(worker_id=0, dp_rank=1))
+    assert [item["logical_request_id"] for item in session.pending_placements()] == [
+        "valid"
+    ]
+
+    with pytest.raises(Exception, match="unknown field"):
+        session.assign(
+            "valid",
+            {
+                "pool_id": "default",
+                "worker_id": 0,
+                "dp_rank": 0,
+                "recorded_queue_ms": 12,
+            },
+        )
     assert [item["logical_request_id"] for item in session.pending_placements()] == [
         "valid"
     ]
@@ -214,6 +294,83 @@ def test_interactive_assignment_and_admission_errors_preserve_session_state():
     with pytest.raises(Exception, match="after admission is closed"):
         session.submit(_request("late", 1))
     session.finalize()
+
+
+def test_interactive_rejected_parent_cancels_descendant_and_reports_statuses():
+    session = OfflineReplaySession(
+        _engine_args(max_model_len=16),
+        trace_block_size=4,
+        num_workers=1,
+        router="external",
+    )
+    oversized = ReplayRequestSpec(
+        logical_request_id="oversized",
+        attempt_id="oversized-attempt-0",
+        group_id="failed-group",
+        session_id="failed-session",
+        authored_turn_index=0,
+        input_length=20,
+        hash_ids=[1, 2, 3, 4, 5],
+        trace_block_size=4,
+        output_length=1,
+    )
+    child = ReplayRequestSpec(
+        logical_request_id="blocked-child",
+        attempt_id="blocked-child-attempt-0",
+        group_id="failed-group",
+        session_id="failed-session",
+        authored_turn_index=1,
+        input_length=4,
+        hash_ids=[6],
+        trace_block_size=4,
+        output_length=1,
+    )
+    session.append_agentic_workflow(
+        ReplayAgenticWorkflow(
+            trace_block_size=4,
+            requests=[
+                ReplayAgenticRequest(request=oversized),
+                ReplayAgenticRequest(request=child, wait_for=["oversized"]),
+            ],
+        ),
+        release_at_ms=0.0,
+    )
+
+    events = _drive_external_to_terminals(
+        session,
+        {"oversized", "blocked-child"},
+    )
+    terminals = [
+        event["event"] for event in events if event["event_type"] == "terminal"
+    ]
+    assert [terminal["logical_request_id"] for terminal in terminals] == [
+        "oversized",
+        "blocked-child",
+    ]
+    assert [terminal["terminal_status"] for terminal in terminals] == [
+        "rejected",
+        "canceled",
+    ]
+    assert not any(
+        event["event_type"] == "routed"
+        and event["event"]["logical_request_id"] == "blocked-child"
+        for event in events
+    )
+
+    session.close()
+    report = session.finalize()
+    assert report.per_request is not None
+    assert {
+        record["logical_request_id"]: record["terminal_status"]
+        for record in report.per_request
+    } == {"oversized": "rejected", "blocked-child": "canceled"}
+    assert {
+        record["logical_request_id"]: (record["attempt_id"], record["group_id"])
+        for record in report.per_request
+    } == {
+        "oversized": ("oversized-attempt-0", "failed-group"),
+        "blocked-child": ("blocked-child-attempt-0", "failed-group"),
+    }
 
 
 def test_interactive_finalize_requires_closed_and_drained_session():
@@ -242,3 +399,224 @@ def test_interactive_finalize_requires_closed_and_drained_session():
 
     report = session.finalize()
     assert report.summary["completed_requests"] == 1
+
+
+def test_interactive_static_heterogeneous_pools_serialize_and_route_both_forms():
+    session = OfflineReplaySession(
+        pools=[
+            PoolSpec(
+                pool_id="fast",
+                engine_args=_pool_engine_args(
+                    speedup_ratio=1000.0,
+                    num_gpu_blocks=64,
+                ),
+                workers=[
+                    WorkerSpec(
+                        worker_id=10,
+                        max_num_seqs=4,
+                        tags=("primary",),
+                        taints=("fast",),
+                        capabilities=("chat",),
+                    )
+                ],
+            ),
+            PoolSpec(
+                pool_id="slow",
+                engine_args=_pool_engine_args(
+                    speedup_ratio=1.0,
+                    num_gpu_blocks=32,
+                ),
+                workers=[WorkerSpec(worker_id=20, max_num_seqs=1)],
+            ),
+        ],
+        trace_block_size=4,
+        router="external",
+    )
+    workers = session.snapshot()["workers"]
+    assert [
+        (worker["pool_id"], worker["worker_id"], worker["max_num_seqs"])
+        for worker in workers
+    ] == [("fast", 10, 4), ("slow", 20, 1)]
+    assert [worker["kv_capacity_blocks"] for worker in workers] == [64, 32]
+    assert workers[0]["tags"] == ["primary"]
+    assert workers[0]["taints"] == ["fast"]
+    assert workers[0]["capabilities"] == ["chat"]
+
+    session.submit(_request("exact-fast", 0))
+    slow = _request("pool-slow", 1).to_native()
+    slow["session_id"] = "session-1"
+    session.submit(slow)
+    session.settle_current_time()
+    placement_events = session.drain_events()
+    assert [event["event"]["logical_request_id"] for event in placement_events] == [
+        "exact-fast",
+        "pool-slow",
+    ]
+    assert all(
+        event["event"]["eligible_pool_ids"] == ["fast", "slow"]
+        for event in placement_events
+    )
+    candidates = placement_events[0]["event"]["candidates"]
+    assert [candidate["target"] for candidate in candidates] == [
+        {"pool_id": "fast", "worker_id": 10, "dp_rank": 0},
+        {"pool_id": "slow", "worker_id": 20, "dp_rank": 0},
+    ]
+    assert candidates[0]["tags"] == ["primary"]
+    assert candidates[0]["taints"] == ["fast"]
+    assert candidates[0]["capabilities"] == ["chat"]
+
+    session.assign(
+        "exact-fast",
+        WorkerTarget(pool_id="fast", worker_id=10),
+    )
+    session.assign_pool("pool-slow", "slow")
+    events = placement_events + _drive_external_to_terminals(
+        session,
+        {"exact-fast", "pool-slow"},
+    )
+    terminals = {
+        event["event"]["logical_request_id"]: event["event"]
+        for event in events
+        if event["event_type"] == "terminal"
+    }
+    assert terminals["exact-fast"]["pool_id"] == "fast"
+    assert terminals["exact-fast"]["worker_id"] == 10
+    assert terminals["pool-slow"]["pool_id"] == "slow"
+    assert terminals["pool-slow"]["worker_id"] == 20
+    assert terminals["exact-fast"]["timestamp_ms"] != terminals["pool-slow"][
+        "timestamp_ms"
+    ]
+
+    session.close()
+    report = session.finalize()
+    assert report.per_request is not None
+    assert {
+        record["logical_request_id"]: (record["pool_id"], record["worker_id"])
+        for record in report.per_request
+    } == {"exact-fast": ("fast", 10), "pool-slow": ("slow", 20)}
+
+
+def test_interactive_constraints_and_invalid_assignment_recovery():
+    session = OfflineReplaySession(
+        pools=[
+            PoolSpec(
+                pool_id="eligible",
+                engine_args=_pool_engine_args(
+                    speedup_ratio=1000.0,
+                    num_gpu_blocks=64,
+                ),
+                workers=[
+                    WorkerSpec(
+                        worker_id=0,
+                        taints=("trusted",),
+                        tags=("primary",),
+                        capabilities=("chat",),
+                    )
+                ],
+            ),
+            PoolSpec(
+                pool_id="ineligible",
+                engine_args=_pool_engine_args(
+                    speedup_ratio=1000.0,
+                    num_gpu_blocks=64,
+                ),
+                workers=[WorkerSpec(worker_id=0, taints=("batch",))],
+            ),
+        ],
+        trace_block_size=4,
+        router="external",
+    )
+    request = _request("constrained", 0).to_native()
+    request["routing_constraints"] = ReplayRoutingConstraints(
+        required_taints=("trusted",),
+        preferred_taints={"trusted": 2.0},
+    ).to_native()
+    session.submit(request)
+    session.settle_current_time()
+    placement = session.drain_events()[0]["event"]
+    assert placement["attempt_id"] == "attempt-constrained"
+    assert placement["group_id"] == "group-0"
+    assert placement["routing_constraints"] == {
+        "required_taints": ["trusted"],
+        "preferred_taints": {"trusted": 2.0},
+    }
+    assert placement["eligible_pool_ids"] == ["eligible"]
+    assert [candidate["eligible"] for candidate in placement["candidates"]] == [
+        True,
+        False,
+    ]
+    assert placement["candidates"][1]["constraint_reason"] is not None
+
+    with pytest.raises(Exception, match="pool.*unavailable"):
+        session.assign(
+            "constrained",
+            WorkerTarget(pool_id="missing", worker_id=0),
+        )
+    assert [item["logical_request_id"] for item in session.pending_placements()] == [
+        "constrained"
+    ]
+
+    with pytest.raises(Exception, match="required taints"):
+        session.assign(
+            "constrained",
+            WorkerTarget(pool_id="ineligible", worker_id=0),
+        )
+    assert [item["logical_request_id"] for item in session.pending_placements()] == [
+        "constrained"
+    ]
+
+    session.assign(
+        "constrained",
+        WorkerTarget(pool_id="eligible", worker_id=0),
+    )
+    with pytest.raises(Exception, match="not awaiting placement"):
+        session.assign(
+            "constrained",
+            WorkerTarget(pool_id="eligible", worker_id=0),
+        )
+    events = _drive_external_to_terminals(session, {"constrained"})
+    terminal = next(
+        event["event"] for event in events if event["event_type"] == "terminal"
+    )
+    assert terminal["attempt_id"] == "attempt-constrained"
+    assert terminal["group_id"] == "group-0"
+    session.close()
+    report = session.finalize()
+    assert report.per_request is not None
+    assert report.per_request[0]["attempt_id"] == "attempt-constrained"
+    assert report.per_request[0]["group_id"] == "group-0"
+
+
+def test_interactive_pool_topology_mapping_rejects_unknown_fields_without_fallback():
+    engine_args = _pool_engine_args(speedup_ratio=1.0, num_gpu_blocks=32)
+    with pytest.raises(ValueError, match="unknown replay worker topology fields"):
+        OfflineReplaySession(
+            pools=[
+                {
+                    "pool_id": "pool",
+                    "engine_args": engine_args,
+                    "workers": [{"worker_id": 0, "recorded_latency_ms": 10.0}],
+                }
+            ],
+            trace_block_size=4,
+        )
+
+    with pytest.raises(ValueError, match="unknown replay pool topology fields"):
+        OfflineReplaySession(
+            pools=[
+                {
+                    "pool_id": "pool",
+                    "engine_args": engine_args,
+                    "workers": [{"worker_id": 0}],
+                    "performance_profile": "recorded-service-time",
+                }
+            ],
+            trace_block_size=4,
+        )
+
+    with pytest.raises(ValueError, match="either engine_args or pools"):
+        OfflineReplaySession(
+            engine_args=engine_args,
+            pools=[PoolSpec("pool", engine_args, [WorkerSpec(0)])],
+            trace_block_size=4,
+        )

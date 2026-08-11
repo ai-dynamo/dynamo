@@ -9,6 +9,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
 use crate::common::protocols::OutputSignal;
+use crate::loadgen::{CascadedWorkloadTerminal, WorkloadTerminalStatus};
 use crate::scheduler::EnginePassResult;
 
 // 0.1% relative quantile error. The enlarged store covers latency/rate values
@@ -332,6 +333,11 @@ where
 #[derive(Debug)]
 struct TraceRequestStats {
     logical_request_id: Option<String>,
+    attempt_id: Option<String>,
+    group_id: Option<String>,
+    pool_id: Option<String>,
+    authored_worker_id: Option<usize>,
+    authored_dp_rank: Option<usize>,
     arrival_time_ms: f64,
     first_admit_ms: Option<f64>,
     terminal_time_ms: Option<f64>,
@@ -534,6 +540,28 @@ pub enum ReplayTerminalStatus {
     Failed,
 }
 
+impl From<WorkloadTerminalStatus> for ReplayTerminalStatus {
+    fn from(status: WorkloadTerminalStatus) -> Self {
+        match status {
+            WorkloadTerminalStatus::Completed => Self::Completed,
+            WorkloadTerminalStatus::Rejected => Self::Rejected,
+            WorkloadTerminalStatus::Failed => Self::Failed,
+            WorkloadTerminalStatus::Canceled => Self::Canceled,
+        }
+    }
+}
+
+impl From<ReplayTerminalStatus> for WorkloadTerminalStatus {
+    fn from(status: ReplayTerminalStatus) -> Self {
+        match status {
+            ReplayTerminalStatus::Completed => Self::Completed,
+            ReplayTerminalStatus::Rejected => Self::Rejected,
+            ReplayTerminalStatus::Failed => Self::Failed,
+            ReplayTerminalStatus::Canceled => Self::Canceled,
+        }
+    }
+}
+
 /// Flat per-request record for `--per-request-jsonl` emission. One JSON line per
 /// request in the JSONL output; consumed by external analysis tools that want
 /// per-request granularity (TTFT vs. ISL scatter, worker-residency analysis,
@@ -544,6 +572,16 @@ pub struct PerRequestRecord {
     /// the internal UUID used by scheduler and KV state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logical_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<usize>,
     /// Session identifier from the trace, when present. Mirrors AIPerf's
     /// `conversation_id` field for the same purpose: bucket per-request
     /// records by multi-turn session. Placed first in the serialized output
@@ -835,6 +873,11 @@ impl TraceCollector {
             uuid,
             TraceRequestStats {
                 logical_request_id: None,
+                attempt_id: None,
+                group_id: None,
+                pool_id: None,
+                authored_worker_id: None,
+                authored_dp_rank: None,
                 arrival_time_ms,
                 first_admit_ms: None,
                 terminal_time_ms: None,
@@ -898,6 +941,23 @@ impl TraceCollector {
         }
     }
 
+    /// Attach interactive attempt/group identity without making generic trace
+    /// formats invent values they do not author.
+    pub(crate) fn on_attempt_group_identity(
+        &mut self,
+        uuid: Uuid,
+        attempt_id: String,
+        group_id: String,
+    ) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.attempt_id.get_or_insert(attempt_id);
+            stats.group_id.get_or_insert(group_id);
+        }
+    }
+
     /// Record that `uuid` was dispatched to `worker_idx` on the prefill pool
     /// (offline disagg replay only). Idempotent — subsequent calls are no-ops
     /// once a value is set, so the first dispatch wins. Aggregated replay does
@@ -918,6 +978,22 @@ impl TraceCollector {
             && stats.decode_worker_idx.is_none()
         {
             stats.decode_worker_idx = Some(worker_idx);
+        }
+    }
+
+    /// Preserve authored static pool identity separately from the engine's
+    /// private dense scheduler index used by legacy report fields.
+    pub(crate) fn on_static_pool_assigned(
+        &mut self,
+        uuid: Uuid,
+        pool_id: String,
+        worker_id: usize,
+        dp_rank: usize,
+    ) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.pool_id.get_or_insert(pool_id);
+            stats.authored_worker_id.get_or_insert(worker_id);
+            stats.authored_dp_rank.get_or_insert(dp_rank);
         }
     }
 
@@ -1164,6 +1240,55 @@ impl TraceCollector {
                 );
             }
         }
+    }
+
+    /// Record an authored request that never became engine-ready because an
+    /// upstream dependency terminated unsuccessfully.
+    ///
+    /// The synthetic arrival timestamp equals the cascade timestamp solely so
+    /// the existing flat report schema can represent the request. It is not an
+    /// engine admission and therefore contributes no traffic, latency, worker,
+    /// queue, or cache accounting. A UUID collision is an invariant violation:
+    /// overwriting an engine-visible record would hide a duplicate terminal.
+    pub(crate) fn on_cascaded_terminal(
+        &mut self,
+        terminal: &CascadedWorkloadTerminal,
+        terminal_time_ms: f64,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            terminal.status != WorkloadTerminalStatus::Completed,
+            "cascaded workload terminal {} cannot be completed",
+            terminal.request_uuid
+        );
+        anyhow::ensure!(
+            terminal.emitted_output_count == 0,
+            "cascaded workload terminal {} unexpectedly emitted {} output tokens",
+            terminal.request_uuid,
+            terminal.emitted_output_count
+        );
+        anyhow::ensure!(
+            !self.requests.contains_key(&terminal.request_uuid),
+            "cascaded workload terminal {} collides with an existing collector record",
+            terminal.request_uuid
+        );
+        self.on_arrival(
+            terminal.request_uuid,
+            terminal_time_ms,
+            terminal.input_length,
+            terminal.requested_output_length,
+        );
+        self.on_authored_identity(
+            terminal.request_uuid,
+            terminal.logical_request_id.clone(),
+            terminal.session_id.clone(),
+            terminal.authored_turn_index,
+        );
+        self.on_terminal(
+            terminal.request_uuid,
+            terminal_time_ms,
+            terminal.status.into(),
+        );
+        Ok(())
     }
 
     fn detail_mut(&mut self, uuid: Uuid) -> Option<&mut PerRequestDetail> {
@@ -1451,6 +1576,11 @@ impl TraceCollector {
             let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
                 logical_request_id: stats.logical_request_id.clone(),
+                attempt_id: stats.attempt_id.clone(),
+                group_id: stats.group_id.clone(),
+                pool_id: stats.pool_id.clone(),
+                worker_id: stats.authored_worker_id,
+                dp_rank: stats.authored_dp_rank,
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
                 authored_turn_index: stats.authored_turn_index,

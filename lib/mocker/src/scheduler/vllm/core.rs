@@ -36,8 +36,8 @@ use crate::scheduler::{
     AcceptLengthSample, ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
     CapturedRouterEventBuffer, DestinationHolds, EnginePassResult, ForwardPassSnapshot,
     MockerMetrics, PendingDestinations, RemovedSource, RouterEventVisibility, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion,
-    SourceHolds, build_fpm_snapshot, capture_router_event_sink,
+    SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SchedulerObservation,
+    SourceCompletion, SourceHolds, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -569,6 +569,9 @@ pub(crate) struct VllmCore {
     lifecycle_events: Vec<SchedulerLifecycleEvent>,
     retain_local_hashes: bool,
     emit_token_ids: bool,
+    /// Scheduler-visible state captured after admission/scheduling but before
+    /// eager output generation mutates state for the future pass boundary.
+    pass_start_observation: Option<SchedulerObservation>,
 
     /// Requests parked on pending G2→G1 swap-ins. Populated by the
     /// admission path when a request's remaining prefix matches G2 only
@@ -701,6 +704,7 @@ impl VllmCore {
             lifecycle_events: Vec::new(),
             retain_local_hashes,
             emit_token_ids,
+            pass_start_observation: None,
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
         }
@@ -1286,6 +1290,62 @@ impl VllmCore {
         self.state.requests.len()
     }
 
+    /// Capture current scheduler state without consulting completion targets
+    /// or recorded request timing.
+    ///
+    /// Token counts are materialized sequence lengths, not remaining service
+    /// work: a waiting prompt contributes its current prompt length and a
+    /// running decode contributes prompt plus tokens generated so far.
+    pub(crate) fn scheduler_observation(&self) -> SchedulerObservation {
+        let queued_tokens = self
+            .state
+            .waiting_members
+            .iter()
+            .filter_map(|uuid| self.state.requests.get(uuid))
+            .map(|request| request.sequence.len())
+            .sum();
+        let running_tokens = self
+            .state
+            .running_members
+            .iter()
+            .filter_map(|uuid| self.state.requests.get(uuid))
+            .map(|request| request.sequence.len())
+            .sum();
+
+        let kv_capacity_blocks = self.kv_manager.max_capacity();
+        let kv_occupied_blocks = self
+            .kv_manager
+            .num_active_blocks()
+            .checked_add(self.kv_manager.num_inactive_blocks())
+            .expect("vLLM KV block occupancy overflowed");
+        let kv_free_blocks = kv_capacity_blocks
+            .checked_sub(kv_occupied_blocks)
+            .expect("vLLM KV block occupancy exceeded capacity");
+
+        SchedulerObservation {
+            queued_requests: self.state.waiting_members.len(),
+            running_requests: self.state.running_members.len(),
+            queued_tokens,
+            running_tokens,
+            max_num_seqs: self.args.max_num_seqs,
+            kv_capacity_blocks,
+            kv_occupied_blocks,
+            kv_free_blocks,
+        }
+    }
+
+    pub(crate) fn native_prefix_overlap_tokens(&self, tokens: &[u32]) -> Option<usize> {
+        self.kv_manager.native_prefix_overlap_tokens(tokens)
+    }
+
+    pub(crate) fn native_prefix_snapshot(&self) -> Option<crate::kv_manager::NativePrefixSnapshot> {
+        self.kv_manager.native_prefix_snapshot()
+    }
+
+    pub(crate) fn pass_start_observation(&self) -> Option<SchedulerObservation> {
+        self.pass_start_observation
+    }
+
     fn bump_capacity_generation(&mut self) {
         self.capacity_generation = self
             .capacity_generation
@@ -1784,6 +1844,11 @@ impl VllmCore {
 
         let prefill_time =
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args)?;
+        // Offline execution eagerly generates outputs and performs terminal
+        // cleanup below even when their modeled completion lies in the
+        // future. Preserve the policy-visible pass-start state so external
+        // placement cannot observe those future mutations.
+        self.pass_start_observation = Some(self.scheduler_observation());
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
         let (decode_time, mut output_signals, accept_length) = self.emit_ready_tokens()?;
         // Emit the terminal signals for the requests the gate rejected above

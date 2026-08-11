@@ -142,6 +142,30 @@ impl PlacementPolicy<ReplayRequestPayload> for AdaptiveAggPlacement {
         }
     }
 
+    fn request_terminal_feedback(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
+        match self {
+            Self::RoundRobin(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::request_terminal_feedback(
+                    policy, request_id, now_ms,
+                )
+            }
+            Self::Kv(policy) => PlacementPolicy::<ReplayRequestPayload>::request_terminal_feedback(
+                policy, request_id, now_ms,
+            ),
+        }
+    }
+
+    fn settle_terminal_feedback(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
+        match self {
+            Self::RoundRobin(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::settle_terminal_feedback(policy, now_ms)
+            }
+            Self::Kv(policy) => {
+                PlacementPolicy::<ReplayRequestPayload>::settle_terminal_feedback(policy, now_ms)
+            }
+        }
+    }
+
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
         match self {
             Self::RoundRobin(policy) => PlacementPolicy::<ReplayRequestPayload>::prefill_completed(

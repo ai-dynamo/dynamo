@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,8 +18,12 @@ use dynamo_mocker::loadgen::{
 use dynamo_mocker::replay::{
     OfflineReplaySession as RsOfflineReplaySession, ReplayAgenticRequest as RsReplayAgenticRequest,
     ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode,
-    ReplayRequestSpec as RsReplayRequestSpec, ReplayScalingDecision, ReplayScalingPolicy,
-    ReplayScalingSnapshot, ReplaySessionRouter as RsReplaySessionRouter,
+    ReplayRequestSpec as RsReplayRequestSpec,
+    ReplayRoutingConstraints as RsReplayRoutingConstraints, ReplayScalingDecision,
+    ReplayScalingPolicy, ReplayScalingSnapshot,
+    ReplaySessionOptions as RsReplaySessionOptions,
+    ReplaySessionRouter as RsReplaySessionRouter,
+    PoolRouter as RsPoolRouter, PoolSpec as RsPoolSpec, WorkerSpec as RsWorkerSpec,
     WorkerTarget as RsWorkerTarget,
 };
 use pyo3::{
@@ -1004,6 +1009,8 @@ impl MockEngineArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InteractiveWorkerTarget {
+    #[serde(default = "default_interactive_pool_id")]
+    pool_id: String,
     worker_id: usize,
     #[serde(default)]
     dp_rank: usize,
@@ -1012,9 +1019,112 @@ struct InteractiveWorkerTarget {
 impl From<InteractiveWorkerTarget> for RsWorkerTarget {
     fn from(target: InteractiveWorkerTarget) -> Self {
         Self {
+            pool_id: target.pool_id,
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
         }
+    }
+}
+
+fn default_interactive_pool_id() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InteractiveRoutingConstraints {
+    #[serde(default)]
+    required_taints: Vec<String>,
+    #[serde(default)]
+    preferred_taints: BTreeMap<String, f32>,
+}
+
+impl From<InteractiveRoutingConstraints> for RsReplayRoutingConstraints {
+    fn from(constraints: InteractiveRoutingConstraints) -> Self {
+        Self {
+            required_taints: constraints.required_taints,
+            preferred_taints: constraints.preferred_taints,
+        }
+    }
+}
+
+#[pyclass(name = "_ReplayWorkerSpec")]
+#[derive(Clone, Debug)]
+pub struct PyReplayWorkerSpec {
+    inner: RsWorkerSpec,
+}
+
+#[pymethods]
+impl PyReplayWorkerSpec {
+    #[new]
+    #[pyo3(signature = (worker_id, max_num_seqs=None, tags=Vec::new(), taints=Vec::new(), capabilities=Vec::new(), active=true, draining=false))]
+    fn new(
+        worker_id: usize,
+        max_num_seqs: Option<usize>,
+        tags: Vec<String>,
+        taints: Vec<String>,
+        capabilities: Vec<String>,
+        active: bool,
+        draining: bool,
+    ) -> Self {
+        Self {
+            inner: RsWorkerSpec {
+                worker_id,
+                max_num_seqs,
+                tags,
+                taints,
+                capabilities,
+                active,
+                draining,
+            },
+        }
+    }
+}
+
+fn parse_pool_router(router: &str) -> PyResult<RsPoolRouter> {
+    match router {
+        "round_robin" => Ok(RsPoolRouter::RoundRobin),
+        other => Err(PyValueError::new_err(format!(
+            "interactive replay pool router must be 'round_robin', got {other:?}"
+        ))),
+    }
+}
+
+#[pyclass(name = "_ReplayPoolSpec")]
+#[derive(Clone, Debug)]
+pub struct PyReplayPoolSpec {
+    inner: RsPoolSpec,
+}
+
+#[pymethods]
+impl PyReplayPoolSpec {
+    #[new]
+    #[pyo3(signature = (pool_id, engine_args, workers, router="round_robin"))]
+    fn new(
+        py: Python<'_>,
+        pool_id: String,
+        engine_args: MockEngineArgs,
+        workers: Vec<Py<PyReplayWorkerSpec>>,
+        router: &str,
+    ) -> PyResult<Self> {
+        if engine_args.inner.aic_backend.is_some() {
+            return Err(PyValueError::new_err(
+                "interactive replay does not support Python-backed AIC performance callbacks",
+            ));
+        }
+        let engine_args = materialize_replay_mocker_args(py, engine_args)?;
+        let workers = workers
+            .into_iter()
+            .map(|worker| worker.borrow(py).inner.clone())
+            .collect();
+        Ok(Self {
+            inner: RsPoolSpec {
+                pool_id,
+                engine_args,
+                workers,
+                router: parse_pool_router(router)?,
+            },
+        })
     }
 }
 
@@ -1022,6 +1132,8 @@ impl From<InteractiveWorkerTarget> for RsWorkerTarget {
 #[serde(deny_unknown_fields)]
 struct InteractiveRequestSpec {
     logical_request_id: String,
+    attempt_id: String,
+    group_id: String,
     #[serde(default)]
     internal_uuid: Option<Uuid>,
     session_id: String,
@@ -1041,6 +1153,8 @@ struct InteractiveRequestSpec {
     #[serde(default)]
     policy_class: Option<String>,
     #[serde(default)]
+    routing_constraints: InteractiveRoutingConstraints,
+    #[serde(default)]
     target: Option<InteractiveWorkerTarget>,
 }
 
@@ -1048,6 +1162,8 @@ impl From<InteractiveRequestSpec> for RsReplayRequestSpec {
     fn from(request: InteractiveRequestSpec) -> Self {
         Self {
             logical_request_id: request.logical_request_id,
+            attempt_id: request.attempt_id,
+            group_id: request.group_id,
             internal_uuid: request.internal_uuid,
             session_id: request.session_id,
             authored_turn_index: request.authored_turn_index,
@@ -1060,6 +1176,7 @@ impl From<InteractiveRequestSpec> for RsReplayRequestSpec {
             priority: request.priority,
             strict_priority: request.strict_priority,
             policy_class: request.policy_class,
+            routing_constraints: request.routing_constraints.into(),
             target: request.target.map(Into::into),
         }
     }
@@ -1145,13 +1262,14 @@ pub struct PyOfflineReplaySession {
 #[pymethods]
 impl PyOfflineReplaySession {
     #[new]
-    #[pyo3(signature = (engine_args, trace_block_size, num_workers=1, router="external"))]
+    #[pyo3(signature = (engine_args, trace_block_size, num_workers=1, router="external", session_affinity=false))]
     fn new(
         py: Python<'_>,
         engine_args: MockEngineArgs,
         trace_block_size: usize,
         num_workers: usize,
         router: &str,
+        session_affinity: bool,
     ) -> PyResult<Self> {
         if engine_args.inner.aic_backend.is_some() {
             return Err(PyValueError::new_err(
@@ -1160,8 +1278,41 @@ impl PyOfflineReplaySession {
         }
         let args = materialize_replay_mocker_args(py, engine_args)?;
         let router = parse_interactive_router(router)?;
-        let inner = RsOfflineReplaySession::new(&args, num_workers, trace_block_size, router)
-            .map_err(to_pyerr)?;
+        let inner = RsOfflineReplaySession::new_with_options(
+            &args,
+            num_workers,
+            trace_block_size,
+            router,
+            RsReplaySessionOptions { session_affinity },
+        )
+        .map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (pools, trace_block_size, router="external", session_affinity=false))]
+    fn from_pools(
+        py: Python<'_>,
+        pools: Vec<Py<PyReplayPoolSpec>>,
+        trace_block_size: usize,
+        router: &str,
+        session_affinity: bool,
+    ) -> PyResult<Self> {
+        if router != "external" {
+            return Err(PyValueError::new_err(format!(
+                "pooled interactive replay requires router='external', got {router:?}"
+            )));
+        }
+        let pools = pools
+            .into_iter()
+            .map(|pool| pool.borrow(py).inner.clone())
+            .collect();
+        let inner = RsOfflineReplaySession::new_pooled_with_options(
+            pools,
+            trace_block_size,
+            RsReplaySessionOptions { session_affinity },
+        )
+        .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
 
@@ -1219,6 +1370,12 @@ impl PyOfflineReplaySession {
         let target: InteractiveWorkerTarget = depythonize_interactive(target, "worker target")?;
         self.inner
             .assign(logical_request_id, target.into())
+            .map_err(to_pyerr)
+    }
+
+    fn assign_pool(&mut self, logical_request_id: &str, pool_id: &str) -> PyResult<()> {
+        self.inner
+            .assign_pool(logical_request_id, pool_id)
             .map_err(to_pyerr)
     }
 

@@ -86,9 +86,34 @@ impl DynamoRequestTrace {
         paths: &[PathBuf],
         expected_block_size: Option<usize>,
     ) -> Result<Self> {
-        validate_trace_files(TraceFileFormat::Dynamo, paths)?;
+        if paths.is_empty() {
+            bail!("trace replay requires at least one trace file");
+        }
+        let mut canonical_paths = paths
+            .iter()
+            .map(|path| {
+                path.canonicalize().with_context(|| {
+                    format!(
+                        "failed to canonicalize request trace path {}",
+                        path.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        canonical_paths.sort();
+        if let Some(duplicate) = canonical_paths
+            .windows(2)
+            .find(|pair| pair[0] == pair[1])
+            .map(|pair| &pair[0])
+        {
+            bail!(
+                "request trace path {} was supplied more than once",
+                duplicate.display()
+            );
+        }
+        validate_trace_files(TraceFileFormat::Dynamo, &canonical_paths)?;
 
-        let loaded = load_request_trace_records(paths)?;
+        let loaded = load_request_trace_records(&canonical_paths)?;
         match loaded.mode()? {
             RequestTraceMode::Standard => {
                 let mut builder = None;
@@ -156,9 +181,9 @@ fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
     Uuid::new_v4()
 }
 
-pub(super) fn validate_synthesizable_prompt(
+pub(super) fn validate_synthesizable_prompt<T>(
     input_length: usize,
-    hash_ids: &[u32],
+    hash_ids: &[T],
     trace_block_size: usize,
 ) -> Result<()> {
     if trace_block_size == 0 {
@@ -169,10 +194,13 @@ pub(super) fn validate_synthesizable_prompt(
         .checked_mul(trace_block_size)
         .context("synthesized prompt capacity overflow")?;
     let required_hash_ids = input_length.div_ceil(trace_block_size);
-    if hash_ids.len() < required_hash_ids {
+    if hash_ids.len() != required_hash_ids {
         bail!(
-            "input_length {} exceeds synthesized capacity {}",
+            "input_length {} requires exactly {} hash IDs at trace block size {}, got {} (synthesized capacity {})",
             input_length,
+            required_hash_ids,
+            trace_block_size,
+            hash_ids.len(),
             synthesizable_capacity
         );
     }
@@ -431,17 +459,11 @@ impl MooncakeTraceBuilder {
         let hash_ids = raw
             .hash_ids
             .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
-        // Clamp input_length to the synthesizable capacity: in the mooncake
-        // trace format, input_length is the full prompt token count which may
-        // exceed hash_ids.len() * block_size (cached portion only).
         let synthesizable_capacity = hash_ids
             .len()
             .checked_mul(self.trace_block_size)
             .ok_or_else(|| anyhow!("trace line {} synthesized capacity overflow", line_idx + 1))?;
-        let input_length = raw
-            .input_length
-            .unwrap_or(synthesizable_capacity)
-            .min(synthesizable_capacity);
+        let input_length = raw.input_length.unwrap_or(synthesizable_capacity);
         let output_length = raw
             .output_length
             .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
@@ -523,14 +545,8 @@ impl MooncakeTraceBuilder {
             );
         }
 
-        if hash_ids.len() * self.trace_block_size < input_length {
-            bail!(
-                "trace line {} input_length {} exceeds synthesized capacity {}",
-                line_idx + 1,
-                input_length,
-                hash_ids.len() * self.trace_block_size
-            );
-        }
+        validate_synthesizable_prompt(input_length, &hash_ids, self.trace_block_size)
+            .with_context(|| format!("trace line {} has invalid prompt", line_idx + 1))?;
 
         let hash_ids = self.hash_id_interner.intern_all(hash_ids)?;
 
@@ -968,24 +984,39 @@ impl Trace {
         if factor <= 1 {
             return self;
         }
-        let factor = u32::try_from(factor).expect("hash prefix expansion factor exceeds u32");
+        let hash_factor = u32::try_from(factor).expect("hash prefix expansion factor exceeds u32");
+        let block_size = self.block_size;
         for session in &mut self.sessions {
             for turn in &mut session.turns {
+                let original_input_length = turn.input_length;
                 turn.input_length = turn
                     .input_length
-                    .checked_mul(factor as usize)
+                    .checked_mul(factor)
                     .expect("input_length expansion overflow");
                 turn.hash_ids = turn
                     .hash_ids
                     .iter()
-                    .flat_map(|&hash_id| {
+                    .enumerate()
+                    .flat_map(|(block_index, &hash_id)| {
                         let base = hash_id
-                            .checked_mul(factor)
+                            .checked_mul(hash_factor)
                             .expect("hash prefix expansion overflow");
-                        (0..factor).map(move |offset| {
-                            base.checked_add(offset)
-                                .expect("hash prefix expansion overflow")
-                        })
+                        let block_start = block_index
+                            .checked_mul(block_size)
+                            .expect("hash prefix expansion overflow");
+                        let source_tokens = original_input_length
+                            .saturating_sub(block_start)
+                            .min(block_size);
+                        let expanded_blocks = source_tokens
+                            .checked_mul(factor)
+                            .expect("hash prefix expansion overflow")
+                            .div_ceil(block_size);
+                        (0..u32::try_from(expanded_blocks)
+                            .expect("hash prefix expansion exceeds u32"))
+                            .map(move |offset| {
+                                base.checked_add(offset)
+                                    .expect("hash prefix expansion overflow")
+                            })
                     })
                     .collect();
             }
@@ -1329,6 +1360,17 @@ impl AgenticTraceBuilder {
             Some(input_length) => input_length,
             None => synthesizable_capacity,
         };
+        let required_hash_ids = input_length.div_ceil(self.trace_block_size);
+        if hash_ids.len() != required_hash_ids {
+            bail!(
+                "trace line {} has input_length {} which requires exactly {} hash_ids at trace_block_size {}, got {}",
+                line_idx + 1,
+                input_length,
+                required_hash_ids,
+                self.trace_block_size,
+                hash_ids.len()
+            );
+        }
         let output_length = raw
             .output_length
             .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;

@@ -15,7 +15,7 @@ use super::super::evidence::{
     KvIngestBoundary, KvIngestEventEncoder, WorkerPool, record_kv_ingest,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::Trace;
+use crate::loadgen::{Trace, WorkloadTerminalStatus};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest,
     ReplayWorkerArtifacts, TraceCollector,
@@ -271,7 +271,16 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
                 driver.on_output_token(signal.uuid, token_id)?;
             }
             if signal.completed {
-                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
+                let status = if signal.rejected {
+                    WorkloadTerminalStatus::Rejected
+                } else {
+                    WorkloadTerminalStatus::Completed
+                };
+                let cascaded = driver.on_terminal(signal.uuid, current_time_ms, status)?;
+                anyhow::ensure!(
+                    cascaded.is_empty(),
+                    "single-worker KV artifact capture does not accept agentic dependency cascades"
+                );
             }
             artifacts.output_signals.push(ReplayTimedOutputSignal {
                 signal,

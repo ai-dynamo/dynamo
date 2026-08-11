@@ -12,11 +12,12 @@ use rand::rngs::StdRng;
 pub use driver::WorkloadDriver;
 pub use trace::validate_trace_files;
 pub use types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
-    OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY, OUTPUT_REPLAY_ID_ANNOTATION_KEY, ReadyReplayTurn,
-    ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, RouterSequence, SequenceHashMode,
+    AgenticTrace, AgenticTurnTrace, ArrivalSpec, CascadedWorkloadTerminal, DelaySpec,
+    DynamoRequestTrace, LengthSpec, OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY,
+    OUTPUT_REPLAY_ID_ANNOTATION_KEY, ReadyReplayTurn, ReadyTurn, ReplayRequestHashes,
+    ReplayRequestPayload, ReplayRoutingConstraints, RouterSequence, SequenceHashMode,
     SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
-    effective_replay_key, output_replay_id_annotation,
+    WorkloadTerminalStatus, effective_replay_key, output_replay_id_annotation,
 };
 
 pub(super) const SYNTHETIC_OUTPUT_SEED: u64 = 0xD37A_0A7E_5EED;

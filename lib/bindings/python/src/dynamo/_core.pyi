@@ -2438,6 +2438,158 @@ class _OfflineReplayResult:
     @property
     def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
 
+class _ReplayWorkerTargetData(TypedDict):
+    pool_id: str
+    worker_id: int
+    dp_rank: int
+
+class _ReplayRoutingConstraintsData(TypedDict):
+    required_taints: List[str]
+    preferred_taints: Dict[str, float]
+
+class _ReplayPlacementCandidateData(TypedDict):
+    target: _ReplayWorkerTargetData
+    active: bool
+    draining: bool
+    eligible: bool
+    constraint_reason: Optional[str]
+    in_flight_requests: int
+    queued_requests: Optional[int]
+    running_requests: Optional[int]
+    queued_tokens: Optional[int]
+    running_tokens: Optional[int]
+    max_num_seqs: Optional[int]
+    kv_prefix_overlap_tokens: Optional[int]
+    kv_capacity_blocks: Optional[int]
+    kv_occupied_blocks: Optional[int]
+    kv_free_blocks: Optional[int]
+    tags: List[str]
+    taints: List[str]
+    capabilities: List[str]
+
+class _ReplayEventData(TypedDict):
+    logical_request_id: str
+    attempt_id: str
+    group_id: str
+    internal_uuid: str
+    session_id: str
+    authored_turn_index: int
+    timestamp_ms: float
+    pool_id: Optional[str]
+    worker_id: Optional[int]
+    dp_rank: Optional[int]
+    terminal_status: Optional[Literal["completed", "rejected", "canceled", "failed"]]
+    input_length: int
+    requested_output_length: Optional[int]
+    emitted_output_count: int
+    reused_input_tokens: Optional[int]
+    ttft_ms: Optional[float]
+    e2e_latency_ms: Optional[float]
+    priority: int
+    strict_priority: int
+    policy_class: Optional[str]
+    routing_constraints: _ReplayRoutingConstraintsData
+    eligible_pool_ids: List[str]
+    candidates: List[_ReplayPlacementCandidateData]
+
+class _ReplayEvent(TypedDict):
+    event_type: Literal[
+        "placement_needed",
+        "routed",
+        "queued",
+        "admitted",
+        "first_token",
+        "terminal",
+    ]
+    event: _ReplayEventData
+
+class _ReplayPendingPlacementData(TypedDict):
+    logical_request_id: str
+    attempt_id: str
+    group_id: str
+    internal_uuid: str
+    session_id: str
+    authored_turn_index: int
+    ready_at_ms: float
+    eligible_pool_ids: List[str]
+    candidates: List[_ReplayPlacementCandidateData]
+
+class _ReplayWorkerSnapshotData(TypedDict):
+    pool_id: str
+    worker_id: int
+    dp_rank: int
+    active: bool
+    draining: bool
+    in_flight_requests: int
+    queued_requests: Optional[int]
+    running_requests: Optional[int]
+    queued_tokens: Optional[int]
+    running_tokens: Optional[int]
+    max_num_seqs: Optional[int]
+    kv_capacity_blocks: Optional[int]
+    kv_occupied_blocks: Optional[int]
+    kv_free_blocks: Optional[int]
+    tags: List[str]
+    taints: List[str]
+    capabilities: List[str]
+
+class _ReplaySnapshotData(TypedDict):
+    now_ms: float
+    admission_open: bool
+    pending_request_count: int
+    pending_placement_count: int
+    workers: List[_ReplayWorkerSnapshotData]
+
+class _ReplayRequestData(TypedDict):
+    logical_request_id: str
+    attempt_id: str
+    group_id: str
+    internal_uuid: Optional[str]
+    session_id: str
+    authored_turn_index: int
+    ready_time_ms: float
+    input_length: int
+    hash_ids: List[int]
+    trace_block_size: int
+    output_length: int
+    output_token_ids: Optional[List[int]]
+    priority: int
+    strict_priority: int
+    policy_class: Optional[str]
+    routing_constraints: _ReplayRoutingConstraintsData
+    target: Optional[_ReplayWorkerTargetData]
+
+class _ReplayAgenticRequestData(TypedDict):
+    request: _ReplayRequestData
+    wait_for: List[str]
+    dependency_delay_ms: float
+    prefix_reset: bool
+
+class _ReplayAgenticWorkflowData(TypedDict):
+    trace_block_size: int
+    requests: List[_ReplayAgenticRequestData]
+
+class _ReplayWorkerSpec:
+    def __init__(
+        self,
+        worker_id: int,
+        max_num_seqs: Optional[int] = None,
+        tags: Sequence[str] = (),
+        taints: Sequence[str] = (),
+        capabilities: Sequence[str] = (),
+        active: bool = True,
+        draining: bool = False,
+    ) -> None: ...
+
+class _ReplayPoolSpec:
+    def __init__(
+        self,
+        pool_id: str,
+        engine_args: MockEngineArgs,
+        workers: Sequence[_ReplayWorkerSpec],
+        router: Literal["round_robin"] = "round_robin",
+    ) -> None: ...
+
 class _OfflineReplaySession:
     """Synchronous polling interface for one long-lived offline replay."""
 
@@ -2447,12 +2599,21 @@ class _OfflineReplaySession:
         trace_block_size: int,
         num_workers: int = 1,
         router: Literal["external", "round_robin", "kv_router"] = "external",
+        session_affinity: bool = False,
     ) -> None: ...
 
-    def submit(self, request: Dict[str, Any]) -> None: ...
+    @staticmethod
+    def from_pools(
+        pools: Sequence[_ReplayPoolSpec],
+        trace_block_size: int,
+        router: Literal["external"] = "external",
+        session_affinity: bool = False,
+    ) -> _OfflineReplaySession: ...
+
+    def submit(self, request: _ReplayRequestData) -> None: ...
     def append_agentic_workflow(
         self,
-        workflow: Dict[str, Any],
+        workflow: _ReplayAgenticWorkflowData,
         release_at_ms: float,
     ) -> None: ...
     def now_ms(self) -> float: ...
@@ -2460,10 +2621,13 @@ class _OfflineReplaySession:
     def advance_next(self) -> Dict[str, Any]: ...
     def advance_to(self, target_ms: float) -> Dict[str, Any]: ...
     def settle_current_time(self) -> Dict[str, Any]: ...
-    def drain_events(self) -> List[Dict[str, Any]]: ...
-    def pending_placements(self) -> List[Dict[str, Any]]: ...
-    def assign(self, logical_request_id: str, target: Dict[str, int]) -> None: ...
-    def snapshot(self) -> Dict[str, Any]: ...
+    def drain_events(self) -> List[_ReplayEvent]: ...
+    def pending_placements(self) -> List[_ReplayPendingPlacementData]: ...
+    def assign(
+        self, logical_request_id: str, target: _ReplayWorkerTargetData
+    ) -> None: ...
+    def assign_pool(self, logical_request_id: str, pool_id: str) -> None: ...
+    def snapshot(self) -> _ReplaySnapshotData: ...
     def close_admission(self) -> None: ...
     def is_quiescent(self) -> bool: ...
     def is_drained(self) -> bool: ...

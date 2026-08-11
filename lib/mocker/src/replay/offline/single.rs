@@ -5,7 +5,7 @@ use super::components::ReplayWorkerCore;
 use super::evidence::{WorkerPool, attach_pressure_references, with_engine_evidence_context};
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::WorkloadDriver;
+use crate::loadgen::{CascadedWorkloadTerminal, WorkloadDriver, WorkloadTerminalStatus};
 use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
 use anyhow::{Context, bail};
 use std::collections::VecDeque;
@@ -235,6 +235,7 @@ impl SingleRuntime {
             || !pass.admissions.is_empty()
             || !pass.output_signals.is_empty()
             || !pass.kv_events.is_empty();
+        let mut cascaded_terminals = Vec::<CascadedWorkloadTerminal>::new();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
             for signal in &pass.output_signals {
                 if let Some(token_id) = signal.token_id {
@@ -248,14 +249,20 @@ impl SingleRuntime {
                         })?;
                 }
                 if signal.completed {
-                    driver
-                        .on_terminal(signal.uuid, self.current_time_ms, signal.rejected)
+                    let status = if signal.rejected {
+                        WorkloadTerminalStatus::Rejected
+                    } else {
+                        WorkloadTerminalStatus::Completed
+                    };
+                    let mut cascaded = driver
+                        .on_terminal(signal.uuid, self.current_time_ms, status)
                         .with_context(|| {
                             format!(
                                 "failed to process terminal signal for workload request {}",
                                 signal.uuid
                             )
                         })?;
+                    cascaded_terminals.append(&mut cascaded);
                 }
             }
         }
@@ -273,7 +280,14 @@ impl SingleRuntime {
             self.collector
                 .on_terminal(signal.uuid, self.current_time_ms, status);
         }
+        for terminal in &cascaded_terminals {
+            self.collector
+                .on_cascaded_terminal(terminal, self.current_time_ms)?;
+        }
         for _ in 0..completed_requests {
+            self.progress.inc_completed();
+        }
+        for _ in &cascaded_terminals {
             self.progress.inc_completed();
         }
         if admit_arrivals_between_steps {

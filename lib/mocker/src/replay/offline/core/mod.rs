@@ -16,6 +16,14 @@ pub(crate) trait RequestIdentity {
     fn request_id(&self) -> Option<Uuid>;
 }
 
+/// Router-neutral request facts needed to enforce authored placement.
+///
+/// The adapter that owns the concrete request type performs any conversion
+/// from deployment routing metadata before it crosses the core firewall.
+pub(crate) trait PlacementRequest: RequestIdentity {
+    fn required_taints(&self) -> std::collections::BTreeSet<String>;
+}
+
 #[derive(Debug)]
 pub(crate) struct ReadyArrival<Request, Metadata> {
     pub(in crate::replay::offline) request: Request,
@@ -30,6 +38,8 @@ pub(crate) struct ReadyArrival<Request, Metadata> {
 pub(crate) trait AdmissionSource {
     type Request;
     type Metadata;
+    type TerminalStatus;
+    type CascadedTerminal;
 
     /// Return the next source-owned event time.
     ///
@@ -43,7 +53,15 @@ pub(crate) trait AdmissionSource {
         cluster_in_flight: usize,
     ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>>;
     fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> Result<()>;
-    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()>;
+    /// Resolve a terminal request and return authored descendants canceled by
+    /// dependency failure. Sources without an internal DAG return an empty
+    /// vector.
+    fn on_terminal(
+        &mut self,
+        request_id: Uuid,
+        now_ms: f64,
+        status: Self::TerminalStatus,
+    ) -> Result<Vec<Self::CascadedTerminal>>;
     fn is_drained(&self) -> bool;
     fn total_requests(&self) -> usize;
 }
@@ -94,6 +112,21 @@ pub(crate) trait PlacementPolicy<Request> {
     fn observe(&mut self, observation: Self::Observation, now_ms: f64) -> Result<Vec<Placement>>;
     fn cancel_pending(&mut self, request_id: Uuid) -> bool;
     fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>>;
+    /// Publish terminal ownership changes without making a placement decision.
+    /// Policies whose terminal callback never releases work may use the
+    /// default adapter; queueing policies override this and settle once after
+    /// every same-time terminal has been published.
+    fn request_terminal_feedback(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
+        let released = self.request_terminal(request_id, now_ms)?;
+        anyhow::ensure!(
+            released.is_empty(),
+            "placement policy must split terminal feedback from same-time placement settlement"
+        );
+        Ok(())
+    }
+    fn settle_terminal_feedback(&mut self, _now_ms: f64) -> Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>>;
     fn pending_count(&self) -> usize;
     fn worker_ready(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>>;

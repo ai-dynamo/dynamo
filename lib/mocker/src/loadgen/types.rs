@@ -7,6 +7,8 @@ use dynamo_kv_router::protocols::{
     compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_tokens::SequenceHash;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::trace::synthesize_validated_trace_tokens;
@@ -14,6 +16,26 @@ use crate::common::protocols::DirectRequest;
 
 pub const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 pub const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+/// Stable, serialization-safe routing constraints used by the public replay
+/// adapter. The load-generation adapter owns conversion to the router crate's
+/// deployment type so offline replay keeps its extension firewall intact.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplayRoutingConstraints {
+    #[serde(default)]
+    pub required_taints: Vec<String>,
+    #[serde(default)]
+    pub preferred_taints: BTreeMap<String, f32>,
+}
+
+impl ReplayRoutingConstraints {
+    pub(crate) fn into_router_constraints(self) -> RoutingConstraints {
+        RoutingConstraints {
+            required_taints: self.required_taints.into_iter().collect(),
+            preferred_taints: self.preferred_taints.into_iter().collect(),
+        }
+    }
+}
 
 pub fn output_replay_id_annotation(replay_key: &str) -> String {
     format!("{OUTPUT_REPLAY_ID_ANNOTATION_KEY}:{replay_key}")

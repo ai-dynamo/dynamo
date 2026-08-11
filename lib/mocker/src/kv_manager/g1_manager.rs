@@ -34,8 +34,8 @@ use super::kvbm_backend;
 #[cfg(feature = "kvbm-offload")]
 use super::kvbm_backend::{BatchSwapInOutcome, SwapInRegistrationBlock, SwapInRegistrationOutcome};
 use super::vllm_backend::{
-    BlockRequestLease, NativeDecodeBlockReservation, NativeDestinationReservation, VllmAcquire,
-    VllmKvManager,
+    BlockRequestLease, NativeDecodeBlockReservation, NativeDestinationReservation,
+    NativePrefixSnapshot, VllmAcquire, VllmKvManager,
 };
 
 enum G1ManagerBackend {
@@ -220,6 +220,20 @@ impl G1Manager {
             panic!("native request lease used with legacy KVBM")
         };
         manager.get_lease_prefill_cost(sequence, lease)
+    }
+
+    pub(crate) fn native_prefix_overlap_tokens(&self, tokens: &[u32]) -> Option<usize> {
+        match &self.backend {
+            G1ManagerBackend::Native(manager) => Some(manager.prefix_overlap_tokens(tokens)),
+            G1ManagerBackend::Kvbm(_) => None,
+        }
+    }
+
+    pub(crate) fn native_prefix_snapshot(&self) -> Option<NativePrefixSnapshot> {
+        match &self.backend {
+            G1ManagerBackend::Native(manager) => Some(manager.prefix_snapshot()),
+            G1ManagerBackend::Kvbm(_) => None,
+        }
     }
 
     pub(crate) fn reserve_native_destination_at(

@@ -193,6 +193,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<llm::replay::PyOfflineReplaySession>()?;
+    m.add_class::<llm::replay::PyReplayWorkerSpec>()?;
+    m.add_class::<llm::replay::PyReplayPoolSpec>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;

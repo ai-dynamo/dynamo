@@ -3,7 +3,7 @@
 
 //! Explicit, controller-owned placement for interactive offline replay.
 
-use std::collections::{BTreeMap, VecDeque, hash_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, hash_map::Entry};
 
 use anyhow::{Result, anyhow, bail};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -11,12 +11,14 @@ use uuid::Uuid;
 
 use super::{
     EngineEventBatch, Placement, PlacementDecision, PlacementEffects, PlacementPolicy,
-    RequestIdentity, WorkerTopology,
+    PlacementRequest, WorkerTopology,
 };
 use crate::replay::offline::agg::AggregatedPlacement;
 #[cfg(test)]
 use crate::replay::offline::components::OfflineRouterSnapshot;
-use crate::replay::offline::interactive::WorkerTarget;
+use crate::replay::offline::topology::{
+    DEFAULT_REPLAY_POOL_ID, PoolRouter, ResolvedPoolWorker, WorkerTarget,
+};
 
 /// Placement policy whose decisions are supplied explicitly by the caller.
 ///
@@ -25,8 +27,12 @@ use crate::replay::offline::interactive::WorkerTarget;
 /// timestamp. Pending requests survive worker lifecycle changes.
 #[derive(Debug)]
 pub(in crate::replay) struct ExternalPlacement<Events: EngineEventBatch> {
-    workers: BTreeMap<usize, Vec<usize>>,
+    workers: BTreeMap<(String, usize), (Vec<usize>, std::collections::BTreeSet<String>)>,
+    pool_workers: BTreeMap<String, Vec<WorkerTarget>>,
+    pool_routers: BTreeMap<String, PoolRouter>,
+    pool_next: BTreeMap<String, usize>,
     preassigned: FxHashMap<Uuid, WorkerTarget>,
+    constraints: FxHashMap<Uuid, BTreeSet<String>>,
     pending_order: VecDeque<Uuid>,
     pending: FxHashSet<Uuid>,
     events: std::marker::PhantomData<Events>,
@@ -34,12 +40,56 @@ pub(in crate::replay) struct ExternalPlacement<Events: EngineEventBatch> {
 
 impl<Events: EngineEventBatch> ExternalPlacement<Events> {
     pub(in crate::replay) fn new(workers: Vec<WorkerTopology>) -> Self {
+        let resolved = workers
+            .iter()
+            .map(|worker| ResolvedPoolWorker {
+                target: WorkerTarget::default_pool(worker.worker_id, 0),
+                engine_args: crate::common::protocols::MockEngineArgs::default(),
+                tags: Default::default(),
+                taints: Default::default(),
+                capabilities: Default::default(),
+                active: true,
+                draining: false,
+            })
+            .collect();
+        Self::new_pooled(
+            workers,
+            resolved,
+            vec![(DEFAULT_REPLAY_POOL_ID.to_string(), PoolRouter::RoundRobin)],
+        )
+    }
+
+    pub(in crate::replay::offline) fn new_pooled(
+        workers: Vec<WorkerTopology>,
+        resolved: Vec<ResolvedPoolWorker>,
+        pool_routers: Vec<(String, PoolRouter)>,
+    ) -> Self {
+        debug_assert_eq!(workers.len(), resolved.len());
+        let mut target_workers = BTreeMap::new();
+        let mut pool_workers: BTreeMap<String, Vec<WorkerTarget>> = BTreeMap::new();
+        for (worker, resolved) in workers.into_iter().zip(resolved) {
+            if !resolved.active || resolved.draining {
+                continue;
+            }
+            pool_workers
+                .entry(resolved.target.pool_id.clone())
+                .or_default()
+                .push(resolved.target.clone());
+            target_workers.insert(
+                (resolved.target.pool_id, resolved.target.worker_id),
+                (worker.scheduler_ids, resolved.taints),
+            );
+        }
+        for workers in pool_workers.values_mut() {
+            workers.sort_by_key(|worker| worker.worker_id);
+        }
         Self {
-            workers: workers
-                .into_iter()
-                .map(|worker| (worker.worker_id, worker.scheduler_ids))
-                .collect(),
+            workers: target_workers,
+            pool_workers,
+            pool_routers: pool_routers.into_iter().collect(),
+            pool_next: BTreeMap::new(),
             preassigned: FxHashMap::default(),
+            constraints: FxHashMap::default(),
             pending_order: VecDeque::new(),
             pending: FxHashSet::default(),
             events: std::marker::PhantomData,
@@ -47,12 +97,22 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
     }
 
     fn resolve_target(&self, target: WorkerTarget) -> Result<usize> {
-        let scheduler_ids = self.workers.get(&target.worker_id).ok_or_else(|| {
-            anyhow!(
-                "interactive replay worker {} is unavailable or draining",
-                target.worker_id
-            )
-        })?;
+        if !self.pool_workers.contains_key(&target.pool_id) {
+            bail!(
+                "interactive replay pool {:?} is unavailable",
+                target.pool_id
+            );
+        }
+        let (scheduler_ids, _) = self
+            .workers
+            .get(&(target.pool_id.clone(), target.worker_id))
+            .ok_or_else(|| {
+                anyhow!(
+                    "interactive replay worker {} is not a member of pool {:?} or is unavailable",
+                    target.worker_id,
+                    target.pool_id
+                )
+            })?;
         scheduler_ids.get(target.dp_rank).copied().ok_or_else(|| {
             anyhow!(
                 "interactive replay worker {} has no active DP rank {} (active ranks: {})",
@@ -63,12 +123,48 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         })
     }
 
+    fn validate_required_taints(
+        &self,
+        required_taints: &BTreeSet<String>,
+        target: &WorkerTarget,
+    ) -> Result<()> {
+        if required_taints.is_empty() {
+            return Ok(());
+        }
+        let (_, taints) = self
+            .workers
+            .get(&(target.pool_id.clone(), target.worker_id))
+            .ok_or_else(|| anyhow!("interactive replay target disappeared during validation"))?;
+        if required_taints
+            .iter()
+            .all(|required| taints.contains(required))
+        {
+            Ok(())
+        } else {
+            bail!(
+                "interactive replay worker {} in pool {:?} does not satisfy required taints {:?}",
+                target.worker_id,
+                target.pool_id,
+                required_taints
+            )
+        }
+    }
+
+    fn validate_constraints(&self, request_id: Uuid, target: &WorkerTarget) -> Result<()> {
+        let Some(required_taints) = self.constraints.get(&request_id) else {
+            return Ok(());
+        };
+        self.validate_required_taints(required_taints, target)
+    }
+
     pub(in crate::replay) fn preassign(
         &mut self,
         request_id: Uuid,
         target: WorkerTarget,
+        required_taints: BTreeSet<String>,
     ) -> Result<()> {
-        self.resolve_target(target)?;
+        self.resolve_target(target.clone())?;
+        self.validate_required_taints(&required_taints, &target)?;
         match self.preassigned.entry(request_id) {
             Entry::Vacant(entry) => {
                 entry.insert(target);
@@ -77,6 +173,7 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
                 bail!("interactive replay request {request_id} already has a placement target");
             }
         }
+        self.constraints.insert(request_id, required_taints);
         Ok(())
     }
 
@@ -85,16 +182,17 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         request_id: Uuid,
         target: WorkerTarget,
     ) -> Result<Placement> {
-        if !self.pending.remove(&request_id) {
+        if !self.pending.contains(&request_id) {
             bail!("interactive replay request {request_id} is not awaiting placement");
         }
-        let scheduler_id = match self.resolve_target(target) {
-            Ok(scheduler_id) => scheduler_id,
-            Err(error) => {
-                self.pending.insert(request_id);
-                return Err(error);
-            }
-        };
+        let scheduler_id = self
+            .resolve_target(target.clone())
+            .and_then(|scheduler_id| {
+                self.validate_constraints(request_id, &target)?;
+                Ok(scheduler_id)
+            })?;
+        self.pending.remove(&request_id);
+        self.constraints.remove(&request_id);
         self.pending_order
             .retain(|candidate| *candidate != request_id);
         Ok(Placement {
@@ -105,12 +203,44 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         })
     }
 
+    pub(in crate::replay) fn assign_pool(
+        &mut self,
+        request_id: Uuid,
+        pool_id: &str,
+    ) -> Result<Placement> {
+        if !self.pending.contains(&request_id) {
+            bail!("interactive replay request {request_id} is not awaiting placement");
+        }
+        if self.pool_routers.get(pool_id) != Some(&PoolRouter::RoundRobin) {
+            bail!("interactive replay pool {pool_id:?} has no supported internal router");
+        }
+        let workers = self
+            .pool_workers
+            .get(pool_id)
+            .ok_or_else(|| anyhow!("interactive replay pool {pool_id:?} is unavailable"))?;
+        let eligible = workers
+            .iter()
+            .filter(|target| self.validate_constraints(request_id, target).is_ok())
+            .cloned()
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            bail!(
+                "interactive replay pool {pool_id:?} has no worker eligible for request {request_id}"
+            );
+        }
+        let cursor = self.pool_next.entry(pool_id.to_string()).or_default();
+        let target = eligible[*cursor % eligible.len()].clone();
+        *cursor = (*cursor + 1) % eligible.len();
+        self.assign(request_id, target)
+    }
+
     pub(in crate::replay) fn pending_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
         self.pending_order.iter().copied()
     }
 
     pub(in crate::replay) fn cancel(&mut self, request_id: Uuid) -> bool {
         self.preassigned.remove(&request_id);
+        self.constraints.remove(&request_id);
         let removed = self.pending.remove(&request_id);
         if removed {
             self.pending_order
@@ -120,10 +250,10 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
     }
 }
 
-impl<Request, Events> PlacementPolicy<Request> for ExternalPlacement<Events>
+impl<Events, Request> PlacementPolicy<Request> for ExternalPlacement<Events>
 where
-    Request: RequestIdentity,
     Events: EngineEventBatch,
+    Request: PlacementRequest,
 {
     type Metadata = ();
     type Observation = Events;
@@ -138,10 +268,27 @@ where
         let request_id = request
             .request_id()
             .ok_or_else(|| anyhow!("external placement requires a request UUID"))?;
+        let required_taints = request.required_taints();
+        if let Some(preassigned) = self.constraints.get(&request_id) {
+            if preassigned != &required_taints {
+                bail!(
+                    "interactive replay request {request_id} routing constraints changed after authored preassignment"
+                );
+            }
+        } else {
+            self.constraints.insert(request_id, required_taints);
+        }
         let decision = if let Some(target) = self.preassigned.remove(&request_id) {
+            let scheduler_id = self
+                .resolve_target(target.clone())
+                .and_then(|scheduler_id| {
+                    self.validate_constraints(request_id, &target)?;
+                    Ok(scheduler_id)
+                })?;
+            self.constraints.remove(&request_id);
             PlacementDecision::Immediate(Placement {
                 request_id,
-                scheduler_id: self.resolve_target(target)?,
+                scheduler_id,
                 reported_overlap_tokens: 0,
                 planner_cache_sample: None,
             })
@@ -180,17 +327,33 @@ where
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.workers.insert(worker.worker_id, worker.scheduler_ids);
+        let target = WorkerTarget::default_pool(worker.worker_id, 0);
+        self.pool_workers
+            .entry(DEFAULT_REPLAY_POOL_ID.to_string())
+            .or_default()
+            .push(target.clone());
+        self.workers.insert(
+            (target.pool_id, target.worker_id),
+            (worker.scheduler_ids, Default::default()),
+        );
         Ok(Vec::new())
     }
 
     fn worker_draining(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.workers.remove(&worker.worker_id);
+        self.workers
+            .remove(&(DEFAULT_REPLAY_POOL_ID.to_string(), worker.worker_id));
+        if let Some(workers) = self.pool_workers.get_mut(DEFAULT_REPLAY_POOL_ID) {
+            workers.retain(|target| target.worker_id != worker.worker_id);
+        }
         Ok(Vec::new())
     }
 
     fn worker_removed(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.workers.remove(&worker.worker_id);
+        self.workers
+            .remove(&(DEFAULT_REPLAY_POOL_ID.to_string(), worker.worker_id));
+        if let Some(workers) = self.pool_workers.get_mut(DEFAULT_REPLAY_POOL_ID) {
+            workers.retain(|target| target.worker_id != worker.worker_id);
+        }
         Ok(Vec::new())
     }
 

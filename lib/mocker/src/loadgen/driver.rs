@@ -59,6 +59,8 @@ enum PromptMode {
 
 #[derive(Debug)]
 struct TurnResolution {
+    session_index: usize,
+    turn_index: usize,
     logical_request_id: Option<String>,
     session_ended: bool,
     status: WorkloadTerminalStatus,
@@ -378,9 +380,7 @@ impl AgenticState {
                 )
             })?;
             let authored_turn_index = turn.authored_turn_index.ok_or_else(|| {
-                anyhow!(
-                    "agentic dependent request {logical_request_id} has no authored turn index"
-                )
+                anyhow!("agentic dependent request {logical_request_id} has no authored turn index")
             })?;
             let request_uuid = if let Some(request_uuid) = turn.internal_uuid {
                 request_uuid
@@ -1217,11 +1217,7 @@ impl WorkloadDriver {
     }
 
     pub fn on_complete(&mut self, request_uuid: Uuid, now_ms: f64) -> Result<()> {
-        let cascaded = self.on_terminal(
-            request_uuid,
-            now_ms,
-            WorkloadTerminalStatus::Completed,
-        )?;
+        let cascaded = self.on_terminal(request_uuid, now_ms, WorkloadTerminalStatus::Completed)?;
         debug_assert!(cascaded.is_empty());
         Ok(())
     }
@@ -1342,6 +1338,8 @@ impl WorkloadDriver {
         }
 
         Ok(Some(TurnResolution {
+            session_index: in_flight.session_index,
+            turn_index: in_flight.turn_index,
             logical_request_id,
             session_ended,
             status,
@@ -1353,13 +1351,21 @@ impl WorkloadDriver {
         resolution: TurnResolution,
         now_ms: f64,
     ) -> Result<Vec<CascadedWorkloadTerminal>> {
+        let sequential_cascades = if resolution.status == WorkloadTerminalStatus::Completed {
+            Vec::new()
+        } else {
+            self.cancel_sequential_descendants(
+                resolution.session_index,
+                resolution.turn_index.saturating_add(1),
+            )
+        };
         match &mut self.policy {
-            SchedulingPolicy::Trace => Ok(Vec::new()),
+            SchedulingPolicy::Trace => Ok(sequential_cascades),
             SchedulingPolicy::Concurrency(state) => {
                 if resolution.session_ended {
                     state.on_session_finished(&mut self.sessions, &mut self.ready_sessions, now_ms);
                 }
-                Ok(Vec::new())
+                Ok(sequential_cascades)
             }
             SchedulingPolicy::Agentic(state) => {
                 if let Some(request_id) = resolution.logical_request_id {
@@ -1379,6 +1385,35 @@ impl WorkloadDriver {
                 }
             }
         }
+    }
+
+    fn cancel_sequential_descendants(
+        &mut self,
+        session_index: usize,
+        first_turn_index: usize,
+    ) -> Vec<CascadedWorkloadTerminal> {
+        let turn_count = self.sessions[session_index].turns.len();
+        let mut terminals = Vec::with_capacity(turn_count.saturating_sub(first_turn_index));
+        for turn_index in first_turn_index..turn_count {
+            let request_uuid = self.request_uuid(session_index, turn_index);
+            let session = &self.sessions[session_index];
+            let turn = &session.turns[turn_index];
+            let authored_turn_index = turn.authored_turn_index.unwrap_or(turn_index);
+            terminals.push(CascadedWorkloadTerminal {
+                request_uuid,
+                logical_request_id: turn
+                    .logical_request_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{authored_turn_index}", session.session_id)),
+                session_id: session.session_id.clone(),
+                authored_turn_index,
+                input_length: turn.prompt_tokens.input_length(),
+                requested_output_length: turn.max_output_tokens,
+                emitted_output_count: 0,
+                status: WorkloadTerminalStatus::Canceled,
+            });
+        }
+        terminals
     }
 
     pub fn next_ready_time_ms(&mut self) -> Option<f64> {
@@ -1611,9 +1646,9 @@ mod tests {
 
         let error = WorkloadDriver::new_trace(trace, 4).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("input_length 5 exceeds synthesized capacity 4")
+            error.to_string().contains(
+                "input_length 5 requires exactly 2 hash IDs at trace block size 4, got 1"
+            )
         );
     }
 
@@ -2129,14 +2164,18 @@ mod tests {
 
         let first = driver.pop_ready(0.0, usize::MAX);
         let cascaded = driver
-            .on_terminal(
-                first[0].request_uuid,
-                1.0,
-                WorkloadTerminalStatus::Rejected,
-            )
+            .on_terminal(first[0].request_uuid, 1.0, WorkloadTerminalStatus::Rejected)
             .unwrap();
 
-        assert!(cascaded.is_empty());
+        assert_eq!(cascaded.len(), 1);
+        let descendant = &cascaded[0];
+        assert_eq!(descendant.logical_request_id, "a:1");
+        assert_eq!(descendant.session_id, "a");
+        assert_eq!(descendant.authored_turn_index, 1);
+        assert_eq!(descendant.input_length, 1);
+        assert_eq!(descendant.requested_output_length, 1);
+        assert_eq!(descendant.emitted_output_count, 0);
+        assert_eq!(descendant.status, WorkloadTerminalStatus::Canceled);
         assert!(driver.pop_ready(1.0, usize::MAX).is_empty());
         assert!(driver.is_drained());
     }
@@ -2549,7 +2588,10 @@ mod tests {
         assert_eq!(cascaded[0].request_uuid, Uuid::from_u128(3));
         assert_eq!(cascaded[1].request_uuid, Uuid::from_u128(4));
         assert_eq!(driver.next_ready_time_ms(), None);
-        assert!(!driver.is_drained(), "the independent root is still in flight");
+        assert!(
+            !driver.is_drained(),
+            "the independent root is still in flight"
+        );
 
         driver.on_complete(b_uuid, 7.0).unwrap();
         assert_eq!(driver.next_ready_time_ms(), None);

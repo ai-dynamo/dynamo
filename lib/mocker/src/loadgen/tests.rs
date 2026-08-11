@@ -133,6 +133,57 @@ fn dynamo_trace_input_validation_errors_are_clear() {
 }
 
 #[test]
+fn dynamo_multi_file_hash_identity_is_global_and_path_order_independent() {
+    let shared = 0xB300_0000_0000_0000_u64;
+    let distinct_a = 0xB300_0001_0000_0000_u64;
+    let distinct_b = 0xB300_0002_0000_0000_u64;
+    let row = |request_id: &str, hashes: [u64; 2]| {
+        let mut value = request_trace_row(request_id, 4, None);
+        value["request"]["replay"]["input_length"] = serde_json::json!(8);
+        value["request"]["replay"]["input_sequence_hashes"] = serde_json::json!(hashes);
+        value
+    };
+    let first = write_trace(&[row("a", [shared, distinct_a])]);
+    let second = write_trace(&[row("b", [shared, distinct_b])]);
+
+    let forward = DynamoRequestTrace::from_request_trace_files(
+        &[first.path().to_path_buf(), second.path().to_path_buf()],
+        Some(4),
+    )
+    .unwrap();
+    let reverse = DynamoRequestTrace::from_request_trace_files(
+        &[second.path().to_path_buf(), first.path().to_path_buf()],
+        Some(4),
+    )
+    .unwrap();
+    assert_eq!(forward, reverse);
+
+    let DynamoRequestTrace::Standard(trace) = forward else {
+        panic!("context-free request traces must lower to a standard trace")
+    };
+    let hashes = trace
+        .sessions
+        .iter()
+        .flat_map(|session| session.turns.iter())
+        .map(|turn| turn.hash_ids.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(hashes.len(), 2);
+    assert_eq!(hashes[0][0], hashes[1][0]);
+    assert_ne!(hashes[0][1], hashes[1][1]);
+}
+
+#[test]
+fn dynamo_multi_file_loader_rejects_duplicate_canonical_paths() {
+    let file = write_trace(&[request_trace_row("only", 4, None)]);
+    let error = DynamoRequestTrace::from_request_trace_files(
+        &[file.path().to_path_buf(), file.path().to_path_buf()],
+        Some(4),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("was supplied more than once"));
+}
+
+#[test]
 fn test_from_mooncake_single_turn_loads_fields_and_canonicalizes_hashes() {
     let file = write_trace(&[serde_json::json!({
         "timestamp": 123.0,
@@ -366,6 +417,36 @@ fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
 }
 
 #[test]
+fn test_from_mooncake_rejects_input_length_above_hash_capacity() {
+    let file = write_trace(&[serde_json::json!({
+        "input_length": 9,
+        "output_length": 1,
+        "hash_ids": [5, 6],
+    })]);
+
+    let error = Trace::from_mooncake(file.path(), 4).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("requires exactly 3 hash IDs at trace block size 4, got 2"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn test_from_mooncake_rejects_excess_hash_ids() {
+    let file = write_trace(&[serde_json::json!({
+        "input_length": 4,
+        "output_length": 1,
+        "hash_ids": [5, 6],
+    })]);
+
+    let error = Trace::from_mooncake(file.path(), 4).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("requires exactly 1 hash IDs at trace block size 4, got 2"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn test_from_agentic_mooncake_preserves_dependencies_and_tool_wait() {
     let file = write_trace(&[
         serde_json::json!({
@@ -453,6 +534,19 @@ fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
 
     let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
     assert!(err.to_string().contains("input_length 9"));
+}
+
+#[test]
+fn test_from_agentic_mooncake_rejects_excess_hash_ids() {
+    let file = write_trace(&[serde_json::json!({
+        "request_id": "r1",
+        "input_length": 4,
+        "output_length": 1,
+        "hash_ids": [1, 2]
+    })]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    assert!(err.to_string().contains("requires exactly 1 hash_ids"));
 }
 
 #[test]
@@ -749,7 +843,7 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
 
     let turn = &trace.sessions[0].turns[0];
     assert_eq!(turn.input_length, 18);
-    assert_eq!(turn.hash_ids, vec![21, 22, 23, 24, 25, 26]);
+    assert_eq!(turn.hash_ids, vec![21, 22, 23, 24, 25]);
 
     let request = turn
         .to_direct_request(trace.block_size, Uuid::from_u128(2), Some(10.0))

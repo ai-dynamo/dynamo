@@ -20,6 +20,7 @@ pub(crate) mod runtime_utils;
 pub(crate) mod scaling;
 pub(crate) mod single;
 pub(crate) mod state;
+mod topology;
 
 pub use canonical::{
     CANONICAL_RESULT_EXCLUSIONS, CANONICAL_SCHEMA_VERSION, CanonicalAicIdentity,
@@ -56,9 +57,11 @@ pub use extensions::kv_router::{
 };
 pub use interactive::{
     OfflineReplaySession, ReplayAgenticRequest, ReplayAgenticWorkflow, ReplayEvent,
-    ReplayEventData, ReplayPendingPlacement, ReplayRequestSpec, ReplaySessionRouter,
-    ReplaySnapshot, ReplayStepStatus, ReplayWorkerSnapshot, WorkerTarget,
+    ReplayEventData, ReplayPendingPlacement, ReplayPlacementCandidate, ReplayRequestSpec,
+    ReplayRoutingConstraints, ReplaySessionOptions, ReplaySessionRouter, ReplaySnapshot,
+    ReplayStepStatus, ReplayWorkerSnapshot,
 };
+pub use topology::{PoolRouter, PoolSpec, WorkerSpec, WorkerTarget};
 
 #[cfg(test)]
 mod firewall_tests;

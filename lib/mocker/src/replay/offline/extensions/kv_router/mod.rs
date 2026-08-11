@@ -478,6 +478,16 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(self.placements(effects.admissions))
     }
 
+    fn request_terminal_feedback(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
+        self.router
+            .on_request_completed_deferred(request_id, now_ms)
+    }
+
+    fn settle_terminal_feedback(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.settle_terminal_feedback(now_ms)?;
+        Ok(self.placements(effects.admissions))
+    }
+
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
         let effects = self.router.on_prefill_completed(request_id, now_ms)?;
         Ok(self.placements(effects.admissions))
@@ -675,6 +685,20 @@ impl OfflineReplayRouter {
         self.slots
             .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
+        Ok(RouterEffects {
+            admissions: self.drain_pending(decay_now)?,
+        })
+    }
+
+    pub(crate) fn on_request_completed_deferred(&mut self, uuid: Uuid, now_ms: f64) -> Result<()> {
+        let decay_now = self.decay_now(now_ms);
+        self.slots
+            .free(&uuid.to_string(), decay_now)
+            .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) fn settle_terminal_feedback(&mut self, now_ms: f64) -> Result<RouterEffects> {
+        let decay_now = self.decay_now(now_ms);
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
         })

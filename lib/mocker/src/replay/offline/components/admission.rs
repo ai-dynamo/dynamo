@@ -358,6 +358,8 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
 impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<Metadata> {
     type Request = ReplayRequestPayload;
     type Metadata = Metadata;
+    type TerminalStatus = WorkloadTerminalStatus;
+    type CascadedTerminal = CascadedWorkloadTerminal;
 
     fn next_internal_event_ms(&mut self) -> Option<f64> {
         AdmissionQueue::next_ready_time_ms(self)

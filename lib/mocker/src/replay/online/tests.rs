@@ -296,7 +296,7 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
                 max_output_tokens: 2,
                 hash_ids: vec![1],
                 first_ready_timestamp_ms: Some(0.0),
-                prefix_reset: true,
+                prefix_reset: false,
                 ..Default::default()
             },
             AgenticTurnTrace {
@@ -308,7 +308,7 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
                 first_ready_timestamp_ms: Some(0.0),
                 delay_after_dependencies_ms: 5.0,
                 wait_for: vec!["root".to_string()],
-                prefix_reset: true,
+                prefix_reset: false,
                 ..Default::default()
             },
         ],

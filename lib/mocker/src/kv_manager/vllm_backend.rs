@@ -12,6 +12,7 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, LocalBlockHash,
 };
 use dynamo_tokens::{BlockHash, SequenceHash};
+use rustc_hash::FxHashSet;
 use uuid::Uuid;
 
 use crate::cache::vllm_block_pool::{BlockCopyId, BlockReservation, ReserveOutcome, VllmBlockPool};
@@ -171,6 +172,37 @@ pub(crate) struct VllmKvManager {
     kv_event_publishers: KvEventPublishers,
     dp_rank: u32,
     next_event_id: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct NativePrefixSnapshot {
+    resident_hashes: FxHashSet<SequenceHash>,
+    block_size: usize,
+    enabled: bool,
+}
+
+impl NativePrefixSnapshot {
+    pub(crate) fn overlap_tokens(&self, tokens: &[u32]) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+        let (_, identities) = RequestSequence::new(
+            tokens.to_vec(),
+            0,
+            0,
+            self.block_size,
+            true,
+            false,
+            false,
+            None,
+        );
+        let overlap_blocks = identities
+            .iter()
+            .map_while(|identity| identity.sequence_hash)
+            .take_while(|hash| self.resident_hashes.contains(hash))
+            .count();
+        (overlap_blocks * self.block_size).min(tokens.len())
+    }
 }
 
 impl VllmKvManager {
@@ -573,6 +605,39 @@ impl VllmKvManager {
             new_tokens: sequence.len() - cached_tokens,
             cached_tokens,
             active_cached_tokens,
+        }
+    }
+
+    /// Read-only prefix overlap for an unadmitted candidate request. This uses
+    /// the same native sequence-hash chain and physical cache pool as
+    /// admission, but acquires no lease and performs no eviction.
+    pub(crate) fn prefix_overlap_tokens(&self, tokens: &[u32]) -> usize {
+        if !self.enable_prefix_caching {
+            return 0;
+        }
+        let (_, identities) = RequestSequence::new(
+            tokens.to_vec(),
+            0,
+            0,
+            self.block_size,
+            true,
+            false,
+            false,
+            None,
+        );
+        let overlap_blocks = identities
+            .iter()
+            .map_while(|identity| identity.sequence_hash)
+            .take_while(|hash| self.pool.prefix_hit(*hash).is_some())
+            .count();
+        (overlap_blocks * self.block_size).min(tokens.len())
+    }
+
+    pub(crate) fn prefix_snapshot(&self) -> NativePrefixSnapshot {
+        NativePrefixSnapshot {
+            resident_hashes: self.pool.resident_hashes(),
+            block_size: self.block_size,
+            enabled: self.enable_prefix_caching,
         }
     }
 

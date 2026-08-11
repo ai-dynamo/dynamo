@@ -11,7 +11,7 @@ use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandResult, SchedulerLifecycleEvent,
+    SchedulerCommandResult, SchedulerLifecycleEvent, SchedulerObservation,
 };
 use uuid::Uuid;
 
@@ -62,6 +62,12 @@ impl AggRequestState {
             .ok_or_else(|| anyhow!("offline replay missing queued request payload for {uuid}"))?;
         self.phase = AggRequestPhase::Running;
         Ok(request.into_direct_request())
+    }
+
+    pub(crate) fn queued_request(&self) -> Option<&ReplayRequestPayload> {
+        (self.phase == AggRequestPhase::QueuedAtRouter)
+            .then_some(self.request.as_ref())
+            .flatten()
     }
 }
 
@@ -253,6 +259,8 @@ pub(crate) struct OfflineWorkerState {
     dp_rank: u32,
     busy: bool,
     in_flight: usize,
+    committed_scheduler_observation: Option<SchedulerObservation>,
+    committed_native_prefix_snapshot: Option<crate::kv_manager::NativePrefixSnapshot>,
 }
 
 #[cfg(test)]
@@ -312,6 +320,8 @@ impl OfflineWorkerState {
             dp_rank,
             busy: false,
             in_flight: 0,
+            committed_scheduler_observation: None,
+            committed_native_prefix_snapshot: None,
         }
     }
 
@@ -395,6 +405,8 @@ impl OfflineWorkerState {
 
     pub(crate) fn mark_idle(&mut self) {
         self.busy = false;
+        self.committed_scheduler_observation = None;
+        self.committed_native_prefix_snapshot = None;
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -417,6 +429,40 @@ impl OfflineWorkerState {
         &self.core
     }
 
+    pub(crate) fn scheduler_observation(&self) -> Option<SchedulerObservation> {
+        let current = self.core.scheduler_observation()?;
+        if !self.busy {
+            return Some(current);
+        }
+        let Some(committed) = self.committed_scheduler_observation else {
+            return Some(current);
+        };
+
+        // The core executes the committed pass eagerly. While virtual time is
+        // still inside that pass, retain its pass-start running/KV view but
+        // include requests that arrived into the waiting queue meanwhile.
+        Some(SchedulerObservation {
+            queued_requests: current.queued_requests,
+            running_requests: committed.running_requests,
+            queued_tokens: current.queued_tokens,
+            running_tokens: committed.running_tokens,
+            max_num_seqs: committed.max_num_seqs,
+            kv_capacity_blocks: committed.kv_capacity_blocks,
+            kv_occupied_blocks: committed.kv_occupied_blocks,
+            kv_free_blocks: committed.kv_free_blocks,
+        })
+    }
+
+    pub(crate) fn native_prefix_overlap_tokens(&self, tokens: &[u32]) -> Option<usize> {
+        if self.busy {
+            return self
+                .committed_native_prefix_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.overlap_tokens(tokens));
+        }
+        self.core.native_prefix_overlap_tokens(tokens)
+    }
+
     fn increment_in_flight(&mut self) {
         self.in_flight = self
             .in_flight
@@ -432,7 +478,10 @@ impl OfflineWorkerState {
     }
 
     pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
-        self.core.try_execute_pass(now_ms)
+        self.committed_native_prefix_snapshot = self.core.native_prefix_snapshot();
+        let pass = self.core.try_execute_pass(now_ms)?;
+        self.committed_scheduler_observation = self.core.pass_start_observation();
+        Ok(pass)
     }
 
     #[cfg(test)]

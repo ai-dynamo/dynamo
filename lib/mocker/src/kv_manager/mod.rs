@@ -58,6 +58,7 @@ mod g1_manager;
 pub mod kvbm_backend;
 pub mod sglang_backend;
 mod vllm_backend;
+pub(crate) use vllm_backend::NativePrefixSnapshot;
 #[cfg(test)]
 mod vllm_firewall_tests;
 

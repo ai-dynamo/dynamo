@@ -165,6 +165,10 @@ impl VllmBlockPool {
         })
     }
 
+    pub(crate) fn resident_hashes(&self) -> FxHashSet<SequenceHash> {
+        self.by_hash.keys().copied().collect()
+    }
+
     /// Atomically pins `prefix` and reserves `fresh` additional copies.
     ///
     /// The caller obtains `prefix` from a preceding synchronous lookup. A

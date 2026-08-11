@@ -22,7 +22,7 @@ use super::evidence::{
 use super::extensions::kv_router::AggRuntime;
 use super::interactive::{
     InteractiveCapture, InteractiveRequestIdentity, ReplayEvent, ReplayPendingPlacement,
-    ReplaySnapshot, ReplayStepStatus, WorkerTarget,
+    ReplayPlacementCandidate, ReplaySnapshot, ReplayStepStatus, ReplayWorkerSnapshot,
 };
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -37,6 +37,7 @@ use super::scaling::{LatestFpmBuffer, ReplayScalingPolicy, ReplayScalingSnapshot
 use super::state::AggRequestPhase;
 #[cfg(test)]
 use super::state::OfflineWorkerSnapshot;
+use super::topology::{ResolvedPoolTopology, ResolvedPoolWorker, WorkerTarget};
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
@@ -56,7 +57,7 @@ use anyhow::bail;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BTreeSet, BinaryHeap, VecDeque};
 use uuid::Uuid;
 
 fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
@@ -180,7 +181,12 @@ pub(in crate::replay) struct AggRuntimeImpl<
     Observation: ReplayEngineObservation,
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
-    Admission: CoreAdmissionSource<Request = ReplayRequestPayload, Metadata = Metadata>,
+    Admission: CoreAdmissionSource<
+            Request = ReplayRequestPayload,
+            Metadata = Metadata,
+            TerminalStatus = WorkloadTerminalStatus,
+            CascadedTerminal = CascadedWorkloadTerminal,
+        >,
 {
     now_ms: f64,
     dp_size: u32,
@@ -192,6 +198,10 @@ pub(in crate::replay) struct AggRuntimeImpl<
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent<Observation::Batch>>,
     placement: PlacementPolicyImpl,
+    /// Placements released by completion feedback at `now_ms`. They are held
+    /// until every completion at that timestamp has published terminal/DAG
+    /// feedback and newly-ready arrivals have crossed admission.
+    deferred_timestamp_placements: Vec<Placement>,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
     /// Latest forward pass metric per worker/rank since the previous scaling tick.
@@ -210,6 +220,11 @@ pub(in crate::replay) struct AggRuntimeImpl<
     /// Allocated only for polling-based interactive replay. Ordinary one-shot
     /// replay retains its allocation profile when this is `None`.
     interactive: Option<InteractiveCapture>,
+    /// Dense engine worker index to authored pool/worker identity. Pool
+    /// membership is explicit and never inferred from numeric ID ranges.
+    interactive_worker_targets: Vec<WorkerTarget>,
+    interactive_workers: Vec<ResolvedPoolWorker>,
+    interactive_pool_ids: Vec<String>,
     stepping_started: bool,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
@@ -273,12 +288,39 @@ impl
         )
     }
 
+    pub(in crate::replay::offline) fn new_external_pooled_workload(
+        driver: WorkloadDriver,
+        topology: ResolvedPoolTopology,
+    ) -> anyhow::Result<Self> {
+        let args = topology
+            .workers
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("interactive replay topology has no workers"))?
+            .engine_args
+            .clone();
+        let pool_routers = topology.pool_routers;
+        Self::new_composed_heterogeneous(
+            &args,
+            AdmissionQueue::new_workload(driver, ReplayMode::Trace),
+            topology.workers,
+            move |_args, engine_topology, workers| {
+                Ok(ExternalPlacement::new_pooled(
+                    engine_topology,
+                    workers.to_vec(),
+                    pool_routers,
+                ))
+            },
+        )
+    }
+
     pub(in crate::replay::offline) fn preassign_interactive(
         &mut self,
         request_id: Uuid,
         target: WorkerTarget,
+        required_taints: BTreeSet<String>,
     ) -> anyhow::Result<()> {
-        self.placement.preassign(request_id, target)
+        self.placement
+            .preassign(request_id, target, required_taints)
     }
 
     pub(in crate::replay::offline) fn assign_interactive(
@@ -287,6 +329,15 @@ impl
         target: WorkerTarget,
     ) -> anyhow::Result<()> {
         let placement = self.placement.assign(request_id, target)?;
+        self.dispatch_placements(vec![placement])
+    }
+
+    pub(in crate::replay::offline) fn assign_pool_interactive(
+        &mut self,
+        request_id: Uuid,
+        pool_id: &str,
+    ) -> anyhow::Result<()> {
+        let placement = self.placement.assign_pool(request_id, pool_id)?;
         self.dispatch_placements(vec![placement])
     }
 
@@ -307,7 +358,12 @@ where
     Observation: ReplayEngineObservation,
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
-    Admission: CoreAdmissionSource<Request = ReplayRequestPayload, Metadata = Metadata>,
+    Admission: CoreAdmissionSource<
+            Request = ReplayRequestPayload,
+            Metadata = Metadata,
+            TerminalStatus = WorkloadTerminalStatus,
+            CascadedTerminal = CascadedWorkloadTerminal,
+        >,
 {
     pub(in crate::replay::offline) fn new_composed(
         args: &MockEngineArgs,
@@ -325,23 +381,97 @@ where
             args.worker_max_num_seqs.len(),
             num_workers,
         );
+        let workers = (0..num_workers)
+            .map(|worker_id| {
+                let mut worker_args = args.clone();
+                if let Some(&max_num_seqs) = args.worker_max_num_seqs.get(worker_id) {
+                    worker_args.max_num_seqs = Some(max_num_seqs);
+                }
+                ResolvedPoolWorker {
+                    target: WorkerTarget::default_pool(worker_id, 0),
+                    engine_args: worker_args,
+                    tags: BTreeSet::new(),
+                    taints: args
+                        .worker_taints
+                        .get(worker_id)
+                        .map(|taints| taints.iter().cloned().collect())
+                        .unwrap_or_default(),
+                    capabilities: BTreeSet::new(),
+                    active: true,
+                    draining: false,
+                }
+            })
+            .collect();
+        Self::new_composed_heterogeneous(&args, admission, workers, |args, topology, _workers| {
+            create_placement(args, topology)
+        })
+    }
+
+    fn new_composed_heterogeneous(
+        args: &MockEngineArgs,
+        admission: Admission,
+        workers: Vec<ResolvedPoolWorker>,
+        create_placement: impl FnOnce(
+            &MockEngineArgs,
+            Vec<WorkerTopology>,
+            &[ResolvedPoolWorker],
+        ) -> anyhow::Result<PlacementPolicyImpl>,
+    ) -> anyhow::Result<Self> {
+        let args = args.clone().normalized()?;
+        let num_workers = workers.len();
+        anyhow::ensure!(
+            num_workers > 0,
+            "offline replay requires at least one worker"
+        );
+        let gpu_counts = workers
+            .iter()
+            .map(|worker| worker.engine_args.aic_gpus_per_worker())
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            gpu_counts.len() == 1,
+            "heterogeneous GPUs-per-worker accounting is unsupported; all static replay workers must use the same model parallelism, got {gpu_counts:?}"
+        );
+        let gpus_per_worker = *gpu_counts
+            .first()
+            .expect("validated topology contains at least one worker");
         let progress = ReplayProgress::new(
             CoreAdmissionSource::total_requests(&admission),
             "offline replay",
         );
-        let mut engine = EngineComponent::<Observation>::new_ranked(
+        let worker_args = workers
+            .iter()
+            .map(|worker| worker.engine_args.clone())
+            .collect();
+        let mut engine = EngineComponent::<Observation>::new_ranked_heterogeneous(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
             args.clone(),
-            num_workers,
+            worker_args,
         );
         engine.set_scaling_args(args.clone(), Observation::CAPTURE_RAW);
-        let placement = create_placement(&args, engine.active_topology())?;
+        for (engine_worker_id, worker) in workers.iter().enumerate() {
+            if worker.draining {
+                engine.mark_for_removal(engine_worker_id);
+            } else if !worker.active {
+                engine.mark_static_inactive(engine_worker_id);
+            }
+        }
+        let placement = create_placement(&args, engine.all_topology(), &workers)?;
+        let interactive_worker_targets = workers
+            .iter()
+            .map(|worker| worker.target.clone())
+            .collect::<Vec<_>>();
+        let interactive_pool_ids = workers
+            .iter()
+            .map(|worker| worker.target.pool_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
 
         // Aggregated replay has a single (decode) pool; record its GPUs/worker
         // so the report can express GPU-hours from the mocker's own parallelism.
         let mut collector = TraceCollector::default();
-        collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
+        collector.set_gpus_per_worker(0, gpus_per_worker);
 
         Ok(Self {
             now_ms: 0.0,
@@ -354,6 +484,7 @@ where
             collector,
             events: BinaryHeap::new(),
             placement,
+            deferred_timestamp_placements: Vec::new(),
             progress,
             #[cfg(test)]
             stats: AggRuntimeStats::default(),
@@ -365,6 +496,9 @@ where
             scaling_policy: None,
             collect_fpm: false,
             interactive: None,
+            interactive_worker_targets,
+            interactive_workers: workers,
+            interactive_pool_ids,
             stepping_started: false,
             #[cfg(test)]
             worker_active_requests: vec![
@@ -385,10 +519,15 @@ where
     pub(in crate::replay::offline) fn enable_interactive_capture(
         &mut self,
         external_placement: bool,
+        session_affinity: bool,
     ) {
         self.collector.set_capture_per_request(true);
         self.progress = ReplayProgress::disabled();
-        self.interactive = Some(InteractiveCapture::new(external_placement));
+        self.interactive = Some(InteractiveCapture::new(
+            external_placement,
+            session_affinity,
+            self.interactive_pool_ids.clone(),
+        ));
     }
 
     pub(in crate::replay::offline) fn register_interactive_identity(
@@ -465,7 +604,15 @@ where
 
     /// Count all requests currently consuming cluster capacity, including router-queued ones.
     fn cluster_in_flight(&self) -> usize {
-        self.engine.in_flight() + self.placement.pending_count()
+        // A timestamp-wide terminal phase can release router-queued work into
+        // placements that intentionally remain undispatched until every
+        // completion and admission release at this timestamp has settled.
+        // Those requests still consume the closed-loop concurrency budget;
+        // omitting them here creates a transient hole that can over-admit a
+        // new request before the deferred placements are dispatched.
+        self.engine.in_flight()
+            + self.placement.pending_count()
+            + self.deferred_timestamp_placements.len()
     }
 
     /// Track the peak cluster occupancy seen during the replay.
@@ -525,24 +672,34 @@ where
         worker_idx: usize,
     ) -> anyhow::Result<()> {
         let interactive_target = if let Some(capture) = self.interactive.as_ref() {
-            let (worker_id, dp_rank) = self.engine.rank_identity(worker_idx).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "interactive replay dispatch references unknown scheduler {worker_idx}"
-                )
-            })?;
+            let (engine_worker_id, dp_rank) =
+                self.engine.rank_identity(worker_idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "interactive replay dispatch references unknown scheduler {worker_idx}"
+                    )
+                })?;
             capture.identity(uuid).ok_or_else(|| {
                 anyhow::anyhow!("interactive replay has no authored identity for request {uuid}")
             })?;
-            Some(WorkerTarget {
-                worker_id,
-                dp_rank: dp_rank as usize,
-            })
+            let mut target = self
+                .interactive_worker_targets
+                .get(engine_worker_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "interactive replay engine worker {engine_worker_id} has no authored pool identity"
+                    )
+                })?;
+            target.dp_rank = dp_rank as usize;
+            Some(target)
         } else {
             None
         };
         self.engine.dispatch(worker_idx, request)?;
-        if let (Some(capture), Some(target)) = (self.interactive.as_mut(), interactive_target) {
-            capture.set_worker(uuid, target)?;
+        if let (Some(capture), Some(target)) =
+            (self.interactive.as_mut(), interactive_target.as_ref())
+        {
+            capture.set_worker(uuid, target.clone())?;
             capture.emit_routed(uuid, self.now_ms)?;
             capture.emit_queued(uuid, self.now_ms)?;
         }
@@ -552,6 +709,14 @@ where
         // worker that served the request; prefill_worker_idx stays None,
         // signaling "no separate prefill pool".
         self.collector.on_decode_assigned(uuid, worker_idx);
+        if let Some(target) = interactive_target.as_ref() {
+            self.collector.on_static_pool_assigned(
+                uuid,
+                target.pool_id.clone(),
+                target.worker_id,
+                target.dp_rank,
+            );
+        }
         #[cfg(test)]
         self.worker_active_requests[worker_idx].push(uuid);
         Ok(())
@@ -564,6 +729,80 @@ where
             #[cfg(test)]
             self.stats.overlap_history.push(sample.overlap_blocks);
         }
+    }
+
+    fn interactive_worker_snapshots(&self) -> Vec<ReplayWorkerSnapshot> {
+        let mut snapshots = self.engine.interactive_snapshots();
+        for snapshot in &mut snapshots {
+            let engine_worker_id = snapshot.worker_id;
+            if let Some(worker) = self.interactive_workers.get(engine_worker_id) {
+                snapshot.pool_id = worker.target.pool_id.clone();
+                snapshot.worker_id = worker.target.worker_id;
+                snapshot.tags = worker.tags.iter().cloned().collect();
+                snapshot.taints = worker.taints.iter().cloned().collect();
+                snapshot.capabilities = worker.capabilities.iter().cloned().collect();
+            }
+        }
+        snapshots
+    }
+
+    fn interactive_placement_candidates(
+        &self,
+        request: &ReplayRequestPayload,
+    ) -> Vec<ReplayPlacementCandidate> {
+        let tokens = request.prompt_tokens();
+        let constraints = request.routing_constraints();
+        self.engine
+            .interactive_snapshots()
+            .into_iter()
+            .filter_map(|snapshot| {
+                let engine_worker_id = snapshot.worker_id;
+                let worker = self.interactive_workers.get(engine_worker_id)?;
+                let scheduler_id = self
+                    .engine
+                    .worker_topology(engine_worker_id)?
+                    .scheduler_ids
+                    .get(snapshot.dp_rank)
+                    .copied()?;
+                let constraint_reason = if snapshot.draining || worker.draining {
+                    Some("worker is draining".to_string())
+                } else if !snapshot.active || !worker.active {
+                    Some("worker is inactive".to_string())
+                } else {
+                    let missing = constraints
+                        .required_taints
+                        .iter()
+                        .filter(|required| !worker.taints.contains(*required))
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    (!missing.is_empty()).then(|| format!("missing required taints {missing:?}"))
+                };
+                let mut target = worker.target.clone();
+                target.dp_rank = snapshot.dp_rank;
+                Some(ReplayPlacementCandidate {
+                    target,
+                    active: snapshot.active,
+                    draining: snapshot.draining,
+                    eligible: constraint_reason.is_none(),
+                    constraint_reason,
+                    in_flight_requests: snapshot.in_flight_requests,
+                    queued_requests: snapshot.queued_requests,
+                    running_requests: snapshot.running_requests,
+                    queued_tokens: snapshot.queued_tokens,
+                    running_tokens: snapshot.running_tokens,
+                    max_num_seqs: snapshot.max_num_seqs,
+                    kv_prefix_overlap_tokens: self
+                        .engine
+                        .native_prefix_overlap_tokens(scheduler_id, &tokens),
+                    kv_capacity_blocks: snapshot.kv_capacity_blocks,
+                    kv_occupied_blocks: snapshot.kv_occupied_blocks,
+                    kv_free_blocks: snapshot.kv_free_blocks,
+                    tags: worker.tags.iter().cloned().collect(),
+                    taints: worker.taints.iter().cloned().collect(),
+                    capabilities: worker.capabilities.iter().cloned().collect(),
+                })
+            })
+            .collect()
     }
 
     /// Materialize policy-released admissions into concrete worker dispatches.
@@ -619,14 +858,34 @@ where
 
         self.collector
             .on_arrival(uuid, arrival_time_ms, input_length, output_length);
+        if let Some(identity) = self
+            .interactive
+            .as_ref()
+            .and_then(|capture| capture.identity(uuid))
+        {
+            self.collector.on_attempt_group_identity(
+                uuid,
+                identity.attempt_id.clone(),
+                identity.group_id.clone(),
+            );
+        }
         if let Some(capture) = self.interactive.as_mut() {
             capture.mark_ready(uuid, self.now_ms)?;
         }
         self.traffic.on_arrival();
 
-        let effects = self
-            .placement
-            .place(&request, metadata, session_id, self.now_ms)?;
+        let placement_session_id = if self
+            .interactive
+            .as_ref()
+            .is_some_and(|capture| !capture.uses_session_affinity())
+        {
+            None
+        } else {
+            session_id
+        };
+        let effects =
+            self.placement
+                .place(&request, metadata, placement_session_id, self.now_ms)?;
         match effects.decision {
             PlacementDecision::Immediate(placement) => {
                 if placement.request_id != uuid {
@@ -664,6 +923,11 @@ where
                 )?;
             }
             PlacementDecision::Queued => {
+                let placement_candidates = self
+                    .interactive
+                    .as_ref()
+                    .filter(|capture| capture.uses_external_placement())
+                    .map(|_| self.interactive_placement_candidates(&request));
                 self.collector
                     .on_route_queued(uuid, ReplayRequestPool::Agg, self.now_ms);
                 self.requests
@@ -671,7 +935,11 @@ where
                 if let Some(capture) = self.interactive.as_mut()
                     && capture.uses_external_placement()
                 {
-                    capture.emit_placement_needed(uuid, self.now_ms)?;
+                    capture.emit_placement_needed(
+                        uuid,
+                        self.now_ms,
+                        placement_candidates.unwrap_or_default(),
+                    )?;
                 }
             }
         }
@@ -759,8 +1027,7 @@ where
         Ok(progress.made_progress)
     }
 
-    /// Consume one output signal, updating router state, collector state, and completion counts.
-    fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
+    fn process_output_token(&mut self, signal: &OutputSignal) -> anyhow::Result<()> {
         if let Some(token_id) = signal.token_id {
             CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
             if !signal.rejected
@@ -769,6 +1036,12 @@ where
                 capture.on_output_token(signal.uuid, self.now_ms)?;
             }
         }
+        Ok(())
+    }
+
+    /// Consume one output lifecycle signal after every token carried by this
+    /// timestamp's completion batch has been published in engine order.
+    fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<Vec<Placement>> {
         if signal.completed {
             let workload_status = if signal.rejected {
                 WorkloadTerminalStatus::Rejected
@@ -784,7 +1057,8 @@ where
             // externally visible Terminal event. The event itself is emitted
             // before any placement released by this terminal, preserving the
             // decision-time ordering required by interactive controllers.
-            let placements = self.placement.request_terminal(signal.uuid, self.now_ms)?;
+            self.placement
+                .request_terminal_feedback(signal.uuid, self.now_ms)?;
             let cascaded = CoreAdmissionSource::on_terminal(
                 &mut self.admission,
                 signal.uuid,
@@ -830,8 +1104,7 @@ where
                 capture.emit_terminal(signal.uuid, self.now_ms, status)?;
             }
             self.record_cascaded_terminals(cascaded)?;
-            self.dispatch_placements(placements)?;
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let already_marked = self
@@ -842,7 +1115,7 @@ where
             })?
             .prefill_completed;
         if already_marked {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         self.requests
@@ -857,9 +1130,7 @@ where
             self.stats.prefill_marked_count += 1;
         }
         self.record_router_pending();
-        self.dispatch_placements(placements)?;
-
-        Ok(())
+        Ok(placements)
     }
 
     /// Publish dependency-cascade terminals for authored requests that never
@@ -879,6 +1150,17 @@ where
             self.placement.cancel_pending(terminal.request_uuid);
             self.collector
                 .on_cascaded_terminal(&terminal, self.now_ms)?;
+            if let Some(identity) = self
+                .interactive
+                .as_ref()
+                .and_then(|capture| capture.identity(terminal.request_uuid))
+            {
+                self.collector.on_attempt_group_identity(
+                    terminal.request_uuid,
+                    identity.attempt_id.clone(),
+                    identity.group_id.clone(),
+                );
+            }
             self.progress.inc_completed();
             if let Some(capture) = self.interactive.as_mut() {
                 capture.emit_terminal(
@@ -906,68 +1188,82 @@ where
         }
     }
 
-    /// Apply one completed pass: free request slots, publish KV events, and handle outputs.
-    fn process_completed_pass(
-        &mut self,
-        _worker_idx: usize,
-        _completed_requests: usize,
-        output_signals: Vec<OutputSignal>,
-        engine_events: Observation::Batch,
-        accept_length_output_tokens: usize,
-        accept_length_decode_forwards: usize,
-    ) -> anyhow::Result<()> {
-        self.apply_engine_observations(engine_events, KvIngestBoundary::PassEnd)?;
-        self.traffic
-            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
-        for signal in output_signals {
-            self.process_output_signal(signal)?;
-        }
-        Ok(())
-    }
-
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
-        let mut changed = false;
-        // TODO: Same-time DP-rank completions settle in deterministic event order, and
-        // each pass may drain router-pending work before its sibling ranks are applied.
-        // Preserve this lower-rank-first tie-break for now. Atomic settlement requires
-        // splitting router state mutation from pending-admission draining.
+        let mut payloads = Vec::new();
         while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
             match completions {
-                ReadyWorkerCompletions::Single(payload) => {
-                    self.apply_worker_completion(payload)?;
-                }
-                ReadyWorkerCompletions::Batch(payloads) => {
-                    for payload in payloads {
-                        self.apply_worker_completion(payload)?;
-                    }
-                }
+                ReadyWorkerCompletions::Single(payload) => payloads.push(payload),
+                ReadyWorkerCompletions::Batch(batch) => payloads.extend(Vec::from(batch)),
             }
-            changed = true;
         }
-
-        Ok(changed)
+        if payloads.is_empty() {
+            return Ok(false);
+        }
+        self.settle_worker_completion_batch(payloads)?;
+        Ok(true)
     }
 
-    fn apply_worker_completion(
+    /// Settle one timestamp-wide completion phase. Engine ownership changes
+    /// for every sibling worker commit first, then terminal/DAG feedback, then
+    /// router observations. No placement is dispatched from inside this phase.
+    fn settle_worker_completion_batch(
         &mut self,
-        payload: WorkerCompletionPayload<Observation::Batch>,
+        payloads: Vec<WorkerCompletionPayload<Observation::Batch>>,
     ) -> anyhow::Result<()> {
-        debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
-        let payload = self.engine.on_scheduled_completion(payload)?;
-        if self.collect_fpm
-            && let Some(fpm) = payload.fpm
-        {
-            self.record_fpm(payload.worker_idx, fpm)?;
+        let mut settled = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
+            let mut payload = self.engine.on_scheduled_completion(payload)?;
+            if self.collect_fpm
+                && let Some(fpm) = payload.fpm.take()
+            {
+                self.record_fpm(payload.worker_idx, fpm)?;
+            }
+            settled.push(payload);
         }
-        self.process_completed_pass(
-            payload.worker_idx,
-            payload.completed_requests,
-            payload.output_signals,
-            payload.engine_events,
-            payload.accept_length_output_tokens,
-            payload.accept_length_decode_forwards,
-        )
+
+        let mut placements = Vec::new();
+        let mut output_signals = Vec::new();
+        for payload in &mut settled {
+            self.traffic.on_accept_length_sample(
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
+            );
+            output_signals.extend(std::mem::take(&mut payload.output_signals));
+        }
+        // Publish every token first. A speculative/MTP pass may contain both a
+        // non-terminal progress signal and the terminal signal for one UUID,
+        // so apply the non-terminal state transition while its request state
+        // still exists. Placements returned here remain deferred: no placement
+        // event or dispatch is published until every terminal ownership/DAG
+        // transition at t has completed. Order within each phase remains
+        // worker/event stable.
+        for signal in &output_signals {
+            self.process_output_token(signal)?;
+        }
+        for progress in output_signals
+            .iter()
+            .filter(|signal| !signal.completed)
+            .cloned()
+        {
+            placements.extend(self.process_output_signal(progress)?);
+        }
+        for terminal in output_signals.into_iter().filter(|signal| signal.completed) {
+            placements.extend(self.process_output_signal(terminal)?);
+        }
+        placements.extend(self.placement.settle_terminal_feedback(self.now_ms)?);
+        for payload in settled {
+            Observation::record_ingestion(
+                &payload.engine_events,
+                WorkerPool::Agg,
+                KvIngestBoundary::PassEnd,
+                self.now_ms,
+            )?;
+            placements.extend(self.placement.observe(payload.engine_events, self.now_ms)?);
+        }
+        self.deferred_timestamp_placements.extend(placements);
+        Ok(())
     }
 
     /// Release every admission made ready by the shared admission queue.
@@ -1021,14 +1317,16 @@ where
                 return Ok(changed);
             }
             changed = true;
-            self.handle_engine_effects(effects)?;
+            if self.handle_engine_effects(effects)? {
+                return Ok(changed);
+            }
         }
     }
 
     fn handle_engine_effects(
         &mut self,
         mut effects: EngineEffects<Observation::Batch>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         for admission in effects.admissions.drain(..) {
             self.collector.on_pool_admission(
                 admission.uuid,
@@ -1045,13 +1343,14 @@ where
             }
         }
         self.apply_engine_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
-        for payload in effects.immediate_completions {
-            self.apply_worker_completion(payload)?;
+        let had_immediate_completions = !effects.immediate_completions.is_empty();
+        if had_immediate_completions {
+            self.settle_worker_completion_batch(effects.immediate_completions)?;
         }
         if let Some(scheduled) = effects.scheduled_completion {
             push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
-        Ok(())
+        Ok(had_immediate_completions)
     }
 
     /// Activate workers whose startup period has elapsed at the current timestamp.
@@ -1115,6 +1414,11 @@ where
             changed |= self.apply_worker_completions()?;
             changed |= self.apply_worker_ready_events()?;
             changed |= self.release_ready_arrivals()?;
+            if !self.deferred_timestamp_placements.is_empty() {
+                let placements = std::mem::take(&mut self.deferred_timestamp_placements);
+                self.dispatch_placements(placements)?;
+                changed = true;
+            }
             changed |= self.drive_ready_workers()?;
             let removed = self.engine.try_remove_drained();
             for worker_id in &removed {
@@ -1524,21 +1828,22 @@ where
     where
         Admission: InteractiveAdmission,
     {
-        if !self.is_done()
-            && !self.external_assignment_pending()
-            && self.next_timestamp().is_none()
-            && !(self.admission.is_open()
-                && self.admission.pending_requests() == 0
-                && self.cluster_in_flight() == 0)
+        let can_wait_for_external_input = self.admission.is_open()
+            && self.admission.pending_requests() == 0
+            && self.cluster_in_flight() == 0;
+        if self.is_done()
+            || self.external_assignment_pending()
+            || self.next_timestamp().is_some()
+            || can_wait_for_external_input
         {
-            bail!(
-                "offline replay reached a dead end with {} in-flight requests, {} pending admission requests, and {} pending placements",
-                self.cluster_in_flight(),
-                self.admission.pending_requests(),
-                self.placement.pending_count()
-            );
+            return Ok(());
         }
-        Ok(())
+        bail!(
+            "offline replay reached a dead end with {} in-flight requests, {} pending admission requests, and {} pending placements",
+            self.cluster_in_flight(),
+            self.admission.pending_requests(),
+            self.placement.pending_count()
+        )
     }
     pub(in crate::replay::offline) fn interactive_now_ms(&self) -> f64 {
         self.now_ms
@@ -1653,7 +1958,7 @@ where
             admission_open: self.admission.is_open(),
             pending_request_count: self.admission.pending_requests(),
             pending_placement_count: self.placement.pending_count(),
-            workers: self.engine.interactive_snapshots(),
+            workers: self.interactive_worker_snapshots(),
         }
     }
 
@@ -1670,10 +1975,30 @@ where
         &self,
         uuids: impl Iterator<Item = Uuid>,
     ) -> Vec<ReplayPendingPlacement> {
-        self.interactive
+        let mut placements = self
+            .interactive
             .as_ref()
             .map(|capture| capture.pending(uuids))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for placement in &mut placements {
+            let Some(request) = self
+                .requests
+                .get(&placement.internal_uuid)
+                .and_then(AggRequestState::queued_request)
+            else {
+                continue;
+            };
+            placement.candidates = self.interactive_placement_candidates(request);
+            placement.eligible_pool_ids = placement
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.eligible)
+                .map(|candidate| candidate.target.pool_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
+        placements
     }
 
     pub(in crate::replay::offline) fn interactive_close_admission(&mut self) -> anyhow::Result<()>
@@ -1891,6 +2216,8 @@ mod tests {
     impl CoreAdmissionSource for TwoTurnWorkSource {
         type Request = ReplayRequestPayload;
         type Metadata = ();
+        type TerminalStatus = WorkloadTerminalStatus;
+        type CascadedTerminal = CascadedWorkloadTerminal;
 
         fn next_internal_event_ms(&mut self) -> Option<f64> {
             self.driver.next_ready_time_ms()
@@ -2241,7 +2568,7 @@ mod tests {
                     first_ready_timestamp_ms: Some(0.0),
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
                 AgenticTurnTrace {
@@ -2253,7 +2580,7 @@ mod tests {
                     first_ready_timestamp_ms: Some(100.0),
                     delay_after_dependencies_ms: 5.0,
                     wait_for: vec!["root".to_string()],
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
             ],
@@ -2978,15 +3305,25 @@ mod tests {
         };
 
         // The 16-token pool clamps turn 0 from 20 outputs to 12. Turn 1's
-        // resulting 17-token prompt is rejected, so it contributes no output
-        // before turn 2 adds its one-token input delta.
-        let (collector, stats) = run_trace_workload_multi_collect_with_stats(
-            &trtllm_reject_args(),
-            trace,
+        // resulting 17-token prompt is rejected, so the failed session blocks
+        // turn 2 instead of treating engine rejection as successful progress.
+        let args = trtllm_reject_args();
+        let driver = trace
+            .into_delta_accumulating_trace_driver_with_block_size(args.block_size)
+            .unwrap();
+        let (collector, stats) = AggRuntime::new_workload(
+            &args,
+            None,
+            None,
+            driver,
             1,
+            ReplayMode::Trace,
             ReplayRouterMode::RoundRobin,
-            true,
-        );
+        )
+        .unwrap()
+        .with_per_request_records(true)
+        .run()
+        .unwrap();
         let input_lengths = stats
             .dispatch_order
             .iter()
@@ -2994,9 +3331,26 @@ mod tests {
             .collect::<Vec<_>>();
         let report = collector.finish();
 
-        assert_eq!(input_lengths, vec![4, 17, 18]);
+        assert_eq!(input_lengths, vec![4, 17]);
         assert_eq!(report.request_counts.num_requests, 3);
         assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.per_request.len(), 3);
+        let terminal_for_turn = |turn_index| {
+            report
+                .per_request
+                .iter()
+                .find(|record| record.turn_index == Some(turn_index))
+                .map(|record| record.terminal_status)
+                .unwrap_or_else(|| panic!("missing terminal record for authored turn {turn_index}"))
+        };
+        assert_eq!(terminal_for_turn(0), ReplayTerminalStatus::Completed);
+        assert_eq!(terminal_for_turn(1), ReplayTerminalStatus::Rejected);
+        assert_eq!(terminal_for_turn(2), ReplayTerminalStatus::Canceled);
+        assert_eq!(
+            report.request_counts.num_requests,
+            report.per_request.len(),
+            "every authored turn must reconcile to exactly one terminal record"
+        );
     }
 
     #[test]

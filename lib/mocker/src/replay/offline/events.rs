@@ -61,15 +61,17 @@ pub(in crate::replay::offline) enum SimulationEventKind<Events: EngineEventBatch
 }
 
 impl<Events: EngineEventBatch> SimulationEventKind<Events> {
-    /// Tie-breaker among events at the *same* `at_ms`: a `ScalingTick` always
-    /// sorts after every other kind, so the policy observes a fully settled
-    /// timestamp (all worker completions / ready / handoff events at that time
-    /// drain first). `seq_no` is globally unique, so this only ever reorders a
-    /// tick relative to same-timestamp events — never two real events.
+    /// Tie-breaker among events at the *same* `at_ms`. Every engine completion
+    /// is exposed before controller/topology events, and scaling observes the
+    /// fully settled timestamp. Sequence numbers remain the stable tie-breaker
+    /// within each causal phase.
     fn ordering_rank(&self) -> u8 {
         match self {
-            SimulationEventKind::ScalingTick => 1,
-            _ => 0,
+            SimulationEventKind::WorkerCompletion { .. }
+            | SimulationEventKind::WorkerCompletionBatch { .. } => 0,
+            SimulationEventKind::TransferComplete { .. }
+            | SimulationEventKind::WorkerReady { .. } => 1,
+            SimulationEventKind::ScalingTick => 2,
         }
     }
 }
