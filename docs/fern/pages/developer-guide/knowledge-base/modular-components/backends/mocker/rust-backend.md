@@ -25,6 +25,7 @@ backend — all built from source in this repo:
 
 ```bash
 cd lib/backend-common/examples/mocker
+export BUF_TOKEN="your-buf-token"
 docker compose up --build
 ```
 

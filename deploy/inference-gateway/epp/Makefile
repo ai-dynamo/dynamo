@@ -26,6 +26,7 @@ MULTIARCH_PLATFORMS ?= linux/amd64,linux/arm64
 # Docker proxy for avoiding rate limits (e.g., ECR mirror)
 DOCKER_PROXY ?=
 EXTRA_BUILD_ARGS ?=
+BUF_SECRET_ARGS = $(if $(BUF_TOKEN),--secret id=buf_token,env=BUF_TOKEN,$(error BUF_TOKEN is required for Cargo access to the Buf registry))
 
 # sccache configuration for Rust compilation caching (CI only).
 # Leave USE_SCCACHE unset locally to build without S3 cache.
@@ -96,7 +97,7 @@ image-build: ## Build the Docker image (self-contained, no host prerequisites)
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(EXTRA_BUILD_ARGS) $(PUSH) $(LOAD) .
+		$(BUF_SECRET_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) $(LOAD) .
 
 .PHONY: image-push
 image-push: PUSH=--push ## Build and push the Docker image
@@ -138,7 +139,7 @@ image-multiarch: ## Build multi-arch image (requires --push ; --load not support
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) .
+		$(BUF_SECRET_ARGS) $(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) .
 
 .PHONY: image-multiarch-push
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry
@@ -164,7 +165,7 @@ sbom-export: ## Export Go SBOM + license texts to SBOM_DEST (reuses build cache)
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) \
+		$(BUF_SECRET_ARGS) $(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) \
 		--output type=local,dest=$(SBOM_DEST) .
 
 

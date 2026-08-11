@@ -48,7 +48,7 @@ The sidecar uses the generated Rust SDKs from the pinned [`vllm-project/vllm`](h
 export CARGO_REGISTRIES_BUF_TOKEN="Bearer ${BUF_TOKEN}"
 ```
 
-The repository's `.cargo/config.toml` configures the registry and credential provider. CI reads `BUF_TOKEN` from the repository's Actions secrets.
+The repository's `.cargo/config.toml` configures the registry and credential provider. Because the SDKs are in the workspace lockfile, authenticate before running any workspace Cargo command. CI reads `BUF_TOKEN` from the repository's Actions secrets.
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a

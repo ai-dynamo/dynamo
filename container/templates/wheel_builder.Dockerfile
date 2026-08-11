@@ -571,11 +571,13 @@ ARG USE_SCCACHE
 {% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
 {% endif %}
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+RUN --mount=type=secret,id=buf_token,required=true \
+    --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    export CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" && \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
@@ -655,8 +657,10 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 # Mount cargo registry + git caches so re-runs don't re-download the
 # ~750 crates from crates.io every build. `sharing=shared` lets parallel
 # builds (e.g. multiple frameworks in CI) read the same cache concurrently.
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+RUN --mount=type=secret,id=buf_token,required=true \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    export CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" && \
     if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         mkdir -p /tmp/dynamo-vendor-full && \
         cd /opt/dynamo && \
@@ -796,11 +800,13 @@ COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+RUN --mount=type=secret,id=buf_token,required=true \
+    --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    export CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" && \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \

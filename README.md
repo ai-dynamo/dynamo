@@ -204,6 +204,10 @@ sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.cargo/env
 
+# Authenticate Cargo to the Buf Schema Registry
+export BUF_TOKEN="your-buf-token"
+cargo login --registry buf "Bearer ${BUF_TOKEN}"
+
 # Create venv and build
 uv venv dynamo && source dynamo/bin/activate
 uv pip install pip 'maturin[patchelf]'

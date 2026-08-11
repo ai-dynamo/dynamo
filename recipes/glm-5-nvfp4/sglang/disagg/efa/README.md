@@ -30,6 +30,7 @@ Identical to the non-EFA recipe.
 - A Kubernetes cluster with the Dynamo Operator installed.
 - The NVIDIA `ComputeDomain` operator (for the MNNVL ResourceClaim used here).
 - Shared NFS PVC for model weights (same as the non-EFA recipe).
+- A Buf Schema Registry token exported as `BUF_TOKEN`.
 
 The libfabric is built into the image — no cluster-side DaemonSet is required.
 
@@ -37,6 +38,7 @@ The libfabric is built into the image — no cluster-side DaemonSet is required.
 
 ```bash
 docker buildx build \
+  --secret id=buf_token,env=BUF_TOKEN \
   --platform linux/arm64 \
   --build-arg ARCH=arm64 \
   -t <your-registry>/sglang-dynamo-glm5-efa:latest \

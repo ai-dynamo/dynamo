@@ -5,7 +5,8 @@
 # A pure gRPC connector — no GPU, no engine runtime — that runs beside the
 # engine container over loopback (see deploy/agg.yaml).
 #
-#   docker build -f lib/sidecar/trtllm/Dockerfile -t dynamo-trtllm-sidecar:1.3.0 .
+#   docker build --secret id=buf_token,env=BUF_TOKEN \
+#     -f lib/sidecar/trtllm/Dockerfile -t dynamo-trtllm-sidecar:1.3.0 .
 
 FROM rust:1.96.1-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,7 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-RUN cargo build --release --locked -p dynamo-trtllm-sidecar \
+RUN --mount=type=secret,id=buf_token,required=true \
+    CARGO_REGISTRIES_BUF_TOKEN="Bearer $(cat /run/secrets/buf_token)" \
+    cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar
 
 FROM debian:bookworm-slim AS runtime

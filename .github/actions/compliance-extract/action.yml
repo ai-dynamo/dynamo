@@ -61,6 +61,9 @@ inputs:
     description: 'SCCACHE region (= aws_default_region the build passed). See sccache_bucket.'
     required: false
     default: ''
+  buf_token:
+    description: 'Buf Schema Registry token for cache-missed Cargo rebuilds.'
+    required: true
   diff_base_sha:
     description: |
       Commit SHA of the baseline build to diff this build's OSRB CSV against
@@ -126,6 +129,7 @@ runs:
       env:
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
+        BUF_TOKEN: ${{ inputs.buf_token }}
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
       run: |
@@ -149,6 +153,12 @@ runs:
         # Only forward the credentials when S3 sccache is actually configured
         # (bucket set) — a bucket-less caller's build has no use for them.
         SECRET_ARGS=""
+        if [ -n "${BUF_TOKEN:-}" ]; then
+          SECRET_ARGS+=" --secret id=buf_token,env=BUF_TOKEN"
+        else
+          echo "::error::BUF_TOKEN is required for Cargo access to the Buf registry"
+          exit 1
+        fi
         if [ -n "${SCCACHE_BUCKET:-}" ]; then
           TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
           if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
@@ -344,6 +354,7 @@ runs:
       env:
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
+        BUF_TOKEN: ${{ inputs.buf_token }}
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
       run: |
@@ -353,6 +364,12 @@ runs:
         # as the compliance_artifact extract above). Same IRSA secrets too, so a
         # cache-missed stage rebuild can still authenticate sccache (see above).
         SECRET_ARGS=""
+        if [ -n "${BUF_TOKEN:-}" ]; then
+          SECRET_ARGS+=" --secret id=buf_token,env=BUF_TOKEN"
+        else
+          echo "::error::BUF_TOKEN is required for Cargo access to the Buf registry"
+          exit 1
+        fi
         if [ -n "${SCCACHE_BUCKET:-}" ]; then
           TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
           if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
