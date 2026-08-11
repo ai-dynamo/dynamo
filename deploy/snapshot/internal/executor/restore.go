@@ -232,19 +232,19 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
 //
-// Security hardening against two races:
+// Security hardening in place:
 //
-//  1. PID reuse: mp.NsFd() is the /proc/<pid>/ns/mnt fd pinned at mount time.
-//     Passing it via --mount=/proc/self/fd/N to nsenter means we enter the
-//     exact namespace we mounted into, even if the placeholder died and its PID
-//     was recycled before nsenter runs.
+//  1. Mount-namespace pinning: mp.NsFd() is the /proc/<pid>/ns/mnt fd opened at
+//     mount time. Passing it via --mount=/proc/self/fd/N to nsenter pins the mount
+//     namespace against PID reuse. The remaining four namespaces (uts, ipc, net,
+//     pid) are still resolved via -t <pid> and are not protected against reuse.
 //
-//  2. TOCTOU path attack: the container runs as root and could rename /tmp
-//     between mountBundle and this exec, carrying our bind-mount to a new path
-//     and placing a malicious binary at /tmp/snapshot-binaries/nsrestore. We
-//     open the nsrestore binary from the agent host side (SnapshotBinSrc) before
-//     entering any namespace and exec it via /proc/self/fd/N, which is unaffected
-//     by mount-namespace changes inside the container.
+//  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
+//     before entering any namespace and exec it via /proc/self/fd/N. This protects
+//     the nsrestore binary itself against path-based substitution inside the
+//     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
+//     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
+//     mount namespace.
 func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint) (*RestoreInNamespaceResult, error) {
 	checkpointPath := req.ContainerCheckpointLocation
 	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
@@ -269,7 +269,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
 	)
 
-	bundleDir := nsmount.SnapshotBinDst // agent-side bundle root
+	bundleDir := nsmount.SnapshotBinDst // bundle root as seen inside the container
 	var args []string
 
 	nsFd := mp.NsFd()
@@ -286,12 +286,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
 		}
 	} else {
-		// Fallback for test mocks where NsFd returns nil.
-		args = []string{
-			"-t", strconv.Itoa(snap.PlaceholderPID),
-			"-m", "-u", "-i", "-n", "-p",
-			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
-		}
+		return nil, fmt.Errorf("execNSRestore: mp.NsFd() is nil; mount point was not properly initialized")
 	}
 	args = append(args,
 		"--checkpoint-path", checkpointPath,
@@ -310,11 +305,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
-	if nsFd != nil {
-		cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
-	} else {
-		cmd.ExtraFiles = []*os.File{nil, binaryFile}
-	}
+	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

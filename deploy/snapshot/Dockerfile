@@ -251,9 +251,10 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
 #   tar — used by runtime.ApplyRootfsDiff
-# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts: each
-# pod runs in its own network namespace in Kubernetes, so DROP-rule locking
-# is unnecessary and avoids bundling iptables/nft (both GPL-2.0).
+# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
+# criu never forks iptables-restore/ip6tables-restore on this path and neither
+# binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
+# for restore specifically.
 # All resolve through PATH inside the namespace.
 RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
@@ -433,13 +434,19 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # The mount destination is created by the ns-bind-mount helper inside this
 # namespace, so nothing needs pre-provisioning here.
 #
-# Two constraints follow from that and must hold for every BASE_IMAGE:
+# Three constraints follow from that and must hold for every BASE_IMAGE:
 #   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
 #     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
 #     glibc 2.39) and loaded ahead of the placeholder's own libraries via
 #     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
 #     restore with "version 'GLIBC_2.38' not found".
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
+#   - The placeholder pod must NOT set readOnlyRootFilesystem: true. The agent
+#     bind-mounts the binary bundle into the placeholder's /tmp at restore time;
+#     a read-only root filesystem makes /tmp unwritable and the mount fails.
+#     (An emptyDir volume at /tmp does not help — the agent creates the mount
+#     point from outside via ns-bind-mount, which requires the target path to
+#     be on a writable filesystem inside the namespace.)
 #
 # cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
 # When used, the source workload image must have cuda-checkpoint at the same

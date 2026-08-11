@@ -56,8 +56,8 @@ type NSMounter struct {
 }
 
 // probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
-// Called with an invalid fd: EBADF means the syscall exists; ENOSYS means the
-// kernel is too old.
+// Called with a NULL attr, so a kernel that implements the syscall fails in
+// copy_struct_from_user with EFAULT; ENOSYS means the kernel is too old.
 func probeKernelMountAPI() error {
 	err := unix.MountSetattr(-1, "", 0, nil)
 	if errors.Is(err, syscall.ENOSYS) {
