@@ -4863,6 +4863,9 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::extensions::{
+        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext,
+    };
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
@@ -6152,6 +6155,31 @@ mod tests {
             .output_options(crate::protocols::common::OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn attach_agent_context_preserves_compaction_metadata() {
+        let agent_context = AgentContext {
+            session_id: "codex-thread".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            compaction: Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                ..Default::default()
+            }),
+            kv_hints: None,
+        };
+        let mut context = PipelineContext::new(());
+        context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
+        let mut request = preprocessed_budget_request(None);
+
+        attach_agent_context_from_context(&mut request, &context);
+
+        assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["agent_context"]["compaction"]["trigger"],
+            "manual"
+        );
     }
 
     #[test]

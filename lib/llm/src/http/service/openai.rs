@@ -4396,7 +4396,7 @@ mod tests {
     use super::*;
     use crate::discovery::ModelManagerError;
     use crate::protocols::common::StopConditionsProvider;
-    use crate::protocols::common::extensions::NvExt;
+    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -4792,6 +4792,10 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
+                compaction: Some(AgentCompaction {
+                    trigger: Some("automatic".to_string()),
+                    ..Default::default()
+                }),
                 kv_hints: None,
                 input_trigger: None,
             },
@@ -4809,6 +4813,38 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.trigger.as_deref()),
+            Some("automatic")
+        );
+    }
+
+    #[test]
+    fn test_context_from_headers_preserves_codex_compaction() {
+        let mut headers = HeaderMap::new();
+        headers.insert("thread-id", "codex-thread".parse().unwrap());
+        headers.insert(
+            "x-codex-turn-metadata",
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"local","phase":"summary_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let context = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let agent_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        assert_eq!(agent_context.session_id, "codex-thread");
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.implementation.as_deref()),
+            Some("local")
+        );
     }
 
     #[test]

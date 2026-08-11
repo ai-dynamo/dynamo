@@ -4,12 +4,16 @@
 //! Coding-agent request metadata recognized at Dynamo's HTTP boundary.
 
 use axum::http::HeaderMap;
+use serde::Deserialize;
+
+use crate::protocols::common::extensions::AgentCompaction;
 
 pub(crate) const HEADER_CLAUDE_CODE_SESSION_ID: &str = "x-claude-code-session-id";
 pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
 pub(crate) const HEADER_CLAUDE_CODE_PARENT_AGENT_ID: &str = "x-claude-code-parent-agent-id";
 pub(crate) const HEADER_CODEX_THREAD_ID: &str = "thread-id";
 pub(crate) const HEADER_CODEX_PARENT_THREAD_ID: &str = "x-codex-parent-thread-id";
+pub(crate) const HEADER_CODEX_TURN_METADATA: &str = "x-codex-turn-metadata";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
@@ -50,6 +54,13 @@ pub(crate) struct AgentContextHeaderValues {
     pub(crate) session_id: String,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) session_final: Option<bool>,
+    pub(crate) compaction: Option<AgentCompaction>,
+}
+
+#[derive(Deserialize)]
+struct CodexTurnMetadata {
+    request_kind: Option<String>,
+    compaction: Option<AgentCompaction>,
 }
 
 fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
@@ -59,6 +70,7 @@ fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
+    let compaction = codex_compaction_header_value(headers);
 
     if let Some(session_id) = header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
@@ -66,6 +78,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
                 .filter(|parent_session_id| parent_session_id != &session_id),
             session_id,
             session_final,
+            compaction,
         });
     }
 
@@ -93,9 +106,17 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             session_id,
             parent_session_id,
             session_final,
+            compaction,
         });
     }
     None
+}
+
+fn codex_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction> {
+    let raw = header_value(headers, HEADER_CODEX_TURN_METADATA)?;
+    let metadata: CodexTurnMetadata = serde_json::from_str(&raw).ok()?;
+    (metadata.request_kind.as_deref() == Some("compaction"))
+        .then(|| metadata.compaction.unwrap_or_default())
 }
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
