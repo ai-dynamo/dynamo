@@ -155,7 +155,7 @@ pub struct SharedTcpServer {
     /// the queue is empty for the FIFO direct-dispatch rule.
     queue_capacity: usize,
     /// Optional TLS acceptor for encrypting request plane connections.
-    tls_acceptor: Option<Arc<TlsAcceptor>>,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 struct EndpointHandler {
@@ -231,7 +231,7 @@ impl SharedTcpServer {
                             env::DYN_TCP_TLS_KEY_PATH,
                         );
                     }
-                    Some(Arc::new(TlsAcceptor::from(Arc::new(config))))
+                    Some(TlsAcceptor::from(Arc::new(config)))
                 }
                 (Some(_), None) | (None, Some(_)) => {
                     anyhow::bail!(
@@ -474,13 +474,16 @@ impl SharedTcpServer {
                                             }
                                             Ok(Err(e)) => {
                                                 tracing::warn!(
-                                                    "Request plane TLS handshake failed from {peer_addr}: {e}"
+                                                    peer_addr = %peer_addr,
+                                                    error = %e,
+                                                    "Request-plane TLS handshake failed"
                                                 );
                                                 return;
                                             }
                                             Err(_) => {
                                                 tracing::warn!(
-                                                    "Request plane TLS handshake timed out from {peer_addr}"
+                                                    peer_addr = %peer_addr,
+                                                    "Request-plane TLS handshake timed out"
                                                 );
                                                 return;
                                             }
