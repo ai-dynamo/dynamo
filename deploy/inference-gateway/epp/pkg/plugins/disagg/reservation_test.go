@@ -20,9 +20,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
+
+	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
 
 func requestWithBooking(externalRequestID, bookingID string) *schedtypes.InferenceRequest {
@@ -148,5 +152,66 @@ func TestPreRequestCancellationCleansBooking(t *testing.T) {
 
 	if freeCalls != 1 {
 		t.Fatalf("free calls = %d, want 1", freeCalls)
+	}
+}
+
+func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reserveStarted := make(chan struct{})
+	allowReserveReturn := make(chan struct{})
+	cancelCalls := make(chan string, 1)
+	freeCalls := make(chan string, 1)
+	scorer := &DynPrefillScorer{
+		reservePrefill: func(string, string, string) (*dynscorer.RoutingResult, error) {
+			close(reserveStarted)
+			<-allowReserveReturn
+			return &dynscorer.RoutingResult{WorkerID: 7}, nil
+		},
+		cancelPrefill: func(bookingID string) error {
+			cancelCalls <- bookingID
+			close(allowReserveReturn)
+			return nil
+		},
+		freeBooking: func(bookingID string) error {
+			freeCalls <- bookingID
+			return nil
+		},
+	}
+	cycleState := schedtypes.NewCycleState()
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: true})
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "model",
+		Headers:     map[string]string{},
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{"model": "model", "prompt": "hello"},
+		},
+	}
+
+	scoresCh := make(chan map[schedtypes.Endpoint]float64, 1)
+	go func() {
+		scoresCh <- scorer.Score(ctx, cycleState, req, nil)
+	}()
+	<-reserveStarted
+	cancel()
+
+	if scores := <-scoresCh; len(scores) != 0 {
+		t.Fatalf("scores = %v, want aggregate fallback with no prefill endpoints", scores)
+	}
+	bookingID := bookingIDFromRequest(req)
+	if got := <-cancelCalls; got != bookingID {
+		t.Fatalf("cancel booking ID = %q, want %q", got, bookingID)
+	}
+	select {
+	case got := <-freeCalls:
+		if got != bookingID {
+			t.Fatalf("late release booking ID = %q, want %q", got, bookingID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late successful reservation was not released")
+	}
+	if readPrefillEnabled(cycleState) {
+		t.Fatal("prefill remained enabled after reservation cancellation")
 	}
 }

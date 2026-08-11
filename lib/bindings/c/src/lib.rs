@@ -1404,8 +1404,8 @@ fn write_cache_namespace_to_result(cache_namespace: Option<&str>, out: &mut CRou
 
 /// Atomically select and reserve the best prefill worker for an EPP-owned booking.
 ///
-/// Pending scheduler admission is bounded by `timeout_ms`. Dropping the timed-out future
-/// retracts the queued request through the scheduler lifecycle lease.
+/// Dropping the future after cancellation retracts queued admission through the scheduler
+/// lifecycle lease.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
@@ -1419,14 +1419,12 @@ pub unsafe extern "C" fn route_prefill_request_with_reservation(
     reservation_id: *const c_char,
     request_json: *const c_char,
     pods_json: *const c_char,
-    timeout_ms: u64,
     out_result: *mut CRoutingResult,
 ) -> QueryRouterResult {
     if handle.is_null()
         || reservation_id.is_null()
         || request_json.is_null()
         || out_result.is_null()
-        || timeout_ms == 0
     {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -1442,29 +1440,24 @@ pub unsafe extern "C" fn route_prefill_request_with_reservation(
             Err(code) => return code,
         };
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
-    let timeout_duration = Duration::from_millis(timeout_ms);
 
-    let result = handles.runtime.secondary().block_on(async {
-        tokio::time::timeout(timeout_duration, async {
-            handles
-                .reserve_prefill_worker(
-                    &reservation_id,
-                    &tokens,
-                    None,
-                    None,
-                    cache_namespace.clone(),
-                    priority_jump,
-                    strict_priority,
-                    allowed_worker_ids,
-                    routing_constraints,
-                )
-                .await
-        })
-        .await
-    });
+    let result = handles
+        .runtime
+        .secondary()
+        .block_on(handles.reserve_prefill_worker(
+            &reservation_id,
+            &tokens,
+            None,
+            None,
+            cache_namespace.clone(),
+            priority_jump,
+            strict_priority,
+            allowed_worker_ids,
+            routing_constraints,
+        ));
 
     match result {
-        Ok(Ok((prefill_worker_id, prefill_dp_rank))) => {
+        Ok((prefill_worker_id, prefill_dp_rank)) => {
             let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
             tracing::info!(
                 %reservation_id,
@@ -1485,16 +1478,36 @@ pub unsafe extern "C" fn route_prefill_request_with_reservation(
             write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
-        Ok(Err(code)) => code,
-        Err(_) => {
-            tracing::warn!(
-                %reservation_id,
-                timeout_ms,
-                "Prefill reservation timed out"
-            );
-            QueryRouterResult::ErrTimeout
-        }
+        Err(code) => code,
     }
+}
+
+/// Signal cancellation for a pending EPP prefill reservation.
+///
+/// This function never waits for scheduler admission or booking cleanup. If admission has
+/// already succeeded, normal request cleanup (or the Go late-result drain) owns release.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `reservation_id` must be a valid non-empty null-terminated UTF-8 string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cancel_prefill_reservation(
+    handle: RouterHandlesPtr,
+    reservation_id: *const c_char,
+) -> QueryRouterResult {
+    if handle.is_null() || reservation_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let reservation_id = match unsafe { CStr::from_ptr(reservation_id) }.to_str() {
+        Ok(value) if !value.is_empty() => value,
+        _ => return QueryRouterResult::ErrInvalidParam,
+    };
+    let handles = unsafe { &*handle };
+    handles
+        .prefill_router
+        .cancel_prefill_reservation(reservation_id);
+    QueryRouterResult::Ok
 }
 
 /// Route a request to select the best **decode** worker only.

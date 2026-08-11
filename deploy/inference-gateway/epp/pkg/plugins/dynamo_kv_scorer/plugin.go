@@ -71,8 +71,10 @@ query_router_result_t route_prefill_request_with_reservation(RouterHandles *hand
                                                              const char *reservation_id,
                                                              const char *request_json,
                                                              const char *pods_json,
-                                                             uint64_t timeout_ms,
                                                              CRoutingResult *out_result);
+
+query_router_result_t cancel_prefill_reservation(RouterHandles *handle,
+                                                  const char *reservation_id);
 
 query_router_result_t route_decode_request(RouterHandles *handle,
                                            const char *request_json,
@@ -443,13 +445,10 @@ func extractCacheNamespace(result *C.CRoutingResult) string {
 }
 
 // CallRoutePrefillRequestWithReservation atomically selects and books a prefill worker.
-// The Rust scheduler retracts pending admission when timeout expires.
-func CallRoutePrefillRequestWithReservation(reservationID string, requestJSON string, podsJSON string, timeout time.Duration) (*RoutingResult, error) {
+// The caller cancels pending admission through CallCancelPrefillReservation.
+func CallRoutePrefillRequestWithReservation(reservationID string, requestJSON string, podsJSON string) (*RoutingResult, error) {
 	if reservationID == "" {
 		return nil, fmt.Errorf("prefill reservation ID is required")
-	}
-	if timeout <= 0 {
-		return nil, fmt.Errorf("prefill reservation timeout must be positive")
 	}
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")
@@ -473,17 +472,12 @@ func CallRoutePrefillRequestWithReservation(reservationID string, requestJSON st
 		defer C.free(unsafe.Pointer(cPodsJSON))
 	}
 
-	timeoutMS := timeout.Milliseconds()
-	if timeoutMS < 1 {
-		timeoutMS = 1
-	}
 	var result C.CRoutingResult
 	rc := C.route_prefill_request_with_reservation(
 		router,
 		cReservationID,
 		cRequestJSON,
 		cPodsJSON,
-		C.uint64_t(timeoutMS),
 		&result,
 	)
 	if rc != C.QUERY_ROUTER_OK {
@@ -502,6 +496,33 @@ func CallRoutePrefillRequestWithReservation(reservationID string, requestJSON st
 		TokenData:      tokens,
 		CacheNamespace: cacheNamespace,
 	}, nil
+}
+
+// CallCancelPrefillReservation cancels a pending prefill reservation without waiting for
+// scheduler cleanup. It is safe to call concurrently with the blocking reservation call.
+func CallCancelPrefillReservation(reservationID string) error {
+	if reservationID == "" {
+		return fmt.Errorf("prefill reservation ID is required")
+	}
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+
+	rc := C.cancel_prefill_reservation(router, cReservationID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("cancel_prefill_reservation failed with code %d", rc)
+	}
+	return nil
 }
 
 // CallRouteDecodeRequest routes a request to the best decode worker.
