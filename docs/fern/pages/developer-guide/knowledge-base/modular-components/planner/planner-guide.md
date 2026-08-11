@@ -7,6 +7,8 @@ subtitle: Configures Planner optimization targets, scaling modes, and PlannerCon
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
+Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AIConfigurator estimate is unavailable.
+
 For a quick overview, see the [Planner overview](overview.md). For architecture internals, see [Planner Design](planner-design.md).
 
 ## Scaling Modes
