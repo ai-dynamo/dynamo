@@ -241,6 +241,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 token_id: None,
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
                     config.worker_type,
                     true,
@@ -354,6 +355,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 token_id: Some(token_id),
                 completed: is_complete,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
                     config.worker_type,
                     is_complete,

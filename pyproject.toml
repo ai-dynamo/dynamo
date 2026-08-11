@@ -114,6 +114,14 @@ docs = [
     "myst-parser>=4.0",
     "myst-nb>=1.2",
     "nbsphinx>=0.9",
+    # Static Python API discovery for docs/fern/scripts/gen_python_api.py.
+    # Griffe parses the source tree without importing Dynamo, so the Fern
+    # docs build does not require the runtime, backends, or CUDA to be
+    # installed. Pytest and PyYAML are used by the focused tests under
+    # docs/fern/scripts/tests/ that exercise the generator and navigation.
+    "griffe==2.1.0",
+    "pytest>=8.0",
+    "pyyaml>=6.0",
 ]
 
 [build-system]

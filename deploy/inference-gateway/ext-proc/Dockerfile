@@ -66,6 +66,7 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 # only compiles the crates dynamo-ext-proc transitively depends on; the rest
 # are parsed but not built.
 COPY --from=dynamo lib/ lib/
+COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/

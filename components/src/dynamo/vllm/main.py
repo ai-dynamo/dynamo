@@ -59,6 +59,7 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .engine_generate import publish_engine_generate_capability
 from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -689,6 +690,10 @@ async def register_vllm_model(
         runtime_config, config.engine_args, worker_type, dp_range
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    if publish_engine_generate_capability(
+        runtime_config, model_input, model_type, worker_type
+    ):
+        logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len

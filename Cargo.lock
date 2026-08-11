@@ -2470,6 +2470,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-basic"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-custom-policy-example-basic",
+ "dynamo-custom-policy-example-disaggregated",
+ "dynamo-kv-router",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-disaggregated"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-epp"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "dynamo-custom-policy-example-catalog",
+ "dynamo-ext-proc",
+ "dynamo-kv-router",
+ "tokio",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.4.0"
 dependencies = [
@@ -2818,9 +2854,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.1.0"
+version = "5.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "696b6df4c817c16dc0a619d43f6af5ecc4f045a6b6be7ef516bfe502f977764b"
+checksum = "97fd951c32c033f4f220b6087db91d7f7d475f1bf1f886c8e60798ac1cf4cc9a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2892,12 +2928,12 @@ dependencies = [
  "either",
  "etcd-client",
  "figment",
+ "fs4",
  "futures",
  "humantime",
  "jsonschema",
  "k8s-openapi",
  "kube",
- "libc",
  "local-ip-address",
  "log",
  "lru 0.16.4",
@@ -3084,6 +3120,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
+ "tonic-health",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3108,7 +3145,15 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
 ]
 
 [[package]]

@@ -27,8 +27,7 @@ use crate::{
 };
 
 pub(super) struct WorkerSelection {
-    pub(super) instance_id: u64,
-    pub(super) dp_rank: u32,
+    pub(super) worker: WorkerWithDpRank,
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
@@ -121,8 +120,7 @@ where
                 routing_hashes,
                 router_hint,
             } => Ok(WorkerSelection {
-                instance_id: worker.worker_id,
-                dp_rank: worker.dp_rank,
+                worker,
                 overlap_amount: overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
@@ -222,13 +220,13 @@ where
                 // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
-                    worker_id = selection.instance_id,
-                    dp_rank = selection.dp_rank,
+                    worker_id = selection.worker.worker_id,
+                    dp_rank = selection.worker.dp_rank,
                     overlap_blocks = selection.overlap_amount,
                     total_blocks,
                     "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
-                    selection.instance_id,
-                    selection.dp_rank,
+                    selection.worker.worker_id,
+                    selection.worker.dp_rank,
                     selection.overlap_amount,
                     total_blocks,
                 );

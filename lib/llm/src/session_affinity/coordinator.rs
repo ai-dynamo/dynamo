@@ -35,11 +35,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AffinityTarget {
-    pub worker_id: u64,
-    pub dp_rank: Option<u32>,
-}
+pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 
 enum AffinityEntry {
     Initializing {

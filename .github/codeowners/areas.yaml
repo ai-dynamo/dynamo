@@ -66,7 +66,9 @@ areas:
   - lib/llm/src/kv_router/publisher/
   - tests/router/
   - tests/router/configs/
+  - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
+  - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -847,7 +849,7 @@ shared:
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/planner/connectors/kubernetes_api.py
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - planner
   - operator
