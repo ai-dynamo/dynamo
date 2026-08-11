@@ -15,6 +15,7 @@ members = [
     "lib/router-plugins/catalog",
     "examples/router/custom-policy-example/basic",
     "examples/router/custom-policy-example/catalog",
+    "examples/router/custom-policy-example/disaggregated",
     "examples/router/custom-policy-example/epp",
     "lib/memory",
     "lib/kvbm-common",

@@ -59,13 +59,6 @@ func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
 		t.Fatalf("ValidateCreate() error = %v, want GVK mismatch", err)
 	}
 
-	_, err = handler.ValidateCreate(
-		dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
-		&runtime.Unknown{},
-	)
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoGraphDeployment") {
-		t.Fatalf("ValidateCreate() error = %v, want type mismatch", err)
-	}
 }
 
 func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
@@ -89,22 +82,8 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD := oldDGD.DeepCopy()
 		now := metav1.Now()
 		newDGD.DeletionTimestamp = &now
-		if _, err := handler.ValidateUpdate(ctx, &runtime.Unknown{}, newDGD); err != nil {
+		if _, err := handler.ValidateUpdate(ctx, nil, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() error = %v", err)
-		}
-	})
-
-	t.Run("invalid new object", func(t *testing.T) {
-		_, err := handler.ValidateUpdate(ctx, newBetaDGDForValidation(), &runtime.Unknown{})
-		if err == nil || !strings.Contains(err.Error(), "expected DynamoGraphDeployment") {
-			t.Fatalf("ValidateUpdate() error = %v, want new object type mismatch", err)
-		}
-	})
-
-	t.Run("invalid old object", func(t *testing.T) {
-		_, err := handler.ValidateUpdate(ctx, &runtime.Unknown{}, newBetaDGDForValidation())
-		if err == nil || !strings.Contains(err.Error(), "expected DynamoGraphDeployment") {
-			t.Fatalf("ValidateUpdate() error = %v, want old object type mismatch", err)
 		}
 	})
 
@@ -137,22 +116,6 @@ func TestDynamoGraphDeploymentHandlerValidateDelete(t *testing.T) {
 		t.Fatalf("ValidateDelete() warnings = %v, want none", warnings)
 	}
 
-	_, err = handler.ValidateDelete(ctx, &runtime.Unknown{})
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoGraphDeployment") {
-		t.Fatalf("ValidateDelete() error = %v, want type mismatch", err)
-	}
-}
-
-func TestCastToDynamoGraphDeployment(t *testing.T) {
-	dgd := newBetaDGDForValidation()
-	got, err := castToDynamoGraphDeployment(dgd)
-	if err != nil || got != dgd {
-		t.Fatalf("castToDynamoGraphDeployment() = (%v, %v), want original DGD", got, err)
-	}
-
-	if _, err := castToDynamoGraphDeployment(nil); err == nil {
-		t.Fatal("castToDynamoGraphDeployment() error = nil, want type mismatch")
-	}
 }
 
 func TestDynamoGraphDeploymentHandlerRegisterWithManager(t *testing.T) {

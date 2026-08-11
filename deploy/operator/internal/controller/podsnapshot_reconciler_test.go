@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,7 +67,7 @@ func makeSnapshotReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.
 			WithStatusSubresource(&nvidiacomv1alpha1.PodSnapshot{}, &nvidiacomv1alpha1.PodSnapshotContent{}).
 			WithInterceptorFuncs(funcs).Build(),
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 	}
 }
 
@@ -726,7 +726,7 @@ func TestSnapshotReconciler_ContentCreateErrorEmitsEventAndRequeues(t *testing.T
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 
-	recorder := r.Recorder.(*record.FakeRecorder)
+	recorder := r.Recorder.(*events.FakeRecorder)
 	select {
 	case ev := <-recorder.Events:
 		assert.Contains(t, ev, "SnapshotContentCreateFailed")

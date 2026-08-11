@@ -12,5 +12,6 @@ repository.workspace = true
 description = "Custom worker-selection policy catalog example for Dynamo"
 
 [dependencies]
-dynamo-custom-policy-example-basic = { path = "../basic" }
+basic-agg-policy = { package = "dynamo-custom-policy-example-basic", path = "../basic" }
+basic-disagg-policy = { package = "dynamo-custom-policy-example-disaggregated", path = "../disaggregated" }
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }

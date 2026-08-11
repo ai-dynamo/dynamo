@@ -10,7 +10,8 @@ use dynamo_kv_router::services::selection::{
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    dynamo_custom_policy_example_basic::register(registry)
+    basic_agg_policy::register(registry)?;
+    basic_disagg_policy::register(registry)
 }
 
 #[cfg(test)]
@@ -18,13 +19,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registers_least_busy() {
+    fn registers_both_policies() {
         let mut registry = WorkerSelectionPolicyRegistry::default();
         register(&mut registry).unwrap();
 
         assert!(matches!(
-            register(&mut registry),
+            basic_agg_policy::register(&mut registry),
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "least-busy"
+        ));
+        assert!(matches!(
+            basic_disagg_policy::register(&mut registry),
+            Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "disaggregated-load"
         ));
     }
 }

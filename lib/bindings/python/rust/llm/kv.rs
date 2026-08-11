@@ -1807,22 +1807,20 @@ impl KvRouter {
                         inject_timing_from_tracker(data, tracker);
                     }
 
-                    let py_response = Python::with_gil(|py| {
-                        pythonize(py, &response.data)
-                            .map(|obj| obj.unbind())
-                            .map_err(|e| e.to_string())
+                    let response = response.map_data(|data| {
+                        Python::with_gil(|py| {
+                            pythonize(py, &data)
+                                .map(|obj| obj.unbind())
+                                .map_err(|error| error.to_string())
+                        })
                     });
+                    let is_error = response.is_error();
 
-                    match py_response {
-                        Ok(obj) => {
-                            if tx.send(RsAnnotated::from_data(obj)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to pythonize response: {}", e);
-                            break;
-                        }
+                    if tx.send(response).await.is_err() {
+                        break;
+                    }
+                    if is_error {
+                        break;
                     }
                 }
 
