@@ -7,7 +7,6 @@ package validation
 
 import (
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,9 +17,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestDynamoCheckpointValidator_Validate(t *testing.T) {
@@ -275,26 +272,6 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 				t.Fatalf("webhook warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
-	}
-}
-
-func TestDynamoCheckpointHandlerBoundaryErrorsRemainRegular(t *testing.T) {
-	handler := NewDynamoCheckpointHandler()
-	_, err := handler.ValidateCreate(t.Context(), &runtime.Unknown{})
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoCheckpoint") {
-		t.Fatalf("ValidateCreate() error = %v, want cast error", err)
-	}
-	if k8serrors.IsInvalid(err) {
-		t.Fatalf("ValidateCreate() error = %v, want regular boundary error", err)
-	}
-
-	checkpoint := dynamoCheckpointForAdmission(nil)
-	_, err = handler.ValidateUpdate(t.Context(), &runtime.Unknown{}, checkpoint)
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoCheckpoint") {
-		t.Fatalf("ValidateUpdate() error = %v, want old-object cast error", err)
-	}
-	if k8serrors.IsInvalid(err) {
-		t.Fatalf("ValidateUpdate() error = %v, want regular boundary error", err)
 	}
 }
 

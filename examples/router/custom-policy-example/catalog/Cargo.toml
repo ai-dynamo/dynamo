@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-custom-policy-example-catalog"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Custom worker-selection policy catalog example for Dynamo"
+
+[dependencies]
+basic-agg-policy = { package = "dynamo-custom-policy-example-basic", path = "../basic" }
+basic-disagg-policy = { package = "dynamo-custom-policy-example-disaggregated", path = "../disaggregated" }
+dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
