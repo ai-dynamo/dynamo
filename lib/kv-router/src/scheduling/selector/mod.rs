@@ -323,7 +323,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
             state.filter_inputs | state.scorer_picker_inputs
         }
     };
-    let input =
+    let mut input =
         WorkerSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
     let selected = match state {
         WorkerSelectionPolicyStateRef::Default(picker) => {
@@ -336,7 +336,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
             let has_eligible_worker =
-                collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
+                collect_custom_candidates(&mut state, &mut input, workers, request, eligibility)?;
             let CustomWorkerSelectionState {
                 picker,
                 picker_inputs,
