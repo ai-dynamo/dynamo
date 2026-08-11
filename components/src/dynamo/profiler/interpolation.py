@@ -28,7 +28,6 @@ import os
 import yaml
 
 from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
-from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
@@ -38,6 +37,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     inject_tolerations_into_dgd,
+    needs_profile_data,
     pick_decode_component,
 )
 from dynamo.profiler.utils.profile_decode import profile_decode
@@ -98,18 +98,10 @@ async def run_interpolation(
     short-circuits here because its interpolation is now handled by the
     planner (AIC in-process) and the mocker (``--aic-perf-model`` at runtime).
     """
-    planner_cfg = (
-        dgdr.features.planner if (dgdr.features and dgdr.features.planner) else None
-    )
-    sweep_mode = PlannerPreDeploymentSweepMode.None_
-    if planner_cfg and planner_cfg.pre_deployment_sweeping_mode:
-        sweep_mode = planner_cfg.pre_deployment_sweeping_mode
-
-    if sweep_mode != PlannerPreDeploymentSweepMode.Thorough:
+    if not needs_profile_data(dgdr):
         logger.info(
-            "Skipping real-GPU interpolation for sweep_mode=%s; rapid-mode "
-            "consumers (planner, mocker) use AIC at runtime.",
-            sweep_mode,
+            "Skipping real-GPU interpolation; rapid-mode consumers "
+            "(planner, mocker) use AIC at runtime instead of NPZ data."
         )
         return
 
