@@ -112,6 +112,34 @@ def _read_pod_logs(pod) -> str:
     return "\n".join(chunks)
 
 
+def log_nixl_layout(pod) -> None:
+    """Record where NIXL actually lives in the worker image. Diagnostic only.
+
+    Deliberately not asserted on. The layout moves between framework images and
+    between releases -- vLLM and TRT-LLM expose the canonical
+    /opt/nvidia/nvda_nixl tree via NIXL_PLUGIN_DIR, while the CUDA SGLang image
+    gets NIXL from the pip wheel and exports no NIXL_* variables at all -- so a
+    test that pins the layout breaks on the next repackaging without any EFA
+    regression having occurred. Logging it keeps a failed run diagnosable
+    ("NIXL was over here, and these plugins were present") while the assertions
+    below stay on the observable outcome: bytes moved over LIBFABRIC/EFA.
+    """
+    snippet = (
+        "import os;"
+        "d=os.environ.get('NIXL_PLUGIN_DIR','');"
+        "print('NIXL_PLUGIN_DIR=', d or '<unset>');"
+        "print('NIXL_LIB_DIR=', os.environ.get('NIXL_LIB_DIR','') or '<unset>');"
+        "print('LD_PRELOAD=', os.environ.get('LD_PRELOAD','') or '<unset>');"
+        "print('EFA_VERSION=', os.environ.get('EFA_VERSION','') or '<unset>');"
+        "print('plugins=', sorted(os.listdir(d)) if d and os.path.isdir(d) else '<no plugin dir>')"
+    )
+    try:
+        result = pod.exec(["python3", "-c", snippet])
+        logger.info("NIXL layout in %s:\n%s", pod.name, result.stdout.decode())
+    except Exception as e:  # noqa: BLE001 - diagnostics only, never fail the test
+        logger.warning("Could not read NIXL layout from %s: %s", pod.name, e)
+
+
 def assert_nixl_used_libfabric(deployment: ManagedDeployment) -> None:
     """Fail unless the worker logs prove NIXL used the LIBFABRIC/EFA backend.
 
@@ -330,6 +358,7 @@ async def test_efa_deployment(
         # A successful disagg completion means KV moved prefill->decode. Prove it
         # (1) rode the LIBFABRIC/EFA backend rather than falling back to UCX, and
         # (2) physically moved bytes over EFA RDMA (the rx-bytes counter grew).
+        log_nixl_layout(decode_pod)
         assert_nixl_used_libfabric(deployment)
         assert_efa_rdma_traffic(rx_before, rx_after)
 
