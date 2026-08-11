@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Downloads the base model and optional draft models into the default Hugging
+# Face cache layout used by the recipe manifests (HF_HOME=/model-cache).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: BASE_MODEL
+              value: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+            - name: DFLASH_MODEL
+              value: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash
+            - name: DSPARK_MODEL
+              value: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download "$BASE_MODEL"
+              hf download "$DFLASH_MODEL"
+              hf download "$DSPARK_MODEL"
+              find /model-cache/hub -maxdepth 3 -type d -name snapshots -print
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
