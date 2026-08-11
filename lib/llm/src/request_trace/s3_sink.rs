@@ -34,7 +34,8 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use flate2::{Compression, write::GzEncoder};
 use object_store::{
-    Attribute, Attributes, ClientOptions, ObjectStore, RetryConfig, aws::AmazonS3Builder,
+    Attribute, Attributes, ClientConfigKey, ObjectStore, RetryConfig,
+    aws::{AmazonS3Builder, AmazonS3ConfigKey},
     path::Path as ObjectPath,
 };
 use tokio::sync::mpsc;
@@ -94,22 +95,8 @@ impl S3RequestTraceSink {
         let roll_uncompressed_bytes = policy.s3_roll_uncompressed_bytes;
         let flush_interval = Duration::from_millis(policy.s3_flush_interval_ms.max(1));
 
-        let retry_config = RetryConfig {
-            max_retries: 2,
-            retry_timeout: S3_OPERATION_TIMEOUT,
-            ..Default::default()
-        };
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(&bucket)
-            .with_client_options(ClientOptions::new().with_timeout(S3_ATTEMPT_TIMEOUT))
-            .with_retry(retry_config);
-        if let Some(region) = policy.s3_region.clone() {
-            builder = builder.with_region(region);
-        } else if let Ok(region) = std::env::var("AWS_REGION") {
-            builder = builder.with_region(region);
-        }
         let store: Arc<dyn ObjectStore> = Arc::new(
-            builder
+            request_trace_s3_builder(&bucket, policy.s3_region.as_deref())
                 .build()
                 .context("building request trace S3 client")?,
         );
@@ -366,6 +353,27 @@ impl S3Uploader {
     }
 }
 
+fn request_trace_s3_builder(bucket: &str, region: Option<&str>) -> AmazonS3Builder {
+    let retry_config = RetryConfig {
+        max_retries: 2,
+        retry_timeout: S3_OPERATION_TIMEOUT,
+        ..Default::default()
+    };
+    let mut builder = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+            format!("{}s", S3_ATTEMPT_TIMEOUT.as_secs()),
+        )
+        .with_retry(retry_config);
+    if let Some(region) = region {
+        builder = builder.with_region(region);
+    } else if let Ok(region) = std::env::var("AWS_REGION") {
+        builder = builder.with_region(region);
+    }
+    builder
+}
+
 /// Buffers raw JSONL bytes until the batch is ready to flush; gzip
 /// compression happens in [`take_finished`], which offloads the CPU work
 /// to a blocking pool (matching `telemetry::jsonl_gz`).
@@ -521,6 +529,31 @@ mod tests {
             Some("application/gzip")
         );
         assert_eq!(result.bytes().await.unwrap().as_ref(), body.as_slice());
+    }
+
+    #[test]
+    fn s3_builder_preserves_environment_client_options() {
+        temp_env::with_vars(
+            [
+                ("AWS_ALLOW_HTTP", Some("true")),
+                ("AWS_PROXY_URL", Some("http://proxy.example:8080")),
+            ],
+            || {
+                let builder = request_trace_s3_builder("b", Some("us-west-2"));
+                assert_eq!(
+                    builder
+                        .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp))
+                        .as_deref(),
+                    Some("true")
+                );
+                assert_eq!(
+                    builder
+                        .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::ProxyUrl))
+                        .as_deref(),
+                    Some("http://proxy.example:8080")
+                );
+            },
+        );
     }
 
     fn test_uploader(prefix: &str) -> S3Uploader {
