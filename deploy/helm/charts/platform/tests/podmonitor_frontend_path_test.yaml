@@ -78,3 +78,7 @@ tests:
           path: spec.podMetricsEndpoints[0].path
           value: /metrics
         documentIndex: 0
+      - equal:
+          path: spec.podMetricsEndpoints[3].path
+          value: /metrics
+        documentIndex: 1
