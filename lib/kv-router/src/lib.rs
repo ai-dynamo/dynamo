@@ -6,6 +6,8 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+use std::sync::Arc;
+
 mod active_set;
 pub(crate) mod cleanup;
 pub mod conditional_disagg;
@@ -79,3 +81,10 @@ pub use selector::{
     WorkerSelector,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+
+/// Factory that creates one worker-selection policy per routing partition.
+pub type WorkerSelectionPolicyFactory = Arc<
+    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
+        + Send
+        + Sync,
+>;
