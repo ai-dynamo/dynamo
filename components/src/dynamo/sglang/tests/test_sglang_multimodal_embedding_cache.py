@@ -29,7 +29,7 @@ from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,  # sglang tests run on GPU-enabled workers
+    pytest.mark.gpu_0,
     # These are sub-second unit tests. A generous cap so a hang here fails
     # this test instead of stalling the whole session.
     pytest.mark.timeout(60),
