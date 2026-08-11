@@ -1579,7 +1579,7 @@ class InstrumentedScheduler(AsyncScheduler):
                     num_common_prefix_blocks=(
                         [0] * self.kv_cache_manager.num_kv_cache_groups
                     ),
-                    finished_req_ids=self.finished_req_ids,
+                    finished_req_ids=set(self.finished_req_ids),
                     free_encoder_mm_hashes=[],
                 )
                 # See _bench_inject_fake_decode for the rationale; the
@@ -1696,8 +1696,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 scheduled=scheduled,
             )
             self._publish_or_record_metrics(metrics)
-            if is_benchmark_point:
-                self._bench_advance_decode_stage_after_output()
+            self._bench_advance_decode_stage_after_output()
         else:
             self._last_update_time = 0.0
 

@@ -1327,11 +1327,14 @@ def test_decode_sweep_empty_frame_no_connector_leaves_metadata_none():
     guard in the fix.
     """
     stub = _make_decode_sweep_stub(connector=None)
+    stub.finished_req_ids.add("finished")
     out = InstrumentedScheduler.schedule(stub)
 
     assert out.kv_connector_metadata is None
     assert out.ec_connector_metadata is None
     assert out.num_scheduled_tokens == {"__bench_0": 0}
+    assert out.finished_req_ids == {"finished"}
+    assert out.finished_req_ids is not stub.finished_req_ids
     stub._update_after_schedule.assert_not_called()
 
 
@@ -1362,7 +1365,7 @@ def test_decode_retention_map_is_sanitized_without_mutating_original(monkeypatch
     stub._cleanup_finished.assert_called_once_with(output)
 
 
-def test_non_benchmark_output_does_not_advance_decode_stage(monkeypatch):
+def test_completed_pass_advances_stage_without_recording_fpm(monkeypatch):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_active = True
     stub._bench_phase = _BenchPhase.DECODE_SWEEP
@@ -1370,14 +1373,15 @@ def test_non_benchmark_output_does_not_advance_decode_stage(monkeypatch):
     stub._bench_current_point = BenchmarkPoint(point_type="decode")
     stub._schedule_times = deque([1.0])
     stub._last_update_time = 0.0
-    stub._extract_scheduled = MagicMock(
-        return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
-            num_prefill_requests=1
-        )
+    scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+        num_prefill_requests=1
     )
+    stub._extract_scheduled = MagicMock(return_value=scheduled)
     stub._compute_queued = MagicMock(return_value=None)
-    stub._extract_metrics = MagicMock(return_value="metrics")
-    stub._publish_or_record_metrics = MagicMock()
+    stub._extract_metrics = MagicMock(
+        return_value=SimpleNamespace(scheduled_requests=scheduled)
+    )
+    stub._bench_current_fpms = []
     stub._cleanup_finished = MagicMock()
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
@@ -1389,7 +1393,8 @@ def test_non_benchmark_output_does_not_advance_decode_stage(monkeypatch):
     result = InstrumentedScheduler._update_from_output(stub, output, object())
 
     assert result == "parent-result"
-    assert stub._bench_decode_stage == _DecodePointStage.ADMITTING
+    assert stub._bench_current_fpms == []
+    assert stub._bench_decode_stage == _DecodePointStage.READY
 
 
 def test_decode_retention_map_rejects_positive_work(monkeypatch):
