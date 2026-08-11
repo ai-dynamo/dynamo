@@ -7,12 +7,79 @@ subtitle: Link Rust scorers and pickers into the Dynamo frontend or EPP
 
 **Experimental.** A custom worker-selection policy controls how Dynamo scores eligible workers and selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
 
-See the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) for the complete build and run walkthrough. It includes:
+The [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) contains the complete source and commands for both integration paths.
+
+## How It Works
+
+A custom routing strategy has four parts:
+
+1. A policy crate defines one or more scorers and one picker.
+2. A catalog crate registers each policy type under a unique name.
+3. The router policy configuration selects a named policy instance and supplies its parameters.
+4. The Python frontend or Endpoint Picker Provider (EPP) links the catalog into its binary.
+
+The catalog is a compile-time extension point. Dynamo does not load policy libraries at runtime. This keeps registration explicit and lets each team own its policy crates and dependencies.
+
+At startup, Dynamo reads the selected policy instance and asks its provider to parse the parameter map. The provider returns a factory after validation succeeds. Invalid parameters, unknown types, and duplicate registrations stop startup.
+
+Dynamo calls the factory once for each routing partition. The factory receives the router configuration, worker type, and partition identity. It can build different scorer and picker combinations for prefill and decode workers.
+
+For each request, Dynamo first applies its built-in worker eligibility rules. The custom scorers assign finite costs to the remaining workers. The picker returns one row from that scored candidate set, then Dynamo reserves and routes to that worker.
+
+## Example Policies
+
+The example catalog registers two policy types:
 
 - A basic policy that scores active requests for every worker type.
 - A disaggregated policy with separate prefill and decode scorers and pickers.
-- A catalog that registers both policies.
-- Commands for the Python frontend and a standalone Endpoint Picker Provider (EPP).
+
+The disaggregated factory selects its components from `worker_type`:
+
+| Worker type | Scorer cost | Picker behavior |
+|---|---|---|
+| Prefill | Active prefill tokens | Select the lowest total cost |
+| Decode | Projected decode blocks | Select the lowest total cost |
+
+Both policies request only the `LOAD` signal group. A policy can also request cache or routing signals when its scorer or picker uses them.
+
+## Register and Configure a Policy
+
+The catalog is the static link point for policy crates. Add each policy crate as a catalog dependency, then call its `register` function from the catalog. Teams keep external policies in their own catalogs. Dynamo's built-in catalog remains unchanged.
+
+A policy type and policy instance are different. The catalog registers a type such as `disaggregated-load`. The router policy configuration creates a named instance of that type and supplies its parameters.
+
+The `worker_selection.default` field selects the instance at startup. `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides that field by instance name. Set the override to `default` to use Dynamo's built-in selector.
+
+Policy providers own their parameter schema. Parse and validate parameters before returning the factory. Use strict unknown-field handling so configuration mistakes fail at startup.
+
+## Choose an Integration
+
+Both integrations use the same policy traits, registry, and router policy configuration. They differ only in where the catalog is linked and which process owns selection.
+
+<Tabs>
+  <Tab title="Python Frontend">
+
+    The Python frontend links the catalog into `dynamo._core`. Keep the dependency alias `dynamo-worker-selection-policy-catalog`, but point it at your catalog when you build the extension.
+
+    Build the extension with the `custom-policy` feature. Then start `python3 -m dynamo.frontend` in KV-router mode with the router policy configuration.
+
+    The frontend resolves the selected policy during startup and uses its factory for each KV-router partition. Linked policies do not apply to `python3 -m dynamo.router`.
+
+    See the [Python frontend walkthrough](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example#run-with-the-python-frontend) for the manifest and launch commands.
+
+  </Tab>
+  <Tab title="EPP">
+
+    A custom EPP binary links your catalog directly. It creates a registry, registers the catalog, and calls Dynamo's public EPP runner.
+
+    Linked policies require standalone EPP mode. In Dynamo mode, EPP delegates worker selection to the Dynamo runtime.
+
+    The stock EPP binary does not link a custom catalog. It uses Dynamo's built-in selector and rejects configured custom instances at startup.
+
+    See the [EPP walkthrough](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example#run-with-epp) for the binary and launch commands. The [standalone EPP guide](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) covers discovery, KV events, tokenization, and Kubernetes resources.
+
+  </Tab>
+</Tabs>
 
 ## Policy Contract
 
