@@ -28,9 +28,15 @@ is expensive, so do not collect repetitions only to produce confidence intervals
   inflates the best observed result.
 - Keep practical significance separate from detectability: state the smallest delta that matters for the engagement
   and do not claim gains below it regardless of statistical separation.
-- Record neighbour occupancy (what else runs on the node) with every measurement and compare only like with like. A
-  fleet or full-node projection from idle-neighbour measurements is invalid until confirmed by one co-located
-  measurement with load generation verified unsaturated.
+- Record neighbour occupancy (what else runs on the node) with every measurement and compare only like with like:
+  candidates measured under the same occupancy are like-for-like. A fleet or full-node projection from
+  idle-neighbour measurements is invalid until confirmed by one co-located measurement with load generation
+  verified unsaturated.
+- Neighbour occupancy is a recorded condition, not an admission gate. Do not require idle or exclusive nodes to
+  measure: on a shared cluster they may never exist, and an empirical noise floor measured under real occupancy is
+  the decision floor. Reserve isolation requests for the finalist's confirmatory absolutes, and when isolation is
+  unavailable even then, report the finalist with occupancy labeled as a limitation rather than blocking the
+  engagement.
 - Cache-state policy for reuse-heavy workloads: reset caches between points and rank candidates on cold, identical
   content (comparability), but before promising an absolute number — a floor-pick or a fleet projection — on a
   workload with substantial prefix reuse, confirm the finalist once at warm steady state. A cold, short window
