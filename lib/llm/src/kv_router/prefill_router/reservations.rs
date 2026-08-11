@@ -9,11 +9,12 @@ use std::{
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
     sequence::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION,
 };
 use parking_lot::Mutex;
 use tokio::time::{Instant, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     InnerPrefillRouter, PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter,
@@ -23,6 +24,7 @@ use crate::kv_router::{KvRouter, sequence::SequenceError};
 const PREFILL_SCHEDULER_ID_PREFIX: &str = "epp-prefill/";
 const ACTIVE_REQUEST_EXPIRY_ENV: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 const RESERVATION_EXPIRY_GRACE: Duration = Duration::from_secs(60);
+const CANCELLED_RESERVATION_RETENTION: Duration = Duration::from_secs(60);
 const RESERVATION_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 struct ActivePrefillReservation {
@@ -41,8 +43,25 @@ impl Clone for ActivePrefillReservation {
     }
 }
 
+enum PrefillReservationEntry {
+    /// Cancelling this token drops the selection future. Release/1.3.0 keeps a
+    /// queued entry until its next dequeue, where the closed response receiver
+    /// prevents scheduler booking.
+    Pending { cancellation: CancellationToken },
+    Active(ActivePrefillReservation),
+    /// Preserve a cancellation that reaches Rust before the blocking reserve
+    /// call creates the pending entry.
+    Cancelled { created_at: Instant },
+}
+
+enum BeginReservation {
+    Pending(CancellationToken),
+    Cancelled,
+    AlreadyExists,
+}
+
 pub(super) struct PrefillReservationRegistry {
-    entries: Mutex<HashMap<String, ActivePrefillReservation>>,
+    entries: Mutex<HashMap<String, PrefillReservationEntry>>,
 }
 
 impl Default for PrefillReservationRegistry {
@@ -54,37 +73,110 @@ impl Default for PrefillReservationRegistry {
 }
 
 impl PrefillReservationRegistry {
-    fn insert(&self, reservation_id: &str, reservation: ActivePrefillReservation) -> bool {
-        match self.entries.lock().entry(reservation_id.to_string()) {
+    fn begin(&self, reservation_id: &str) -> BeginReservation {
+        let mut entries = self.entries.lock();
+        match entries.entry(reservation_id.to_string()) {
             Entry::Vacant(entry) => {
-                entry.insert(reservation);
-                true
+                let cancellation = CancellationToken::new();
+                entry.insert(PrefillReservationEntry::Pending {
+                    cancellation: cancellation.clone(),
+                });
+                BeginReservation::Pending(cancellation)
             }
-            Entry::Occupied(_) => false,
+            Entry::Occupied(entry) => match entry.get() {
+                PrefillReservationEntry::Cancelled { .. } => {
+                    entry.remove();
+                    BeginReservation::Cancelled
+                }
+                PrefillReservationEntry::Pending { .. } | PrefillReservationEntry::Active(_) => {
+                    BeginReservation::AlreadyExists
+                }
+            },
         }
     }
 
-    fn get(&self, reservation_id: &str) -> Option<ActivePrefillReservation> {
-        self.entries.lock().get(reservation_id).cloned()
+    fn activate(&self, reservation_id: &str, reservation: ActivePrefillReservation) -> bool {
+        let mut entries = self.entries.lock();
+        let Some(entry) = entries.get(reservation_id) else {
+            return false;
+        };
+
+        let PrefillReservationEntry::Pending { cancellation } = entry else {
+            return false;
+        };
+        if cancellation.is_cancelled() {
+            entries.remove(reservation_id);
+            return false;
+        }
+
+        entries.insert(
+            reservation_id.to_string(),
+            PrefillReservationEntry::Active(reservation),
+        );
+        true
     }
 
-    fn remove_if_scheduler_id(&self, reservation_id: &str, scheduler_id: &str) {
+    fn remove_pending(&self, reservation_id: &str) {
         let mut entries = self.entries.lock();
-        if entries
-            .get(reservation_id)
-            .is_some_and(|entry| entry.scheduler_id == scheduler_id)
-        {
+        if matches!(
+            entries.get(reservation_id),
+            Some(PrefillReservationEntry::Pending { .. })
+        ) {
             entries.remove(reservation_id);
         }
     }
 
-    fn expired_ids(&self, now: Instant, retention: Duration) -> Vec<String> {
+    fn cancel(&self, reservation_id: &str) {
+        let mut entries = self.entries.lock();
+        match entries.entry(reservation_id.to_string()) {
+            Entry::Occupied(entry) => {
+                if let PrefillReservationEntry::Pending { cancellation } = entry.get() {
+                    cancellation.cancel();
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(PrefillReservationEntry::Cancelled {
+                    created_at: Instant::now(),
+                });
+            }
+        }
+    }
+
+    fn get_active(&self, reservation_id: &str) -> Option<ActivePrefillReservation> {
+        match self.entries.lock().get(reservation_id) {
+            Some(PrefillReservationEntry::Active(reservation)) => Some(reservation.clone()),
+            Some(PrefillReservationEntry::Pending { .. })
+            | Some(PrefillReservationEntry::Cancelled { .. })
+            | None => None,
+        }
+    }
+
+    fn remove_if_scheduler_id(&self, reservation_id: &str, scheduler_id: &str) {
+        let mut entries = self.entries.lock();
+        if entries.get(reservation_id).is_some_and(|entry| {
+            matches!(entry, PrefillReservationEntry::Active(active) if active.scheduler_id == scheduler_id)
+        }) {
+            entries.remove(reservation_id);
+        }
+    }
+
+    fn expired_active_ids(&self, now: Instant, retention: Duration) -> Vec<String> {
         self.entries
             .lock()
             .iter()
-            .filter(|(_, entry)| now.saturating_duration_since(entry.created_at) >= retention)
+            .filter(|(_, entry)| {
+                matches!(entry, PrefillReservationEntry::Active(active)
+                    if now.saturating_duration_since(active.created_at) >= retention)
+            })
             .map(|(reservation_id, _)| reservation_id.clone())
             .collect()
+    }
+
+    fn remove_expired_cancellations(&self, now: Instant, retention: Duration) {
+        self.entries.lock().retain(|_, entry| {
+            !matches!(entry, PrefillReservationEntry::Cancelled { created_at }
+                if now.saturating_duration_since(*created_at) >= retention)
+        });
     }
 }
 
@@ -143,8 +235,23 @@ impl PrefillRouter {
         };
         let chooser = router.chooser.clone();
         let scheduler_id = scheduler_id(reservation_id);
-        let outcome = chooser
-            .find_best_match_details(
+        let cancellation = match self.reservations.begin(reservation_id) {
+            BeginReservation::Pending(cancellation) => cancellation,
+            BeginReservation::Cancelled => {
+                anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
+            }
+            BeginReservation::AlreadyExists => {
+                anyhow::bail!("prefill reservation {reservation_id:?} already exists")
+            }
+        };
+
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                self.reservations.remove_pending(reservation_id);
+                anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
+            }
+            outcome = chooser.find_best_match_details(
                 Some(&scheduler_id),
                 token_ids,
                 block_mm_infos,
@@ -158,8 +265,15 @@ impl PrefillRouter {
                 None,
                 allowed_worker_ids,
                 routing_constraints,
-            )
-            .await?;
+            ) => outcome,
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.reservations.remove_pending(reservation_id);
+                return Err(error);
+            }
+        };
 
         match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
@@ -168,9 +282,9 @@ impl PrefillRouter {
                     scheduler_id: scheduler_id.clone(),
                     created_at: Instant::now(),
                 };
-                if !self.reservations.insert(reservation_id, reservation) {
+                if !self.reservations.activate(reservation_id, reservation) {
                     ignore_missing_request(chooser.free(&scheduler_id).await)?;
-                    anyhow::bail!("prefill reservation {reservation_id:?} already exists");
+                    anyhow::bail!("prefill reservation {reservation_id:?} was cancelled");
                 }
                 Ok(PrefillQueryOutcome::Routed {
                     worker_id: worker.worker_id,
@@ -178,53 +292,28 @@ impl PrefillRouter {
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                self.reservations.remove_pending(reservation_id);
                 Ok(PrefillQueryOutcome::QueueRejected { rejection })
             }
         }
     }
 
-    /// Release a prefill reservation. Missing reservations are idempotent no-ops.
+    /// Cancel a pending prefill reservation without waiting for scheduler cleanup.
     ///
-    /// The registry entry remains present until scheduler cleanup succeeds, so a timeout or
-    /// transient router error can be retried safely.
+    /// An active reservation remains owned by the normal booking lifecycle. If cancellation
+    /// races with admission, the Go caller drains the reserve result and releases that booking.
+    pub fn cancel_prefill_reservation(&self, reservation_id: &str) {
+        if !reservation_id.is_empty() {
+            self.reservations.cancel(reservation_id);
+        }
+    }
+
+    /// Release a prefill reservation. Missing reservations are idempotent no-ops.
     pub async fn release_prefill_reservation(&self, reservation_id: &str) -> Result<()> {
-        let Some(reservation) = self.reservations.get(reservation_id) else {
+        let Some(reservation) = self.reservations.get_active(reservation_id) else {
             return Ok(());
         };
 
         ignore_missing_request(reservation.chooser.free(&reservation.scheduler_id).await)?;
         self.reservations
             .remove_if_scheduler_id(reservation_id, &reservation.scheduler_id);
-        Ok(())
-    }
-
-    pub(super) fn spawn_reservation_reaper(router: &Arc<Self>) {
-        let router: Weak<Self> = Arc::downgrade(router);
-        let cancellation = router
-            .upgrade()
-            .expect("router must be alive while starting reservation reaper")
-            .cancel_token
-            .child_token();
-
-        tokio::spawn(async move {
-            let retention = reservation_retention();
-            let mut interval = tokio::time::interval_at(
-                Instant::now() + RESERVATION_REAPER_INTERVAL,
-                RESERVATION_REAPER_INTERVAL,
-            );
-            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    _ = cancellation.cancelled() => return,
-                    _ = interval.tick() => {
-                        let Some(router) = router.upgrade() else {
-                            return;
-                        };
-                        let expired = router.reservations.expired_ids(Instant::now(), retention);
-                        for reservation_id in expired {
-                            if let Err(error) = router.release_prefill_reservation(&reservation_id).await {
-                                tracing::warn!(
-                                    %reservation_id,
-                                    %error,
-                                    "Failed to expire stale EPP prefill reservation"
