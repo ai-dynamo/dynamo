@@ -36,7 +36,6 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     podTemplate:
       spec:
         imagePullSecrets:
@@ -82,7 +81,6 @@ spec:
   - name: VllmPrefillWorker
     type: prefill
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     sharedMemorySize: 40Gi
     podTemplate:
       spec:
@@ -155,8 +153,6 @@ spec:
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --disaggregation-mode
           - prefill
-          - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}'
           env:
           - name: POD_UID
             valueFrom:
@@ -222,7 +218,6 @@ spec:
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     sharedMemorySize: 40Gi
     podTemplate:
       spec:

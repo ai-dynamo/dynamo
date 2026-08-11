@@ -18,36 +18,6 @@ data:
       "rejection_sample_method": "synthetic",
       "synthetic_acceptance_length": 3.421
     }
-  efa-entrypoint.sh: |
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    export DEBIAN_FRONTEND=noninteractive
-
-    install_efa_userspace() {
-      if [ -x /opt/amazon/efa/bin/fi_info ]; then
-        return 0
-      fi
-
-      apt-get update
-      apt-get install -y --no-install-recommends ca-certificates curl tar gzip
-      cd /tmp
-      curl -fsSL https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz -o aws-efa-installer-latest.tar.gz
-      tar -xzf aws-efa-installer-latest.tar.gz
-      cd aws-efa-installer
-      ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify || ./efa_installer.sh -y --skip-kmod --skip-limit-conf
-    }
-
-    install_efa_userspace
-
-    export PATH="/opt/amazon/efa/bin:${PATH}"
-    export LD_LIBRARY_PATH="/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-    export UCX_RCACHE_MAX_UNRELEASED="${UCX_RCACHE_MAX_UNRELEASED:-1024}"
-
-    echo "LOI_LIBFABRIC_DEBUG FI_PROVIDER=${FI_PROVIDER:-unset} NIXL_LIBFABRIC_USE_DEVICE_RDMA=${NIXL_LIBFABRIC_USE_DEVICE_RDMA:-unset} UCX_RCACHE_MAX_UNRELEASED=${UCX_RCACHE_MAX_UNRELEASED:-unset}"
-    fi_info -p efa | head -80 || true
-
-    exec "$@"
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -134,22 +104,14 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 40Gi
-        - name: efa-entrypoint
-          configMap:
-            name: vllm-disagg-h100-mtp-config
-            defaultMode: 0555
-            items:
-            - key: efa-entrypoint.sh
-              path: efa-entrypoint.sh
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/
           command:
-          - /opt/dynamo/efa/efa-entrypoint.sh
-          args:
           - python3
+          args:
           - -m
           - dynamo.vllm
           - --model
@@ -189,8 +151,6 @@ spec:
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - --disaggregation-mode
           - prefill
-          - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}'
           env:
           - name: POD_UID
             valueFrom:
@@ -217,6 +177,10 @@ spec:
             value: '1'
           - name: NIXL_LOG_LEVEL
             value: INFO
+          # Assumes AWS EFA userspace is present in the image or installed by cluster bootstrap.
+          # If EFA is unpacked under /opt/amazon/efa without ldconfig registration,
+          # add PATH and LD_LIBRARY_PATH entries for that location here.
+          # This manifest does not download or install EFA packages at pod startup.
           - name: FI_PROVIDER
             value: efa
           - name: FI_EFA_USE_DEVICE_RDMA
@@ -261,9 +225,6 @@ spec:
             mountPath: /model-cache
           - name: dshm
             mountPath: /dev/shm
-          - name: efa-entrypoint
-            mountPath: /opt/dynamo/efa
-            readOnly: true
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
@@ -294,22 +255,14 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 40Gi
-        - name: efa-entrypoint
-          configMap:
-            name: vllm-disagg-h100-mtp-config
-            defaultMode: 0555
-            items:
-            - key: efa-entrypoint.sh
-              path: efa-entrypoint.sh
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/
           command:
-          - /opt/dynamo/efa/efa-entrypoint.sh
-          args:
           - python3
+          args:
           - -m
           - dynamo.vllm
           - --model
@@ -375,6 +328,10 @@ spec:
             value: '1'
           - name: NIXL_LOG_LEVEL
             value: INFO
+          # Assumes AWS EFA userspace is present in the image or installed by cluster bootstrap.
+          # If EFA is unpacked under /opt/amazon/efa without ldconfig registration,
+          # add PATH and LD_LIBRARY_PATH entries for that location here.
+          # This manifest does not download or install EFA packages at pod startup.
           - name: FI_PROVIDER
             value: efa
           - name: FI_EFA_USE_DEVICE_RDMA
@@ -419,6 +376,3 @@ spec:
             mountPath: /model-cache
           - name: dshm
             mountPath: /dev/shm
-          - name: efa-entrypoint
-            mountPath: /opt/dynamo/efa
-            readOnly: true

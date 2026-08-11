@@ -153,8 +153,6 @@ spec:
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --disaggregation-mode
           - prefill
-          - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}'
           env:
           - name: POD_UID
             valueFrom:

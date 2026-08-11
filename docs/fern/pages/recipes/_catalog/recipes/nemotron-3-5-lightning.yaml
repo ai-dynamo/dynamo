@@ -341,6 +341,326 @@ targets:
   expected_performance:
     available: true
     summary: 1478.67 output tok/s/GPU, 123.22 tok/s/user, TTFT p50 250.66ms @ concurrency 12
+- id: vllm-disagg-b200-dspark
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dspark
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-b200-dspark/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 904.03 output tok/s/GPU, 226.01 tok/s/user, TTFT p50 236.43ms @ concurrency 8
+- id: vllm-disagg-gb200-dflash
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dflash
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-gb200-dflash/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 584.85 output tok/s/GPU, 292.43 tok/s/user, TTFT p50 491.40ms @ concurrency 4
+- id: vllm-disagg-gb200-dspark
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dspark
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-gb200-dspark/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 939.28 output tok/s/GPU, 234.82 tok/s/user, TTFT p50 599.17ms @ concurrency 8
+- id: vllm-disagg-h100-dflash
+  recommended: true
+  hardware:
+    gpu: H100
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dflash
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-h100-dflash/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1117.29 output tok/s/GPU, 186.21 tok/s/user, TTFT p50 542.71ms @ concurrency 12
+- id: vllm-disagg-h100-dspark
+  recommended: true
+  hardware:
+    gpu: H100
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dspark
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-h100-dspark/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1445.29 output tok/s/GPU, 120.44 tok/s/user, TTFT p50 2028.23ms @ concurrency 24
+- id: vllm-disagg-h100-mtp
+  recommended: true
+  hardware:
+    gpu: H100
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - mtp
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-h100-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1055.68 output tok/s/GPU, 175.95 tok/s/user, TTFT p50 493.52ms @ concurrency 12
+- id: vllm-disagg-h200-dflash
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dflash
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-h200-dflash/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1277.86 output tok/s/GPU, 212.98 tok/s/user, TTFT p50 408.30ms @ concurrency 12
+- id: vllm-disagg-h200-dspark
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - dspark
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-h200-dspark/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1656.90 output tok/s/GPU, 138.08 tok/s/user, TTFT p50 834.80ms @ concurrency 24
+- id: vllm-disagg-h200-mtp
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 2
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - speculative-decoding
+  - mtp
+  - prefix-caching
+  - nixl
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/vllm/disagg-h200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1203.97 output tok/s/GPU, 200.66 tok/s/user, TTFT p50 424.66ms @ concurrency 12
+- id: trtllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 1
+  runtime:
+    framework: TensorRT-LLM
+  topology: aggregated
+  techniques:
+  - tensorrt-llm
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/trtllm/agg-b200/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 386.998 output tok/s/GPU, 21.50 tok/s/user, TTFT p50 377.68ms @ concurrency 18; experimental smoke result
+- id: trtllm-agg-b200-mtp
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 1
+  runtime:
+    framework: TensorRT-LLM
+  topology: aggregated
+  techniques:
+  - tensorrt-llm
+  - speculative-decoding
+  - mtp
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/trtllm/agg-b200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 427.82 output tok/s/GPU, 23.77 tok/s/user, TTFT p50 446.88ms @ concurrency 18; experimental smoke result
+- id: trtllm-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 1
+  runtime:
+    framework: TensorRT-LLM
+  topology: aggregated
+  techniques:
+  - tensorrt-llm
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/trtllm/agg-gb200/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 280.10 output tok/s/GPU, 15.56 tok/s/user, TTFT p50 318.88ms @ concurrency 18; experimental smoke result
+- id: trtllm-agg-gb200-mtp
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 1
+  runtime:
+    framework: TensorRT-LLM
+  topology: aggregated
+  techniques:
+  - tensorrt-llm
+  - speculative-decoding
+  - mtp
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/trtllm/agg-gb200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 580.09 output tok/s/GPU, 32.23 tok/s/user, TTFT p50 400.88ms @ concurrency 18; experimental smoke result
+- id: trtllm-agg-h100-mtp
+  recommended: false
+  hardware:
+    gpu: H100
+    count: 1
+  runtime:
+    framework: TensorRT-LLM
+  topology: aggregated
+  techniques:
+  - tensorrt-llm
+  - speculative-decoding
+  - mtp
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/trtllm/agg-h100-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 264.87 output tok/s/GPU, 22.07 tok/s/user, TTFT p50 1757.00ms @ concurrency 12; experimental smoke result
+- id: trtllm-agg-h200-mtp
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 1
+  runtime:
+    framework: TensorRT-LLM
+  topology: aggregated
+  techniques:
+  - tensorrt-llm
+  - speculative-decoding
+  - mtp
+  workload:
+    type: agentic
+    traffic: 64K/400 Mooncake-format agentic trace, 90% KV reuse
+    sla: TTFT p50 < 5000ms and >= 50 tok/s/user
+  deploy:
+    asset: recipes/nemotron-3.5-lightning/trtllm/agg-h200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 269.26 output tok/s/GPU, 22.44 tok/s/user, TTFT p50 1630.96ms @ concurrency 12; experimental smoke result
 related_benchmarks: []
 maintainer: null
 gaps:
