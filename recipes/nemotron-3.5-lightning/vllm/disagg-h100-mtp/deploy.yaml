@@ -178,13 +178,11 @@ spec:
           - name: NIXL_LOG_LEVEL
             value: INFO
           # Assumes AWS EFA userspace is present in the image or installed by cluster bootstrap.
+          # If EFA is unpacked under /opt/amazon/efa without ldconfig registration,
+          # add PATH and LD_LIBRARY_PATH entries for that location here.
           # This manifest does not download or install EFA packages at pod startup.
           - name: FI_PROVIDER
             value: efa
-          - name: PATH
-            value: /opt/amazon/efa/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-          - name: LD_LIBRARY_PATH
-            value: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/lib/x86_64-linux-gnu
           - name: FI_EFA_USE_DEVICE_RDMA
             value: '1'
           - name: FI_EFA_FORK_SAFE
@@ -331,13 +329,11 @@ spec:
           - name: NIXL_LOG_LEVEL
             value: INFO
           # Assumes AWS EFA userspace is present in the image or installed by cluster bootstrap.
+          # If EFA is unpacked under /opt/amazon/efa without ldconfig registration,
+          # add PATH and LD_LIBRARY_PATH entries for that location here.
           # This manifest does not download or install EFA packages at pod startup.
           - name: FI_PROVIDER
             value: efa
-          - name: PATH
-            value: /opt/amazon/efa/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-          - name: LD_LIBRARY_PATH
-            value: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/lib/x86_64-linux-gnu
           - name: FI_EFA_USE_DEVICE_RDMA
             value: '1'
           - name: FI_EFA_FORK_SAFE
