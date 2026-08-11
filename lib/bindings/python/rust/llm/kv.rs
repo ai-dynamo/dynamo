@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dashmap::{DashMap, mapref::entry::Entry};
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -39,25 +38,17 @@ use dynamo_kv_router::services::selection::{
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
-use rs::pipeline::{
-    ManyOut, PushRouter as RsPolicyPushRouter, RoutingReservation, ServiceEngine, SingleIn,
-};
+use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
-use llm_rs::kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer};
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
-
-type RsPreprocessedRequest = llm_rs::protocols::common::preprocessor::PreprocessedRequest;
-type RsLlmResponse = RsAnnotated<llm_rs::protocols::common::llm_backend::LLMEngineOutput>;
-type RsRouterEngine = ServiceEngine<SingleIn<RsPreprocessedRequest>, ManyOut<RsLlmResponse>>;
-type RsSharedPushRouter = RsPolicyPushRouter<RsPreprocessedRequest, RsLlmResponse>;
 
 mod demand_driven;
 
@@ -1736,168 +1727,7 @@ async fn create_kv_router_from_endpoint(
 
 #[pyclass]
 pub(crate) struct KvRouter {
-    inner: RouterInner,
-}
-
-enum RouterInner {
-    Kv(Arc<RsKvPushRouter>),
-    Shared(Arc<SharedRouterInner>),
-}
-
-struct SharedRouterInner {
-    engine: Arc<llm_rs::session_affinity::SessionAffinityPushRouter>,
-    router: RsSharedPushRouter,
-    mode: rs::pipeline::RouterMode,
-    reservations: Arc<DashMap<String, SharedReservationSlot>>,
-}
-
-enum SharedReservationSlot {
-    Pending { marker: Arc<()> },
-    Active { _reservation: RoutingReservation },
-}
-
-struct PendingReservationGuard {
-    reservations: Arc<DashMap<String, SharedReservationSlot>>,
-    request_id: String,
-    marker: Arc<()>,
-    armed: bool,
-}
-
-impl PendingReservationGuard {
-    fn insert(
-        reservations: Arc<DashMap<String, SharedReservationSlot>>,
-        request_id: String,
-    ) -> Result<Self, String> {
-        let marker = Arc::new(());
-        match reservations.entry(request_id.clone()) {
-            Entry::Vacant(entry) => {
-                entry.insert(SharedReservationSlot::Pending {
-                    marker: marker.clone(),
-                });
-            }
-            Entry::Occupied(_) => {
-                return Err(format!(
-                    "request_id {request_id:?} already has an active routing reservation"
-                ));
-            }
-        }
-
-        Ok(Self {
-            reservations,
-            request_id,
-            marker,
-            armed: true,
-        })
-    }
-
-    fn commit(
-        mut self,
-        reservation: RoutingReservation,
-    ) -> Result<rs::pipeline::RouteTarget, String> {
-        let target = reservation.target();
-        let Some(mut slot) = self.reservations.get_mut(&self.request_id) else {
-            return Err(format!(
-                "routing reservation {:?} was released before selection completed",
-                self.request_id
-            ));
-        };
-        let owns_slot = matches!(
-            slot.value(),
-            SharedReservationSlot::Pending { marker } if Arc::ptr_eq(marker, &self.marker)
-        );
-        if !owns_slot {
-            return Err(format!(
-                "routing reservation {:?} was replaced before selection completed",
-                self.request_id
-            ));
-        }
-
-        *slot = SharedReservationSlot::Active {
-            _reservation: reservation,
-        };
-        self.armed = false;
-        Ok(target)
-    }
-}
-
-impl Drop for PendingReservationGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-
-        let Entry::Occupied(entry) = self.reservations.entry(self.request_id.clone()) else {
-            return;
-        };
-        let owns_slot = matches!(
-            entry.get(),
-            SharedReservationSlot::Pending { marker } if Arc::ptr_eq(marker, &self.marker)
-        );
-        if owns_slot {
-            entry.remove();
-        }
-    }
-}
-
-#[cfg(test)]
-mod pending_reservation_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn cancellation_releases_pending_request_id_for_reuse() {
-        let reservations = Arc::new(DashMap::new());
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-
-        {
-            let pending_reservations = reservations.clone();
-            let pending = async move {
-                let _guard = PendingReservationGuard::insert(
-                    pending_reservations,
-                    "cancelled-request".to_string(),
-                )
-                .unwrap();
-                started_tx.send(()).unwrap();
-                std::future::pending::<()>().await;
-            };
-            tokio::pin!(pending);
-            tokio::select! {
-                _ = &mut pending => panic!("pending reservation unexpectedly completed"),
-                started = started_rx => started.unwrap(),
-            }
-            assert!(reservations.contains_key("cancelled-request"));
-        }
-
-        assert!(!reservations.contains_key("cancelled-request"));
-        let reused =
-            PendingReservationGuard::insert(reservations.clone(), "cancelled-request".to_string())
-                .unwrap();
-        drop(reused);
-        assert!(!reservations.contains_key("cancelled-request"));
-    }
-
-    #[test]
-    fn stale_guard_does_not_remove_reused_request_id() {
-        let reservations = Arc::new(DashMap::new());
-        let stale =
-            PendingReservationGuard::insert(reservations.clone(), "reused-request".to_string())
-                .unwrap();
-        reservations.remove("reused-request");
-        let replacement =
-            PendingReservationGuard::insert(reservations.clone(), "reused-request".to_string())
-                .unwrap();
-
-        drop(stale);
-        let slot = reservations.get("reused-request").unwrap();
-        assert!(matches!(
-            slot.value(),
-            SharedReservationSlot::Pending { marker }
-                if Arc::ptr_eq(marker, &replacement.marker)
-        ));
-        drop(slot);
-
-        drop(replacement);
-        assert!(!reservations.contains_key("reused-request"));
-    }
+    inner: Arc<RsKvPushRouter>,
 }
 
 /// Attach worker_id info from the tracker to `routing_data` so it survives the
@@ -1928,36 +1758,11 @@ fn inject_timing_from_tracker(
 
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvRouter {
-    fn engine(&self) -> RsRouterEngine {
-        match &self.inner {
-            RouterInner::Kv(router) => router.clone(),
-            RouterInner::Shared(inner) => inner.engine.clone(),
-        }
-    }
-
-    fn kv_router(&self, operation: &str) -> PyResult<Arc<RsKvPushRouter>> {
-        match &self.inner {
-            RouterInner::Kv(router) => Ok(router.clone()),
-            RouterInner::Shared(_) => Err(PyValueError::new_err(format!(
-                "{operation} is only available in KV routing mode"
-            ))),
-        }
-    }
-
-    fn shared_router(&self, operation: &str) -> PyResult<&SharedRouterInner> {
-        match &self.inner {
-            RouterInner::Shared(inner) => Ok(inner.as_ref()),
-            RouterInner::Kv(_) => Err(PyValueError::new_err(format!(
-                "{operation} uses the KV scheduler in KV routing mode"
-            ))),
-        }
-    }
-
     /// Helper method to process a request and create a Python async generator
     fn process_request_to_stream<'p>(
         py: Python<'p>,
-        inner: RsRouterEngine,
-        request: RsPreprocessedRequest,
+        inner: Arc<RsKvPushRouter>,
+        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2030,8 +1835,8 @@ impl KvRouter {
 
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
-        inner: RsRouterEngine,
-        request: RsPreprocessedRequest,
+        inner: Arc<RsKvPushRouter>,
+        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2048,76 +1853,33 @@ impl KvRouter {
 
 #[pymethods]
 impl KvRouter {
-    /// Create a router for KV-aware or shared worker-picker routing.
+    /// Create a new KvRouter for KV-aware routing to workers.
     ///
     /// # Arguments
     /// * `endpoint` - The endpoint to route requests to
-    /// * `block_size` - KV cache block size; required only in KV mode
-    /// * `kv_router_config` - KV router configuration; required only in KV mode
+    /// * `block_size` - KV cache block size for routing decisions
+    /// * `kv_router_config` - Configuration for the KV router
     ///
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size=None, kv_router_config=None, aic_perf_config=None, session_affinity_ttl_secs=None, *, router_mode=RouterMode::KV, enable_multimodal_cache_indexer=false))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
         endpoint: &Endpoint,
-        block_size: Option<usize>,
-        kv_router_config: Option<&super::entrypoint::KvRouterConfig>,
+        block_size: usize,
+        kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
-        router_mode: RouterMode,
-        enable_multimodal_cache_indexer: bool,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
-        let is_kv = router_mode == RouterMode::KV;
-        if is_kv {
-            if block_size.is_none() {
-                return Err(PyValueError::new_err(
-                    "block_size is required in KV routing mode",
-                ));
-            }
-            if kv_router_config.is_none() {
-                return Err(PyValueError::new_err(
-                    "kv_router_config is required in KV routing mode",
-                ));
-            }
-            if enable_multimodal_cache_indexer {
-                return Err(PyValueError::new_err(
-                    "enable_multimodal_cache_indexer is only valid for DeviceAwareWeighted routing",
-                ));
-            }
-        } else {
-            if block_size.is_some() {
-                return Err(PyValueError::new_err(
-                    "block_size is only valid in KV routing mode",
-                ));
-            }
-            if kv_router_config.is_some() {
-                return Err(PyValueError::new_err(
-                    "kv_router_config is only valid in KV routing mode",
-                ));
-            }
-            if aic_perf_config.is_some() {
-                return Err(PyValueError::new_err(
-                    "aic_perf_config is only valid in KV routing mode",
-                ));
-            }
-            if enable_multimodal_cache_indexer && router_mode != RouterMode::DeviceAwareWeighted {
-                return Err(PyValueError::new_err(
-                    "enable_multimodal_cache_indexer is only valid for DeviceAwareWeighted routing",
-                ));
-            }
-        }
-
-        if let Some(config) = kv_router_config
-            && let Some(instance) = config
-                .inner()
-                .selected_worker_selection_policy_instance()
-                .map_err(to_pyerr)?
+        if let Some(instance) = kv_router_config
+            .inner()
+            .selected_worker_selection_policy_instance()
+            .map_err(to_pyerr)?
         {
             return Err(PyValueError::new_err(format!(
                 "worker-selection instance {instance:?} is configured, but python -m dynamo.router does not support linked worker-selection policies; use python -m dynamo.frontend or a custom EPP binary"
@@ -2148,71 +1910,42 @@ impl KvRouter {
             })
             .transpose()
             .map_err(to_pyerr)?;
-        let rs_router_mode: rs::pipeline::RouterMode = router_mode.into();
 
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
             let client = endpoint.inner.client().await.map_err(to_pyerr)?;
-            if rs_router_mode == rs::pipeline::RouterMode::KV {
-                let push_router =
-                    RsSharedPushRouter::from_client(client, rs::pipeline::RouterMode::KV)
-                        .await
-                        .map_err(to_pyerr)?;
-                let kv_router = create_kv_router_from_endpoint(
-                    endpoint,
-                    block_size.expect("validated KV block size"),
-                    Some(
-                        kv_router_config
-                            .expect("validated KV router config")
-                            .inner(),
-                    ),
-                    prefill_load_estimator,
-                )
-                .await?;
-                let kv_push_router = RsKvPushRouter::new(
-                    push_router,
-                    kv_router,
-                    session_affinity_ttl_secs.map(Duration::from_secs),
-                )
-                .map_err(to_pyerr)?;
-                return Ok(Self {
-                    inner: RouterInner::Kv(Arc::new(kv_push_router)),
-                });
-            }
 
-            let cache_indexer = if enable_multimodal_cache_indexer {
-                try_build_cache_indexer(&endpoint.inner).await
-            } else {
-                None
-            };
-            let cache_key_extractor = cache_indexer.as_ref().map(|_| {
-                Arc::new(preprocessed_multimodal_cache_keys)
-                    as rs::pipeline::MultimodalCacheKeyExtractor<RsPreprocessedRequest>
-            });
-            let push_router = RsSharedPushRouter::from_client_with_state(
+            // Create PushRouter with KV router mode
+            let push_router = rs::pipeline::PushRouter::<
+                llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                rs::protocols::annotated::Annotated<
+                    llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                >,
+            >::from_client(
                 client,
-                rs_router_mode,
-                None,
-                cache_indexer,
-                cache_key_extractor,
+                rs::pipeline::network::egress::push_router::RouterMode::KV,
             )
             .await
             .map_err(to_pyerr)?;
-            let router = push_router.clone();
-            let engine = llm_rs::session_affinity::SessionAffinityPushRouter::new(
+
+            // Create KvRouter using helper function (ensures etcd registration)
+            let kv_router = create_kv_router_from_endpoint(
+                endpoint,
+                block_size,
+                Some(kv_router_config.inner()),
+                prefill_load_estimator,
+            )
+            .await?;
+
+            let kv_push_router = RsKvPushRouter::new(
                 push_router,
+                kv_router,
                 session_affinity_ttl_secs.map(Duration::from_secs),
-                rs_router_mode.is_direct_routing(),
             )
             .map_err(to_pyerr)?;
 
             Ok(Self {
-                inner: RouterInner::Shared(Arc::new(SharedRouterInner {
-                    engine: Arc::new(engine),
-                    router,
-                    mode: rs_router_mode,
-                    reservations: Arc::new(DashMap::new()),
-                })),
+                inner: Arc::new(kv_push_router),
             })
         })
     }
@@ -2328,7 +2061,7 @@ impl KvRouter {
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
             py,
-            self.engine(),
+            self.inner.clone(),
             request,
             Some(tracker),
             response_buffer_size,
@@ -2360,7 +2093,7 @@ impl KvRouter {
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
             py,
-            self.engine(),
+            self.inner.clone(),
             request,
             Some(tracker),
             response_buffer_size,
@@ -2368,7 +2101,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None, cache_namespace=None, multi_modal_data=None, mm_routing_info=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None, cache_namespace=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -2382,157 +2115,79 @@ impl KvRouter {
         strict_priority: u32,
         policy_class: Option<String>,
         cache_namespace: Option<String>,
-        multi_modal_data: Option<PyObject>,
-        mm_routing_info: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
 
-        if let RouterInner::Kv(inner) = &self.inner {
-            if multi_modal_data.is_some() || mm_routing_info.is_some() {
-                return Err(PyValueError::new_err(
-                    "multi_modal_data and mm_routing_info are only used by shared device-aware selection; use block_mm_infos for KV routing",
-                ));
-            }
-            let router_config_override = if let Some(obj) = router_config_override {
-                let override_config: RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Some(override_config)
-            } else {
-                None
-            };
-            let chooser = inner.chooser.clone();
-            let update_states = request_id.is_some();
-
-            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                let outcome = chooser
-                    .find_best_match_details_with_policy_class(
-                        request_id.as_deref(),
-                        &token_ids,
-                        block_mm_infos.as_deref(),
-                        router_config_override.as_ref(),
-                        update_states,
-                        false,
-                        lora_name.clone(),
-                        cache_namespace.clone(),
-                        0.0,
-                        strict_priority,
-                        policy_class,
-                        None,
-                        None,
-                        None,
-                        None,
-                        routing_constraints.map(Into::into).unwrap_or_default(),
-                    )
-                    .await
-                    .map_err(to_pyerr)?;
-                let (best_worker, overlap_blocks) = match outcome {
-                    llm_rs::kv_router::FindBestMatchOutcome::Routed {
-                        worker,
-                        overlap_blocks,
-                        ..
-                    } => (worker, overlap_blocks),
-                    llm_rs::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                        return Err(crate::errors::queue_rejection_to_pyerr(rejection));
-                    }
-                };
-
-                if update_indexer {
-                    let cfg = chooser.kv_router_config();
-                    if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
-                        let mut tokens_with_hashes =
-                            TokensWithHashes::new(token_ids.clone(), chooser.block_size())
-                                .with_is_eagle(chooser.is_eagle());
-                        if let Some(infos) = block_mm_infos.as_ref() {
-                            tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
-                        }
-                        if let Some(lora_name) = lora_name.as_ref() {
-                            tokens_with_hashes =
-                                tokens_with_hashes.with_lora_name(lora_name.clone());
-                        }
-                        if let Some(cache_namespace) = cache_namespace.as_ref() {
-                            tokens_with_hashes =
-                                tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
-                        }
-                        chooser
-                            .record_routing_decision(tokens_with_hashes, best_worker)
-                            .await
-                            .map_err(to_pyerr)?;
-                    }
-                }
-
-                Ok((
-                    best_worker.worker_id,
-                    Some(best_worker.dp_rank),
-                    overlap_blocks,
-                ))
-            });
-        }
-
-        if router_config_override.is_some()
-            || update_indexer
-            || lora_name.is_some()
-            || routing_constraints.is_some()
-            || strict_priority != 0
-            || policy_class.is_some()
-            || cache_namespace.is_some()
-        {
-            return Err(PyValueError::new_err(
-                "KV-specific best_worker options are not supported outside KV routing mode",
-            ));
-        }
-
-        let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
-            multi_modal_data
-                .map(|obj| depythonize(obj.bind(py)).map_err(to_pyerr))
-                .transpose()?;
-        let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
-            if let Some(obj) = mm_routing_info {
-                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-            } else {
-                block_mm_infos.map(
-                    |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
-                        routing_token_ids: token_ids.clone(),
-                        block_mm_infos: infos,
-                        expanded_prompt_len: token_ids.len(),
-                    },
-                )
-            };
-
-        let request = RsPreprocessedRequest::builder()
-            .model(String::new())
-            .token_ids(token_ids)
-            .stop_conditions(StopConditions::default())
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .multi_modal_data(multi_modal_data)
-            .mm_routing_info(mm_routing_info)
-            .build()
-            .map_err(to_pyerr)?;
-        let shared = self.shared_router("best_worker")?;
-        if shared.mode == rs::pipeline::RouterMode::Direct {
-            return Err(PyValueError::new_err(
-                "Direct best_worker requires an explicit worker target and cannot select one advisory",
-            ));
-        }
-        let router = shared.router.clone();
-        let reservations = shared.reservations.clone();
+        let chooser = self.inner.chooser.clone();
+        let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let Some(request_id) = request_id else {
-                let target = router.peek_target(&request).map_err(to_pyerr)?;
-                return Ok((target.worker_id, target.dp_rank, 0usize));
-            };
-
-            let pending = PendingReservationGuard::insert(reservations, request_id)
-                .map_err(PyValueError::new_err)?;
-            let reservation = router
-                .reserve_target(&request, None)
+            let outcome = chooser
+                .find_best_match_details_with_policy_class(
+                    request_id.as_deref(),
+                    &token_ids,
+                    block_mm_infos.as_deref(),
+                    router_config_override.as_ref(),
+                    update_states,
+                    false,
+                    lora_name.clone(),
+                    cache_namespace.clone(),
+                    0.0,
+                    strict_priority,
+                    policy_class,
+                    None,
+                    None,
+                    None,
+                    None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
+                    routing_constraints.map(Into::into).unwrap_or_default(),
+                )
                 .await
                 .map_err(to_pyerr)?;
-            let target = pending.commit(reservation).map_err(PyValueError::new_err)?;
-            Ok((target.worker_id, target.dp_rank, 0usize))
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    ..
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                    return Err(crate::errors::queue_rejection_to_pyerr(rejection));
+                }
+            };
+
+            if update_indexer {
+                let cfg = chooser.kv_router_config();
+                if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
+                    let mut tokens_with_hashes =
+                        TokensWithHashes::new(token_ids.clone(), chooser.block_size())
+                            .with_is_eagle(chooser.is_eagle());
+                    if let Some(infos) = block_mm_infos.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+                    }
+                    if let Some(lora_name) = lora_name.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    if let Some(cache_namespace) = cache_namespace.as_ref() {
+                        tokens_with_hashes =
+                            tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
+                    }
+                    chooser
+                        .record_routing_decision(tokens_with_hashes, best_worker)
+                        .await
+                        .map_err(to_pyerr)?;
+                }
+            }
+
+            Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
         })
     }
 
@@ -2542,41 +2197,25 @@ impl KvRouter {
         py: Python<'p>,
         request_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
-        match &self.inner {
-            RouterInner::Kv(inner) => {
-                let chooser = inner.chooser.clone();
-                pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                    chooser
-                        .mark_prefill_completed(&request_id)
-                        .await
-                        .map_err(to_pyerr)?;
-                    Ok(())
-                })
-            }
-            RouterInner::Shared(_) => {
-                pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
-            }
-        }
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            chooser
+                .mark_prefill_completed(&request_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
     }
 
     /// Free a request by its ID, signaling the router to release resources
     fn free<'p>(&self, py: Python<'p>, request_id: String) -> PyResult<Bound<'p, PyAny>> {
-        match &self.inner {
-            RouterInner::Kv(inner) => {
-                let chooser = inner.chooser.clone();
-                pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                    chooser.free(&request_id).await.map_err(to_pyerr)?;
-                    Ok(())
-                })
-            }
-            RouterInner::Shared(inner) => {
-                let reservations = inner.reservations.clone();
-                pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                    reservations.remove(&request_id);
-                    Ok(())
-                })
-            }
-        }
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            chooser.free(&request_id).await.map_err(to_pyerr)?;
+            Ok(())
+        })
     }
 
     #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None, cache_namespace=None))]
@@ -2591,7 +2230,7 @@ impl KvRouter {
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
-        let chooser = self.kv_router("get_potential_loads")?.chooser.clone();
+        let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
@@ -2637,7 +2276,7 @@ impl KvRouter {
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
-        let chooser = self.kv_router("get_overlap_scores")?.chooser.clone();
+        let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let scores = chooser
@@ -2662,7 +2301,7 @@ impl KvRouter {
 
     /// Dump all events from the KV router's indexer as a JSON string
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let chooser = self.kv_router("dump_events")?.chooser.clone();
+        let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let events = chooser.dump_events().await.map_err(to_pyerr)?;

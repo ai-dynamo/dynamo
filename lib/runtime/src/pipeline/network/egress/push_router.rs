@@ -130,25 +130,6 @@ impl Drop for OccupancyPermit {
     }
 }
 
-/// A committed worker selection and its optional runtime-owned occupancy lease.
-///
-/// Dropping the reservation releases exactly the counter generation acquired by
-/// this selection, even if discovery removes and later re-adds the same worker ID.
-pub struct RoutingReservation {
-    target: RouteTarget,
-    _permit: Option<OccupancyPermit>,
-}
-
-impl RoutingReservation {
-    pub const fn target(&self) -> RouteTarget {
-        self.target
-    }
-
-    pub fn has_occupancy(&self) -> bool {
-        self._permit.is_some()
-    }
-}
-
 /// Trait for monitoring worker load and determining overload state.
 /// Implementations can define custom load metrics and overload thresholds.
 #[async_trait]
@@ -1304,45 +1285,6 @@ where
         }
     }
 
-    /// Peek a request-aware target without mutating picker or admission state.
-    pub fn peek_target(&self, request: &T) -> anyhow::Result<RouteTarget> {
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids();
-        if instance_ids.is_empty() {
-            return Err(self.empty_free_pool_error(&routing_instances));
-        }
-
-        let decision = match self.router_mode {
-            RouterMode::RoundRobin | RouterMode::Random => self.picker()?.peek(
-                CandidateView::Workers(instance_ids),
-                RouteContext::default(),
-                |_| 0,
-            ),
-            RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => {
-                self.occupancy_state()?.peek(
-                    self.picker()?,
-                    CandidateView::Workers(instance_ids),
-                    RouteContext::default(),
-                )
-            }
-            RouterMode::DeviceAwareWeighted => {
-                let state = self.occupancy_state()?;
-                let selection = self.device_aware_candidates(request, instance_ids);
-                state.peek(
-                    self.picker()?,
-                    CandidateView::DeviceAware(&selection.candidates),
-                    selection.context,
-                )
-            }
-            RouterMode::Direct => {
-                anyhow::bail!("Direct routing requires an explicit worker target")
-            }
-            RouterMode::KV => anyhow::bail!("KV routing selects through the KV scheduler"),
-        }
-        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        Ok(decision.target)
-    }
-
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn occupancy_for_test(&self, worker_id: u64) -> u64 {
@@ -1350,20 +1292,6 @@ where
             .as_deref()
             .map(|state| state.load(worker_id))
             .unwrap_or(0)
-    }
-
-    /// Commit a request-aware target and retain any occupancy lease until the
-    /// returned reservation is dropped.
-    pub async fn reserve_target(
-        &self,
-        request: &T,
-        pinned_worker: Option<u64>,
-    ) -> anyhow::Result<RoutingReservation> {
-        let (instance_id, permit) = self.select_exact_target(request, pinned_worker).await?;
-        Ok(RoutingReservation {
-            target: RouteTarget::worker(instance_id),
-            _permit: permit,
-        })
     }
 
     async fn select_exact_target(

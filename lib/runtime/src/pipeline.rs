@@ -19,8 +19,7 @@ pub use network::egress::addressed_router::{
     AddressedPushRouter, AddressedRequest, StreamingDispatch,
 };
 pub use network::egress::push_router::{
-    MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, RouterMode, RoutingReservation,
-    WorkerLoadMonitor,
+    MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, RouterMode, WorkerLoadMonitor,
 };
 pub mod registry;
 

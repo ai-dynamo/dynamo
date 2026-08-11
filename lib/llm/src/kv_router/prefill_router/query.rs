@@ -301,12 +301,20 @@ mod tests {
             .unwrap();
         let shared = Arc::new(SessionAffinityPushRouter::new(push_router, None, false).unwrap());
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
-        prefill
-            .prefill_router
-            .set(InnerPrefillRouter::SimpleRouter(shared.clone()))
-            .ok()
-            .expect("install test router");
-        prefill.mark_active_for_test();
+        prefill.binding.store(Some(Arc::new(
+            crate::kv_router::prefill_router::PrefillBinding {
+                endpoint_id: dynamo_runtime::protocols::EndpointId {
+                    namespace: namespace.to_string(),
+                    component: component.to_string(),
+                    name: endpoint_name.to_string(),
+                },
+                router: InnerPrefillRouter::SimpleRouter(shared.clone()),
+            },
+        )));
+        prefill.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
         worker_runtimes.push(router_runtime);
         (shared, prefill, worker_runtimes, workers)
     }
