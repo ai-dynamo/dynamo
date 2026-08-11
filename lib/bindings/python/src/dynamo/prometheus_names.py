@@ -397,6 +397,10 @@ class router:
     OVERLAP_BLOCKS_LOST = "router_overlap_blocks_lost"
     # Whether the router currently has a worker/dp_rank registered (1 = registered)
     WORKER_REGISTERED = "router_worker_registered"
+    # Total number of requests cancelled before admission while in or waiting for the router queue
+    QUEUE_CANCELLED_REQUESTS_TOTAL = "router_queue_cancelled_requests_total"
+    # Total number of requests force-expired by router sequence bookkeeping
+    FORCE_EXPIRED_REQUESTS_TOTAL = "router_force_expired_requests_total"
 
 
 class router_request:
