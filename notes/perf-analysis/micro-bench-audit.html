@@ -31,6 +31,8 @@ SPDX-License-Identifier: Apache-2.0
   h1{font-size:25px;margin:0 0 6px;letter-spacing:-.01em}
   .sub{color:var(--muted);font-size:13px;margin:0 0 6px}
   .stamp{color:var(--muted);font-size:11.5px;margin:0 0 26px}
+  .stamp a{color:var(--ink2);text-decoration:underline;text-underline-offset:2px}
+  .stamp a:hover{color:var(--ink)}
   section{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:22px 24px;margin-bottom:20px}
   h2{font-size:16px;margin:0 0 10px}
   .lede{color:var(--ink2);margin:0 0 14px;max-width:78ch}
@@ -88,6 +90,7 @@ SPDX-License-Identifier: Apache-2.0
   <h1>Micro benches vs. the benchmarking procedure</h1>
   <p class="sub">Each bench audited against <code>benchmarking-procedure.md</code>. One tab per bench.</p>
   <p class="stamp">Verified against origin/main @ cd6b63b0cc · working draft, not published guidance</p>
+  <p class="stamp" style="margin-top:-18px">Tier 3 of the three-tier map in <a href="benchmark-coverage-report.html">benchmark-coverage-report.html</a>. The rubric comes from <a href="benchmarking-procedure.md">benchmarking-procedure.md</a>; the argument for why a micro tier exists at all is in <a href="layered-benchmarking.md">layered-benchmarking.md</a>.</p>
 
   <section>
     <h2>The rubric</h2>
@@ -103,7 +106,7 @@ SPDX-License-Identifier: Apache-2.0
         <tr><td><b>Analysis systematized?</b></td><td>§5</td><td>Programmatic → procedural → agent-runnable</td></tr>
       </tbody>
     </table>
-    <div class="note"><b>Two corrections found while auditing.</b> <code>kv_router_bench.rs</code> is <b>not dead and not a micro bench</b> — it is a 1,749-line KV-router stress harness with its own CLI, gated behind <code>kv-router-stress</code>. An earlier note called it dead weight and proposed deleting it; that was wrong, and came from grepping for <code>bench_function</code> in a file that never used criterion. And <b>only 6 of 10 run in default CI</b> — four are feature-gated, so "all ten execute on every PR" was too broad.</div>
+    <div class="note"><b>Two corrections found while auditing.</b> <code>kv_router_bench.rs</code> is <b>not dead and not a micro bench</b> — it is a 1,749-line KV-router stress harness with its own CLI, gated behind <code>kv-router-stress</code>. An earlier note called it dead weight and proposed deleting it; that was wrong, and came from grepping for <code>bench_function</code> in a file that never used criterion. And <b>only 6 of 10 run in default CI</b> — four are feature-gated, so "all ten execute on every PR" was too broad. Both corrections have been applied back to <a href="benchmark-coverage-report.html">benchmark-coverage-report.html</a>, which originally carried them.</div>
   </section>
 
   <section>
