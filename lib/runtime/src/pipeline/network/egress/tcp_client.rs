@@ -1159,14 +1159,11 @@ impl HostPool {
             }
         }
 
-        Err(cannot_connect_error(
+        anyhow::bail!(
+            "No healthy TCP connection to {} after {} connect retries",
             self.addr,
-            anyhow::anyhow!(
-                "No healthy TCP connection to {} after {} connect retries",
-                self.addr,
-                MAX_CONNECT_RETRIES
-            ),
-        ))
+            MAX_CONNECT_RETRIES
+        )
     }
 }
 
