@@ -445,6 +445,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "output_replay_id annotation lookup."
         ),
     )
+    parser.add_argument(
+        "--response-catalog-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional versioned JSON catalog of strict scripted responses selected "
+            "by output_replay_id annotations."
+        ),
+    )
+    parser.add_argument(
+        "--model-output-profile",
+        type=str,
+        default=None,
+        choices=["kimi_k3", "deepseek_v4", "qwen3_5", "glm_5_2", "gpt_oss"],
+        help="Model-native tool/reasoning grammar used by the response catalog.",
+    )
 
     # Engine type selection
     parser.add_argument(

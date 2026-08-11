@@ -119,6 +119,17 @@ def _build_mocker_command(
                 str(mocker_args["response_replay_trace_path"]),
             ]
         )
+    if "response_catalog_path" in mocker_args:
+        command.extend(
+            [
+                "--response-catalog-path",
+                str(mocker_args["response_catalog_path"]),
+            ]
+        )
+    if "model_output_profile" in mocker_args:
+        command.extend(
+            ["--model-output-profile", str(mocker_args["model_output_profile"])]
+        )
 
     return command
 

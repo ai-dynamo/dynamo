@@ -311,7 +311,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
         bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
-        response_replay_trace_path=args.response_replay_trace_path,
+        response_replay_trace_path=getattr(args, "response_replay_trace_path", None),
+        response_catalog_path=getattr(args, "response_catalog_path", None),
+        model_output_profile=getattr(args, "model_output_profile", None),
         sglang=_build_sglang_args(args),
         trtllm=_build_trtllm_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),
@@ -368,6 +370,8 @@ def build_runtime_config(
     )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")
+    rc.tool_call_parser = engine_args.tool_call_parser
+    rc.reasoning_parser = engine_args.reasoning_parser
 
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:

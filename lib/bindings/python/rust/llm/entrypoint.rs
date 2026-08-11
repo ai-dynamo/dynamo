@@ -944,9 +944,19 @@ async fn select_engine(
             }
 
             let endpoint = local_model.endpoint_id().clone();
+            let response_tokenizer = mocker_args
+                .response_catalog_path
+                .as_ref()
+                .map(|_| local_model.card().tokenizer())
+                .transpose()?;
 
-            let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
+            let engine = make_mocker_engine(
+                distributed_runtime.inner,
+                endpoint,
+                mocker_args,
+                response_tokenizer,
+            )
+            .await?;
 
             RsEngineConfig::InProcessTokens {
                 engine,

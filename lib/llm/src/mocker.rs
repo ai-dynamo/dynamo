@@ -8,6 +8,7 @@
 
 mod handoff;
 mod metrics;
+mod response_catalog;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -21,6 +22,7 @@ use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use crate::tokenizers::Tokenizer;
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
@@ -58,6 +60,7 @@ use self::handoff::{
     live_handoff_boundary, order_for_engine, run_destination_session,
 };
 use self::metrics::NativeMockerMetrics;
+use self::response_catalog::{CatalogFinishReason, ResponseCatalog};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -264,6 +267,7 @@ struct MockerExecutionContext {
     startup_state: watch::Sender<StartupState>,
     engine_args: MockEngineArgs,
     response_replay_table: Option<ResponseReplayTable>,
+    response_catalog: Option<ResponseCatalog>,
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
@@ -310,33 +314,61 @@ enum StartupState {
 }
 
 impl MockerExecutionContext {
+    #[cfg(test)]
     fn new(engine_args: MockEngineArgs) -> Self {
+        Self::try_new(engine_args, None).expect("valid mocker engine configuration")
+    }
+
+    fn try_new(engine_args: MockEngineArgs, tokenizer: Option<Tokenizer>) -> Result<Self> {
         let (startup_state, _) = watch::channel(StartupState::Starting);
         let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
-            .expect("mocker native metrics collectors should be valid");
+            .context("failed to create mocker native metrics collectors")?;
         let response_replay_table = engine_args
             .response_replay_trace_path
             .as_deref()
-            .map(|path| {
-                ResponseReplayTable::from_path(path).unwrap_or_else(|error| {
-                    panic!(
-                        "failed to load response replay trace {}: {error:#}",
-                        path.display()
-                    )
-                })
-            });
+            .map(ResponseReplayTable::from_path)
+            .transpose()?;
         if let Some(table) = response_replay_table.as_ref() {
             tracing::info!(
                 rows = table.rows.len(),
                 "loaded response replay token table"
             );
         }
-        Self {
+        let response_catalog = match (
+            engine_args.response_catalog_path.as_deref(),
+            engine_args.model_output_profile,
+        ) {
+            (Some(path), Some(profile)) => {
+                let tokenizer =
+                    tokenizer.context("response catalog mode requires the LocalModel tokenizer")?;
+                let catalog = ResponseCatalog::from_path(path, profile, tokenizer)?;
+                tracing::info!(
+                    path = %path.display(),
+                    profile = %profile,
+                    cases = catalog.len(),
+                    "loaded scripted response catalog"
+                );
+                Some(catalog)
+            }
+            (None, None) => None,
+            _ => {
+                bail!("response_catalog_path and model_output_profile must be configured together")
+            }
+        };
+        if response_catalog.is_some() && response_replay_table.is_some() {
+            bail!("response catalog mode cannot be combined with response replay mode");
+        }
+        if response_catalog.is_some() && engine_args.reasoning.is_some() {
+            bail!("response catalog mode cannot be combined with generic reasoning output");
+        }
+
+        Ok(Self {
             engines: OnceCell::new(),
             handoff_session_permits: OnceCell::new(),
             startup_state,
             engine_args,
             response_replay_table,
+            response_catalog,
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
@@ -347,7 +379,7 @@ impl MockerExecutionContext {
             native_metrics,
             _relay_publishers: OnceCell::new(),
             _fpm_publisher: OnceCell::new(),
-        }
+        })
     }
 
     fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
@@ -835,41 +867,99 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let replay_key = (!is_prefill)
             .then(|| request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY))
             .flatten();
-        let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
-            let Some(table) = self.response_replay_table.as_ref() else {
-                tracing::warn!(
-                    replay_key = key,
-                    "request asked for output token replay but mocker has no response replay trace"
-                );
-                return None;
-            };
-            match table.get(key) {
-                Some(tokens) => Some(tokens),
-                None => {
+        let catalog_case = if is_prefill {
+            None
+        } else if let Some(catalog) = self.response_catalog.as_ref() {
+            let key = replay_key.as_deref().ok_or_else(|| {
+                Error::msg(format!(
+                    "response catalog mode requires nvext.annotations to contain {OUTPUT_REPLAY_ID_ANNOTATION_KEY}:<case-id>"
+                ))
+            })?;
+            Some(
+                catalog
+                    .resolve(key, &request.token_ids)
+                    .map_err(|error| Error::msg(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let catalog_mode = catalog_case.is_some();
+        let legacy_output_token_ids = if catalog_mode {
+            None
+        } else {
+            replay_key.as_deref().and_then(|key| {
+                let Some(table) = self.response_replay_table.as_ref() else {
                     tracing::warn!(
                         replay_key = key,
-                        "request asked for output token replay but key was not found"
+                        "request asked for output token replay but mocker has no response replay trace"
                     );
-                    None
+                    return None;
+                };
+                match table.get(key) {
+                    Some(tokens) => Some(tokens),
+                    None => {
+                        tracing::warn!(
+                            replay_key = key,
+                            "request asked for output token replay but key was not found"
+                        );
+                        None
+                    }
                 }
+            })
+        };
+        let context_output_limit = self
+            .engine_args
+            .max_model_len
+            .map(|max_model_len| max_model_len.saturating_sub(request.token_ids.len()));
+        let (planned_output_token_ids, max_output_tokens, effective_max_output_tokens) =
+            if let Some(case) = catalog_case.as_ref() {
+                let allowed = context_output_limit
+                    .unwrap_or(usize::MAX)
+                    .min(requested_max_output_tokens)
+                    .min(case.token_ids.len());
+                (Some(case.token_ids[..allowed].to_vec()), allowed, allowed)
+            } else {
+                let max_output_tokens = legacy_output_token_ids
+                    .as_ref()
+                    .map_or(requested_max_output_tokens, Vec::len);
+                let effective_max_output_tokens = context_output_limit
+                    .map_or(max_output_tokens, |limit| max_output_tokens.min(limit));
+                (
+                    legacy_output_token_ids,
+                    max_output_tokens,
+                    effective_max_output_tokens,
+                )
+            };
+        let has_planned_output_tokens = planned_output_token_ids.is_some();
+        let catalog_finish_reason = catalog_case.as_ref().map(|case| {
+            if max_output_tokens < case.token_ids.len() {
+                CatalogFinishReason::Length
+            } else {
+                case.finish_reason
             }
         });
-        let has_planned_output_tokens = planned_output_token_ids.is_some();
-        let max_output_tokens = planned_output_token_ids
-            .as_ref()
-            .map_or(requested_max_output_tokens, Vec::len);
-        let effective_max_output_tokens =
-            self.engine_args
-                .max_model_len
-                .map_or(max_output_tokens, |max_model_len| {
-                    max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
-                });
+        let output_chunk_size = catalog_case.as_ref().map_or(1, |case| case.chunk_size);
         let native_timing = self
             .native_metrics
             .request_timing(&request.model, dp_rank, is_prefill, request_start)
             .await;
 
         let prompt_tokens_count = request.token_ids.len();
+        if catalog_mode && max_output_tokens == 0 {
+            let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
+            let async_context = ctx.context();
+            tokio::spawn(async move {
+                let mut final_output = LLMEngineOutput::length();
+                final_output.completion_usage =
+                    Some(usage_with_cached_tokens(prompt_tokens_count, 0, 0));
+                if send_response(&stream_tx, final_output, &async_context).await {
+                    native_timing.record_normal_completion();
+                }
+            });
+            let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
+            return Ok(ResponseStream::new(Box::pin(stream), ctx.context()));
+        }
+
         // Convert PreprocessedRequest to DirectRequest for scheduler
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
@@ -1029,6 +1119,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Spawn a task to handle the complex async logic
         let response_task = async move {
             let mut token_count = 0;
+            let mut pending_token_ids = Vec::with_capacity(output_chunk_size);
             let mut cached_prefix_tokens: Option<usize> = None;
             let mut source_completion_rx = source_completion_rx;
             let mut source_handoff_complete = source_completion_rx.is_none();
@@ -1124,7 +1215,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                         // Generate a token (with thinking boundaries if configured)
                         let token_id = if has_planned_output_tokens {
-                            signal.token_id.unwrap_or_else(generate_random_token)
+                            match signal.token_id {
+                                Some(token_id) => token_id,
+                                None if catalog_mode => {
+                                    let _ = send_response(
+                                        &stream_tx,
+                                        LLMEngineOutput::error(
+                                            "scripted scheduler signal was missing its planned token ID"
+                                                .to_string(),
+                                        ),
+                                        &async_context,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                None => generate_random_token(),
+                            }
                         } else if token_count == 0 && think_len > 0 {
                             reasoning.as_ref().unwrap().start_thinking_token_id
                         } else if think_len > 0 && token_count == think_len - 1 {
@@ -1133,17 +1239,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             generate_random_token()
                         };
                         token_count += 1;
+                        pending_token_ids.push(token_id);
 
-                        // The first chunk carries the admission cache truth; the
-                        // final chunk repeats cumulative totals (OpenAI convention).
-                        let output = LLMEngineOutput {
-                            token_ids: vec![token_id],
+                        let emit_chunk = signal.completed
+                            || pending_token_ids.len() >= output_chunk_size;
+                        let output = emit_chunk.then(|| LLMEngineOutput {
+                            token_ids: std::mem::take(&mut pending_token_ids),
                             disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
-                            completion_usage: signal.cached_tokens.map(|cached| {
-                                usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
-                            }),
+                            completion_usage: (!catalog_mode)
+                                .then(|| {
+                                    signal.cached_tokens.map(|cached| {
+                                        usage_with_cached_tokens(
+                                            prompt_tokens_count,
+                                            token_count,
+                                            cached,
+                                        )
+                                    })
+                                })
+                                .flatten(),
                             ..Default::default()
-                        };
+                        });
 
                         if signal.completed && token_count < effective_max_output_tokens {
                             let _ = send_response(
@@ -1158,7 +1273,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if signal.completed {
-                            if !send_response(&stream_tx, output, &async_context).await {
+                            if let Some(output) = output
+                                && !send_response(&stream_tx, output, &async_context).await
+                            {
                                 break;
                             }
                             native_timing.record_tokens(1);
@@ -1221,8 +1338,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 }
                             }
 
-                            let mut final_output = LLMEngineOutput::length();
-                            if let Some(cached) = cached_prefix_tokens {
+                            let mut final_output = match catalog_finish_reason {
+                                Some(CatalogFinishReason::Stop) => LLMEngineOutput::stop(),
+                                Some(CatalogFinishReason::Length) | None => {
+                                    LLMEngineOutput::length()
+                                }
+                            };
+                            if catalog_mode {
+                                final_output.completion_usage = Some(usage_with_cached_tokens(
+                                    prompt_tokens_count,
+                                    token_count,
+                                    cached_prefix_tokens.unwrap_or(0),
+                                ));
+                            } else if let Some(cached) = cached_prefix_tokens {
                                 final_output.completion_usage = Some(usage_with_cached_tokens(
                                     prompt_tokens_count,
                                     token_count,
@@ -1237,7 +1365,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         }
 
-                        if !send_response(&stream_tx, output, &async_context).await {
+                        if let Some(output) = output
+                            && !send_response(&stream_tx, output, &async_context).await
+                        {
                             break;
                         }
                         native_timing.record_tokens(1);
@@ -1280,9 +1410,13 @@ pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockEngineArgs,
+    tokenizer: Option<Tokenizer>,
 ) -> Result<ExecutionContext, Error> {
     tracing::info!("Creating mocker engine with config: {args:?}");
-    let engine = Arc::new(MockerExecutionContext::new(args));
+    let engine = Arc::new(
+        MockerExecutionContext::try_new(args, tokenizer)
+            .map_err(|error| Error::msg(error.to_string()))?,
+    );
     let startup_engine = Arc::clone(&engine);
     let cancel_token = distributed_runtime.primary_token();
     tokio::spawn(async move {
@@ -1323,7 +1457,7 @@ mod tests {
     use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
+    use dynamo_mocker::common::protocols::{MockEngineArgs, ModelOutputProfile, WorkerType};
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
     use std::collections::BTreeMap;
@@ -1360,6 +1494,169 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    fn catalog_engine(
+        cases: serde_json::Value,
+        max_model_len: Option<usize>,
+    ) -> MockerExecutionContext {
+        let mut catalog = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            catalog,
+            "{}",
+            serde_json::json!({"version": 1, "cases": cases})
+        )
+        .unwrap();
+        let args = MockEngineArgs::builder()
+            .response_catalog_path(Some(catalog.path().to_path_buf()))
+            .model_output_profile(Some(ModelOutputProfile::Qwen35))
+            .max_model_len(max_model_len)
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let tokenizer = Tokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))
+        .unwrap();
+        let engine = MockerExecutionContext::try_new(args, Some(tokenizer)).unwrap();
+        assert!(engine.engines.set(vec![live]).is_ok());
+        engine
+    }
+
+    fn catalog_request(
+        case_id: &str,
+        prompt_tokens: usize,
+        max_tokens: u32,
+    ) -> PreprocessedRequest {
+        let mut request = decode_request(prompt_tokens, max_tokens);
+        request.annotations = vec![format!("{OUTPUT_REPLAY_ID_ANNOTATION_KEY}:{case_id}")];
+        request
+    }
+
+    async fn collect_outputs(
+        engine: &MockerExecutionContext,
+        request: PreprocessedRequest,
+    ) -> Vec<LLMEngineOutput> {
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let mut outputs = Vec::new();
+        while let Some(output) = stream.next().await {
+            outputs.push(output.data.unwrap());
+        }
+        outputs
+    }
+
+    #[tokio::test]
+    async fn response_catalog_coalesces_chunks_and_emits_one_configured_terminal() {
+        let engine = catalog_engine(
+            serde_json::json!([
+                {
+                    "id": "stop",
+                    "output_token_ids": [101, 102, 103, 104, 105],
+                    "chunk_size": 2
+                },
+                {
+                    "id": "configured-length",
+                    "output_token_ids": [201],
+                    "finish_reason": "length"
+                }
+            ]),
+            None,
+        );
+
+        let outputs = collect_outputs(&engine, catalog_request("stop", 3, 10)).await;
+        assert_eq!(
+            outputs
+                .iter()
+                .filter(|output| !output.token_ids.is_empty())
+                .map(|output| output.token_ids.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![101, 102], vec![103, 104], vec![105]]
+        );
+        assert!(
+            outputs[..outputs.len() - 1]
+                .iter()
+                .all(|output| output.finish_reason.is_none() && output.completion_usage.is_none())
+        );
+        let terminal = outputs.last().unwrap();
+        assert_eq!(
+            terminal.finish_reason,
+            LLMEngineOutput::stop().finish_reason
+        );
+        assert_eq!(
+            terminal.completion_usage,
+            Some(usage_with_cached_tokens(3, 5, 0))
+        );
+        assert_eq!(
+            outputs
+                .iter()
+                .filter(|output| output.finish_reason.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            outputs
+                .iter()
+                .filter(|output| output.completion_usage.is_some())
+                .count(),
+            1
+        );
+
+        let configured_length =
+            collect_outputs(&engine, catalog_request("configured-length", 1, 10)).await;
+        assert_eq!(
+            configured_length.last().unwrap().finish_reason,
+            LLMEngineOutput::length().finish_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn response_catalog_clipping_forces_length_and_strict_lookup_errors() {
+        let engine = catalog_engine(
+            serde_json::json!([{
+                "id": "tokens",
+                "output_token_ids": [301, 302, 303, 304],
+                "chunk_size": 3
+            }]),
+            Some(5),
+        );
+
+        let outputs = collect_outputs(&engine, catalog_request("tokens", 3, 10)).await;
+        assert_eq!(
+            outputs
+                .iter()
+                .flat_map(|output| output.token_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            vec![301, 302]
+        );
+        let terminal = outputs.last().unwrap();
+        assert_eq!(
+            terminal.finish_reason,
+            LLMEngineOutput::length().finish_reason
+        );
+        assert_eq!(
+            terminal.completion_usage,
+            Some(usage_with_cached_tokens(3, 2, 0))
+        );
+
+        let missing_annotation = engine
+            .generate(SingleIn::new(decode_request(1, 1)))
+            .await
+            .unwrap_err();
+        assert!(
+            missing_annotation
+                .to_string()
+                .contains("requires nvext.annotations")
+        );
+        let missing_case = engine
+            .generate(SingleIn::new(catalog_request("missing", 1, 1)))
+            .await
+            .unwrap_err();
+        assert!(missing_case.to_string().contains("was not found"));
     }
 
     #[tokio::test(start_paused = true)]

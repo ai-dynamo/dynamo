@@ -153,6 +153,76 @@ def test_mocker_defaults_to_native_g1_across_python_entrypoints():
 
 
 @pytest.mark.parametrize(
+    ("profile", "tool_parser", "reasoning_parser"),
+    [
+        ("kimi_k3", "kimi_k3", "kimi_k3"),
+        ("deepseek_v4", "deepseek_v4", "deepseek_v4"),
+        ("qwen3_5", "qwen3_coder", "qwen3"),
+        ("glm_5_2", "glm47", "glm45"),
+        ("gpt_oss", "harmony", "gpt_oss"),
+    ],
+)
+def test_response_catalog_profile_advertises_runtime_parsers(
+    tmp_path, profile, tool_parser, reasoning_parser
+):
+    catalog_path = tmp_path / "responses.json"
+    engine_args = MockEngineArgs(
+        response_catalog_path=catalog_path,
+        model_output_profile=profile,
+    )
+
+    _, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert engine_args.response_catalog_path == catalog_path
+    assert engine_args.model_output_profile == profile
+    assert runtime_config.tool_call_parser == tool_parser
+    assert runtime_config.reasoning_parser == reasoning_parser
+
+
+def test_response_catalog_cli_flags_are_forwarded(tmp_path):
+    catalog_path = tmp_path / "responses.json"
+    args = parse_args(
+        [
+            "--response-catalog-path",
+            str(catalog_path),
+            "--model-output-profile",
+            "qwen3_5",
+        ]
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+
+    assert engine_args.response_catalog_path == catalog_path
+    assert engine_args.model_output_profile == "qwen3_5"
+
+
+@pytest.mark.parametrize(
+    "kwargs, error",
+    [
+        (
+            {"response_catalog_path": "responses.json"},
+            "must be configured together",
+        ),
+        (
+            {"model_output_profile": "qwen3_5"},
+            "must be configured together",
+        ),
+        (
+            {
+                "response_catalog_path": "responses.json",
+                "model_output_profile": "qwen3_5",
+                "response_replay_trace_path": "trace.jsonl",
+            },
+            "cannot be combined with response_replay_trace_path",
+        ),
+    ],
+)
+def test_response_catalog_rejects_incompatible_options(kwargs, error):
+    with pytest.raises(Exception, match=error):
+        MockEngineArgs(**kwargs)
+
+
+@pytest.mark.parametrize(
     "offload",
     [
         {"num_g2_blocks": 8},

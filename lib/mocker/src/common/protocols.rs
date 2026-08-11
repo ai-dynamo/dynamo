@@ -410,6 +410,153 @@ impl FromStr for EngineType {
     }
 }
 
+/// Model-native response grammar used by scripted mocker output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ModelOutputProfile {
+    KimiK3,
+    DeepseekV4,
+    #[serde(rename = "qwen3_5")]
+    Qwen35,
+    #[serde(rename = "glm_5_2")]
+    Glm52,
+    GptOss,
+}
+
+/// Native response grammar selected by a [`ModelOutputProfile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelOutputGrammar {
+    KimiK3Xtml,
+    DeepseekV4Dsml,
+    Qwen35Xml,
+    Glm52Xml,
+    GptOssHarmony,
+}
+
+/// How scripted native output must be encoded for the worker token stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelOutputEncoding {
+    TokenizerText,
+    SegmentedSpecialTokens,
+    Harmony,
+}
+
+/// Prompt suffix that changes the framing expected from a completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelOutputPromptFraming {
+    ThinkTag,
+    KimiK3Xtml,
+    None,
+}
+
+/// Complete registry entry for a model-native scripted-output profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelOutputProfileSpec {
+    pub profile: ModelOutputProfile,
+    pub name: &'static str,
+    pub tool_call_parser: &'static str,
+    pub reasoning_parser: &'static str,
+    pub grammar: ModelOutputGrammar,
+    pub encoding: ModelOutputEncoding,
+    pub prompt_framing: ModelOutputPromptFraming,
+    pub official_source: &'static str,
+}
+
+pub const MODEL_OUTPUT_PROFILE_SPECS: [ModelOutputProfileSpec; 5] = [
+    ModelOutputProfileSpec {
+        profile: ModelOutputProfile::KimiK3,
+        name: "kimi_k3",
+        tool_call_parser: "kimi_k3",
+        reasoning_parser: "kimi_k3",
+        grammar: ModelOutputGrammar::KimiK3Xtml,
+        encoding: ModelOutputEncoding::SegmentedSpecialTokens,
+        prompt_framing: ModelOutputPromptFraming::KimiK3Xtml,
+        official_source: "https://huggingface.co/moonshotai/Kimi-K3/blob/main/encoding_k3.py",
+    },
+    ModelOutputProfileSpec {
+        profile: ModelOutputProfile::DeepseekV4,
+        name: "deepseek_v4",
+        tool_call_parser: "deepseek_v4",
+        reasoning_parser: "deepseek_v4",
+        grammar: ModelOutputGrammar::DeepseekV4Dsml,
+        encoding: ModelOutputEncoding::TokenizerText,
+        prompt_framing: ModelOutputPromptFraming::ThinkTag,
+        official_source: "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/encoding/README.md",
+    },
+    ModelOutputProfileSpec {
+        profile: ModelOutputProfile::Qwen35,
+        name: "qwen3_5",
+        tool_call_parser: "qwen3_coder",
+        reasoning_parser: "qwen3",
+        grammar: ModelOutputGrammar::Qwen35Xml,
+        encoding: ModelOutputEncoding::TokenizerText,
+        prompt_framing: ModelOutputPromptFraming::ThinkTag,
+        official_source: "https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/tokenizer_config.json",
+    },
+    ModelOutputProfileSpec {
+        profile: ModelOutputProfile::Glm52,
+        name: "glm_5_2",
+        tool_call_parser: "glm47",
+        reasoning_parser: "glm45",
+        grammar: ModelOutputGrammar::Glm52Xml,
+        encoding: ModelOutputEncoding::TokenizerText,
+        prompt_framing: ModelOutputPromptFraming::ThinkTag,
+        official_source: "https://huggingface.co/zai-org/GLM-5",
+    },
+    ModelOutputProfileSpec {
+        profile: ModelOutputProfile::GptOss,
+        name: "gpt_oss",
+        tool_call_parser: "harmony",
+        reasoning_parser: "gpt_oss",
+        grammar: ModelOutputGrammar::GptOssHarmony,
+        encoding: ModelOutputEncoding::Harmony,
+        prompt_framing: ModelOutputPromptFraming::None,
+        official_source: "https://github.com/openai/harmony",
+    },
+];
+
+impl ModelOutputProfile {
+    pub fn spec(self) -> &'static ModelOutputProfileSpec {
+        &MODEL_OUTPUT_PROFILE_SPECS[self as usize]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.spec().name
+    }
+
+    pub fn tool_call_parser(self) -> &'static str {
+        self.spec().tool_call_parser
+    }
+
+    pub fn reasoning_parser(self) -> &'static str {
+        self.spec().reasoning_parser
+    }
+}
+
+impl std::fmt::Display for ModelOutputProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ModelOutputProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "kimi_k3" => Ok(Self::KimiK3),
+            "deepseek_v4" => Ok(Self::DeepseekV4),
+            "qwen3_5" => Ok(Self::Qwen35),
+            "glm_5_2" => Ok(Self::Glm52),
+            "gpt_oss" => Ok(Self::GptOss),
+            _ => Err(format!(
+                "Invalid model_output_profile '{value}'. Must be 'kimi_k3', 'deepseek_v4', 'qwen3_5', 'glm_5_2', or 'gpt_oss'."
+            )),
+        }
+    }
+}
+
 /// Scheduling policy applied by the shared vLLM scheduler core.
 ///
 /// Derived from [`EngineType`] (+ engine-specific args) so the core reads a
@@ -641,6 +788,8 @@ struct MockEngineArgsSerde {
     bandwidth_g4_to_g2_gbps: OptionalConfigValue<f64>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
     response_replay_trace_path: OptionalConfigValue<PathBuf>,
+    response_catalog_path: OptionalConfigValue<PathBuf>,
+    model_output_profile: OptionalConfigValue<ModelOutputProfile>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
@@ -966,6 +1115,14 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub response_replay_trace_path: Option<PathBuf>,
 
+    /// Versioned scripted response catalog selected by `output_replay_id`.
+    #[builder(default = "None")]
+    pub response_catalog_path: Option<PathBuf>,
+
+    /// Model-native grammar used to compile semantic catalog responses.
+    #[builder(default = "None")]
+    pub model_output_profile: Option<ModelOutputProfile>,
+
     /// ZMQ port for publishing KV events in vLLM's native wire format.
     /// When set, the scheduler publishes to a ZMQ PUB socket instead of directly to NATS.
     /// A KvEventPublisher relay subscribes to this socket and forwards events to NATS.
@@ -1050,6 +1207,26 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
             "g4_requires_g2",
             "enable_g4_storage requires num_g2_blocks because mocker stages G4 through G2"
                 .to_string(),
+        ));
+    }
+
+    if args.response_catalog_path.is_some() != args.model_output_profile.is_some() {
+        return Err(mock_engine_args_validation_error(
+            "response_catalog_profile_pair",
+            "response_catalog_path and model_output_profile must be configured together"
+                .to_string(),
+        ));
+    }
+    if args.response_catalog_path.is_some() && args.response_replay_trace_path.is_some() {
+        return Err(mock_engine_args_validation_error(
+            "response_catalog_replay_conflict",
+            "response_catalog_path cannot be combined with response_replay_trace_path".to_string(),
+        ));
+    }
+    if args.response_catalog_path.is_some() && args.reasoning.is_some() {
+        return Err(mock_engine_args_validation_error(
+            "response_catalog_reasoning_conflict",
+            "response_catalog_path cannot be combined with generic reasoning output".to_string(),
         ));
     }
 
@@ -1331,6 +1508,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(response_replay_trace_path) = compat.response_replay_trace_path.into_nullable()
         {
             builder = builder.response_replay_trace_path(response_replay_trace_path);
+        }
+        if let Some(response_catalog_path) = compat.response_catalog_path.into_nullable() {
+            builder = builder.response_catalog_path(response_catalog_path);
+        }
+        if let Some(model_output_profile) = compat.model_output_profile.into_nullable() {
+            builder = builder.model_output_profile(model_output_profile);
         }
         if let Some(zmq_kv_events_port) = compat.zmq_kv_events_port.into_nullable() {
             builder = builder.zmq_kv_events_port(zmq_kv_events_port);
@@ -2221,6 +2404,73 @@ mod tests {
             .unwrap();
 
         assert_eq!(args.block_size, 1);
+    }
+
+    #[test]
+    fn model_output_profile_registry_is_complete_and_unique() {
+        let mut names = std::collections::HashSet::new();
+        for spec in MODEL_OUTPUT_PROFILE_SPECS {
+            assert_eq!(spec.profile.spec(), &spec);
+            assert!(names.insert(spec.name));
+            assert!(!spec.tool_call_parser.is_empty());
+            assert!(!spec.reasoning_parser.is_empty());
+            assert!(spec.official_source.starts_with("https://"));
+        }
+        assert_eq!(names.len(), 5);
+    }
+
+    #[test]
+    fn response_catalog_options_are_strictly_paired_and_exclusive() {
+        let path = PathBuf::from("responses.json");
+        for args in [
+            MockEngineArgs::builder()
+                .response_catalog_path(Some(path.clone()))
+                .build()
+                .unwrap(),
+            MockEngineArgs::builder()
+                .model_output_profile(Some(ModelOutputProfile::Qwen35))
+                .build()
+                .unwrap(),
+        ] {
+            assert!(
+                args.normalized()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be configured together")
+            );
+        }
+
+        let replay_conflict = MockEngineArgs::builder()
+            .response_catalog_path(Some(path.clone()))
+            .model_output_profile(Some(ModelOutputProfile::Qwen35))
+            .response_replay_trace_path(Some(PathBuf::from("trace.jsonl")))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            replay_conflict
+                .to_string()
+                .contains("cannot be combined with response_replay_trace_path")
+        );
+
+        let reasoning_conflict = MockEngineArgs::builder()
+            .response_catalog_path(Some(path))
+            .model_output_profile(Some(ModelOutputProfile::Qwen35))
+            .reasoning(Some(ReasoningConfig {
+                start_thinking_token_id: 1,
+                end_thinking_token_id: 2,
+                thinking_ratio: 0.5,
+            }))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            reasoning_conflict
+                .to_string()
+                .contains("cannot be combined with generic reasoning output")
+        );
     }
 
     #[test]
