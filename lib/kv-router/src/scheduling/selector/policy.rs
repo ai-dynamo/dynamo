@@ -48,10 +48,10 @@ impl WorkerInputs {
     pub const CACHE: Self = Self(1 << 0);
     pub const LOAD: Self = Self(1 << 1);
     pub const ROUTING: Self = Self(1 << 2);
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
 
-    pub const fn contains(self, other: Self) -> bool {
+    pub(super) const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
@@ -146,10 +146,6 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
-    pub fn request_id(&self) -> &str {
-        self.request_id
-    }
-
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }
@@ -253,10 +249,6 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
-    pub fn effective_overlap_blocks(&self) -> f64 {
-        self.effective_overlap_blocks
-    }
-
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
     }
@@ -275,10 +267,6 @@ impl WorkerCacheInput {
 }
 
 impl WorkerLoadInput {
-    pub fn raw_prefill_blocks(&self) -> f64 {
-        self.raw_prefill_blocks
-    }
-
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
@@ -627,7 +615,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_default_policy_matches_default_selector() {
+    fn default_policy_components_match_default_selector() {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let workers = HashMap::from([
@@ -688,8 +676,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .max_by(|(_, left), (_, right)| {
-                        left.effective_overlap_blocks()
-                            .total_cmp(&right.effective_overlap_blocks())
+                        left.device_overlap_blocks()
+                            .total_cmp(&right.device_overlap_blocks())
                     })
                     .map(|(row, _)| row)
                     .expect("eligible candidate"))
@@ -703,8 +691,8 @@ mod tests {
             (1, TaintedWorkerConfig::default()),
         ]);
         let mut request = base_request(16);
-        request.overlap.effective_overlap_blocks =
-            HashMap::from([(worker0, 0.25), (worker1, 0.75)]);
+        request.overlap.tier_overlap_blocks.device =
+            FxHashMap::from_iter([(worker0, 1), (worker1, 3)]);
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",

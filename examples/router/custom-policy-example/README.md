@@ -5,42 +5,114 @@ SPDX-License-Identifier: Apache-2.0
 
 # Custom Worker Selection Policies
 
-This example shows how to link custom Rust worker-selection policies into the Dynamo frontend or a standalone Endpoint Picker Provider (EPP).
+Use this example as the build guide for a custom Rust worker-selection policy. It covers the full path from `WorkerScorer` and `WorkerPicker` implementations to a linked Python frontend or standalone Endpoint Picker Provider (EPP).
 
-## Crates
+## What You Are Building
 
-| Crate | Purpose |
-|---|---|
-| `basic` | Optionally requires cache overlap, then scores active requests and picks the lowest cost. |
-| `disaggregated` | Uses separate scorer and picker types for prefill and decode workers. |
-| `catalog` | Registers both policy types with Dynamo. Add new policy crates here. |
-| `epp` | Runs the catalog in a standalone EPP binary. |
-
-Each policy crate keeps configuration, factory creation, and registration in `lib.rs`. The filter, scorer, and picker algorithms live in focused source files.
-
-The disaggregated policy keeps the algorithm deliberately small:
-
-| Worker type | Score | Pick |
-|---|---|---|
-| Prefill | Active prefill tokens | Lowest score |
-| Decode | Projected decode blocks | Lowest score |
-
-The Python frontend supplies `prefill` or `decode` as `worker_type`. Standalone EPP supplies `select` because it selects from one worker pool.
-
-## Build and Test
-
-Run these commands from the Dynamo repository root:
-
-```bash
-cargo test -p dynamo-custom-policy-example-basic \
-  -p dynamo-custom-policy-example-disaggregated \
-  -p dynamo-custom-policy-example-catalog
-cargo build -p dynamo-custom-policy-example-epp
+```text
+policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 ```
 
-## Configure a Policy
+- The policy crate owns the scoring and picking algorithm.
+- The catalog gives each policy type a stable name.
+- The YAML file creates named policy instances and supplies parameters.
+- The frontend or EPP links the catalog at compile time.
 
-Create a policy file outside the repository. This example selects the disaggregated policy:
+Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
+
+## Pick a Starting Point
+
+| Crate | Use it for |
+|---|---|
+| `basic` | One scorer and picker work for every worker type |
+| `disaggregated` | Prefill and decode workers need different components |
+| `catalog` | You need to register policy types for configuration |
+| `epp` | Worker selection runs in a standalone EPP |
+
+The basic policy scores active requests. The disaggregated policy scores active prefill tokens for prefill workers and projected decode blocks for decode workers. Both own their picker implementation.
+
+## 1. Create the Policy Crate
+
+Add `dynamo-kv-router` from the same Dynamo checkout that builds the host process. Enable `standalone-selection`:
+
+```toml
+[dependencies]
+dynamo-kv-router = { path = "/work/dynamo/lib/kv-router", features = ["standalone-selection"] }
+serde = { version = "1", features = ["derive"] }
+```
+
+A policy that lives in the Dynamo workspace can use the workspace dependencies shown in [`basic/Cargo.toml`](basic/Cargo.toml).
+
+## 2. Implement the Scorer and Picker
+
+A scorer receives one eligible worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
+
+The [basic policy](basic/src/lib.rs) is the shortest complete implementation. The [disaggregated policy](disaggregated/src/lib.rs) shows how one factory selects different component types from `worker_type`.
+
+Declare each optional input group that a component reads:
+
+```rust
+fn required_worker_inputs(&self) -> WorkerInputs {
+    WorkerInputs::LOAD
+}
+```
+
+If a component needs both groups, use `WorkerInputs::CACHE | WorkerInputs::LOAD`. Do not request unused groups because Dynamo calculates and retains those columns for each eligible worker.
+
+Keep these rules in the scorer and picker:
+
+- Return an error instead of panicking.
+- Return finite scorer costs.
+- Treat candidate order as unspecified.
+- Keep blocking I/O out of `score` and `pick`.
+- Keep mutable policy state inside the factory-created policy.
+
+## 3. Parse Parameters and Build the Factory
+
+The provider runs at startup. Parse all parameters there and reject unknown fields:
+
+```rust
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Parameters {}
+
+fn provider(
+    parameters: &WorkerSelectionPolicyParameters,
+) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
+    let _: Parameters = parameters.deserialize()?;
+
+    Ok(Arc::new(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            vec![Box::new(LeastBusyScorer)],
+            Box::new(LowestCostPicker),
+        )
+    }))
+}
+```
+
+Dynamo calls the returned factory once per routing partition. Use `worker_type` to choose prefill, decode, or standalone `select` behavior. Use the partition identity for distinct model or routing-group state.
+
+## 4. Register the Policy Type
+
+Expose one registration function from the policy crate:
+
+```rust
+pub fn register(
+    registry: &mut WorkerSelectionPolicyRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    registry.register("least-busy", Arc::new(provider))
+}
+```
+
+Choose a stable, unique type name. The name becomes part of the YAML contract.
+
+Add the policy dependency and registration call to the catalog that ships with the host process. See [`catalog/src/lib.rs`](catalog/src/lib.rs).
+
+## 5. Configure a Policy Instance
+
+Create a YAML file outside the source tree:
 
 ```yaml
 worker_selection:
@@ -49,22 +121,36 @@ worker_selection:
     - name: least-busy
       type: least-busy
       parameters: {}
-    - name: cache-affinity
-      type: least-busy
-      parameters:
-        min_effective_overlap_blocks: 8
     - name: disaggregated-load
       type: disaggregated-load
       parameters: {}
 ```
 
-Change `default` to `least-busy` to use the basic policy without a filter. Change it to `cache-affinity` to require at least eight effective cache-overlap blocks. Set a positive `min_effective_overlap_blocks` value. Set `DYN_ROUTER_WORKER_SELECTION_POLICY` to an instance name to override the YAML default. Use `default` to select Dynamo's built-in policy.
+- `type` selects a registered provider.
+- `name` identifies one configured instance.
+- `worker_selection.default` selects an instance at startup.
+- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the selected instance by name.
+- The override value `default` selects Dynamo's built-in policy.
 
-The cache-affinity filter is a hard requirement. If no eligible worker meets the threshold, Dynamo returns HTTP 503.
+Unknown policy types, duplicate registrations, and invalid parameters stop startup.
+
+## 6. Build and Test
+
+Run these commands from the Dynamo repository root:
+
+```bash
+cargo test \
+  -p dynamo-custom-policy-example-basic \
+  -p dynamo-custom-policy-example-disaggregated \
+  -p dynamo-custom-policy-example-catalog
+cargo build -p dynamo-custom-policy-example-epp
+```
+
+Add one focused test for the policy decision and one registration test for each new type. If a new input adds calculation, allocation, storage, or scans, add a worker-selection benchmark.
 
 ## Run With the Python Frontend
 
-The Python extension uses the dependency alias `dynamo-worker-selection-policy-catalog`. Point that alias at this example catalog in the checkout you build:
+The Python extension uses the dependency alias `dynamo-worker-selection-policy-catalog`. Point that alias at the catalog in the checkout that you build:
 
 ```bash
 export DYNAMO_DIR="$(pwd)"
@@ -77,7 +163,7 @@ cargo add \
   dynamo-custom-policy-example-catalog
 ```
 
-Build the extension with the custom catalog and start the frontend:
+Build the extension with the linked catalog:
 
 ```bash
 cd "$DYNAMO_DIR/lib/bindings/python"
@@ -90,33 +176,38 @@ python3 -m dynamo.frontend \
   --router-policy-config /path/to/worker-selection.yaml
 ```
 
-For a private catalog, run the same `cargo add` command with your catalog path and package name. The alias stays the same.
+For a private catalog, keep the dependency alias and change the package name and path. Linked policies apply to the embedded frontend selection service. They do not apply to `python3 -m dynamo.router`.
 
 ## Run With EPP
 
-The example EPP already links the example catalog. Use the basic policy for its single worker pool:
+The example EPP links the example catalog and registers it before the standard runner starts:
+
+```rust
+let mut registry = WorkerSelectionPolicyRegistry::default();
+dynamo_custom_policy_example_catalog::register(&mut registry)?;
+run_with_worker_selection_policy_registry(registry).await
+```
+
+Run the binary in standalone mode:
 
 ```bash
 DYN_EPP_MODE=standalone \
 DYN_ROUTER_POLICY_CONFIG=/path/to/worker-selection.yaml \
 DYN_ROUTER_WORKER_SELECTION_POLICY=least-busy \
-cargo run --release -p dynamo-custom-policy-example-epp
+  cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
-Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes setup. Use this binary instead of the stock EPP executable. Policies that branch on `worker_type` must handle `select` for this path.
+Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`.
 
-## Add a Policy
+Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes resources.
 
-Start with a new Rust library crate. The `basic` and `disaggregated` crates are runnable references, not templates.
+## Before You Ship
 
-1. Implement filters, scorers, and a picker. Declare each signal with `required_worker_inputs`.
-2. Parse and validate policy parameters in the provider.
-3. Return a factory that builds the policy for each worker type.
-4. Register a unique policy type name.
-5. Add the crate dependency and `register` call to the catalog that ships with your frontend or EPP.
+- Build the policy against the same Dynamo revision as the frontend or EPP.
+- Make sure that each component declares every input group that it reads.
+- Check every parameter before the factory is created.
+- Exercise each `worker_type` branch.
+- Prove that scorer failures and invalid picker rows do not reserve a worker.
+- Benchmark stateful or input-heavy policies at the expected worker count.
 
-The [custom routing guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) explains the traits, available signals, factory lifecycle, and registration flow.
-
-`keep`, `score`, and `pick` run in the scheduler queue actor. Keep them free of blocking I/O. Return finite costs and a valid candidate row.
-
-For each candidate, filters run in declaration order before scorers. Candidate order and callback order across different candidates are unspecified. Dynamo normally scores kept candidates directly. It buffers them only when the built-in scorer needs a minimum active prefill load across the filtered set.
+The [custom routing API reference](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) lists the available context and worker signals.

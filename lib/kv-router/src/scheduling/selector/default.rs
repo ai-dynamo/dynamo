@@ -96,12 +96,12 @@ pub struct DefaultWorkerSelector {
     picker: DefaultWorkerPicker,
 }
 
-pub struct DefaultWorkerScorer<C = KvRouterConfig> {
+pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
     pub(super) kv_router_config: C,
     pub(super) worker_type: &'static str,
 }
 
-pub struct DefaultWorkerPicker {
+pub(super) struct DefaultWorkerPicker {
     default_temperature: f64,
     // Preserve DefaultWorkerSelector's Sync contract. Zero-temperature selection never locks.
     softmax_scratch: Mutex<DefaultSoftmaxScratch>,
@@ -179,8 +179,9 @@ impl DefaultWorkerSelector {
     }
 }
 
+#[cfg(test)]
 impl DefaultWorkerScorer<KvRouterConfig> {
-    pub fn new(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
+    pub(super) fn new(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
         Self {
             kv_router_config,
             worker_type,
@@ -340,7 +341,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
 }
 
 impl DefaultWorkerPicker {
-    pub fn new(default_temperature: f64) -> Self {
+    pub(super) fn new(default_temperature: f64) -> Self {
         Self::from_parts(
             default_temperature,
             #[cfg(any(test, feature = "bench"))]
