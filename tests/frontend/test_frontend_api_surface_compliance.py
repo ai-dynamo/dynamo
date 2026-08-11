@@ -75,7 +75,13 @@ BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
-OPENRESPONSES_MAX_OUTPUT_TOKENS = 512
+# 2048, not 512: the compliance worker runs a qwen3-style *reasoning* model,
+# and its <think> tokens count against max_output_tokens. At 512 the "System
+# Prompt" case can exhaust the budget mid-think and return
+# status=incomplete/{"reason": "max_output_tokens"} — an assertion failure
+# that has nothing to do with API compliance. 2048 keeps the worst-case
+# response under a minute while leaving thinking headroom.
+OPENRESPONSES_MAX_OUTPUT_TOKENS = 2048
 CLAUDE_SUBAGENT_NAME = "dynamo-subagent-smoke"
 CLAUDE_SUBAGENT_TIMEOUT_S = 45
 OPENCODE_SUBTASK_COMMAND = "dynamo-subagent-smoke"
