@@ -161,44 +161,49 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
 }
 
 fn worker_selection(c: &mut Criterion) {
-    for temperature in [0.0, 0.7] {
-        let mut group = c.benchmark_group(format!(
-            "default_worker_selection/temperature_{temperature}"
-        ));
-        group.warm_up_time(Duration::from_secs(2));
-        group.measurement_time(Duration::from_secs(5));
-        group.sample_size(50);
+    for (scenario, overlap_score_credit_decay) in
+        [("direct", 0.0), ("filtered_prefill_baseline", 1.0)]
+    {
+        for temperature in [0.0, 0.7] {
+            let mut group = c.benchmark_group(format!(
+                "default_worker_selection/{scenario}/temperature_{temperature}"
+            ));
+            group.warm_up_time(Duration::from_secs(2));
+            group.measurement_time(Duration::from_secs(5));
+            group.sample_size(50);
 
-        for worker_count in [2, 32, 1_024, 10_000] {
-            let (workers, request) = fixture(worker_count);
-            let selector = DefaultWorkerSelector::new(
-                Some(KvRouterConfig {
-                    router_temperature: temperature,
-                    ..Default::default()
-                }),
-                "prefill",
-            );
-            group.throughput(Throughput::Elements(worker_count as u64));
-            group.bench_with_input(
-                BenchmarkId::from_parameter(worker_count),
-                &worker_count,
-                |b, _| {
-                    b.iter(|| {
-                        black_box(
-                            selector
-                                .select_worker(
-                                    black_box(&workers),
-                                    black_box(&request),
-                                    request.eligibility(),
-                                    black_box(16),
-                                )
-                                .unwrap(),
-                        )
-                    })
-                },
-            );
+            for worker_count in [2, 32, 1_024, 10_000] {
+                let (workers, request) = fixture(worker_count);
+                let selector = DefaultWorkerSelector::new(
+                    Some(KvRouterConfig {
+                        router_temperature: temperature,
+                        overlap_score_credit_decay,
+                        ..Default::default()
+                    }),
+                    "prefill",
+                );
+                group.throughput(Throughput::Elements(worker_count as u64));
+                group.bench_with_input(
+                    BenchmarkId::from_parameter(worker_count),
+                    &worker_count,
+                    |b, _| {
+                        b.iter(|| {
+                            black_box(
+                                selector
+                                    .select_worker(
+                                        black_box(&workers),
+                                        black_box(&request),
+                                        request.eligibility(),
+                                        black_box(16),
+                                    )
+                                    .unwrap(),
+                            )
+                        })
+                    },
+                );
+            }
+            group.finish();
         }
-        group.finish();
     }
 }
 
@@ -210,7 +215,6 @@ fn custom_worker_selection(c: &mut Criterion) {
         router_temperature: 0.0,
         ..Default::default()
     };
-    let default = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
     let custom_no_filter = WorkerSelectionPolicy::new(
         config.clone(),
         "prefill",
@@ -230,20 +234,6 @@ fn custom_worker_selection(c: &mut Criterion) {
     group.sample_size(50);
     group.throughput(Throughput::Elements(WORKER_COUNT as u64));
 
-    group.bench_function("default", |b| {
-        b.iter(|| {
-            black_box(
-                default
-                    .select_worker(
-                        black_box(&workers),
-                        black_box(&request),
-                        request.eligibility(),
-                        black_box(16),
-                    )
-                    .unwrap(),
-            )
-        })
-    });
     group.bench_function("custom_no_filter", |b| {
         b.iter(|| {
             black_box(

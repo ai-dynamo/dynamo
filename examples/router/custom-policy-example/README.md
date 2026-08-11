@@ -27,8 +27,6 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
-| `catalog` | You need to register policy types for configuration |
-| `epp` | Worker selection runs in a standalone EPP |
 
 The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
@@ -38,60 +36,37 @@ The `simple-stacked-score-pick` policy has no custom filter. It adds active-requ
 
 ## 1. Create the Policy Crate
 
-Add `dynamo-kv-router` from the same Dynamo checkout that builds the host process. Enable `standalone-selection`:
+Create a Rust library crate outside the Dynamo checkout:
 
-```toml
-[dependencies]
-dynamo-kv-router = { path = "/work/dynamo/lib/kv-router", features = ["standalone-selection"] }
-serde = { version = "1", features = ["derive"] }
+```bash
+# Create the policy crate.
+cargo new --lib my-worker-policy
+cd my-worker-policy
+
+# Use the router crate from the same Dynamo checkout as the host process.
+cargo add dynamo-kv-router \
+  --path /work/dynamo/lib/kv-router \
+  --features standalone-selection
+
+# Add YAML parameter deserialization.
+cargo add serde --features derive
 ```
 
 A policy that lives in the Dynamo workspace can use the workspace dependencies shown in [`simple-filter-score-pick/Cargo.toml`](simple-filter-score-pick/Cargo.toml).
 
 ## 2. Implement the Filter, Scorers, and Picker
 
-A filter receives one host-eligible worker and returns whether to keep it. Use filters for hard requirements. A scorer receives one kept worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
+Each policy stage has one job:
 
-Each example keeps its implemented stages in matching modules: `filter.rs`, `scorer.rs`, and `picker.rs`. The crate's `lib.rs` parses parameters, composes those stages, and registers the policy. The stacked example has no filter, so it omits `filter.rs`. Its [`scorer.rs`](simple-stacked-score-pick/src/scorer.rs) groups the scorer stage and re-exports each scorer from a separate file under [`scorer/`](simple-stacked-score-pick/src/scorer/).
+| Stage | Role |
+|---|---|
+| Filter (`filter.rs`) | Removes workers that do not meet a hard requirement |
+| Scorer (`scorer.rs`) | Assigns a finite, lower-is-better cost to each remaining worker. Dynamo adds costs from stacked scorers |
+| Picker (`picker.rs`) | Selects one row from the scored candidates |
 
-The [filter-score-pick policy](simple-filter-score-pick/src/lib.rs) is the shortest complete implementation. Its [filter](simple-filter-score-pick/src/filter.rs) uses raw device-overlap data. The [disaggregated policy](disagg-filter-score-pick/src/lib.rs) creates the complete flow for both worker types.
+Each example keeps its implemented stages in these matching files. `lib.rs` parses parameters, composes the stages, and registers the policy. The stacked example keeps each scorer implementation in a separate file under [`scorer/`](simple-stacked-score-pick/src/scorer/).
 
-The [stacked policy](simple-stacked-score-pick/src/lib.rs) shows why scorers use a `Vec`. The `Vec` stores an ordered stack. Each `Box<dyn WorkerScorer>` can hold a different scorer type:
-
-```rust
-let scorers: Vec<Box<dyn WorkerScorer>> = vec![
-    Box::new(ActiveRequestsScorer),
-    Box::new(UncachedBlocksScorer),
-];
-```
-
-Dynamo calls the scorers in order and adds their costs. A cost of `3` plus a cost of `5` gives the picker a total cost of `8`.
-
-The `simple-filter-score-pick` example exercises one of each policy stage:
-
-```text
-host eligibility -> MinimumDeviceOverlapFilter -> ActiveRequestsScorer -> RequestAwarePicker
-```
-
-The `disagg-filter-score-pick` factory creates the same three stages for prefill and decode worker sets. Its scorer and picker types differ by worker type.
-
-Declare each optional input group that a component reads:
-
-```rust
-fn required_worker_inputs(&self) -> WorkerInputs {
-    WorkerInputs::LOAD
-}
-```
-
-If a component needs both groups, use `WorkerInputs::CACHE | WorkerInputs::LOAD`. Do not request unused groups because Dynamo calculates and retains those columns for each eligible worker.
-
-Keep these rules in every filter, scorer, and picker:
-
-- Return an error instead of panicking.
-- Return finite scorer costs.
-- Treat candidate order as unspecified.
-- Keep blocking I/O out of `keep`, `score`, and `pick`.
-- Keep mutable policy state inside the factory-created policy.
+Read the [custom worker-selection guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) for input groups, method contracts, and error handling.
 
 ## 3. Parse Parameters and Build the Factory
 
@@ -279,6 +254,8 @@ The [custom routing API reference](../../../docs/fern/pages/developer-guide/adva
 Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
 
 Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a Policy Instance](#5-configure-a-policy-instance).
+
+Use `min_device_overlap_blocks: 0` for this test. A positive threshold can reject every worker on a cold request or a replay path without raw tier data.
 
 ### Aggregated Policy
 
