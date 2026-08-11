@@ -7,12 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::engine_routes::{EngineRouteCallback, EngineRouteRegistry};
+use dynamo_runtime::engine_routes::{
+    EngineRouteCallback, EngineRouteMethod, EngineRouteRegistry,
+};
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use parking_lot::RwLock;
 use serde::Serialize;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, oneshot};
 
 use crate::disagg::DisaggregationMode;
 use crate::worker::EngineKind;
@@ -74,6 +78,35 @@ pub(crate) struct WorkerLifecycleStatus {
     last_error: Option<String>,
 }
 
+#[async_trait]
+trait DiscoveryRegistration: Send + Sync {
+    async fn unregister(&self) -> Result<()>;
+    async fn register(&self) -> Result<()>;
+}
+
+#[async_trait]
+impl DiscoveryRegistration for Endpoint {
+    async fn unregister(&self) -> Result<()> {
+        self.unregister_endpoint_instance().await
+    }
+
+    async fn register(&self) -> Result<()> {
+        self.register_endpoint_instance().await
+    }
+}
+
+#[async_trait]
+trait QuiescenceCheck: Send + Sync {
+    async fn is_quiescent(&self) -> Result<Option<bool>>;
+}
+
+#[async_trait]
+impl QuiescenceCheck for EngineKind {
+    async fn is_quiescent(&self) -> Result<Option<bool>> {
+        Ok(EngineKind::is_quiescent(self).await?)
+    }
+}
+
 /// Shared request-admission and in-flight tracker.
 ///
 /// The double-check around `fetch_add` closes the drain/admission race: a
@@ -97,13 +130,15 @@ impl RequestTracker {
 
     pub(crate) fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard> {
         if !self.accepting.load(Ordering::Acquire) {
-            bail!("worker is not accepting new requests");
+            return Err(worker_draining_error("worker is not accepting new requests"));
         }
 
         self.inflight.fetch_add(1, Ordering::AcqRel);
         if !self.accepting.load(Ordering::Acquire) {
             self.release();
-            bail!("worker started draining before request admission completed");
+            return Err(worker_draining_error(
+                "worker started draining before request admission completed",
+            ));
         }
 
         Ok(RequestGuard {
@@ -134,6 +169,14 @@ impl RequestTracker {
     }
 }
 
+fn worker_draining_error(message: &'static str) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::WorkerOverloaded)
+        .message(message)
+        .build()
+        .into()
+}
+
 pub(crate) struct RequestGuard {
     tracker: Arc<RequestTracker>,
 }
@@ -153,9 +196,10 @@ pub(crate) struct WorkerLifecycleController {
     operation_lock: Mutex<()>,
     drain_generation: AtomicU64,
     tracker: Arc<RequestTracker>,
-    endpoint: Endpoint,
-    engine: EngineKind,
+    discovery: Arc<dyn DiscoveryRegistration>,
+    quiescence: Arc<dyn QuiescenceCheck>,
     mode: DisaggregationMode,
+    discovery_grace_period: Duration,
 }
 
 impl WorkerLifecycleController {
@@ -164,6 +208,23 @@ impl WorkerLifecycleController {
         endpoint: Endpoint,
         engine: EngineKind,
         mode: DisaggregationMode,
+        discovery_grace_period: Duration,
+    ) -> Arc<Self> {
+        Self::with_dependencies(
+            tracker,
+            Arc::new(endpoint),
+            Arc::new(engine),
+            mode,
+            discovery_grace_period,
+        )
+    }
+
+    fn with_dependencies(
+        tracker: Arc<RequestTracker>,
+        discovery: Arc<dyn DiscoveryRegistration>,
+        quiescence: Arc<dyn QuiescenceCheck>,
+        mode: DisaggregationMode,
+        discovery_grace_period: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU8::new(WorkerLifecycleState::Serving as u8),
@@ -173,9 +234,10 @@ impl WorkerLifecycleController {
             operation_lock: Mutex::new(()),
             drain_generation: AtomicU64::new(0),
             tracker,
-            endpoint,
-            engine,
+            discovery,
+            quiescence,
             mode,
+            discovery_grace_period,
         })
     }
 
@@ -204,16 +266,19 @@ impl WorkerLifecycleController {
     }
 
     pub(crate) fn register_admin_routes(self: &Arc<Self>, registry: &EngineRouteRegistry) {
-        registry.register(
+        registry.register_method(
             "drain",
+            EngineRouteMethod::Post,
             lifecycle_callback(Arc::clone(self), LifecycleAction::Drain),
         );
-        registry.register(
+        registry.register_method(
             "resume",
+            EngineRouteMethod::Post,
             lifecycle_callback(Arc::clone(self), LifecycleAction::Resume),
         );
-        registry.register(
+        registry.register_method(
             "status",
+            EngineRouteMethod::Get,
             lifecycle_callback(Arc::clone(self), LifecycleAction::Status),
         );
         tracing::info!("registered worker Admin API routes under /engine");
@@ -221,40 +286,95 @@ impl WorkerLifecycleController {
 
     pub(crate) async fn drain(self: &Arc<Self>) -> Result<WorkerLifecycleStatus> {
         let operation = self.operation_lock.lock().await;
-        let generation = match self.state() {
+        let started = match self.state() {
             WorkerLifecycleState::Serving => {
                 self.last_error.write().take();
-                self.tracker.stop_accepting();
                 self.kv_transfers
                     .store(Self::initial_kv_state(self.mode) as u8, Ordering::Release);
                 self.state
                     .store(WorkerLifecycleState::Draining as u8, Ordering::Release);
-                Some(self.drain_generation.fetch_add(1, Ordering::AcqRel) + 1)
+                let generation = self.drain_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let (started_tx, started_rx) = oneshot::channel();
+                let controller = Arc::clone(self);
+                tokio::spawn(async move {
+                    controller
+                        .run_drain_operation(generation, started_tx)
+                        .await;
+                });
+                Some(started_rx)
             }
             WorkerLifecycleState::Draining => None,
             WorkerLifecycleState::Drained => return Ok(self.status()),
             WorkerLifecycleState::Stopping => bail!("worker shutdown is already in progress"),
         };
-
-        if self.discovery_registered.load(Ordering::Acquire) {
-            if let Err(error) = self.endpoint.unregister_endpoint_instance().await {
-                let message = format!("failed to unregister worker from discovery: {error}");
-                *self.last_error.write() = Some(message.clone());
-                self.drain_generation.fetch_add(1, Ordering::AcqRel);
-                self.state
-                    .store(WorkerLifecycleState::Serving as u8, Ordering::Release);
-                self.tracker.start_accepting();
-                return Err(error).context("failed to unregister worker from discovery");
-            }
-            self.discovery_registered.store(false, Ordering::Release);
-        }
-
         drop(operation);
-        if let Some(generation) = generation {
-            let controller = Arc::clone(self);
-            tokio::spawn(async move { controller.monitor_drain(generation).await });
+
+        if let Some(started) = started {
+            started
+                .await
+                .context("drain operation ended before discovery was updated")??;
         }
         Ok(self.status())
+    }
+
+    /// Own the drain after the HTTP handler starts it. The task is detached
+    /// from the request so cancelling the client cannot strand `Draining`.
+    async fn run_drain_operation(
+        self: Arc<Self>,
+        generation: u64,
+        started: oneshot::Sender<Result<()>>,
+    ) {
+        let mut started = Some(started);
+        {
+            let _operation = self.operation_lock.lock().await;
+            if self.state() != WorkerLifecycleState::Draining
+                || self.drain_generation.load(Ordering::Acquire) != generation
+            {
+                if let Some(started) = started.take() {
+                    let _ = started.send(Err(anyhow!(
+                        "drain operation was superseded before discovery was updated"
+                    )));
+                }
+                return;
+            }
+
+            if self.discovery_registered.load(Ordering::Acquire) {
+                if let Err(error) = self.discovery.unregister().await {
+                    let message = format!("failed to unregister worker from discovery: {error}");
+                    *self.last_error.write() = Some(message);
+                    self.drain_generation.fetch_add(1, Ordering::AcqRel);
+                    self.state
+                        .store(WorkerLifecycleState::Serving as u8, Ordering::Release);
+                    self.tracker.start_accepting();
+                    if let Some(started) = started.take() {
+                        let _ = started.send(
+                            Err(error).context("failed to unregister worker from discovery"),
+                        );
+                    }
+                    return;
+                }
+                self.discovery_registered.store(false, Ordering::Release);
+            }
+
+            if let Some(started) = started.take() {
+                let _ = started.send(Ok(()));
+            }
+        }
+
+        // Keep accepting requests already selected by frontends until their
+        // discovery views have had time to observe the unregister.
+        tokio::time::sleep(self.discovery_grace_period).await;
+        {
+            let _operation = self.operation_lock.lock().await;
+            if self.state() != WorkerLifecycleState::Draining
+                || self.drain_generation.load(Ordering::Acquire) != generation
+            {
+                return;
+            }
+            self.tracker.stop_accepting();
+        }
+
+        self.monitor_drain(generation).await;
     }
 
     pub(crate) async fn resume(self: &Arc<Self>) -> Result<WorkerLifecycleStatus> {
@@ -270,11 +390,15 @@ impl WorkerLifecycleController {
             .store(WorkerLifecycleState::Draining as u8, Ordering::Release);
 
         if !self.discovery_registered.load(Ordering::Acquire) {
-            if let Err(error) = self.endpoint.register_endpoint_instance().await {
+            if let Err(error) = self.discovery.register().await {
                 let message = format!("failed to re-register worker in discovery: {error}");
                 *self.last_error.write() = Some(message);
                 self.state.store(previous_state as u8, Ordering::Release);
                 if previous_state == WorkerLifecycleState::Draining {
+                    // The old operation was fenced by the generation bump.
+                    // Continue toward Drained rather than leaving the worker
+                    // unregistered with no controller-owned monitor.
+                    self.tracker.stop_accepting();
                     let controller = Arc::clone(self);
                     tokio::spawn(async move { controller.monitor_drain(generation).await });
                 }
@@ -301,7 +425,7 @@ impl WorkerLifecycleController {
             .store(WorkerLifecycleState::Stopping as u8, Ordering::Release);
 
         if self.discovery_registered.load(Ordering::Acquire) {
-            if let Err(error) = self.endpoint.unregister_endpoint_instance().await {
+            if let Err(error) = self.discovery.unregister().await {
                 tracing::warn!(%error, "discovery unregister failed during shutdown");
                 *self.last_error.write() = Some(error.to_string());
             } else {
@@ -319,48 +443,44 @@ impl WorkerLifecycleController {
             }
 
             if self.tracker.inflight() == 0 {
-                let kv_complete = if self.mode.is_prefill() {
-                    match self.engine.is_quiescent().await {
-                        Ok(Some(true)) => {
-                            self.kv_transfers
-                                .store(KvTransferState::Complete as u8, Ordering::Release);
-                            true
-                        }
-                        Ok(Some(false)) => {
-                            self.kv_transfers
-                                .store(KvTransferState::Pending as u8, Ordering::Release);
-                            false
-                        }
-                        Ok(None) => {
-                            self.kv_transfers
-                                .store(KvTransferState::Unknown as u8, Ordering::Release);
-                            false
-                        }
-                        Err(error) => {
-                            self.kv_transfers
-                                .store(KvTransferState::Unknown as u8, Ordering::Release);
-                            *self.last_error.write() = Some(error.to_string());
-                            false
-                        }
-                    }
+                let quiescence = if self.mode.is_prefill() {
+                    self.quiescence.is_quiescent().await
                 } else {
-                    true
+                    Ok(Some(true))
                 };
 
-                if kv_complete
-                    && self.drain_generation.load(Ordering::Acquire) == generation
-                    && self
-                        .state
-                        .compare_exchange(
-                            WorkerLifecycleState::Draining as u8,
-                            WorkerLifecycleState::Drained as u8,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
+                // Publish both KV state and Drained under the same operation
+                // fence used by resume. A stale monitor may finish an engine
+                // check, but it can never publish after its generation ends.
+                let _operation = self.operation_lock.lock().await;
+                if self.state() != WorkerLifecycleState::Draining
+                    || self.drain_generation.load(Ordering::Acquire) != generation
                 {
-                    tracing::info!("worker drained and is safe to delete");
                     return;
+                }
+
+                match quiescence {
+                    Ok(Some(true)) => {
+                        if self.mode.is_prefill() {
+                            self.kv_transfers
+                                .store(KvTransferState::Complete as u8, Ordering::Release);
+                        }
+                        self.state
+                            .store(WorkerLifecycleState::Drained as u8, Ordering::Release);
+                        tracing::info!("worker drained and is safe to delete");
+                        return;
+                    }
+                    Ok(Some(false)) => self
+                        .kv_transfers
+                        .store(KvTransferState::Pending as u8, Ordering::Release),
+                    Ok(None) => self
+                        .kv_transfers
+                        .store(KvTransferState::Unknown as u8, Ordering::Release),
+                    Err(error) => {
+                        self.kv_transfers
+                            .store(KvTransferState::Unknown as u8, Ordering::Release);
+                        *self.last_error.write() = Some(error.to_string());
+                    }
                 }
             }
 
@@ -402,6 +522,106 @@ fn lifecycle_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Semaphore;
+
+    struct MockDiscovery {
+        unregister_started: Semaphore,
+        unregister_gate: Semaphore,
+    }
+
+    impl MockDiscovery {
+        fn new(unregister_permits: usize) -> Arc<Self> {
+            Arc::new(Self {
+                unregister_started: Semaphore::new(0),
+                unregister_gate: Semaphore::new(unregister_permits),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DiscoveryRegistration for MockDiscovery {
+        async fn unregister(&self) -> Result<()> {
+            self.unregister_started.add_permits(1);
+            self.unregister_gate
+                .acquire()
+                .await
+                .expect("unregister gate should stay open")
+                .forget();
+            Ok(())
+        }
+
+        async fn register(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct MockQuiescence {
+        result: Option<bool>,
+        check_started: Semaphore,
+        check_gate: Semaphore,
+    }
+
+    impl MockQuiescence {
+        fn new(result: Option<bool>, check_permits: usize) -> Arc<Self> {
+            Arc::new(Self {
+                result,
+                check_started: Semaphore::new(0),
+                check_gate: Semaphore::new(check_permits),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl QuiescenceCheck for MockQuiescence {
+        async fn is_quiescent(&self) -> Result<Option<bool>> {
+            self.check_started.add_permits(1);
+            self.check_gate
+                .acquire()
+                .await
+                .expect("quiescence gate should stay open")
+                .forget();
+            Ok(self.result)
+        }
+    }
+
+    fn test_controller(
+        discovery: Arc<MockDiscovery>,
+        quiescence: Arc<MockQuiescence>,
+        mode: DisaggregationMode,
+        grace_period: Duration,
+    ) -> (Arc<WorkerLifecycleController>, Arc<RequestTracker>) {
+        let tracker = RequestTracker::new();
+        let controller = WorkerLifecycleController::with_dependencies(
+            Arc::clone(&tracker),
+            discovery,
+            quiescence,
+            mode,
+            grace_period,
+        );
+        (controller, tracker)
+    }
+
+    async fn yield_to_background_tasks() {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn wait_for_state(
+        controller: &WorkerLifecycleController,
+        expected: WorkerLifecycleState,
+    ) {
+        for _ in 0..20 {
+            if controller.status().state == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "worker did not reach {expected:?}; current state is {:?}",
+            controller.status().state
+        );
+    }
 
     #[test]
     fn request_tracker_rejects_after_drain_starts() {
@@ -425,5 +645,107 @@ mod tests {
         let guard = tracker.try_acquire().unwrap();
         assert_eq!(tracker.inflight(), 1);
         drop(guard);
+    }
+
+    #[test]
+    fn request_tracker_uses_migratable_error_while_draining() {
+        let tracker = RequestTracker::new();
+        tracker.stop_accepting();
+
+        let error = match tracker.try_acquire() {
+            Ok(_) => panic!("draining worker must reject new requests"),
+            Err(error) => error,
+        };
+        let error = error
+            .downcast_ref::<DynamoError>()
+            .expect("drain rejection should preserve its Dynamo error type");
+        assert_eq!(error.error_type(), ErrorType::WorkerOverloaded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_keeps_admission_open_during_discovery_grace_period() {
+        let discovery = MockDiscovery::new(1);
+        let quiescence = MockQuiescence::new(Some(true), 1);
+        let grace_period = Duration::from_secs(5);
+        let (controller, tracker) = test_controller(
+            discovery,
+            quiescence,
+            DisaggregationMode::Aggregated,
+            grace_period,
+        );
+
+        let status = controller.drain().await.unwrap();
+        assert_eq!(status.state, WorkerLifecycleState::Draining);
+        let admitted_during_convergence = tracker
+            .try_acquire()
+            .expect("late frontend selections should be admitted during convergence");
+
+        yield_to_background_tasks().await;
+        tokio::time::advance(grace_period).await;
+        yield_to_background_tasks().await;
+        assert!(tracker.try_acquire().is_err());
+
+        drop(admitted_during_convergence);
+        tokio::time::advance(QUIESCENCE_POLL_INTERVAL).await;
+        wait_for_state(&controller, WorkerLifecycleState::Drained).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_drain_caller_does_not_strand_the_worker() {
+        let discovery = MockDiscovery::new(0);
+        let quiescence = MockQuiescence::new(Some(true), 1);
+        let (controller, _) = test_controller(
+            Arc::clone(&discovery),
+            quiescence,
+            DisaggregationMode::Aggregated,
+            Duration::ZERO,
+        );
+
+        let first_controller = Arc::clone(&controller);
+        let first_call = tokio::spawn(async move { first_controller.drain().await });
+        discovery
+            .unregister_started
+            .acquire()
+            .await
+            .unwrap()
+            .forget();
+        first_call.abort();
+        let _ = first_call.await;
+
+        let retry_controller = Arc::clone(&controller);
+        let retry = tokio::spawn(async move { retry_controller.drain().await });
+        discovery.unregister_gate.add_permits(1);
+        retry.await.unwrap().unwrap();
+        wait_for_state(&controller, WorkerLifecycleState::Drained).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_monitor_cannot_publish_after_resume() {
+        let discovery = MockDiscovery::new(1);
+        let quiescence = MockQuiescence::new(Some(true), 0);
+        let (controller, _) = test_controller(
+            discovery,
+            Arc::clone(&quiescence),
+            DisaggregationMode::Prefill,
+            Duration::ZERO,
+        );
+
+        controller.drain().await.unwrap();
+        quiescence
+            .check_started
+            .acquire()
+            .await
+            .unwrap()
+            .forget();
+
+        let resumed = controller.resume().await.unwrap();
+        assert_eq!(resumed.state, WorkerLifecycleState::Serving);
+        quiescence.check_gate.add_permits(1);
+        yield_to_background_tasks().await;
+
+        let status = controller.status();
+        assert_eq!(status.state, WorkerLifecycleState::Serving);
+        assert_eq!(status.kv_transfers, KvTransferState::Unknown);
+        assert!(!status.safe_to_delete);
     }
 }

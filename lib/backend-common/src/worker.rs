@@ -907,6 +907,7 @@ impl Worker {
             endpoint.clone(),
             self.engine.clone(),
             self.config.disaggregation_mode,
+            Duration::from_secs_f64(grace_period_secs()),
         );
 
         let (ingress, probe_engine): (
