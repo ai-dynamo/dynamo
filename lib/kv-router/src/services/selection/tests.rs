@@ -22,12 +22,14 @@ use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
-use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
     WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy,
+};
+use crate::scheduling::{
+    PolicyQueueDecision, PolicyQueuePolicy, PolicyQueueRequest, WorkerSelectionPolicyError,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -120,6 +122,17 @@ impl WorkerFilter for RejectWorker {
         candidate: &WorkerCandidate,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != self.0)
+    }
+}
+
+struct CountingQueuePolicy {
+    admissions: Arc<AtomicUsize>,
+}
+
+impl PolicyQueuePolicy for CountingQueuePolicy {
+    fn admit(&mut self, _request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+        self.admissions.fetch_add(1, Ordering::Relaxed);
+        PolicyQueueDecision::Ready
     }
 }
 
@@ -369,6 +382,53 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
         *factory_worker_types.lock().unwrap(),
         vec![crate::WorkerType::Aggregated; 2]
     );
+}
+
+#[tokio::test]
+async fn queue_policy_admits_atomic_reservations_and_rejects_two_step_booking() {
+    let admissions = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&admissions);
+    let app = native_policy_app(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            vec![Box::new(WorkerIdScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .with_queue_policy(Box::new(CountingQueuePolicy {
+            admissions: Arc::clone(&observed),
+        }))
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"atomic-policy","session_id":"session-a"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    assert_eq!(admissions.load(Ordering::Relaxed), 1);
+
+    let selected = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"two-step-policy","session_id":"session-b"}"#,
+    )
+    .await;
+    assert_eq!(selected.status(), StatusCode::OK);
+    let replay = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"two-step-policy"}"#,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(admissions.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

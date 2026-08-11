@@ -242,6 +242,10 @@ struct OutputBlockUpdate {
     decay_fraction: Option<f64>,
 }
 
+fn routing_isl_tokens(request: &PreprocessedRequest) -> usize {
+    request.block_mm_routing_info().0.len()
+}
+
 /// Tracks when streamed output grows into a new scheduler accounting block.
 struct OutputBlockTracker {
     track_output_blocks: bool,
@@ -320,7 +324,7 @@ where
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
         let block_size = chooser.block_size() as usize;
-        let isl_tokens = request.token_ids.len();
+        let isl_tokens = routing_isl_tokens(request);
         let expected_output_tokens = request
             .routing
             .as_ref()
@@ -436,5 +440,30 @@ where
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
         self.observability.record_metrics();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::preprocessor::MmRoutingInfo;
+
+    #[test]
+    fn terminal_context_uses_multimodal_routing_length() {
+        let request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .mm_routing_info(Some(MmRoutingInfo {
+                routing_token_ids: vec![1, 2, 3, 4],
+                block_mm_infos: Vec::new(),
+                expanded_prompt_len: 4,
+            }))
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+
+        assert_eq!(routing_isl_tokens(&request), 4);
     }
 }

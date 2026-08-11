@@ -682,40 +682,44 @@ impl<T> PolicyQueue<T> {
             return (Vec::new(), false);
         }
 
-        let removed_ready_head = class
-            .pending
-            .peek()
-            .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
-            || class.ready_by_worker.values().any(|ready| {
-                ready
-                    .peek()
-                    .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
-            });
-
         let mut removed = Vec::new();
-        let mut retained = Vec::with_capacity(class.pending.len());
-        for entry in class.pending.drain() {
-            if remove_sequences.contains(&entry.enqueue_seq) {
-                removed.push(entry);
-            } else {
-                retained.push(entry);
-            }
-        }
-        class.pending = BinaryHeap::from(retained);
-
-        class.ready_by_worker.retain(|_, ready| {
-            let mut retained = Vec::with_capacity(ready.len());
-            for entry in ready.drain() {
+        let removed_ready_head = if remove_sequences.is_empty() {
+            false
+        } else {
+            let removed_ready_head = class
+                .pending
+                .peek()
+                .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+                || class.ready_by_worker.values().any(|ready| {
+                    ready
+                        .peek()
+                        .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+                });
+            let mut retained = Vec::with_capacity(class.pending.len());
+            for entry in class.pending.drain() {
                 if remove_sequences.contains(&entry.enqueue_seq) {
                     removed.push(entry);
                 } else {
                     retained.push(entry);
                 }
             }
-            *ready = BinaryHeap::from(retained);
-            !ready.is_empty()
-        });
-        class.rebuild_worker_heads();
+            class.pending = BinaryHeap::from(retained);
+
+            class.ready_by_worker.retain(|_, ready| {
+                let mut retained = Vec::with_capacity(ready.len());
+                for entry in ready.drain() {
+                    if remove_sequences.contains(&entry.enqueue_seq) {
+                        removed.push(entry);
+                    } else {
+                        retained.push(entry);
+                    }
+                }
+                *ready = BinaryHeap::from(retained);
+                !ready.is_empty()
+            });
+            class.rebuild_worker_heads();
+            removed_ready_head
+        };
 
         for id in remove_deferred {
             if let Some(deferred) = self.deferred.remove(&id) {
@@ -1012,6 +1016,7 @@ policy_classes:
         let workers = [PolicyQueueWorker::new(
             WorkerWithDpRank::new(7, 0),
             Some(1_024),
+            true,
             true,
         )];
         let (id, decision) = queue.admit_policy("request-1", 32, None, &workers).unwrap();
