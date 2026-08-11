@@ -5,33 +5,46 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 )
 
-func TestRunActionPassesJobFile(t *testing.T) {
-	trace := filepath.Join(t.TempDir(), "trace")
+func installFakeCUDAHelper(t *testing.T, script string) {
+	t.Helper()
 	helper := filepath.Join(t.TempDir(), "cuda-checkpoint-helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + trace + "\"\n"
-	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\n"+script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	originalHelper := cudaCheckpointHelperBinary
 	cudaCheckpointHelperBinary = helper
 	t.Cleanup(func() { cudaCheckpointHelperBinary = originalHelper })
+}
 
-	if err := runAction(context.Background(), 11, actionRestore, "", "/checkpoints/job", logr.Discard()); err != nil {
+func TestRunActionCancellationIsBounded(t *testing.T) {
+	installFakeCUDAHelper(t, "sleep 300 &\nwait\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	err := runAction(ctx, 11, actionRestore, "", logr.Discard())
+	duration := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
 		t.Fatalf("runAction() error = %v", err)
 	}
-	content, err := os.ReadFile(trace)
-	if err != nil {
-		t.Fatal(err)
+	if duration > helperWaitDelay+time.Second {
+		t.Fatalf("runAction() took %s after cancellation", duration)
 	}
-	want := "--action\nrestore\n--pid\n11\n--job-file\n/checkpoints/job\n"
-	if string(content) != want {
-		t.Fatalf("helper arguments = %q, want %q", content, want)
+}
+
+func TestNormalizeProcessGroupKillErrorReportsFinishedProcess(t *testing.T) {
+	if err := normalizeProcessGroupKillError(syscall.ESRCH); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("normalizeProcessGroupKillError() error = %v, want %v", err, os.ErrProcessDone)
 	}
 }
