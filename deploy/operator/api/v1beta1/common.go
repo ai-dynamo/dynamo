@@ -133,6 +133,10 @@ type RestartStrategy struct {
 // object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
 // field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
 // the Scale subresource. Omitting the field opts the component out.
+//
+// NOTE: this differs from v1alpha1, where ScalingAdapter carries an explicit `enabled`
+// field (default false) — there a bare `scalingAdapter: {}` is DISABLED and opting in
+// requires `scalingAdapter: {enabled: true}`. In v1beta1, presence alone enables it.
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.

@@ -151,6 +151,13 @@ spec:
         enabled: true    # ← DGDSA created, managed via adapter
 ```
 
+> [!NOTE]
+> In the `nvidia.com/v1alpha1` API shown here, `scalingAdapter` has an `enabled` flag that defaults to
+> `false`, so `enabled: true` is required — a bare `scalingAdapter: {}` is **disabled** and creates no
+> DGDSA. This differs from the stored `nvidia.com/v1beta1` API, where `scalingAdapter` is a marker whose
+> mere presence (`scalingAdapter: {}`) enables the adapter. When writing v1alpha1 DGDs, always use
+> `scalingAdapter: {enabled: true}`.
+
 **When to enable DGDSA:**
 - You want to use HPA, KEDA, or Planner for autoscaling
 - You want a clear separation between "desired scale" (adapter) and "deployment config" (DGD)

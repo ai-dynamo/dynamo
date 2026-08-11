@@ -257,10 +257,16 @@ type FailoverSpec struct {
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+//
+// NOTE: in this (v1alpha1) API opt-in is via the explicit `enabled` field, which defaults
+// to false, so a bare `scalingAdapter: {}` means DISABLED here. This differs from v1beta1,
+// where ScalingAdapter is a marker struct and mere presence (`scalingAdapter: {}`) means
+// enabled. To turn the adapter on in v1alpha1, write `scalingAdapter: {enabled: true}`.
 type ScalingAdapter struct {
 	// Enabled indicates whether the ScalingAdapter should be enabled for this service.
 	// When true, a DGDSA is created and owns the replicas field.
 	// When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+	// A bare `scalingAdapter: {}` leaves this false (disabled); set `enabled: true` to opt in.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`

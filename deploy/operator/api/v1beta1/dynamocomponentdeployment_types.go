@@ -173,7 +173,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
 	// `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
 	// so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-	// the Scale subresource. Omit the field to opt out.
+	// the Scale subresource. Omit the field to opt out. (In v1alpha1 the same
+	// opt-in requires `scalingAdapter: {enabled: true}`; a bare `{}` is disabled there.)
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 

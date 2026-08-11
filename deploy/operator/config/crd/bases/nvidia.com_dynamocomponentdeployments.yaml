@@ -11462,6 +11462,8 @@ spec:
                     ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
                     When enabled, replicas are managed via DGDSA and external autoscalers can scale
                     the service using the Scale subresource. When disabled, replicas can be modified directly.
+                    Opt in with `scalingAdapter: {enabled: true}`; a bare `scalingAdapter: {}` is DISABLED here
+                    because `enabled` defaults to false (unlike v1beta1, where mere presence enables it).
                   properties:
                     enabled:
                       default: false
@@ -11469,6 +11471,7 @@ spec:
                         Enabled indicates whether the ScalingAdapter should be enabled for this service.
                         When true, a DGDSA is created and owns the replicas field.
                         When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+                        A bare `scalingAdapter: {}` leaves this false (disabled); set `enabled: true` to opt in.
                       type: boolean
                   type: object
                 serviceName:
@@ -20446,7 +20449,8 @@ spec:
                     DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
                     `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
                     so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-                    the Scale subresource. Omit the field to opt out.
+                    the Scale subresource. Omit the field to opt out. (In v1alpha1 the same
+                    opt-in requires `scalingAdapter: {enabled: true}`; a bare `{}` is disabled there.)
                   type: object
                 sharedMemorySize:
                   anyOf:
