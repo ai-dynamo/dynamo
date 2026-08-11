@@ -26,6 +26,57 @@ Dynamo calls the factory once for each routing partition. The factory receives t
 
 For each request, Dynamo first applies its built-in worker eligibility rules. The custom scorers assign finite costs to the remaining workers. The picker returns one row from that scored candidate set, then Dynamo reserves and routes to that worker.
 
+## Implement the Traits
+
+Implement the policy in four parts. The [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) contains the complete Rust source.
+
+### Score Workers
+
+Implement `WorkerScorer` for each cost you want to measure. `score` receives the request-wide `WorkerSelectionContext` and one eligible `WorkerCandidate`. Return a finite cost where lower values are better.
+
+A policy can combine multiple scorers. Dynamo calls each scorer for every eligible worker and adds their costs. This makes it possible to keep independent concerns, such as cache locality and load, in separate scorers.
+
+Use `required_worker_inputs` to declare every optional signal group the scorer reads. Read those groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. Use `WorkerInputs::NONE` when worker identity and request context are enough. Requesting fewer groups avoids calculating unused inputs.
+
+### Pick a Worker
+
+Implement `WorkerPicker` to choose one row after scoring finishes. `WorkerInputView::candidates()` always contains each worker identity and its total cost. Return the index of the selected row.
+
+A picker can use the scores alone or declare its own cache, load, or routing inputs with `required_worker_inputs`. Each optional input array uses the same row order as `candidates()`. Candidate order itself is unspecified, so inspect the worker and signals instead of relying on the first row.
+
+### Build and Register the Policy
+
+Implement a provider to parse and validate one policy instance at startup. The provider returns a factory, and Dynamo calls that factory once per routing partition. The factory receives the router configuration, partition identity, and `worker_type`, so it can build separate scorer and picker combinations for prefill and decode workers.
+
+Build a `WorkerSelectionPolicy` from the chosen scorers and picker, then register the provider under a unique policy type name. The router configuration refers to that name when it creates a policy instance.
+
+## Available Signals
+
+Request context and worker identity are always available. Optional per-worker signals are calculated only when a scorer or picker requests their group.
+
+| Source | Available values | Meaning |
+|---|---|---|
+| `WorkerSelectionContext` | `request_id()`, `request_blocks()`, `block_size()` | Request identity, request size in KV blocks, and KV block size |
+| `WorkerSelectionContext` | `tracks_prefill_tokens()` | Whether this request contributes to prefill-load tracking |
+| `WorkerSelectionContext` | `router_temperature_override()` | Per-request router temperature override, when present |
+| `WorkerCandidate::worker()` | `worker_id`, `dp_rank` | Candidate worker and data-parallel rank |
+| `ScoredWorkerCandidate` | `worker()`, `cost()` | Candidate identity and accumulated scorer cost passed to the picker |
+
+Declare optional inputs with `WorkerInputs`. `WorkerInputs::ALL` requests all three public groups.
+
+| Group | Available values | Meaning |
+|---|---|---|
+| `CACHE` | `effective_overlap_blocks()` | Effective KV overlap between this request and worker |
+| `CACHE` | `device_overlap_blocks()`, `host_overlap_blocks()`, `disk_overlap_blocks()` | KV overlap at each storage tier |
+| `CACHE` | `shared_beyond_device_blocks()` | Shared-cache hits beyond the device-resident prefix |
+| `LOAD` | `raw_prefill_blocks()` | Existing prefill work plus this request before cache credit, expressed in blocks |
+| `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
+| `LOAD` | `decode_cost_blocks()` | Estimated decode work on the worker, expressed in blocks |
+| `LOAD` | `active_requests()` | Requests currently active on the worker |
+| `ROUTING` | `preferred_taint_multiplier()` | Cost multiplier from the request's preferred routing constraints, when applicable |
+
+Each scorer and picker must declare the groups it reads. Do not depend on another component requesting a group on its behalf.
+
 ## Example Policies
 
 The example catalog registers two policy types:
