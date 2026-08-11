@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::engines::ValidateRequest;
 use dynamo_llm::protocols::common::extensions::NvExt;
 use dynamo_llm::protocols::{
     common::StopConditionsProvider,
@@ -26,6 +27,37 @@ fn test_chat_completions_ignore_eos_from_common() {
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(100));
     assert_eq!(request.common.include_stop_str_in_output, None);
+}
+
+#[test]
+fn test_stream_interval_round_trips_and_validates_for_chat_and_completions() {
+    let chat_json = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream_interval": 7
+    }"#;
+    let chat: NvCreateChatCompletionRequest = serde_json::from_str(chat_json).unwrap();
+    assert_eq!(chat.common.stream_interval, Some(7));
+    assert_eq!(serde_json::to_value(&chat).unwrap()["stream_interval"], 7);
+    assert!(ValidateRequest::validate(&chat).is_ok());
+
+    let completion_json = r#"{
+        "model": "test-model",
+        "prompt": "Hello",
+        "stream_interval": 9
+    }"#;
+    let completion: NvCreateCompletionRequest = serde_json::from_str(completion_json).unwrap();
+    assert_eq!(completion.common.stream_interval, Some(9));
+    assert_eq!(
+        serde_json::to_value(&completion).unwrap()["stream_interval"],
+        9
+    );
+    assert!(ValidateRequest::validate(&completion).is_ok());
+
+    let invalid_json = chat_json.replace(": 7", ": 0");
+    let invalid: NvCreateChatCompletionRequest = serde_json::from_str(&invalid_json).unwrap();
+    let error = ValidateRequest::validate(&invalid).unwrap_err();
+    assert!(error.to_string().contains("stream_interval"));
 }
 
 #[test]

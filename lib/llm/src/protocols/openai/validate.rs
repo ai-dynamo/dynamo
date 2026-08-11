@@ -218,6 +218,14 @@ pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Erro
     Ok(())
 }
 
+/// Validates vLLM's per-request streaming cadence.
+pub fn validate_stream_interval(stream_interval: Option<u32>) -> Result<(), anyhow::Error> {
+    if stream_interval == Some(0) {
+        anyhow::bail!("`stream_interval` must be at least 1");
+    }
+    Ok(())
+}
+
 /// Validates the top_p parameter
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(p) = top_p

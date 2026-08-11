@@ -737,13 +737,13 @@ def vllm_processor_module(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generator_preserves_zero_top_logprobs(
+async def test_generator_preserves_zero_top_logprobs_and_stream_interval(
     vllm_processor_module,
     monkeypatch,
     caplog,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = {}
+        model_fields = {"stream_interval": object()}
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -757,6 +757,7 @@ async def test_generator_preserves_zero_top_logprobs(
                     top_logprobs=0,
                     cache_salt=None,
                     mm_processor_kwargs=None,
+                    stream_interval=7,
                 ),
                 tool_parser=None,
                 chat_template_kwargs={},
@@ -772,6 +773,7 @@ async def test_generator_preserves_zero_top_logprobs(
 
     def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
         assert sampling_params.logprobs == 0
+        assert sampling_params.stream_interval == 7
         raise ProjectionObserved
 
     input_processor = SimpleNamespace(
@@ -804,6 +806,39 @@ async def test_generator_preserves_zero_top_logprobs(
         "Logprobs requested but not supported in distributed inference mode"
         in caplog.messages
     )
+
+
+@pytest.mark.asyncio
+async def test_generator_maps_vllm_client_errors_to_invalid_argument(
+    vllm_processor_module, monkeypatch
+):
+    from contextlib import nullcontext
+
+    from vllm.exceptions import VLLMValidationError
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+
+    async def fail_with_client_error(_request, context=None):
+        del context
+        if False:
+            yield None
+        raise VLLMValidationError(
+            "stream_interval must be at least 1",
+            parameter="stream_interval",
+            value=0,
+        )
+
+    monkeypatch.setattr(processor, "_generator_inner", fail_with_client_error)
+    monkeypatch.setattr(
+        vllm_processor_module._nvtx,
+        "annotate",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    with pytest.raises(InvalidArgument, match="stream_interval must be at least 1"):
+        await anext(processor.generator({"model": "test"}))
 
 
 def _make_processor(module, routed_engine):

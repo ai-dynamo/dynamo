@@ -87,6 +87,11 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub prompt_logprobs: Option<u32>,
+
+    /// Minimum number of output tokens vLLM batches before emitting a stream update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub stream_interval: Option<u32>,
 }
 
 impl CommonExt {
@@ -144,6 +149,7 @@ mod tests {
         assert_eq!(common_ext.guided_decoding_backend, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
         assert_eq!(common_ext.skip_special_tokens, None);
+        assert_eq!(common_ext.stream_interval, None);
     }
 
     #[test]
@@ -160,6 +166,7 @@ mod tests {
             .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
             .guided_decoding_backend("backend".to_string())
             .skip_special_tokens(false)
+            .stream_interval(7)
             .build()
             .unwrap();
 
@@ -183,6 +190,7 @@ mod tests {
             Some("backend".to_string())
         );
         assert_eq!(common_ext.skip_special_tokens, Some(false));
+        assert_eq!(common_ext.stream_interval, Some(7));
     }
 
     #[test]
@@ -218,6 +226,7 @@ mod tests {
             guided_whitespace_pattern: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
+            stream_interval: None,
         };
         assert!(common_ext.validate().is_ok());
     }
@@ -232,6 +241,7 @@ mod tests {
         assert_eq!(common_ext.top_k, None);
         assert_eq!(common_ext.repetition_penalty, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
+        assert_eq!(common_ext.stream_interval, None);
         assert!(common_ext.validate().is_ok());
     }
 

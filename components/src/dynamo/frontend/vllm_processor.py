@@ -17,6 +17,7 @@ from typing import Any
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -37,6 +38,7 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import InvalidArgument
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
@@ -472,9 +474,15 @@ class VllmProcessor:
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a backend using the router.
         """
-        with _nvtx.annotate("mm_frontend:generator", color="blue"):
-            async for item in self._generator_inner(request, context=context):
-                yield item
+        try:
+            with _nvtx.annotate("mm_frontend:generator", color="blue"):
+                async for item in self._generator_inner(request, context=context):
+                    yield item
+        except VLLMClientError as exc:
+            # vLLM 0.27 replaced many request-side ValueError/TypeError raises
+            # with this hierarchy. Preserve Dynamo's client-error boundary so
+            # invalid sampling, rendering, and multimodal inputs remain HTTP 400.
+            raise InvalidArgument(str(exc)) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None

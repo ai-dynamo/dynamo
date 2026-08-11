@@ -450,6 +450,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_stream_interval(self.common.stream_interval)?;
         validate::validate_model(&self.inner.model)?;
 
         // Validate prompt and prompt_embeds together (checks presence, format, and content)
