@@ -152,7 +152,7 @@ impl KvEventPublishers {
 }
 
 /// Replay-neutral per-pass metrics shared by offline and Live Mocker drivers.
-pub use aisimulate_replay::ForwardPassSnapshot;
+pub use aisimulate_core::replay::ForwardPassSnapshot;
 
 /// Trait for publishing forward pass metrics snapshots.
 /// This abstracts the FPM publishing pipeline so mocker schedulers remain generic.
@@ -183,7 +183,7 @@ impl FpmPublisher {
 /// Replay-owned request DTO shared by Dynamo's compatibility and Live Mocker
 /// drivers. The type remains provider-neutral; Dynamo-specific metadata is
 /// interpreted only by Dynamo adapters.
-pub use aisimulate_replay::DirectRequest;
+pub use aisimulate_core::replay::DirectRequest;
 
 /// Signal for output token generation with completion status
 #[derive(Debug, Clone, Serialize, Deserialize)]

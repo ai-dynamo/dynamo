@@ -143,7 +143,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         dispatch_command_effects(
             23,
             EngineEffects {
-                by_rank: vec![aisimulate_engine::generalized::RankEffects {
+                by_rank: vec![aisimulate_core::engine::generalized::RankEffects {
                     dp_rank: 0,
                     effects: CommandEffects {
                         result: CommandResult::Noop,
@@ -177,7 +177,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
             }
         );
 
-        let output = compatibility.output_signal(aisimulate_engine::Output {
+        let output = compatibility.output_signal(aisimulate_core::engine::Output {
             request_id,
             token_id: Some(9),
             completed: true,
@@ -613,7 +613,7 @@ async fn applied_midpass_cancellation_publishes_empty_occupancy_immediately() {
     dispatch_command_effects(
         24,
         EngineEffects {
-            by_rank: vec![aisimulate_engine::generalized::RankEffects {
+            by_rank: vec![aisimulate_core::engine::generalized::RankEffects {
                 dp_rank: 0,
                 effects: CommandEffects {
                     result: CommandResult::Applied,
@@ -678,7 +678,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
     )]));
     let mut deferred = vec![DeferredCommandPublication::default()];
     let command_effects = EngineEffects {
-        by_rank: vec![aisimulate_engine::generalized::RankEffects {
+        by_rank: vec![aisimulate_core::engine::generalized::RankEffects {
             dp_rank: 0,
             effects: CommandEffects {
                 result: CommandResult::Applied,

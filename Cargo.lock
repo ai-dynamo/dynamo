@@ -32,17 +32,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "aisimulate-engine"
+name = "aisimulate-core"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "ddsketchy",
  "derive_builder",
+ "indicatif 0.18.4",
  "rand 0.9.4",
  "rstest 0.18.2",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "slotmap",
+ "tempfile",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
  "xxhash-rust",
@@ -52,32 +57,11 @@ dependencies = [
 name = "aisimulate-python"
 version = "1.4.0"
 dependencies = [
- "aisimulate-engine",
- "aisimulate-replay",
+ "aisimulate-core",
  "anyhow",
  "pyo3",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "aisimulate-replay"
-version = "1.4.0"
-dependencies = [
- "aisimulate-engine",
- "anyhow",
- "blake3",
- "ddsketchy",
- "indicatif 0.18.4",
- "rand 0.9.4",
- "rstest 0.18.2",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "uuid",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -2807,8 +2791,7 @@ dependencies = [
 name = "dynamo-mocker"
 version = "1.4.0"
 dependencies = [
- "aisimulate-engine",
- "aisimulate-replay",
+ "aisimulate-core",
  "anyhow",
  "blake3",
  "bytes",

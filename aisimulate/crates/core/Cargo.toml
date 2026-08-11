@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "aisimulate-core"
+description = "Engine-neutral inference simulation and deterministic replay runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+ddsketchy = "0.1.7"
+derive_builder = { workspace = true }
+indicatif = "0.18"
+rand = { workspace = true }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+slotmap = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[features]
+default = []
+replay-bench = []
+
+[dev-dependencies]
+rstest = "0.18.2"
+tempfile = { workspace = true }

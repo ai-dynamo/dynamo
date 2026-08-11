@@ -39,8 +39,8 @@ use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
     replay_slots, replay_worker_config, replay_workers_with_configs,
 };
-use aisimulate_replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use aisimulate_replay::{
+use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use aisimulate_core::replay::{
     Placement, PlacementCacheSample, PlacementDecision, PlacementEffects, PlacementPolicy,
     ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
@@ -1092,7 +1092,7 @@ mod tests {
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_replay::{ReplayPromptTokenSource, ReplayRequestContext};
+    use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,

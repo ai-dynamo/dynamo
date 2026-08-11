@@ -226,7 +226,7 @@ impl LiveEngine {
     ///
     /// Each returned [`LiveEngine`] retains the latest-main rank-scoped request
     /// and handoff API, while all ranks share one scheduler actor and one
-    /// [`aisimulate_engine::generalized::GeneralizedMockerEngine`] barrier.
+    /// [`aisimulate_core::engine::generalized::GeneralizedMockerEngine`] barrier.
     pub fn start_grouped_with_configs(
         args: MockEngineArgs,
         configs: Vec<LiveEngineConfig>,

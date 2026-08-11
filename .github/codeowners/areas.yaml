@@ -487,8 +487,8 @@ areas:
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
   path_globs:
-  - aisimulate/crates/engine/src/cache/
-  - aisimulate/crates/engine/src/kv_manager/
+  - aisimulate/crates/core/src/engine/cache/
+  - aisimulate/crates/core/src/engine/kv_manager/
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
@@ -1034,7 +1034,7 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: aisimulate/crates/engine/src/kv_manager/
+- glob: aisimulate/crates/core/src/engine/kv_manager/
   owners:
   - performance
   - kv-memory

@@ -557,7 +557,6 @@
 /lib/llm/src/block_manager/offload/                                          @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/storage/                                          @ai-dynamo/dynamo-kv-memory-codeowners
-/aisimulate/crates/engine/src/cache/                                         @ai-dynamo/dynamo-performance-codeowners
 /lib/backend-common/examples/mocker/                                         @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/python/rust/parsers.rs                                         @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/block_manager/layout.rs                                         @ai-dynamo/dynamo-kv-memory-codeowners
@@ -578,7 +577,7 @@
 /components/src/dynamo/common/protocols/                                     @ai-dynamo/dynamo-frontend-codeowners
 /deploy/operator/internal/observability/                                     @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/block_manager/controller.rs                                     @ai-dynamo/dynamo-kv-memory-codeowners
-/aisimulate/crates/engine/src/kv_manager/                                    @ai-dynamo/dynamo-performance-codeowners
+/aisimulate/crates/core/src/engine/cache/                                    @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/common/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/block_manager/distributed.rs                                    @ai-dynamo/dynamo-kv-memory-codeowners
@@ -588,6 +587,7 @@
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-multimodal-codeowners
 /lib/bindings/python/src/dynamo/nixl_connect/                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                @ai-dynamo/dynamo-frontend-codeowners
+/aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                               @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-multimodal-codeowners
 /container/templates/sglang_xpu_framework.Dockerfile                         @ai-dynamo/dynamo-xpu-codeowners
@@ -647,7 +647,6 @@
 /components/src/dynamo/vllm/publisher.py                                     @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/src/replay/planner_handle.rs                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/runtime/src/system_status_server.rs                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/aisimulate/crates/engine/src/kv_manager/                                    @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/sglang/protocol.py                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/sglang/snapshot.py                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/multimodal/                                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -670,6 +669,7 @@
 /components/src/dynamo/trtllm/health_check.py                                @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/engine_monitor.py                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/trtllm/encode_helper.py                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/sglang/init_diffusion.py                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/engine_monitor.py                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners

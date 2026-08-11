@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 
-use aisimulate_engine::{
+use aisimulate_core::engine::{
     Backend, EngineConfig, EngineFactory, PreemptionMode as EnginePreemptionMode, SglangConfig,
     SglangSchedulePolicy, TimingModel, TimingModelConfig, TransferTimingMode,
     WorkerType as EngineWorkerType,
 };
-use aisimulate_replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
+use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -226,8 +226,8 @@ impl TimingModel for DynamoPerfTimingModel {
 mod tests {
     use std::num::NonZeroU32;
 
-    use aisimulate_engine::generalized::EngineIdentity;
-    use aisimulate_replay::WorkerStage;
+    use aisimulate_core::engine::generalized::EngineIdentity;
+    use aisimulate_core::replay::WorkerStage;
     use ndarray_interp::InterpolateError;
 
     use super::*;

@@ -15,7 +15,7 @@ For task-oriented instructions, see [Simulate a Kubernetes Deployment](../../../
 
 ## Generalized Engine
 
-The `aisimulate-engine` crate owns the scheduler, native GPU KV accounting, preemption, timing, and
+The `aisimulate_core::engine` module owns the scheduler, native GPU KV accounting, preemption, timing, and
 attention data-parallel (DP) barrier. A logical engine contains either one rank or a fixed group of
 sibling ranks. Grouped execution starts a pass only when every sibling rank is ready and completes
 at the latest rank completion time.

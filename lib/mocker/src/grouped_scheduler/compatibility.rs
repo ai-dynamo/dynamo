@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use aisimulate_engine::{
+use aisimulate_core::engine::{
     HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
     TransferTimingMode as EngineTransferTimingMode,
 };

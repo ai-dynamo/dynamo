@@ -14,12 +14,14 @@ use std::sync::Arc;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
-pub(crate) use aisimulate_replay::TraceCollector;
-pub use aisimulate_replay::{
+/// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
+pub use aisimulate_core::ReplayReport as TraceSimulationReport;
+pub(crate) use aisimulate_core::replay::TraceCollector;
+pub use aisimulate_core::replay::{
     CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
     PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
     TraceDistributionStats, TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats,
-    TraceRequestCounts, TraceSimulationReport, TraceThroughputStats,
+    TraceRequestCounts, TraceThroughputStats,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -60,8 +62,10 @@ impl OfflineDisaggReplayConfig {
     }
 }
 
-pub use aisimulate_replay::TrafficStats;
-pub use aisimulate_replay::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
+pub use aisimulate_core::replay::TrafficStats;
+pub use aisimulate_core::replay::{
+    ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+};
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,

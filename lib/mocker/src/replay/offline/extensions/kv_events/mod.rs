@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use aisimulate_engine::KvEvent;
+use aisimulate_core::engine::KvEvent;
 use anyhow::Context;
 use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
@@ -12,7 +12,7 @@ use crate::replay::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
 use crate::scheduler::RouterEventVisibility;
-use aisimulate_replay::{
+use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, EngineEventBatch, KvIngestEventEncoder, ProviderSpec,
     ReplayAdapters, ReplayArtifactKvEventVisibility, ReplayEngineObservation, ReplayRuntimeInput,
     ReplaySpec, ReplayTopology, Replayer, WorkerPoolSpec, WorkerStage,
