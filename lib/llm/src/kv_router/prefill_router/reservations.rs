@@ -11,7 +11,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
     selector::WorkerSelector,
-    sequence::active_request_expiry_duration,
+    sequences::active_request_expiry_duration,
 };
 use parking_lot::Mutex;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -78,14 +78,20 @@ enum BeginReservation {
     AlreadyExists,
 }
 
-pub(super) struct PrefillReservationRegistry<Sel>
+/// EPP-owned prefill reservation state.
+///
+/// This lives alongside the C router handle rather than in [`PrefillRouter`].
+/// It receives a router reference only while taking an admission snapshot, and
+/// retains the resulting chooser in active entries so later cleanup is safe
+/// across router rebinds.
+pub struct EppReservationManager<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     entries: Mutex<HashMap<String, PrefillReservationEntry<Sel>>>,
 }
 
-impl<Sel> Default for PrefillReservationRegistry<Sel>
+impl<Sel> Default for EppReservationManager<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -96,11 +102,17 @@ where
     }
 }
 
-impl<Sel> PrefillReservationRegistry<Sel>
+impl<Sel> EppReservationManager<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    fn begin(&self, reservation_id: &str) -> BeginReservation {
+    /// Construct an empty manager. Call [`Self::spawn_reaper`] after placing
+    /// the manager in an [`Arc`] owned by the external router handle.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin_entry(&self, reservation_id: &str) -> BeginReservation {
         let mut entries = self.entries.lock();
         match entries.entry(reservation_id.to_string()) {
             Entry::Vacant(entry) => {
@@ -154,7 +166,7 @@ where
         }
     }
 
-    fn cancel(&self, reservation_id: &str) {
+    fn cancel_entry(&self, reservation_id: &str) {
         let mut entries = self.entries.lock();
         match entries.entry(reservation_id.to_string()) {
             Entry::Occupied(entry) => {
@@ -230,7 +242,7 @@ fn ignore_missing_request(result: std::result::Result<(), SequenceError>) -> Res
     }
 }
 
-impl<Sel> PrefillRouter<Sel>
+impl<Sel> EppReservationManager<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -238,18 +250,18 @@ where
     ///
     /// Calling this repeatedly for the same in-flight booking is idempotent. A
     /// cancellation that arrived first is observed here and never queues work.
-    pub fn begin_prefill_reservation(&self, reservation_id: &str) -> Result<()> {
+    pub fn begin(&self, router: &PrefillRouter<Sel>, reservation_id: &str) -> Result<()> {
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
+        if router.lifecycle_state() != PrefillLifecycleState::Active {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         }
-        if self.binding.load_full().is_none() {
+        if router.binding.load_full().is_none() {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         }
 
-        match self.reservations.begin(reservation_id) {
+        match self.begin_entry(reservation_id) {
             BeginReservation::Pending(_) => Ok(()),
             BeginReservation::Cancelled => {
                 anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
@@ -261,8 +273,8 @@ where
     }
 
     /// Drop a pending reservation when preprocessing fails before scheduler admission.
-    pub fn abort_prefill_reservation(&self, reservation_id: &str) {
-        self.reservations.remove_pending(reservation_id);
+    pub fn abort(&self, reservation_id: &str) {
+        self.remove_pending(reservation_id);
     }
 
     /// Atomically select and reserve a prefill worker for an externally dispatched request.
@@ -270,8 +282,9 @@ where
     /// The scheduler observes the booking before selecting the next request. The caller owns
     /// the returned reservation until first output, terminal completion, or cancellation.
     #[expect(clippy::too_many_arguments)]
-    pub async fn reserve_prefill_worker(
+    pub async fn reserve(
         &self,
+        router: &PrefillRouter<Sel>,
         reservation_id: &str,
         token_ids: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
@@ -285,7 +298,7 @@ where
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
-        let cancellation = match self.reservations.begin(reservation_id) {
+        let cancellation = match self.begin_entry(reservation_id) {
             BeginReservation::Pending(cancellation) => cancellation,
             BeginReservation::Cancelled => {
                 anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
@@ -294,17 +307,17 @@ where
                 anyhow::bail!("prefill reservation {reservation_id:?} already exists")
             }
         };
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
-            self.reservations.remove_pending(reservation_id);
+        if router.lifecycle_state() != PrefillLifecycleState::Active {
+            self.remove_pending(reservation_id);
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         }
-        let Some(binding) = self.binding.load_full() else {
-            self.reservations.remove_pending(reservation_id);
+        let Some(binding) = router.binding.load_full() else {
+            self.remove_pending(reservation_id);
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         };
 
         let InnerPrefillRouter::KvRouter(router) = &binding.router else {
-            self.reservations.remove_pending(reservation_id);
+            self.remove_pending(reservation_id);
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
         };
         let chooser = router.chooser.clone();
@@ -313,7 +326,7 @@ where
         let outcome = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                self.reservations.remove_pending(reservation_id);
+                self.remove_pending(reservation_id);
                 anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
             }
             outcome = chooser.find_best_match_details_with_lifecycle(
@@ -336,7 +349,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.reservations.remove_pending(reservation_id);
+                self.remove_pending(reservation_id);
                 return Err(error);
             }
         };
@@ -349,7 +362,7 @@ where
                     worker,
                     created_at: Instant::now(),
                 };
-                if !self.reservations.activate(reservation_id, reservation) {
+                if !self.activate(reservation_id, reservation) {
                     ignore_missing_request(chooser.free_if_worker(&scheduler_id, worker).await)?;
                     anyhow::bail!("prefill reservation {reservation_id:?} was cancelled");
                 }
@@ -359,7 +372,7 @@ where
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                self.reservations.remove_pending(reservation_id);
+                self.remove_pending(reservation_id);
                 Ok(PrefillQueryOutcome::QueueRejected { rejection })
             }
         }
@@ -369,9 +382,9 @@ where
     ///
     /// An active reservation remains owned by the normal booking lifecycle. If cancellation
     /// races with admission, the Go caller drains the reserve result and releases that booking.
-    pub fn cancel_prefill_reservation(&self, reservation_id: &str) {
+    pub fn cancel(&self, reservation_id: &str) {
         if !reservation_id.is_empty() {
-            self.reservations.cancel(reservation_id);
+            self.cancel_entry(reservation_id);
         }
     }
 
@@ -379,8 +392,8 @@ where
     ///
     /// The registry entry remains present until scheduler cleanup succeeds, so a timeout or
     /// transient router error can be retried safely.
-    pub async fn release_prefill_reservation(&self, reservation_id: &str) -> Result<()> {
-        let Some(reservation) = self.reservations.get_active(reservation_id) else {
+    pub async fn release(&self, reservation_id: &str) -> Result<()> {
+        let Some(reservation) = self.get_active(reservation_id) else {
             return Ok(());
         };
 
@@ -390,18 +403,15 @@ where
                 .free_if_worker(&reservation.scheduler_id, reservation.worker)
                 .await,
         )?;
-        self.reservations
-            .remove_if_scheduler_id(reservation_id, &reservation.scheduler_id);
+        self.remove_if_scheduler_id(reservation_id, &reservation.scheduler_id);
         Ok(())
     }
 
-    pub(super) fn spawn_reservation_reaper(router: &Arc<Self>) {
-        let router: Weak<Self> = Arc::downgrade(router);
-        let cancellation = router
-            .upgrade()
-            .expect("router must be alive while starting reservation reaper")
-            .cancel_token
-            .child_token();
+    /// Reap stale EPP-owned bookings. The task only weakly holds the manager,
+    /// so destroying the C router handle stops it without affecting the
+    /// prefill router's lifecycle.
+    pub fn spawn_reaper(manager: &Arc<Self>) {
+        let manager: Weak<Self> = Arc::downgrade(manager);
 
         tokio::spawn(async move {
             let retention = reservation_retention();
@@ -412,38 +422,26 @@ where
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
             loop {
-                tokio::select! {
-                    _ = cancellation.cancelled() => return,
-                    _ = interval.tick() => {
-                        let Some(router) = router.upgrade() else {
-                            return;
-                        };
-                        let now = Instant::now();
-                        router
-                            .reservations
-                            .remove_expired_cancellations(now, CANCELLED_RESERVATION_RETENTION);
-                        let expired = router
-                            .reservations
-                            .expired_active_ids(now, retention);
-                        for reservation_id in expired {
-                            if let Err(error) = router
-                                .release_prefill_reservation(&reservation_id)
-                                .await
-                            {
-                                tracing::warn!(
-                                    %reservation_id,
-                                    %error,
-                                    "Failed to expire stale EPP prefill reservation"
-                                );
-                            }
-                        }
+                interval.tick().await;
+                let Some(manager) = manager.upgrade() else {
+                    return;
+                };
+                let now = Instant::now();
+                manager.remove_expired_cancellations(now, CANCELLED_RESERVATION_RETENTION);
+                let expired = manager.expired_active_ids(now, retention);
+                for reservation_id in expired {
+                    if let Err(error) = manager.release(&reservation_id).await {
+                        tracing::warn!(
+                            %reservation_id,
+                            %error,
+                            "Failed to expire stale EPP prefill reservation"
+                        );
                     }
                 }
             }
         });
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -560,10 +558,15 @@ mod tests {
         }
     }
 
-    async fn reserve(router: &PrefillRouter<DefaultWorkerSelector>, id: &str) -> WorkerWithDpRank {
+    async fn reserve(
+        manager: &EppReservationManager<DefaultWorkerSelector>,
+        router: &PrefillRouter<DefaultWorkerSelector>,
+        id: &str,
+    ) -> WorkerWithDpRank {
         routed_worker(
-            router
-                .reserve_prefill_worker(
+            manager
+                .reserve(
+                    router,
                     id,
                     &vec![1; 64],
                     None,
@@ -582,9 +585,10 @@ mod tests {
     #[tokio::test]
     async fn reservations_affect_selection_and_release_load() {
         let (router, chooser) = tracked_prefill_router().await;
+        let manager = EppReservationManager::default();
 
-        let first = reserve(&router, "reservation-1").await;
-        let second = reserve(&router, "reservation-2").await;
+        let first = reserve(&manager, &router, "reservation-1").await;
+        let second = reserve(&manager, &router, "reservation-2").await;
 
         assert_ne!(
             first, second,
@@ -597,14 +601,8 @@ mod tests {
         assert_eq!(loads.len(), 2);
         assert!(loads.iter().all(|load| load.potential_prefill_tokens == 64));
 
-        router
-            .release_prefill_reservation("reservation-1")
-            .await
-            .unwrap();
-        router
-            .release_prefill_reservation("reservation-2")
-            .await
-            .unwrap();
+        manager.release("reservation-1").await.unwrap();
+        manager.release("reservation-2").await.unwrap();
         let loads = chooser
             .get_potential_loads(&[], None, None, None, None)
             .await
@@ -615,14 +613,12 @@ mod tests {
     #[tokio::test]
     async fn release_uses_the_binding_that_created_the_reservation() {
         let (router, original_chooser) = tracked_prefill_router().await;
-        reserve(&router, "reservation-before-rebind").await;
+        let manager = EppReservationManager::default();
+        reserve(&manager, &router, "reservation-before-rebind").await;
 
         let (replacement, _) = tracked_binding("replacement").await;
         router.binding.store(Some(replacement));
-        router
-            .release_prefill_reservation("reservation-before-rebind")
-            .await
-            .unwrap();
+        manager.release("reservation-before-rebind").await.unwrap();
 
         let loads = original_chooser
             .get_potential_loads(&[], None, None, None, None)
@@ -638,15 +634,15 @@ mod tests {
 
     #[test]
     fn cancellation_before_reservation_is_observed() {
-        let registry = PrefillReservationRegistry::<DefaultWorkerSelector>::default();
+        let registry = EppReservationManager::<DefaultWorkerSelector>::default();
         registry.cancel("reservation-1");
 
         assert!(matches!(
-            registry.begin("reservation-1"),
+            registry.begin_entry("reservation-1"),
             BeginReservation::Cancelled
         ));
         assert!(matches!(
-            registry.begin("reservation-1"),
+            registry.begin_entry("reservation-1"),
             BeginReservation::Pending(_)
         ));
     }
@@ -665,8 +661,8 @@ mod tests {
 
     #[test]
     fn pre_registered_pending_reservation_survives_tombstone_reaping() {
-        let registry = PrefillReservationRegistry::<DefaultWorkerSelector>::default();
-        let BeginReservation::Pending(cancellation) = registry.begin("reservation-1") else {
+        let registry = EppReservationManager::<DefaultWorkerSelector>::default();
+        let BeginReservation::Pending(cancellation) = registry.begin_entry("reservation-1") else {
             panic!("expected pending reservation");
         };
 
@@ -677,7 +673,7 @@ mod tests {
         );
 
         assert!(cancellation.is_cancelled());
-        let BeginReservation::Pending(existing) = registry.begin("reservation-1") else {
+        let BeginReservation::Pending(existing) = registry.begin_entry("reservation-1") else {
             panic!("expected pending reservation to remain registered");
         };
         assert!(existing.is_cancelled());
@@ -685,8 +681,8 @@ mod tests {
 
     #[test]
     fn cancellation_signals_pending_reservation() {
-        let registry = PrefillReservationRegistry::<DefaultWorkerSelector>::default();
-        let BeginReservation::Pending(cancellation) = registry.begin("reservation-1") else {
+        let registry = EppReservationManager::<DefaultWorkerSelector>::default();
+        let BeginReservation::Pending(cancellation) = registry.begin_entry("reservation-1") else {
             panic!("expected pending reservation");
         };
 
