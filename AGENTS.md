@@ -157,3 +157,45 @@ Any change under `docs/`, `examples/`, or `recipes/` must follow
 [documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
+
+## Cursor Cloud specific instructions
+
+The Cloud VM is **CPU-only (no GPU)** with **no HuggingFace Hub egress** (downloads fail
+with connection reset). GitHub and PyPI egress do work. The build is pre-done in the VM
+snapshot; the startup update script only refreshes the two editable Python installs
+(`ai-dynamo` and `lib/gpu_memory_service`) into `.venv` — it does **not** rebuild the Rust
+bindings. Activate the env with `source .venv/bin/activate` before running anything.
+
+- **Rust changes are NOT hot-reloaded into Python.** After editing anything the PyO3
+  bindings depend on (`lib/bindings/python` or any workspace crate under `lib/`),
+  rebuild with `cd lib/bindings/python && maturin develop --uv`. A plain `uv pip install -e .`
+  will not pick up Rust changes. First build is ~3–5 min; incremental is faster.
+- **`cc`/`c++` are pointed at gcc/g++** (via `update-alternatives`, baked into the
+  snapshot). This is required because the default clang can't find libstdc++ headers when
+  cc-rs passes `--target=...`, which breaks C/C++ deps like the vendored ZeroMQ. If you
+  rebuild in a context where those alternatives aren't set, prefix builds with
+  `CC=gcc CXX=g++`.
+- **Run the product locally without GPU/etcd/NATS** using the mocker worker + file-based
+  discovery. HF Hub is blocked, so point `--model-path` at a local sample-model dir that
+  contains a `chat_template` (the frontend refuses to materialize a model without one).
+  `lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct` works; `TinyLlama_v1.1`
+  does **not** (no `chat_template`). Do **not** pass `--model-name` — let the model id
+  default to the path so the frontend loads the tokenizer from disk instead of trying HF.
+  Set `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`. Example (two shells):
+  `python -m dynamo.frontend --http-port 8000 --discovery-backend file` and
+  `python -m dynamo.mocker --model-path lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct --discovery-backend file`,
+  then `curl localhost:8000/v1/chat/completions`. The mocker simulates scheduling/KV/timing
+  and emits synthetic token IDs, so response `content` is `null`/garbage — the meaningful
+  signal is the request lifecycle and token/latency metrics, not the text. Real inference
+  (vLLM/SGLang/TensorRT-LLM) and anything needing Kubernetes require a GPU/cluster and are
+  out of scope here.
+- **Unit tests** (`pytest -m unit tests/`, see [Test](#test)) need
+  `--continue-on-collection-errors` on CPU-only: `tests/serve/test_{vllm,sglang,trtllm}.py`
+  and `tests/fault_tolerance/test_canary_rank_pause.py` fail to import (`torch`/
+  `tensorrt_llm` absent). Three unit tests fail by design in this env and are not setup
+  problems: `test_kvbm_wheel_exists`/`test_kvbm_imports` (expect a prebuilt KVBM wheel in
+  `/opt/dynamo/wheelhouse/`, only present in the container image) and
+  `test_aiconfigurator_consistency` (optional `aiconfigurator` sibling package not
+  installed).
+- **Lint**: `cargo fmt --all -- --check` and `cargo clippy --workspace` work directly;
+  `pre-commit` hooks fetch their environments from GitHub on first run (egress works).
