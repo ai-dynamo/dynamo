@@ -103,6 +103,12 @@ async def test_agg_runtime_patch_updates_legacy_min_endpoint():
     }
     assert planner.config.min_endpoint == 5
 
+    assert await planner.patch_min_endpoints({"min_endpoint": 0}) == {
+        "mode": "agg",
+        "min_endpoint": 0,
+    }
+    assert planner.config.min_endpoint == 0
+
 
 @pytest.mark.asyncio
 async def test_http_validation_and_budget_rejection_leave_config_unchanged():

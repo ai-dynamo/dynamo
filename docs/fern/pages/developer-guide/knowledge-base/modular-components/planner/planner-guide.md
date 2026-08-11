@@ -117,7 +117,7 @@ spec:
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
-| `min_endpoint` | int | `1` | Legacy shared endpoint floor and the endpoint floor for `agg` mode. Unset component-specific floors inherit it. |
+| `min_endpoint` | int | `1` | Legacy shared endpoint floor and the endpoint floor for `agg` mode. Unset component-specific floors inherit it. May be `0` for scale-to-zero compatibility. |
 | `prefill_min_endpoint` | int or `null` | `null` | Prefill endpoint floor for `disagg` and `prefill` modes. Must be at least `1`. |
 | `decode_min_endpoint` | int or `null` | `null` | Decode endpoint floor for `disagg` and `decode` modes. Must be at least `1`. |
 | `max_gpu_budget` | int | `8` | Maximum total GPUs the planner may allocate. |

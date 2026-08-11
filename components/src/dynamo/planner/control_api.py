@@ -34,7 +34,7 @@ class MinimumEndpointController(Protocol):
 class _MinimumEndpointsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    min_endpoint: int | None = Field(default=None, ge=1)
+    min_endpoint: int | None = Field(default=None, ge=0)
     prefill_min_endpoint: int | None = Field(default=None, ge=1)
     decode_min_endpoint: int | None = Field(default=None, ge=1)
 

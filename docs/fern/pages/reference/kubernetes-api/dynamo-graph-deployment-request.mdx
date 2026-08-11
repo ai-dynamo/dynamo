@@ -339,7 +339,7 @@ service.
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Legacy shared minimum number of engine endpoints. Component-specific minimums inherit this value when unset. Aggregated mode always uses this field. Must be at least `1`.
+  Legacy shared minimum number of engine endpoints. Component-specific minimums inherit this value when unset. Aggregated mode always uses this field. Must be nonnegative; use `0` for scale-to-zero compatibility.
 </ParamField>
 
 <ParamField path="prefill_min_endpoint" type="integer | null" default="null">

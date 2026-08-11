@@ -172,7 +172,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Legacy shared minimum number of engine endpoints (replicas). In disaggregated and single-component modes, an unset component-specific minimum inherits this value. Aggregated mode always uses this field. Must be at least `1`.
+  Legacy shared minimum number of engine endpoints (replicas). In disaggregated and single-component modes, an unset component-specific minimum inherits this value. Aggregated mode always uses this field. Must be nonnegative; use `0` for scale-to-zero compatibility.
 </ParamField>
 
 <ParamField path="prefill_min_endpoint" type="integer" default="null">
@@ -370,7 +370,7 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
   --data '{"prefill_min_endpoint": 2}'
 ```
 
-PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null` or below-`1` values, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
+PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
 
 ## Scheduling and plugin pipeline
 

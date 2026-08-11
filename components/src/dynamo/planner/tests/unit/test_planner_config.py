@@ -173,7 +173,7 @@ def test_component_min_endpoints_reject_inactive_static_fields(mode, field):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("min_endpoint", 0),
+        ("min_endpoint", -1),
         ("prefill_min_endpoint", 0),
         ("decode_min_endpoint", 0),
         ("control_api_port", -1),
@@ -189,6 +189,14 @@ def test_agg_active_min_endpoint_uses_legacy_field():
     config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=5)
 
     assert config.active_min_endpoints() == (None, 5)
+
+
+def test_legacy_min_endpoint_allows_zero_for_scale_to_zero():
+    agg_config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=0)
+    disagg_config = PlannerConfig(namespace="test-ns", mode="disagg", min_endpoint=0)
+
+    assert agg_config.active_min_endpoints() == (None, 0)
+    assert disagg_config.active_min_endpoints() == (0, 0)
 
 
 def test_throughput_metrics_source_default():

@@ -428,10 +428,11 @@ class PlannerConfig(BaseModel):
     """
     min_endpoint: int = Field(
         default=SLAPlannerDefaults.min_endpoint,
-        ge=1,
+        ge=0,
         description=(
-            "Legacy endpoint floor. Component-specific minimums inherit this value "
-            "when unset. Aggregated mode always uses this field."
+            "Legacy endpoint floor; 0 permits scale-to-zero. Component-specific "
+            "minimums inherit this value when unset. Aggregated mode always uses "
+            "this field."
         ),
     )
     prefill_min_endpoint: Optional[int] = Field(
