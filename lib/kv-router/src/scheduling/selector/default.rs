@@ -245,7 +245,8 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             1.0
         };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * cache.device_overlap_blocks
+        let overlap_credit_blocks = effective_overlap_score_credit
+            * cache.default_device_overlap_blocks
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;

@@ -126,15 +126,14 @@ impl<'a> WorkerSelectionInput<'a> {
                 .get(&worker)
                 .copied()
                 .map(|blocks| blocks as f64)
-                .unwrap_or_else(|| {
-                    if self.has_tier_overlap_blocks {
-                        0.0
-                    } else {
-                        effective_overlap_blocks
-                    }
-                });
+                .unwrap_or(0.0);
             WorkerCacheInput {
                 effective_overlap_blocks,
+                default_device_overlap_blocks: if self.has_tier_overlap_blocks {
+                    device_overlap_blocks
+                } else {
+                    effective_overlap_blocks
+                },
                 device_overlap_blocks,
                 host_overlap_blocks: self
                     .request

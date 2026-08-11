@@ -73,6 +73,7 @@ impl BitOr for WorkerInputs {
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
     pub(super) effective_overlap_blocks: f64,
+    pub(super) default_device_overlap_blocks: f64,
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
     pub(super) disk_overlap_blocks: f64,
@@ -708,6 +709,44 @@ mod tests {
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn custom_policy_does_not_receive_effective_overlap_as_device_overlap() {
+        struct RawDeviceOverlapPicker;
+
+        impl WorkerPicker for RawDeviceOverlapPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(
+                    input.cache().expect("cache input")[0].device_overlap_blocks(),
+                    0.0
+                );
+                Ok(0)
+            }
+        }
+
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.overlap.effective_overlap_blocks.insert(worker, 3.5);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(RawDeviceOverlapPicker),
+        );
+
+        policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
     }
 
     #[test]

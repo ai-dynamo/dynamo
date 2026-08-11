@@ -322,7 +322,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `ROUTING` | `preferred_taint_multiplier()` | Optional cost multiplier from preferred routing constraints |
 
-If per-tier overlap data is unavailable, `device_overlap_blocks()` reports the available local overlap. These accessors return raw block counts, so each custom scorer chooses how to combine them.
+The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A scorer reads requested groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every group that it reads.
 
