@@ -266,7 +266,12 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             let overlap_adjusted_decode_blocks =
                 (decode_cost_blocks - overlap_credit_blocks).max(0.0);
             let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            // Stamped for the same reason as the two rows below: this row is emitted from the
+            // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
+            // it, and this branch returns early without reaching them.
             tracing::debug!(
+                request_id = context.request_id,
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
                  = max(0, {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}) + {active_request_cost_blocks:.3}",

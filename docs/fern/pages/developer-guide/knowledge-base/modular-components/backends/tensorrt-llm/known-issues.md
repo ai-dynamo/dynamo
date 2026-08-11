@@ -50,10 +50,17 @@ This is the symptom, not the cause — the cause is that the container image you
 
 > The driver-mismatch error message itself is being improved — tracked as an engineering follow-up.
 
-## Amazon Linux 2023 hang with `--network host`
+## Hang when running locally with `--network host`
 
-**Issue:** On Amazon Linux 2023 (AL2023), running the TensorRT-LLM container locally with
-`docker run --network host ...` can hang due to an [mpi4py bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609).
+**Issue:** Running the TensorRT-LLM container locally with `docker run --network host ...` can hang
+before the server becomes ready. This was first reported on Amazon Linux 2023, but the failure has
+not been shown to be specific to that distribution.
+
+**Cause:** Not established. A comparable hang is tracked in an open
+[mpi4py discussion](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609)
+in which maintainers attribute it to the backend MPI implementation rather than to mpi4py itself.
+That thread remains undiagnosed. Dynamo pins no mpi4py version — it arrives transitively in the
+upstream TensorRT-LLM image.
 
 **Fix:** Replace `--network host` with explicit port mappings, exposing only the ports you need —
 e.g. `4222` (NATS), `2379`/`2380` (etcd), and `8000` (frontend).

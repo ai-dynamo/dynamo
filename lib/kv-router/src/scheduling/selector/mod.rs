@@ -81,6 +81,7 @@ impl<'a> WorkerSelectionInput<'a> {
             request,
             has_tier_overlap_blocks,
             context: WorkerSelectionContext {
+                request,
                 request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
                 block_size,
