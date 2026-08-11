@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/go-logr/logr v1.4.3
+	github.com/google/uuid v1.6.0
 	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/gateway-api-inference-extension v0.0.0-20260603065144-7c1f1994dbff
 )
@@ -45,7 +46,6 @@ require (
 	github.com/google/cel-go v0.28.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/regexp v0.0.0-20250905093917-f7b3be9d1853 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect

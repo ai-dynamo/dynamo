@@ -71,6 +71,12 @@ query_router_result_t route_prefill_request(RouterHandles *handle,
                                             const char *pods_json,
                                             CRoutingResult *out_result);
 
+query_router_result_t route_and_reserve_prefill_request(RouterHandles *handle,
+                                                        const char *reservation_id,
+                                                        const char *request_json,
+                                                        const char *pods_json,
+                                                        CRoutingResult *out_result);
+
 query_router_result_t route_decode_request(RouterHandles *handle,
                                            const char *request_json,
                                            const char *pods_json,
@@ -91,6 +97,11 @@ query_router_result_t mark_prefill_complete(RouterHandles *handle,
 
 query_router_result_t free_request(RouterHandles *handle,
                                    const char *request_id);
+
+query_router_result_t free_prefill_request(RouterHandles *handle,
+                                           const char *reservation_id,
+                                           uint64_t worker_id,
+                                           uint32_t dp_rank);
 
 void free_routing_result(CRoutingResult *result);
 
@@ -408,6 +419,34 @@ func CallFreeRequest(requestID string) error {
 	return nil
 }
 
+// CallFreePrefillRequest releases an atomically reserved prefill booking.
+// The worker identity makes delayed or duplicate cleanup ownership-safe.
+func CallFreePrefillRequest(reservationID string, workerID uint64, dpRank uint32) error {
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+	rc := C.free_prefill_request(
+		router,
+		cReservationID,
+		C.uint64_t(workerID),
+		C.uint32_t(dpRank),
+	)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("free_prefill_request failed with code %d", rc)
+	}
+	return nil
+}
+
 // RoutingResult holds the result of a prefill or decode routing call.
 type RoutingResult struct {
 	WorkerID       uint64
@@ -466,6 +505,51 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	rc := C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
 	if rc != C.QUERY_ROUTER_OK {
 		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
+	}
+
+	tokens := extractTokenData(&result)
+	cacheNamespace := extractCacheNamespace(&result)
+	workerID := uint64(result.prefill_worker_id)
+	dpRank := uint32(result.prefill_dp_rank)
+	C.free_routing_result(&result)
+
+	return &RoutingResult{
+		WorkerID:       workerID,
+		DpRank:         dpRank,
+		TokenData:      tokens,
+		CacheNamespace: cacheNamespace,
+	}, nil
+}
+
+// CallRouteAndReservePrefillRequest atomically selects a prefill worker and
+// books its scheduler load under reservationID before returning.
+func CallRouteAndReservePrefillRequest(reservationID string, requestJSON string, podsJSON string) (*RoutingResult, error) {
+	if !routerInitialized {
+		return nil, fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return nil, fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+	cRequestJSON := C.CString(requestJSON)
+	defer C.free(unsafe.Pointer(cRequestJSON))
+
+	var cPodsJSON *C.char
+	if podsJSON != "" {
+		cPodsJSON = C.CString(podsJSON)
+		defer C.free(unsafe.Pointer(cPodsJSON))
+	}
+
+	var result C.CRoutingResult
+	rc := C.route_and_reserve_prefill_request(router, cReservationID, cRequestJSON, cPodsJSON, &result)
+	if rc != C.QUERY_ROUTER_OK {
+		return nil, fmt.Errorf("route_and_reserve_prefill_request failed with code %d", rc)
 	}
 
 	tokens := extractTokenData(&result)
