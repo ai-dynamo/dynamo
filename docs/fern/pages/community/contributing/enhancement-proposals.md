@@ -23,7 +23,7 @@ A DEP is two artifacts, and you need both:
 Keep the design in the file, not in the issue. The issue points at the proposal and tracks where it
 has got to; the file is the proposal.
 
-## When a DEP Is Required
+## When a DEP Is Required, and When You Might Want One
 
 A DEP is required when a change:
 
@@ -32,7 +32,11 @@ A DEP is required when a change:
 - alters communication plane architecture
 - affects backend integration contracts
 
-Anything smaller does not need one. A change over 100 core lines needs a
+Nothing smaller is required to have one, but anything may. A DEP is for reaching
+agreement on a design before the code exists, and that is worth doing whenever
+the cost of being wrong is high: a change to how the project works rather than
+what it does, a convention everyone will have to follow, a feature whose shape
+several people disagree about. The DEP process itself is a DEP, `0000-dep-process`. A change over 100 core lines needs a
 [Contribution Request](contribution-flow.mdx). A CR is permission to build, where a DEP is agreement
 on the design. An architectural change needs the DEP, not both: agreeing the design settles whether
 the work is wanted.

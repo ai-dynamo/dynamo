@@ -44,7 +44,7 @@ Disagreement escalates in defined steps rather than stalling. An objection still
 
 A **Contribution Request** is permission to build. Open one before sized work so you know the change is welcome before you invest in it.
 
-A **Dynamo Enhancement Proposal** is design consensus. It carries the formal design for architectural changes. The Special Interest Group covering the affected areas sponsors it. The Maintainers of every area it touches review it, including areas outside that SIG's scope, so sponsoring never decides who reviews. Approval is a two-thirds vote of Core Maintainers, since a DEP is by definition a change no single area owns.
+A **Dynamo Enhancement Proposal** is design consensus. It carries the formal design for a change. Architectural changes require one, and anything else worth agreeing before it is built may have one, including changes to process and convention. The Special Interest Group covering the affected areas sponsors it. The Maintainers of every area it touches review it, including areas outside that SIG's scope, so sponsoring never decides who reviews. Approval is a two-thirds vote of Core Maintainers, since a DEP is by definition a change no single area owns.
 
 A small change needs neither. A sized change needs a Contribution Request. An architectural change needs a Dynamo Enhancement Proposal instead, which answers the same question the Contribution Request asks and more, so you do not open both. The thresholds that decide which bucket you are in are in [CONTRIBUTING.md](https://github.com/ai-dynamo/dynamo/blob/main/CONTRIBUTING.md), and [Enhancement Proposals](../contributing/enhancement-proposals.md) covers how a DEP is written and reviewed.
 
