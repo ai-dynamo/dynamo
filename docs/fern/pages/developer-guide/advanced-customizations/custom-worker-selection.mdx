@@ -39,8 +39,7 @@ An external policy owns its filters, scorers, and picker. Dynamo's default score
 
 ## Build the Policy
 
-<Steps toc={true}>
-<Step title="Create the policy and catalog crates">
+### Create the Policy and Catalog Crates
 
 Set the Dynamo checkout and policy project paths:
 
@@ -84,8 +83,7 @@ cargo add \
   dynamo-kv-router
 ```
 
-</Step>
-<Step title="Filter workers">
+### Filter Workers
 
 A filter answers a hard yes-or-no question about one worker that already passed Dynamo's eligibility checks. Return `true` to keep the worker or `false` to remove it. Use a filter only when the worker must not receive the request; use a scorer for preferences.
 
@@ -123,8 +121,7 @@ Dynamo runs filters in declaration order before scoring. A worker must pass ever
 
 Pass filters to `WorkerSelectionPolicy::new_with_filters`. If the policy has no hard requirement, omit filters and use `WorkerSelectionPolicy::new`.
 
-</Step>
-<Step title="Score workers">
+### Score Workers
 
 A scorer expresses a preference without excluding a worker. It returns one finite cost for one worker. Lower total cost is better by convention.
 
@@ -158,8 +155,7 @@ impl WorkerScorer for ActiveRequestsScorer {
 
 A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
 
-</Step>
-<Step title="Pick a worker">
+### Pick a Worker
 
 A picker makes the final choice after filtering and scoring. It sees every remaining worker and its total cost, then returns one row index. Most policies pick the lowest cost, but a picker can instead sample, break ties, or use policy-local state.
 
@@ -191,8 +187,7 @@ impl WorkerPicker for LowestCostPicker {
 
 Candidate order is unspecified, so inspect explicit values instead of relying on row order. Dynamo rejects an out-of-range index before accounting or reservation.
 
-</Step>
-<Step title="Parse parameters and create the factory">
+### Parse Parameters and Create the Factory
 
 The provider runs once at startup. Parse and validate all parameters there, then capture the validated values in the factory:
 
@@ -242,8 +237,7 @@ fn provider(
 
 Dynamo calls the returned factory once per routing partition. If prefill, decode, or standalone `select` workers need different components, branch on `worker_type`. Use the partition identity for distinct model or routing-group state.
 
-</Step>
-<Step title="Register the policy">
+### Register the Policy
 
 Expose a registration function from the policy crate:
 
@@ -271,8 +265,7 @@ pub fn register(
 
 Choose a stable, unique type name. Unknown types, duplicate registrations, and invalid parameters stop startup.
 
-</Step>
-<Step title="Configure an instance">
+### Configure an Instance
 
 Create `$POLICY_DIR/worker-selection.yaml`:
 
@@ -288,17 +281,13 @@ worker_selection:
 
 The `type` selects a registered provider. The `name` identifies one configured instance. `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides `worker_selection.default` by instance name. Set the override to `default` to select Dynamo's built-in policy.
 
-</Step>
-<Step title="Check the policy and catalog">
+### Check the Policy and Catalog
 
 ```bash
 cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 ```
 
 Add one focused test for each policy decision and one registration test for every type name.
-
-</Step>
-</Steps>
 
 ## Available Signals
 
