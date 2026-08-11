@@ -20,9 +20,12 @@ import (
 )
 
 type Options struct {
-	Config            *configv1alpha1.OperatorConfiguration
-	RuntimeConfig     *commoncontroller.RuntimeConfig
-	OperatorVersion   string
+	Config          *configv1alpha1.OperatorConfiguration
+	RuntimeConfig   *commoncontroller.RuntimeConfig
+	OperatorVersion string
+	// DGDRDefaultImage overrides the DGDR webhook's derived default
+	// spec.image (dynamo-planner:<OperatorVersion>) when set.
+	DGDRDefaultImage  string
 	OperatorPrincipal string
 	Gate              features.Gate
 }
@@ -105,7 +108,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}
 
-	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion)
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRDefaultImage)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
 	}

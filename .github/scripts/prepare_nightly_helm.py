@@ -18,11 +18,10 @@ Third-party references are never touched; power-agent is excluded.
 Every rewrite requires exactly one match and raises otherwise, so a chart
 restructure breaks this step loudly instead of shipping stale references.
 
-Known caveat: the DGDR defaulting webhook derives dynamo-planner:<appVersion>
-when spec.image is unset (a hardcoded repo in the operator), which does not
-exist for pre-release appVersions -- true for rc charts today and for these
-nightly charts. Nightly DGDR users must set spec.image explicitly until the
-operator grows a default-image override.
+The DGDR webhook's version-derived default image (dynamo-planner:<appVersion>)
+cannot exist for pre-release appVersions, so the platform rewrite also pins the
+operator's dgdrDefaultImage value (--dgdr-default-image) to the dated nightly
+planner image. rc charts retain the stale derived default.
 """
 from __future__ import annotations
 
@@ -73,6 +72,14 @@ IMAGE_SITES: dict[str, list[tuple[str, str, str]]] = {
     ],
 }
 
+# platform only: pin the DGDR webhook's default profiler image to the dated
+# nightly planner — the version-derived default (dynamo-planner:<appVersion>)
+# cannot exist for pre-release chart versions.
+DGDR_DEFAULT_IMAGE_SITE = (
+    "deploy/helm/charts/platform/components/operator/values.yaml",
+    "nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly",
+)
+
 # Bounds the repository->tag hop at the next `repository:` line, so an image
 # block with no tag fails loudly instead of rewriting another image's tag.
 _TAG_HOP = r"(?:(?![^\n]*repository:)[^\n]*\n)*?"
@@ -109,6 +116,17 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
 
     path.write_text(text)
     print(f"  {path}: version -> {new}")
+
+
+def set_dgdr_default_image(path: Path, image: str) -> None:
+    pat = re.compile(r'^(\s*dgdrDefaultImage:\s*)"?[^"\n]*"?(\s*)$', re.MULTILINE)
+    text, n = pat.subn(lambda m: f'{m.group(1)}"{image}"{m.group(2)}', path.read_text())
+    if n != 1:
+        raise RuntimeError(
+            f"expected exactly one dgdrDefaultImage in {path}, found {n}"
+        )
+    path.write_text(text)
+    print(f"  {path}: dgdrDefaultImage -> {image}")
 
 
 def set_chart_name(path: Path, new: str) -> None:
@@ -195,6 +213,9 @@ def main() -> int:
         set_chart_name(root / chart_path, nightly_name)
         for rel, current_repo, nightly_repo in IMAGE_SITES[token]:
             set_image_site(root / rel, current_repo, nightly_repo, args.image_tag)
+        if token == "platform":
+            rel, planner_repo = DGDR_DEFAULT_IMAGE_SITE
+            set_dgdr_default_image(root / rel, f"{planner_repo}:{args.image_tag}")
     return 0
 
 

@@ -57,11 +57,16 @@ const (
 // operator versions 1.0.0 and later.
 type DGDRDefaulter struct {
 	OperatorVersion string
+	// DefaultImage, when set, is used verbatim instead of deriving
+	// dynamo-planner:<operatorVersion>. Pre-release charts (rc, nightly) have
+	// no matching tag in the GA planner repo, so they pin this explicitly.
+	DefaultImage string
 }
 
-// NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version.
-func NewDGDRDefaulter(operatorVersion string) *DGDRDefaulter {
-	return &DGDRDefaulter{OperatorVersion: operatorVersion}
+// NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
+// and optional default-image override.
+func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
+	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
 }
 
 // Default implements admission.CustomDefaulter.
@@ -100,9 +105,13 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// defaultImageFor returns the default image with a canonical semver tag, or an
-// empty string when the operator version cannot be parsed.
+// defaultImageFor returns the DefaultImage override when set, else the default
+// image with a canonical semver tag, or an empty string when the operator
+// version cannot be parsed.
 func (d *DGDRDefaulter) defaultImageFor() string {
+	if d.DefaultImage != "" {
+		return d.DefaultImage
+	}
 	version, err := semver.NewVersion(d.OperatorVersion)
 	if err != nil {
 		return ""
