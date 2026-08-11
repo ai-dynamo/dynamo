@@ -6,9 +6,10 @@
 # build's unified osrb-deps.csv — the authoritative "did the generators miss
 # anything" check that verify_sbom_diff never was (it only compared our own
 # outputs). Runs as a sibling job (needs:[<fw>-build]) IN PARALLEL with the test
-# jobs so the slow syft pull+scan never blocks testing. SOFT GATE: report-only
-# (no --fail-on-findings) until the name-normalization is proven low-noise; the
-# job is not a required check.
+# jobs so the slow syft pull+scan never blocks testing. PR callers retain the
+# evidence briefly; post-merge callers retain it with the release compliance
+# artifacts. SOFT GATE: report-only (no --fail-on-findings) until the
+# name-normalization is proven low-noise; the job is not a required check.
 name: Shared Compliance Audit
 
 on:
@@ -36,6 +37,11 @@ on:
         required: false
         type: string
         default: ''
+      artifact_retention_days:
+        description: 'Retention in days for the audit report and raw Syft SBOMs. PR callers default to 7; post-merge callers pass 30.'
+        required: false
+        type: number
+        default: 7
 
 jobs:
   audit:
@@ -107,7 +113,7 @@ jobs:
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           # Compliance artifact name — compliance-<git-sha>-<container>, matching
           # compliance-extract's upload (target_tag_plain == container name). For
-          # PR (the only caller), git_sha == github.sha.
+          # Both PR and post-merge callers use github.sha as the build git_sha.
           echo "artifact=compliance-${{ github.sha }}-${{ inputs.target_tag_plain }}" >> "$GITHUB_OUTPUT"
           # Baseline SBOM stem comes from the build job's output (it rendered the
           # Dockerfile with the deps it has), so the audit runner needs no
@@ -147,6 +153,7 @@ jobs:
             --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
             --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
             --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
+            -o json=/tmp/syft.syft.json \
             -o cyclonedx-json=/tmp/syft.cdx.json
           OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
           [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
@@ -159,12 +166,17 @@ jobs:
             --our-csv "${OUR_CSV}" \
             --image "${{ steps.resolve.outputs.image_tag }}" \
             --report /tmp/audit-report.txt -v
-      - name: Upload audit report
+      - name: Upload audit evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          # compliance-audit-<git-sha>-<container>[-cudaN] (image_tag already carries all three).
+          # compliance-audit-<git-sha>-<container>[-cudaN] (image_tag already
+          # carries all three). Keep native Syft JSON as the lossless source for
+          # later Grype scans and CycloneDX for the existing audit/interchange.
           name: compliance-audit-${{ steps.resolve.outputs.image_tag }}
-          path: /tmp/audit-report.txt
-          retention-days: 7
+          path: |
+            /tmp/audit-report.txt
+            /tmp/syft.syft.json
+            /tmp/syft.cdx.json
+          retention-days: ${{ inputs.artifact_retention_days }}
           if-no-files-found: ignore

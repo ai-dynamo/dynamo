@@ -659,10 +659,61 @@ jobs:
   # full-image rebuild on a separate fresh builder. archive_sources is currently
   # false (source archival temporarily disabled), so release branches do not emit
   # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
-  # extract). A compliance failure fails the build.
+  # extract). A compliance failure fails the build. The independent audits retain
+  # native Syft JSON, CycloneDX, and the comparison report for 30 days on both
+  # main and release/*.*.* pushes.
   #
   # planner stays on the legacy shared-compliance scan until it migrates to
   # the inline system.
+
+  vllm-compliance-audit:
+    name: vllm-runtime
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '13.0'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
+  sglang-compliance-audit:
+    name: sglang-runtime
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '13.0'
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.sglang-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
+  trtllm-compliance-audit:
+    name: trtllm-runtime
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '13.1'
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
+  frontend-compliance-audit:
+    name: frontend
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: ''
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
