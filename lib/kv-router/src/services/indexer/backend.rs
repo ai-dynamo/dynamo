@@ -46,50 +46,77 @@ impl Indexer {
 
     /// Apply an event, routing to the device-tier primary when
     /// `event.storage_tier.is_gpu()` and to the appropriate lower-tier
-    /// indexer otherwise. `Cleared` events fan out to every tier so per-tier
-    /// state stays consistent with the primary.
+    /// indexer otherwise. `Cleared` events fan out to their applicable physical
+    /// indexes according to the event's reset scope.
     pub async fn apply_event_routed(&self, event: RouterEvent) {
+        let targets_primary = match event.targets_primary() {
+            Ok(targets_primary) => targets_primary,
+            Err(_) => {
+                match self {
+                    Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                        lower_tier.record_unsupported_residency_event(&event);
+                    }
+                }
+                return;
+            }
+        };
+        let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Indexer::Single {
                 primary,
                 lower_tier,
-            } => match &event.event.data {
-                KvCacheEventData::Cleared => {
-                    primary.apply_event(event.clone()).await;
-                    for indexer in lower_tier.all() {
-                        indexer.apply_event(event.clone()).await;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        if let Err(error) = primary
+                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
+                            .await
+                        {
+                            tracing::warn!(%error, "Failed to reset primary residency");
+                            return;
+                        }
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
+                    for indexer in lower_tier.all() {
+                        if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
+                            tracing::warn!(%error, "Failed to reset lower-tier residency");
+                            return;
+                        }
+                    }
+                } else if targets_primary {
                     primary.apply_event(event).await;
-                }
-                _ => {
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
                         .apply_event(event)
                         .await;
                 }
-            },
+            }
             Indexer::Concurrent {
                 primary,
                 lower_tier,
-            } => match &event.event.data {
-                KvCacheEventData::Cleared => {
-                    primary.apply_event(event.clone()).await;
-                    for indexer in lower_tier.all() {
-                        indexer.apply_event(event.clone()).await;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        if let Err(error) = primary.apply_event_and_wait(event.clone()).await {
+                            tracing::warn!(%error, "Failed to reset primary residency");
+                            return;
+                        }
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
+                    for indexer in lower_tier.all() {
+                        if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
+                            tracing::warn!(%error, "Failed to reset lower-tier residency");
+                            return;
+                        }
+                    }
+                } else if targets_primary {
                     primary.apply_event(event).await;
-                }
-                _ => {
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
                         .apply_event(event)
                         .await;
                 }
-            },
+            }
         }
     }
 

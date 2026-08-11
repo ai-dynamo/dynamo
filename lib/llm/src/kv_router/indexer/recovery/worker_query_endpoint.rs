@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_kv_router::{
     indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse},
-    protocols::DpRank,
+    protocols::{DpRank, ResetScope},
 };
 use dynamo_runtime::{
     component::{Component, StartedEndpoint},
@@ -165,6 +165,7 @@ fn negotiate_tree_dump_failure(
             WorkerKvQueryResponse::TreeDump {
                 events: Vec::new(),
                 last_event_id,
+                reset_scope: ResetScope::All,
             }
         }
         response => response,
@@ -220,6 +221,7 @@ mod tests {
             WorkerKvQueryResponse::TreeDump {
                 events,
                 last_event_id: 17,
+                ..
             } if events.is_empty()
         ));
     }

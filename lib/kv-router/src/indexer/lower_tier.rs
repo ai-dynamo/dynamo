@@ -25,7 +25,8 @@ use super::WorkerObservationState;
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
+    ResidencyOwner, RouterEvent, WorkerWithDpRank,
 };
 use crate::router_hint::RouterHintRootCandidates;
 
@@ -63,7 +64,7 @@ impl RouterHintExtensions {
     }
 }
 type WorkerBlockIndex =
-    FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
+    FxHashMap<ResidencyOwner, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
@@ -75,17 +76,49 @@ struct TransitionKey {
 enum EdgeOwnersEntry {
     Single {
         child_hash: ExternalSequenceBlockHash,
-        owner: WorkerWithDpRank,
+        worker: WorkerWithDpRank,
+        domains: ResidencyDomainSet,
     },
     Multi {
         child_hash: ExternalSequenceBlockHash,
-        owners: WorkerSet,
+        owners: FxHashMap<WorkerWithDpRank, ResidencyDomainSet>,
     },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ResidencyDomainSet(u8);
+
+impl ResidencyDomainSet {
+    fn new(domain: ResidencyDomain) -> Self {
+        let mut domains = Self::default();
+        domains.insert(domain);
+        domains
+    }
+
+    fn bit(domain: ResidencyDomain) -> u8 {
+        match domain {
+            ResidencyDomain::Worker => 1,
+            ResidencyDomain::CacheOwner => 2,
+        }
+    }
+
+    fn insert(&mut self, domain: ResidencyDomain) {
+        self.0 |= Self::bit(domain);
+    }
+
+    fn remove(&mut self, domain: ResidencyDomain) -> bool {
+        self.0 &= !Self::bit(domain);
+        self.0 == 0
+    }
+}
+
 impl EdgeOwnersEntry {
-    fn new(child_hash: ExternalSequenceBlockHash, owner: WorkerWithDpRank) -> Self {
-        Self::Single { child_hash, owner }
+    fn new(child_hash: ExternalSequenceBlockHash, owner: ResidencyOwner) -> Self {
+        Self::Single {
+            child_hash,
+            worker: owner.worker,
+            domains: ResidencyDomainSet::new(owner.domain),
+        }
     }
 
     fn child_hash(&self) -> ExternalSequenceBlockHash {
@@ -94,23 +127,25 @@ impl EdgeOwnersEntry {
         }
     }
 
-    fn insert(&mut self, child_hash: ExternalSequenceBlockHash, owner: WorkerWithDpRank) -> bool {
+    fn insert(&mut self, child_hash: ExternalSequenceBlockHash, owner: ResidencyOwner) -> bool {
         match self {
             Self::Single {
                 child_hash: existing_hash,
-                owner: existing_owner,
+                worker,
+                domains,
             } => {
                 if *existing_hash != child_hash {
                     return false;
                 }
 
-                if *existing_owner == owner {
+                if *worker == owner.worker {
+                    domains.insert(owner.domain);
                     return true;
                 }
 
-                let mut owners = WorkerSet::default();
-                owners.insert(*existing_owner);
-                owners.insert(owner);
+                let mut owners = FxHashMap::default();
+                owners.insert(*worker, *domains);
+                owners.insert(owner.worker, ResidencyDomainSet::new(owner.domain));
                 *self = Self::Multi { child_hash, owners };
                 true
             }
@@ -121,21 +156,23 @@ impl EdgeOwnersEntry {
                 if *existing_hash != child_hash {
                     return false;
                 }
-                owners.insert(owner);
+                owners.entry(owner.worker).or_default().insert(owner.domain);
                 true
             }
         }
     }
 
-    fn remove(&mut self, owner: WorkerWithDpRank) -> bool {
+    fn remove(&mut self, owner: ResidencyOwner) -> bool {
         match self {
             Self::Single {
-                owner: existing_owner,
-                ..
-            } => *existing_owner == owner,
+                worker, domains, ..
+            } => *worker == owner.worker && domains.remove(owner.domain),
             Self::Multi { child_hash, owners } => {
-                if !owners.remove(&owner) {
+                let Some(domains) = owners.get_mut(&owner.worker) else {
                     return false;
+                };
+                if domains.remove(owner.domain) {
+                    owners.remove(&owner.worker);
                 }
 
                 if owners.is_empty() {
@@ -143,10 +180,11 @@ impl EdgeOwnersEntry {
                 }
 
                 if owners.len() == 1 {
-                    let remaining_owner = owners.iter().next().copied().unwrap();
+                    let (&worker, &domains) = owners.iter().next().unwrap();
                     *self = Self::Single {
                         child_hash: *child_hash,
-                        owner: remaining_owner,
+                        worker,
+                        domains,
                     };
                 }
 
@@ -155,20 +193,20 @@ impl EdgeOwnersEntry {
         }
     }
 
-    fn contains(&self, owner: &WorkerWithDpRank) -> bool {
+    fn contains_worker(&self, worker: &WorkerWithDpRank) -> bool {
         match self {
             Self::Single {
-                owner: existing_owner,
+                worker: existing_worker,
                 ..
-            } => existing_owner == owner,
-            Self::Multi { owners, .. } => owners.contains(owner),
+            } => existing_worker == worker,
+            Self::Multi { owners, .. } => owners.contains_key(worker),
         }
     }
 
     fn collect_workers(&self) -> Vec<WorkerWithDpRank> {
         match self {
-            Self::Single { owner, .. } => vec![*owner],
-            Self::Multi { owners, .. } => owners.iter().copied().collect(),
+            Self::Single { worker, .. } => vec![*worker],
+            Self::Multi { owners, .. } => owners.keys().copied().collect(),
         }
     }
 }
@@ -222,29 +260,43 @@ impl LowerTierIndexer {
     ) -> Result<(), KvCacheEventError> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
 
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            let scope = event
+                .reset_scope()
+                .map_err(|_| KvCacheEventError::UnsupportedResidencyDomain)?
+                .expect("Cleared events always resolve a reset scope");
+            match scope {
+                ResetScope::All => self.remove_worker_dp_rank_impl(worker_blocks, worker),
+                ResetScope::Domain(domain) => {
+                    self.remove_owner_impl(worker_blocks, ResidencyOwner::new(worker, domain))
+                }
+            }
+            return Ok(());
+        }
+
+        let owner = event
+            .residency_owner()
+            .map_err(|_| KvCacheEventError::UnsupportedResidencyDomain)?;
         match event.event.data {
             KvCacheEventData::Stored(store_data) => {
-                self.store_blocks_impl(worker_blocks, worker, store_data);
+                self.store_blocks_impl(worker_blocks, owner, store_data);
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes)
+                self.remove_blocks_impl(worker_blocks, owner, &remove_data.block_hashes)
             }
-            KvCacheEventData::Cleared => {
-                self.remove_worker_dp_rank_impl(worker_blocks, worker);
-                Ok(())
-            }
+            KvCacheEventData::Cleared => unreachable!("Cleared returned above"),
         }
     }
 
     fn store_blocks_impl(
         &self,
         worker_blocks: &mut WorkerBlockIndex,
-        worker: WorkerWithDpRank,
+        owner: ResidencyOwner,
         store_data: KvCacheStoreData,
     ) {
         let mut parent_hash = store_data.parent_hash;
-        let worker_map = worker_blocks.entry(worker).or_default();
+        let worker_map = worker_blocks.entry(owner).or_default();
 
         for block in store_data.blocks {
             let key = TransitionKey {
@@ -265,10 +317,10 @@ impl LowerTierIndexer {
 
             let inserted = match self.edges.entry(key) {
                 dashmap::mapref::entry::Entry::Occupied(mut edge) => {
-                    edge.get_mut().insert(block.block_hash, worker)
+                    edge.get_mut().insert(block.block_hash, owner)
                 }
                 dashmap::mapref::entry::Entry::Vacant(edge) => {
-                    edge.insert(EdgeOwnersEntry::new(block.block_hash, worker));
+                    edge.insert(EdgeOwnersEntry::new(block.block_hash, owner));
                     true
                 }
             };
@@ -285,11 +337,11 @@ impl LowerTierIndexer {
     fn remove_blocks_impl(
         &self,
         worker_blocks: &mut WorkerBlockIndex,
-        worker: WorkerWithDpRank,
+        owner: ResidencyOwner,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<(), KvCacheEventError> {
         let remove_worker_entry = {
-            let Some(worker_map) = worker_blocks.get_mut(&worker) else {
+            let Some(worker_map) = worker_blocks.get_mut(&owner) else {
                 return Err(KvCacheEventError::BlockNotFound);
             };
 
@@ -298,28 +350,28 @@ impl LowerTierIndexer {
                     return Err(KvCacheEventError::BlockNotFound);
                 };
 
-                self.remove_worker_from_edge(key, worker);
+                self.remove_owner_from_edge(key, owner);
             }
 
             worker_map.is_empty()
         };
 
         if remove_worker_entry {
-            worker_blocks.remove(&worker);
+            worker_blocks.remove(&owner);
         }
 
         Ok(())
     }
 
     fn clear_worker_impl(&self, worker_blocks: &mut WorkerBlockIndex, worker_id: u64) {
-        let workers: Vec<_> = worker_blocks
+        let owners: Vec<_> = worker_blocks
             .keys()
             .copied()
-            .filter(|worker| worker.worker_id == worker_id)
+            .filter(|owner| owner.worker.worker_id == worker_id)
             .collect();
 
-        for worker in workers {
-            self.remove_worker_dp_rank_impl(worker_blocks, worker);
+        for owner in owners {
+            self.remove_owner_impl(worker_blocks, owner);
         }
     }
 
@@ -328,18 +380,30 @@ impl LowerTierIndexer {
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
     ) {
-        let Some(worker_map) = worker_blocks.remove(&worker) else {
+        let owners: Vec<_> = worker_blocks
+            .keys()
+            .copied()
+            .filter(|owner| owner.worker == worker)
+            .collect();
+
+        for owner in owners {
+            self.remove_owner_impl(worker_blocks, owner);
+        }
+    }
+
+    fn remove_owner_impl(&self, worker_blocks: &mut WorkerBlockIndex, owner: ResidencyOwner) {
+        let Some(worker_map) = worker_blocks.remove(&owner) else {
             return;
         };
 
         for (_, key) in worker_map {
-            self.remove_worker_from_edge(key, worker);
+            self.remove_owner_from_edge(key, owner);
         }
     }
 
-    fn remove_worker_from_edge(&self, key: TransitionKey, worker: WorkerWithDpRank) {
+    fn remove_owner_from_edge(&self, key: TransitionKey, owner: ResidencyOwner) {
         if let dashmap::mapref::entry::Entry::Occupied(mut edge) = self.edges.entry(key)
-            && edge.get_mut().remove(worker)
+            && edge.get_mut().remove(owner)
         {
             edge.remove();
         }
@@ -375,10 +439,10 @@ impl LowerTierIndexer {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        for (worker, block_map) in worker_blocks {
+        for (owner, block_map) in worker_blocks {
             for (block_hash, key) in block_map {
-                events.push(RouterEvent::new(
-                    worker.worker_id,
+                events.push(RouterEvent::with_residency_domain(
+                    owner.worker.worker_id,
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -390,8 +454,10 @@ impl LowerTierIndexer {
                                 mm_extra_info: None,
                             }],
                         }),
-                        dp_rank: worker.dp_rank,
+                        dp_rank: owner.worker.dp_rank,
                     },
+                    crate::protocols::StorageTier::Device,
+                    owner.domain,
                 ));
                 event_id += 1;
             }
@@ -627,10 +693,20 @@ impl SyncIndexer for LowerTierIndexer {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
                 }
                 WorkerTask::Stats(sender) => {
+                    let mut worker_blocks_by_owner: FxHashMap<
+                        WorkerWithDpRank,
+                        FxHashSet<ExternalSequenceBlockHash>,
+                    > = FxHashMap::default();
+                    for (owner, blocks) in &worker_blocks {
+                        worker_blocks_by_owner
+                            .entry(owner.worker)
+                            .or_default()
+                            .extend(blocks.keys().copied());
+                    }
                     let stats = WorkerLookupStats::from_worker_block_counts(
-                        worker_blocks
+                        worker_blocks_by_owner
                             .iter()
-                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                            .map(|(worker, blocks)| (*worker, blocks.len())),
                     );
                     let _ = sender.send(stats);
                 }
@@ -736,10 +812,10 @@ fn advance_state_to_breakpoint(
         // iterating all active workers. For multi-owner edges we iterate
         // whichever side is smaller.
         match edge.value() {
-            EdgeOwnersEntry::Single { owner, .. } => {
-                if active.remove(owner) {
+            EdgeOwnersEntry::Single { worker, .. } => {
+                if active.remove(worker) {
                     finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
-                    active.insert(*owner);
+                    active.insert(*worker);
                 } else {
                     finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
                     break;
@@ -748,9 +824,9 @@ fn advance_state_to_breakpoint(
             EdgeOwnersEntry::Multi { owners, .. } => {
                 if owners.len() <= active.len() {
                     scratch.clear();
-                    for owner in owners {
-                        if active.remove(owner) {
-                            scratch.insert(*owner);
+                    for worker in owners.keys() {
+                        if active.remove(worker) {
+                            scratch.insert(*worker);
                         }
                     }
                     finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
@@ -758,7 +834,7 @@ fn advance_state_to_breakpoint(
                 } else {
                     scratch.clear();
                     for worker in active.drain() {
-                        if owners.contains(&worker) {
+                        if owners.contains_key(&worker) {
                             scratch.insert(worker);
                         } else {
                             final_states.insert(worker, (cur_pos, cur_hash));
@@ -837,7 +913,7 @@ fn advance_single_worker(
             return;
         };
 
-        if !edge.contains(&worker) {
+        if !edge.contains_worker(&worker) {
             final_states.insert(worker, (*cur_pos, *cur_hash));
             return;
         }
@@ -876,7 +952,7 @@ mod tests {
     use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        WorkerWithDpRank,
+        ResidencyDomain, RouterEvent, StorageTier, WireResidencyDomain, WorkerWithDpRank,
     };
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
@@ -904,6 +980,33 @@ mod tests {
                     external_hashes,
                 ),
             }),
+        )
+    }
+
+    fn store_event_in_domain(
+        worker_id: u64,
+        event_id: u64,
+        parent_hash: Option<u64>,
+        local_values: &[u64],
+        external_hashes: &[u64],
+        domain: ResidencyDomain,
+    ) -> RouterEvent {
+        RouterEvent::with_residency_domain(
+            worker_id,
+            crate::protocols::KvCacheEvent {
+                event_id,
+                dp_rank: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                    start_position: None,
+                    blocks: stored_blocks_with_sequence_hashes(
+                        &local_hashes(local_values),
+                        external_hashes,
+                    ),
+                }),
+            },
+            StorageTier::HostPinned,
+            domain,
         )
     }
 
@@ -981,6 +1084,99 @@ mod tests {
         let workers = index.root_workers(LocalBlockHash(11));
         assert_eq!(workers.len(), 1);
         assert!(workers.contains(&WorkerWithDpRank::new(7, 0)));
+    }
+
+    #[test]
+    fn logical_domains_share_one_tree_without_sharing_ownership() {
+        let mut index = TestLowerTierIndex::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        for domain in [ResidencyDomain::Worker, ResidencyDomain::CacheOwner] {
+            index
+                .apply_event(store_event_in_domain(
+                    7,
+                    1,
+                    None,
+                    &[11, 12],
+                    &[101, 102],
+                    domain,
+                ))
+                .unwrap();
+        }
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                2,
+                None,
+                &[21],
+                &[201],
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                3,
+                Some(201),
+                &[22],
+                &[202],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+
+        let continuations = FxHashMap::from_iter([(worker, LowerTierContinuation::from_root(0))]);
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&2)
+        );
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[21, 22]), &continuations)
+                .get(&worker),
+            Some(&2),
+            "one physical walk may cross ownership domains for the same routing worker"
+        );
+
+        index
+            .apply_event(RouterEvent::with_residency_domain(
+                7,
+                crate::protocols::KvCacheEvent {
+                    event_id: 4,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&2),
+            "Worker reset must retain duplicate CacheOwner ownership"
+        );
+
+        index
+            .apply_event(RouterEvent {
+                worker_id: 7,
+                storage_tier: StorageTier::Device,
+                residency_domain: WireResidencyDomain::default(),
+                event: crate::protocols::KvCacheEvent {
+                    event_id: 5,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations)
+                .get(&worker),
+            Some(&0)
+        );
     }
 
     #[tokio::test]
