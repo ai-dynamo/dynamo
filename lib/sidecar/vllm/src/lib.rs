@@ -10,8 +10,7 @@ mod engine;
 mod json;
 mod model;
 
-/// Generated vLLM gRPC types, temporarily exposed for the Mocker server until
-/// vLLM publishes its upstream protocol package.
+/// vLLM gRPC types published through the Buf Schema Registry.
 #[doc(hidden)]
 pub mod proto;
 

@@ -34,7 +34,19 @@ pub fn connection_timeout(message: impl Into<String>) -> DynamoError {
 }
 
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    let kind = match status.code() {
+    status_to_dynamo_parts(rpc, status.message(), status.code())
+}
+
+pub fn status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> DynamoError {
+    status_to_dynamo_parts(
+        rpc,
+        status.message(),
+        tonic::Code::from_i32(status.code() as i32),
+    )
+}
+
+fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
+    let kind = match code {
         tonic::Code::InvalidArgument
         | tonic::Code::NotFound
         | tonic::Code::OutOfRange
@@ -45,10 +57,7 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
     };
-    backend(
-        kind,
-        format!("{rpc}: {} ({:?})", status.message(), status.code()),
-    )
+    backend(kind, format!("{rpc}: {message} ({code:?})"))
 }
 
 #[cfg(test)]

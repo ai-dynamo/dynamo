@@ -42,7 +42,13 @@ Start a vLLM build with the split Inference and Control services. Data-parallel 
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
 ```
 
-The sidecar build downloads `inference.proto` and `control.proto` from the pinned [`vllm-project/vllm`](https://buf.build/vllm-project/vllm/docs/nightly) BSR commit `7726adbdafb34bda85e25c8fc5e192f4` and verifies their SHA-256 checksums before generating Rust bindings. For offline builds, set `DYNAMO_VLLM_PROTO_DIR` to a directory containing those exact files.
+The sidecar uses the generated Rust SDKs from the pinned [`vllm-project/vllm`](https://buf.build/vllm-project/vllm/docs/nightly) BSR commit `7726adbdafb34bda85e25c8fc5e192f4`. The BSR Cargo registry requires authentication. Create a BSR token and export it for Cargo before building:
+
+```bash
+export CARGO_REGISTRIES_BUF_TOKEN="Bearer ${BUF_TOKEN}"
+```
+
+The repository's `.cargo/config.toml` configures the registry and credential provider. CI reads `BUF_TOKEN` from the repository's Actions secrets.
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a
@@ -113,6 +119,7 @@ The sidecar waits for both the Control and Inference services through the standa
   `restartPolicy: Always`), which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
+- A BSR token in `BUF_TOKEN` for building the sidecar.
 - A container registry you can push to and the cluster can pull from.
 
 ### 1. Build and push the sidecar image
@@ -122,6 +129,7 @@ Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --secret id=buf_token,env=BUF_TOKEN \
   -f lib/sidecar/vllm/Dockerfile \
   -t <your-registry>/dynamo-vllm-sidecar:1.3.0 --push .
 ```

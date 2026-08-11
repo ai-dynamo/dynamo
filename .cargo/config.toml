@@ -19,3 +19,6 @@ rustflags = ["-C", "target-cpu=neoverse-n1", "-C", "force-frame-pointers=yes", "
 [env]
 PCRE2_SYS_STATIC = "1"
 
+[registries.buf]
+index = "sparse+https://buf.build/gen/cargo/"
+credential-provider = "cargo:token"

@@ -5,10 +5,12 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use dynamo_backend_common::DynamoError;
 use futures::future::try_join_all;
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::transport::{Channel, Endpoint};
+use tonic_v14::transport::{Channel as ChannelV14, Endpoint as EndpointV14};
 
 use crate::{GrpcEndpoint, GrpcTransportConfig, cannot_connect, invalid_argument};
 
@@ -21,76 +23,143 @@ pub struct GrpcChannelPool {
     next: AtomicUsize,
 }
 
-impl GrpcChannelPool {
-    pub async fn connect(
-        peer: &str,
-        endpoint: &GrpcEndpoint,
-        transport: GrpcTransportConfig,
-    ) -> Result<Self, DynamoError> {
-        let endpoint_label = endpoint.to_string();
-        let tonic_endpoint = Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
-            invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
-        })?;
-        let deadline = checked_instant_add(
-            Instant::now(),
-            transport.startup_deadline,
-            "gRPC startup deadline",
-        )?;
-        let first = connect_until_ready(
-            peer,
-            tonic_endpoint.clone(),
-            endpoint_label.clone(),
-            1,
-            transport,
-            deadline,
-        )
-        .await?;
-        let mut channels = vec![first];
-        let remaining = try_join_all((1..transport.connections.get()).map(|index| {
-            let endpoint = tonic_endpoint.clone();
-            let endpoint_label = endpoint_label.clone();
-            async move {
-                connect_until_ready(
-                    peer,
-                    endpoint,
-                    endpoint_label,
-                    index + 1,
-                    transport,
-                    deadline,
-                )
-                .await
+/// Connected tonic 0.14 channels distributed in round-robin order.
+pub struct GrpcChannelPoolV14 {
+    channels: Vec<ChannelV14>,
+    next: AtomicUsize,
+}
+
+macro_rules! impl_channel_pool {
+    ($pool:ident, $endpoint:ty, $channel:ty) => {
+        impl $pool {
+            pub async fn connect(
+                peer: &str,
+                endpoint: &GrpcEndpoint,
+                transport: GrpcTransportConfig,
+            ) -> Result<Self, DynamoError> {
+                Ok(Self {
+                    channels: connect_channels::<$endpoint>(peer, endpoint, transport).await?,
+                    next: AtomicUsize::new(0),
+                })
             }
-        }))
-        .await?;
-        channels.extend(remaining);
-        Ok(Self {
-            channels,
-            next: AtomicUsize::new(0),
-        })
+
+            pub fn len(&self) -> usize {
+                self.channels.len()
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.channels.is_empty()
+            }
+
+            pub fn next_channel(&self) -> $channel {
+                let index = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
+                self.channels[index].clone()
+            }
+        }
+    };
+}
+
+impl_channel_pool!(GrpcChannelPool, Endpoint, Channel);
+impl_channel_pool!(GrpcChannelPoolV14, EndpointV14, ChannelV14);
+
+#[async_trait]
+trait ConnectEndpoint: Clone + Send + Sync {
+    type Channel: Clone + Send + Sync;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn from_shared(uri: String) -> Result<Self, Self::Error>;
+    fn connect_timeout(self, timeout: Duration) -> Self;
+    async fn connect(&self) -> Result<Self::Channel, Self::Error>;
+}
+
+#[async_trait]
+impl ConnectEndpoint for Endpoint {
+    type Channel = Channel;
+    type Error = tonic::transport::Error;
+
+    fn from_shared(uri: String) -> Result<Self, Self::Error> {
+        Endpoint::from_shared(uri)
     }
 
-    pub fn len(&self) -> usize {
-        self.channels.len()
+    fn connect_timeout(self, timeout: Duration) -> Self {
+        Endpoint::connect_timeout(self, timeout)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.channels.is_empty()
-    }
-
-    pub fn next_channel(&self) -> Channel {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
-        self.channels[index].clone()
+    async fn connect(&self) -> Result<Self::Channel, Self::Error> {
+        Endpoint::connect(self).await
     }
 }
 
-async fn connect_until_ready(
+#[async_trait]
+impl ConnectEndpoint for EndpointV14 {
+    type Channel = ChannelV14;
+    type Error = tonic_v14::transport::Error;
+
+    fn from_shared(uri: String) -> Result<Self, Self::Error> {
+        EndpointV14::from_shared(uri)
+    }
+
+    fn connect_timeout(self, timeout: Duration) -> Self {
+        EndpointV14::connect_timeout(self, timeout)
+    }
+
+    async fn connect(&self) -> Result<Self::Channel, Self::Error> {
+        EndpointV14::connect(self).await
+    }
+}
+
+async fn connect_channels<E: ConnectEndpoint>(
     peer: &str,
-    endpoint: Endpoint,
+    endpoint: &GrpcEndpoint,
+    transport: GrpcTransportConfig,
+) -> Result<Vec<E::Channel>, DynamoError> {
+    let endpoint_label = endpoint.to_string();
+    let tonic_endpoint = E::from_shared(endpoint_label.clone()).map_err(|error| {
+        invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
+    })?;
+    let deadline = checked_instant_add(
+        Instant::now(),
+        transport.startup_deadline,
+        "gRPC startup deadline",
+    )?;
+    let first = connect_until_ready(
+        peer,
+        tonic_endpoint.clone(),
+        endpoint_label.clone(),
+        1,
+        transport,
+        deadline,
+    )
+    .await?;
+    let mut channels = vec![first];
+    let remaining = try_join_all((1..transport.connections.get()).map(|index| {
+        let endpoint = tonic_endpoint.clone();
+        let endpoint_label = endpoint_label.clone();
+        async move {
+            connect_until_ready(
+                peer,
+                endpoint,
+                endpoint_label,
+                index + 1,
+                transport,
+                deadline,
+            )
+            .await
+        }
+    }))
+    .await?;
+    channels.extend(remaining);
+    Ok(channels)
+}
+
+async fn connect_until_ready<E: ConnectEndpoint>(
+    peer: &str,
+    endpoint: E,
     endpoint_label: String,
     pool_slot: usize,
     transport: GrpcTransportConfig,
     deadline: Instant,
-) -> Result<Channel, DynamoError> {
+) -> Result<E::Channel, DynamoError> {
     let started = Instant::now();
     let mut attempt = 0_u64;
     let mut last_error = None;
