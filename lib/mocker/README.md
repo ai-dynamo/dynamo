@@ -1,52 +1,39 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # dynamo-mocker
 
-`dynamo-mocker` is a GPU-free simulation crate for Dynamo's LLM scheduling and KV-cache behavior.
-It is used for testing, replay, and benchmarking workflows where you want realistic scheduler and
-cache behavior without running a real inference engine.
+`dynamo-mocker` integrates the shared AI Simulate engine and Replayer with Dynamo. It does not own
+the generalized scheduler or deterministic replay core.
 
-## What This Crate Provides
+## What This Crate Owns
 
-- `MockEngineArgs` for configuring a simulated engine
-- `engine::create_engine` for building a vLLM-style or SGLang-style mock scheduler
-- `KvEventPublishers` hooks for emitting router-visible KV cache events
-- `loadgen` and `replay` modules for synthetic and trace-driven experiments
+- the Live Mocker driver around `aisimulate_core::engine`
+- Dynamo request, response, lifecycle, KV-event, and metrics adaptation
+- transport, cancellation, and publication for simulated Dynamo workers
+- KV router placement and Planner scaling composition for offline replay
+- Dynamo-compatible online replay and legacy Rust entrypoints
 
-## Basic Rust Usage
+The dependency direction is:
 
-```rust
-use dynamo_mocker::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs,
-};
-use dynamo_mocker::engine::create_engine;
-
-let args = MockEngineArgs::builder()
-    .block_size(16)
-    .num_gpu_blocks(1024)
-    .max_num_seqs(Some(32))
-    .max_num_batched_tokens(Some(4096))
-    .build()
-    .unwrap();
-
-let engine = create_engine(args, 0, None, KvEventPublishers::default(), None);
-
-engine.receive(DirectRequest {
-    tokens: vec![1, 2, 3, 4],
-    max_output_tokens: 16,
-    uuid: None,
-    dp_rank: 0,
-    arrival_timestamp_ms: None,
-});
+```text
+Dynamo Router / Planner / Live adapters
+                    ↓
+        aisimulate-core::replay
+                    ↓
+        aisimulate-core::engine
 ```
 
-This crate is also the foundation for Dynamo's higher-level mocker CLI and replay tooling. In many
-deployments you will interact with it indirectly through the Python entry points rather than
-embedding it directly as a standalone Rust dependency.
+The shared engine owns scheduler behavior, GPU KV-cache accounting, preemption, timing, and
+attention data-parallel barriers. The shared Replayer owns deterministic virtual time, logical
+workers, aggregated and disaggregated replay, and reports.
 
 ## Further Reading
 
-- Mocker guide:
-  [../../docs/fern/pages/kubernetes/operations/dynosim/mocker-live-simulation.mdx](../../docs/fern/pages/kubernetes/operations/dynosim/mocker-live-simulation.mdx)
-- DynoSim runs guide:
-  [../../docs/fern/pages/cli/operations/dynosim/dynosim-replay.mdx](../../docs/fern/pages/cli/operations/dynosim/dynosim-replay.mdx)
-- Python component README:
-  [../../components/src/dynamo/mocker/README.md](../../components/src/dynamo/mocker/README.md)
+- [AISimulate Core](../../aisimulate/crates/core/README.md)
+- [Dynamo Offline Replay Adapters](src/replay/offline/README.md)
+- [Live Mocker Architecture](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md)
+- [Run a Local Live Mocker Deployment](../../docs/fern/pages/cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx)
+- [Dynamo Replay Integration](../../docs/fern/pages/developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md)

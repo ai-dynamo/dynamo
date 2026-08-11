@@ -76,6 +76,7 @@ replay runtime. Adapter-owned search spaces are validated when the selected adap
 by `Sweeper.run`.
 KVBM sweep fields have been removed and have no adapter migration.
 
-Read the canonical [Sweeper documentation](docs/sweeper/overview.md) for its configuration,
-search-space, and replay behavior. Backend-neutral and Dynamo integration examples live under
+Read the canonical documentation for the [engine](docs/engine/architecture.md),
+[Replayer](docs/replay/architecture.md), [replay CLI](docs/replay/cli-reference.md), and
+[Sweeper](docs/sweeper/overview.md). Backend-neutral and Dynamo integration examples live under
 [`aisimulate/examples/sweeper`](examples/sweeper/README.md).

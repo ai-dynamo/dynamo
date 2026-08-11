@@ -9,8 +9,11 @@ subtitle: Command-line flags for the python -m dynamo.mocker simulated worker.
 publishes KV events, and exercises the router and planner paths without a GPU. This page is the flag
 reference. For the deployment workflow and local/Kubernetes launch recipes, see
 [Simulate a Kubernetes Deployment](../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) or
-[Simulate a Local Deployment](../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx); for the engine internals these flags
-configure, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md).
+[Simulate a Local Deployment](../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx).
+For the Dynamo driver and runtime boundary, see
+[Live Mocker Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md).
+For scheduler and KV-cache internals, see
+[AI Simulate Engine Architecture](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/engine-experimental/architecture.md).
 
 The same engine settings apply to [DynoSim Runs](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx): `python -m dynamo.replay`
 reuses the mocker engine and accepts these values as JSON through `--extra-engine-args`,
@@ -127,7 +130,8 @@ reuses the mocker engine and accepts these values as JSON through `--extra-engin
 ## AIC performance model
 
 Opt-in flags for the NVIDIA AI Configurator (AIC) latency model. Default mocker runs do not use AIC.
-For the timing-model design, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md#performance-model).
+For the timing-model design, see
+[AI Simulate Engine Architecture](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/engine-experimental/architecture.md#timing-models).
 
 <ParamField path="--aic-perf-model" type="boolean" default="false">
   Use the AIC SDK for latency prediction instead of the interpolated or polynomial models. Opt-in
@@ -254,8 +258,8 @@ Apply only when `--engine-type sglang`.
   <Card title="Run a DynoSim Simulation" icon="play" href="../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx">
     Run one workload through a simulated configuration with `python -m dynamo.replay`.
   </Card>
-  <Card title="Mocker Engine Architecture" icon="diagram-project" href="../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md">
-    Scheduler, KV block manager, eviction, and timing internals.
+  <Card title="Live Mocker Architecture" icon="diagram-project" href="../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md">
+    Dynamo runtime integration around the shared AI Simulate engine.
   </Card>
   <Card title="Planner Configuration" icon="sliders" href="planner-configuration.mdx">
     The PlannerConfig field reference for the Dynamo Planner service.

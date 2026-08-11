@@ -20,7 +20,7 @@ For the general replay workflow, see [Run a DynoSim Simulation](dynosim-replay.m
 defaults, see the
 [Planner Configuration reference](../../../reference/components/planner-configuration.mdx). For how the
 simulation supplies metrics to the Planner, see
-[DynoSim Architecture](../../../developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md#planner-simulation-adapter).
+[Dynamo Replay Integration](../../../developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md#planner-simulation-adapter).
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ Use a release build because repeated simulation runs are CPU-bound.
 
 The commands below use AIConfigurator-backed engine timing. The relevant fields are documented in
 the
-[DynoSim Replay CLI Reference](../../../reference/components/dynosim-replay-cli-reference.mdx#engine-timing-aic-fields-engine-args-json).
+[Dynamo Replay CLI Reference](../../../reference/components/dynosim-replay-cli-reference.mdx#engine-timing-aic-fields-engine-args-json).
 
 <Warning>
 Set `prefill_engine_num_gpu` and `decode_engine_num_gpu` explicitly in every simulated Planner run.

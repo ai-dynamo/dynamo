@@ -10,10 +10,10 @@ trace without async runtimes, network planes, or real worker tasks: the
 `Replayer` advances a logical clock, drives Generalized Mocker Engines from
 `aisimulate_core::engine`, and records request and token timing in `TraceCollector`.
 
-For operator-facing CLI documentation, see
-[`dynosim-replay.mdx`](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
-This README covers the virtual clock, event queue, logical workers, and the
-placement/scaling boundary used by Dynamo adapters.
+For the operator-facing engine-only command, see the
+[AI Simulate Replay CLI Reference](../../../../docs/replay/cli-reference.md). This README covers the
+virtual clock, event queue, logical workers, and the placement/scaling boundary used by Dynamo
+adapters.
 
 ## Where It Sits
 

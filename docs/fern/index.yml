@@ -617,7 +617,8 @@ navigation:
               - section: Simulation
                 collapsed: true
                 contents:
-                  - page: DynoSim Architecture
+                  - page: Dynamo Replay Integration
+                    slug: dyno-sim-architecture
                     path: pages/developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md
               - section: Fault Tolerance
                 collapsed: true
@@ -715,6 +716,20 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/overview.md
+                  - section: Engine (Experimental)
+                    slug: engine
+                    collapsed: true
+                    contents:
+                      - page: Architecture
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/engine-experimental/architecture.md
+                  - section: Replayer (Experimental)
+                    slug: replayer
+                    collapsed: true
+                    contents:
+                      - page: Architecture
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/replayer-experimental/architecture.md
+                      - page: CLI Reference
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/replayer-experimental/cli-reference.md
                   - section: Sweeper (Experimental)
                     slug: sweeper
                     collapsed: true
@@ -820,7 +835,8 @@ navigation:
                   - section: Mocker
                     collapsed: true
                     contents:
-                      - page: Mocker Engine Architecture
+                      - page: Live Mocker Architecture
+                        slug: mocker-engine-architecture
                         path: pages/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md
           - section: Kubernetes
             collapsed: true
@@ -1098,7 +1114,8 @@ navigation:
             path: pages/reference/components/kvbm-configuration.mdx
           - page: Mocker CLI Reference
             path: pages/reference/components/mocker-cli-reference.mdx
-          - page: DynoSim Replay CLI Reference
+          - page: Dynamo Replay CLI Reference
+            slug: dyno-sim-replay-cli-reference
             path: pages/reference/components/dynosim-replay-cli-reference.mdx
           - page: DynoSim Sweep Reference
             path: pages/reference/components/dynosim-sweep-reference.mdx

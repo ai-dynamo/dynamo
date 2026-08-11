@@ -20,6 +20,29 @@ replay configuration; Dynamo extends it with adapter options. The selected runti
 `Sweeper(runner_factory=...).run(config)` or start from an example under
 [`aisimulate/examples/sweeper`](https://github.com/ai-dynamo/dynamo/tree/main/aisimulate/examples/sweeper).
 
+## Engine
+
+The [AI Simulate Engine](engine-experimental/architecture.md) owns scheduler models for vLLM,
+SGLang, and TensorRT-LLM, native GPU KV-cache accounting, prefix reuse, preemption, timing, and
+attention data-parallel barriers. It emits neutral pass observations and leaves the clock, workload,
+and runtime effects to its caller.
+
+Offline Replayer and Dynamo Live Mocker construct this same generalized engine. Replayer supplies a
+virtual clock; Live Mocker supplies Tokio and Dynamo transport.
+
+## Replayer
+
+The [AI Simulate Replayer](replayer-experimental/architecture.md) owns deterministic virtual time,
+logical workers, aggregated and disaggregated replay, placement and scaling contracts, and canonical
+reports. Built-in round-robin composition runs without Dynamo.
+
+Use `python -m aisimulate.replay` for one engine-only run. The
+[AI Simulate Replay CLI Reference](replayer-experimental/cli-reference.md) documents its shared
+workload, engine, topology, service-level agreement (SLA), and output arguments.
+
+Dynamo extends the same Replayer with KV router placement and Planner scaling. Those adapters remain
+outside AI Simulate.
+
 ## Sweeper
 
 [Sweeper](sweeper-experimental/overview.md) searches backend deployment settings against an injected replay runner.
