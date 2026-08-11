@@ -952,13 +952,9 @@ impl HttpService {
     /// Updates runtime availability for model-backed endpoints.
     ///
     /// Batch API availability is configured when the service is built and cannot be changed here.
-    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) -> Result<()> {
         if endpoint_type == EndpointType::Batch {
-            tracing::warn!(
-                enable,
-                "batch endpoint availability is fixed when the HTTP service is built; ignoring runtime update"
-            );
-            return;
+            anyhow::bail!("batch endpoint availability is fixed when the HTTP service is built");
         }
 
         self.state.flags.set(&endpoint_type, enable);
@@ -967,6 +963,7 @@ impl HttpService {
             endpoint_type.as_str(),
             if enable { "enabled" } else { "disabled" }
         );
+        Ok(())
     }
 }
 
@@ -1469,14 +1466,26 @@ mod tests {
     #[test]
     fn batch_endpoint_enablement_is_fixed_at_build_time() {
         let disabled = HttpService::builder().build().unwrap();
-        disabled.enable_model_endpoint(EndpointType::Batch, true);
+        let error = disabled
+            .enable_model_endpoint(EndpointType::Batch, true)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "batch endpoint availability is fixed when the HTTP service is built"
+        );
         assert!(!disabled.state.flags.get(&EndpointType::Batch));
 
         let enabled = HttpService::builder()
             .enable_batch_endpoints(true)
             .build()
             .unwrap();
-        enabled.enable_model_endpoint(EndpointType::Batch, false);
+        let error = enabled
+            .enable_model_endpoint(EndpointType::Batch, false)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "batch endpoint availability is fixed when the HTTP service is built"
+        );
         assert!(enabled.state.flags.get(&EndpointType::Batch));
     }
 

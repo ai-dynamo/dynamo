@@ -235,7 +235,7 @@ where
             manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
             manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
-            enable_in_process_model_endpoints(&http_service);
+            enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
         EngineConfig::InProcessTokens {
@@ -261,7 +261,7 @@ where
             >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
-            enable_in_process_model_endpoints(&http_service);
+            enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
     };
@@ -282,12 +282,13 @@ where
     Ok(())
 }
 
-fn enable_in_process_model_endpoints(http_service: &HttpService) {
+fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
     for endpoint_type in EndpointType::all() {
         if endpoint_type != EndpointType::Batch {
-            http_service.enable_model_endpoint(endpoint_type, true);
+            http_service.enable_model_endpoint(endpoint_type, true)?;
         }
     }
+    Ok(())
 }
 
 /// Spawns a task that watches for new models in store,
@@ -351,7 +352,9 @@ where
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_update) = rx.recv().await {
-            update_http_endpoints(http_service.clone(), model_update.clone());
+            if let Err(error) = update_http_endpoints(http_service.clone(), model_update.clone()) {
+                tracing::error!(%error, "failed to update HTTP endpoints");
+            }
             update_model_metrics(model_update, metrics.clone());
         }
     });
@@ -365,7 +368,7 @@ where
 }
 
 /// Updates HTTP service endpoints based on available model types
-fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
+fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> anyhow::Result<()> {
     tracing::debug!(
         "Updating HTTP service endpoints for model type: {:?}",
         model_type
@@ -377,7 +380,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 .model_type
                 .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
-                service.enable_model_endpoint(endpoint_type, true);
+                service.enable_model_endpoint(endpoint_type, true)?;
             }
         }
         ModelUpdate::Removed(card) => {
@@ -386,10 +389,11 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 .model_type
                 .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
-                service.enable_model_endpoint(endpoint_type, false);
+                service.enable_model_endpoint(endpoint_type, false)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Updates metrics for model type changes
