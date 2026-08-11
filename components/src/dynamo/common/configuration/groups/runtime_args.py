@@ -90,6 +90,11 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
+        if self.engine_request_limit is not None:
+            # The ingress pool is implemented in Rust and reads this setting
+            # directly from the process environment. Keep CLI and environment
+            # configuration behavior identical after argument resolution.
+            os.environ["DYN_ENGINE_REQUEST_LIMIT"] = str(self.engine_request_limit)
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""

@@ -51,6 +51,53 @@ def test_kv_state_endpoint_supports_cli_and_env(monkeypatch):
     assert "DYN_KV_STATE_ENDPOINT" in help_text
 
 
+def test_event_plane_documents_zmq_default_and_supports_cli_and_env(monkeypatch):
+    monkeypatch.delenv("DYN_EVENT_PLANE", raising=False)
+
+    default_config, help_text = _parse_runtime_args([])
+
+    assert default_config.event_plane is None
+    assert "defaults to 'zmq'" in help_text
+    assert "DYN_EVENT_PLANE" in help_text
+
+    monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
+    env_config, _ = _parse_runtime_args([])
+    cli_config, _ = _parse_runtime_args(["--event-plane", "zmq"])
+
+    assert env_config.event_plane == "nats"
+    assert cli_config.event_plane == "zmq"
+
+
+def test_event_plane_rejects_unknown_value(monkeypatch):
+    monkeypatch.delenv("DYN_EVENT_PLANE", raising=False)
+
+    with pytest.raises(SystemExit):
+        _parse_runtime_args(["--event-plane", "invalid"])
+
+
+def test_engine_request_limit_supports_environment_and_cli_precedence(monkeypatch):
+    monkeypatch.setenv("DYN_ENGINE_REQUEST_LIMIT", "8")
+
+    env_config, help_text = _parse_runtime_args([])
+    assert env_config.engine_request_limit == 8
+    assert os.environ["DYN_ENGINE_REQUEST_LIMIT"] == "8"
+
+    cli_config, _ = _parse_runtime_args(["--engine-request-limit", "16"])
+    assert cli_config.engine_request_limit == 16
+    assert os.environ["DYN_ENGINE_REQUEST_LIMIT"] == "16"
+    assert "DYN_ENGINE_REQUEST_LIMIT" in help_text
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_engine_request_limit_rejects_non_positive_values(monkeypatch, limit):
+    monkeypatch.delenv("DYN_ENGINE_REQUEST_LIMIT", raising=False)
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        _parse_runtime_args(["--engine-request-limit", str(limit)])
+
+    assert "DYN_ENGINE_REQUEST_LIMIT" not in os.environ
+
+
 def test_fpm_trace_env_enables_and_is_canonicalized(monkeypatch):
     monkeypatch.setenv("DYN_FPM_TRACE", "on")
 

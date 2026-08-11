@@ -30,6 +30,15 @@ def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+def _parse_kv_router_config(
+    argv: list[str],
+) -> tuple[KvRouterConfigBase, str]:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    return KvRouterConfigBase.from_cli_args(args), parser.format_help()
+
+
 def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     AicPerfArgGroup().add_arguments(parser)
@@ -296,19 +305,189 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
-def test_policy_config_cli_overrides_environment(
+def test_kv_router_operational_defaults_match_public_contract(monkeypatch) -> None:
+    for env_var in (
+        "DYN_ROUTER_EVENT_THREADS",
+        "DYN_ROUTER_QUEUE_POLICY",
+        "DYN_ROUTER_QUEUE_THRESHOLD",
+        "DYN_ROUTER_POLICY_CONFIG",
+        "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT",
+        "DYN_ROUTER_DISK_CACHE_HIT_WEIGHT",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+    config, help_text = _parse_kv_router_config([])
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["router_event_threads"] == 4
+    assert kwargs["router_queue_policy"] == "fcfs"
+    assert kwargs["router_queue_threshold"] is None
+    assert kwargs["router_policy_config"] is None
+    assert kwargs["host_cache_hit_weight"] == 0.75
+    assert kwargs["disk_cache_hit_weight"] == 0.25
+    assert "--router-event-threads" in help_text
+    assert "--router-queue-policy" in help_text
+    assert "--router-policy-config" in help_text
+
+
+@pytest.mark.parametrize(
+    (
+        "env_var",
+        "flag",
+        "env_value",
+        "cli_value",
+        "field",
+        "expected_env",
+        "expected_cli",
+    ),
+    [
+        (
+            "DYN_ROUTER_EVENT_THREADS",
+            "--router-event-threads",
+            "2",
+            "1",
+            "router_event_threads",
+            2,
+            1,
+        ),
+        (
+            "DYN_ROUTER_QUEUE_POLICY",
+            "--router-queue-policy",
+            "wspt",
+            "fcfs",
+            "router_queue_policy",
+            "wspt",
+            "fcfs",
+        ),
+        (
+            "DYN_ROUTER_QUEUE_THRESHOLD",
+            "--router-queue-threshold",
+            "0.5",
+            "0.75",
+            "router_queue_threshold",
+            0.5,
+            0.75,
+        ),
+        (
+            "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT",
+            "--router-host-cache-hit-weight",
+            "0.6",
+            "0.9",
+            "host_cache_hit_weight",
+            0.6,
+            0.9,
+        ),
+        (
+            "DYN_ROUTER_DISK_CACHE_HIT_WEIGHT",
+            "--router-disk-cache-hit-weight",
+            "0.2",
+            "0.4",
+            "disk_cache_hit_weight",
+            0.2,
+            0.4,
+        ),
+    ],
+    ids=[
+        "event-threads",
+        "queue-policy",
+        "queue-threshold",
+        "host-cache-weight",
+        "disk-cache-weight",
+    ],
+)
+def test_kv_router_cli_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    env_var: str,
+    flag: str,
+    env_value: str,
+    cli_value: str,
+    field: str,
+    expected_env: object,
+    expected_cli: object,
+) -> None:
+    monkeypatch.setenv(env_var, env_value)
+
+    env_config, _ = _parse_kv_router_config([])
+    cli_config, _ = _parse_kv_router_config([flag, cli_value])
+
+    assert env_config.kv_router_kwargs()[field] == expected_env
+    assert cli_config.kv_router_kwargs()[field] == expected_cli
+
+
+def test_policy_config_supports_environment_and_cli_precedence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     env_policy_path = str(tmp_path / "env-policy.yaml")
     explicit_policy_path = str(tmp_path / "explicit-policy.yaml")
+    monkeypatch.delenv("DYN_ROUTER_POLICY_CONFIG", raising=False)
+
+    default_config, _ = _parse_kv_router_config([])
+    assert default_config.kv_router_kwargs()["router_policy_config"] is None
+
     monkeypatch.setenv("DYN_ROUTER_POLICY_CONFIG", env_policy_path)
+    env_config, _ = _parse_kv_router_config([])
+    assert env_config.kv_router_kwargs()["router_policy_config"] == env_policy_path
+
+    cli_config, _ = _parse_kv_router_config(
+        ["--router-policy-config", explicit_policy_path]
+    )
+    assert cli_config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
+
+
+def test_router_queue_policy_rejects_unknown_value(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_QUEUE_POLICY", raising=False)
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--router-policy-config", explicit_policy_path])
-    config = KvRouterConfigBase.from_cli_args(args)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--router-queue-policy", "shortest-first"])
 
-    assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--router-max-tree-size", "1024"),
+        ("--router-prune-target-ratio", "0.5"),
+    ],
+)
+def test_frontend_rejects_removed_router_pruning_options(flag: str, value: str) -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args([flag, value])
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (
+            ["--router-mode", "round-robin", "--serve-indexer"],
+            "--serve-indexer requires --router-mode=kv",
+        ),
+        (
+            [
+                "--router-mode",
+                "kv",
+                "--serve-indexer",
+                "--use-remote-indexer",
+            ],
+            "--serve-indexer and --use-remote-indexer are mutually exclusive",
+        ),
+    ],
+    ids=["serve-requires-kv", "local-and-remote-mutually-exclusive"],
+)
+def test_frontend_indexer_flag_constraints(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], message: str
+) -> None:
+    monkeypatch.delenv("DYN_SERVE_INDEXER", raising=False)
+    monkeypatch.delenv("DYN_USE_REMOTE_INDEXER", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args(argv))
+
+    with pytest.raises(ValueError, match=message):
+        config.validate()
 
 
 def test_load_aware_clears_predicted_ttl() -> None:
