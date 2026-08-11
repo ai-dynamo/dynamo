@@ -1194,8 +1194,9 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
         self._seed_constraints_and_uuid(modules, handle)
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             result = actuator.apply_cap(0, 300)
 
@@ -1230,8 +1231,9 @@ class TestApplyCap(unittest.TestCase):
         discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
             "GPU-A", min_w=100, max_w=700
         )
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.apply_cap(0, 300)
 
@@ -1239,8 +1241,9 @@ class TestApplyCap(unittest.TestCase):
         discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
             "GPU-B", min_w=100, max_w=700
         )
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.apply_cap(0, 300)
 
@@ -1271,8 +1274,9 @@ class TestApplyCap(unittest.TestCase):
         # identity the cap is computed for) then GPU-B (the re-enumerated
         # occupant) so the guard fires.
         with patch.object(actuator, "_read_uuid_raw", side_effect=["GPU-A", "GPU-B"]):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300)
 
@@ -1308,8 +1312,9 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(
             actuator, "get_uuid", side_effect=RuntimeError("transient identity blip")
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300)
 
@@ -1354,13 +1359,15 @@ class TestApplyCap(unittest.TestCase):
             pl.maxPowerLimit = 700
             return pl, "GPU-B"
 
-        with patch.object(
-            actuator, "get_uuid", side_effect=lambda _idx: state["uuid"]
-        ), patch.object(
-            actuator, "_power_limits_with_uuid", side_effect=flip_during_power_read
+        with (
+            patch.object(actuator, "get_uuid", side_effect=lambda _idx: state["uuid"]),
+            patch.object(
+                actuator, "_power_limits_with_uuid", side_effect=flip_during_power_read
+            ),
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300)
 
@@ -1391,8 +1398,9 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(
             actuator, "_power_limits_with_uuid", side_effect=DCGMError(GENERIC_ERROR)
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
@@ -1417,8 +1425,9 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(
             actuator, "_power_limits_with_uuid", return_value=(pl, "GPU-A")
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 with self.assertRaises(RuntimeError):
                     actuator.apply_cap(0, 300, expected_uuid="GPU-A")
@@ -1440,15 +1449,19 @@ class TestApplyCap(unittest.TestCase):
             modules, handle, uuid="GPU-A", min_w=100, max_w=700
         )
 
-        with patch.object(
-            actuator,
-            "get_uuid",
-            side_effect=AssertionError(
-                "get_uuid must not be called when expected_uuid is supplied"
+        with (
+            patch.object(
+                actuator,
+                "get_uuid",
+                side_effect=AssertionError(
+                    "get_uuid must not be called when expected_uuid is supplied"
+                ),
             ),
-        ), patch.object(actuator, "_read_uuid_raw", return_value="GPU-A"):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            patch.object(actuator, "_read_uuid_raw", return_value="GPU-A"),
+        ):
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
@@ -1470,15 +1483,19 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
         self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
 
-        with patch.object(
-            actuator,
-            "get_uuid",
-            side_effect=AssertionError(
-                "get_uuid must not be called when expected_uuid is supplied"
+        with (
+            patch.object(
+                actuator,
+                "get_uuid",
+                side_effect=AssertionError(
+                    "get_uuid must not be called when expected_uuid is supplied"
+                ),
             ),
-        ), patch.object(actuator, "_read_uuid_raw", return_value="GPU-B"):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            patch.object(actuator, "_read_uuid_raw", return_value="GPU-B"),
+        ):
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
@@ -1511,8 +1528,9 @@ class TestApplyCap(unittest.TestCase):
             "_read_uuid_raw",
             side_effect=["GPU-A", RuntimeError("identity read failed at recheck")],
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300)
 
@@ -1543,8 +1561,9 @@ class TestApplyCap(unittest.TestCase):
         # any later call (the simulated post-Set re-enumeration). The fix must
         # NOT consume that second value for bookkeeping.
         with patch.object(actuator, "get_uuid", side_effect=["GPU-A", "GPU-B"]):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 result = actuator.apply_cap(0, 300)
 
@@ -1560,8 +1579,9 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
         self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             result = actuator.apply_cap(0, 900)
 
@@ -1575,8 +1595,9 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
         self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             result = actuator.apply_cap(0, 50)
 
@@ -1594,8 +1615,9 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
         self._seed_constraints_and_uuid(modules, handle)
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.apply_cap(0, 300)
 
@@ -1679,8 +1701,9 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
         self._seed_constraints_and_uuid(modules, handle)
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.apply_cap(0, 300)
 
@@ -1715,8 +1738,9 @@ class TestApplyCap(unittest.TestCase):
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
         self._seed_constraints_and_uuid(modules, handle)
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.apply_cap(0, 300)
             actuator.apply_cap(0, 400)
@@ -1759,8 +1783,9 @@ class TestRestoreDefault(unittest.TestCase):
             b"GPU-x", min_w=100, max_w=500, default_w=400
         )
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.restore_default(0)
 
@@ -1788,8 +1813,9 @@ class TestRestoreDefault(unittest.TestCase):
             20: _make_gpu_attrs("GPU-B", default_w=620),
         }[gid]
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                 actuator.restore_default(0)
@@ -1831,8 +1857,9 @@ class TestRestoreDefault(unittest.TestCase):
             10: _make_gpu_attrs("GPU-A", default_w=410),
         }[gid]
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             with patch.object(
                 actuator, "get_uuid", side_effect=RuntimeError("hostengine blip")
@@ -1866,8 +1893,9 @@ class TestRestoreDefault(unittest.TestCase):
 
         discovery.GetGpuAttributes.side_effect = _attrs
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                 result = actuator.restore_default(0)
@@ -1927,11 +1955,13 @@ class TestRestoreDefault(unittest.TestCase):
 
         # Resolution sees idx 0 still hosting GPU-A; the in-transaction recheck
         # then sees GPU-B (re-enumerated mid-write) → proven mismatch.
-        with patch.object(actuator, "get_uuid", return_value="GPU-A"), patch.object(
-            actuator, "_read_uuid_raw", return_value="GPU-B"
+        with (
+            patch.object(actuator, "get_uuid", return_value="GPU-A"),
+            patch.object(actuator, "_read_uuid_raw", return_value="GPU-B"),
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                     result = actuator.restore_default(0)
@@ -1961,13 +1991,17 @@ class TestRestoreDefault(unittest.TestCase):
             "GPU-A", default_w=410
         )
 
-        with patch.object(actuator, "get_uuid", return_value="GPU-A"), patch.object(
-            actuator,
-            "_read_uuid_raw",
-            side_effect=RuntimeError("identity unreadable at recheck"),
+        with (
+            patch.object(actuator, "get_uuid", return_value="GPU-A"),
+            patch.object(
+                actuator,
+                "_read_uuid_raw",
+                side_effect=RuntimeError("identity unreadable at recheck"),
+            ),
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                     result = actuator.restore_default(0)
@@ -2001,8 +2035,9 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
             20: _make_gpu_attrs("GPU-B", default_w=620, current_w=620),
         }[gid]
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             result = actuator.restore_default_by_uuid("GPU-A")
 
@@ -2086,8 +2121,9 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
         # through `_power_limits_with_uuid` (GetGpuAttributes -> GPU-A), so it is
         # unaffected by this patch.
         with patch.object(actuator, "_read_uuid_raw", side_effect=["GPU-A", "GPU-B"]):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                     result = actuator.restore_default_by_uuid("GPU-A")
@@ -2120,8 +2156,9 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
         with patch.object(
             actuator, "_power_limits_with_uuid", return_value=(pl, "GPU-B")
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                     result = actuator.restore_default_by_uuid("GPU-A")
@@ -2145,8 +2182,9 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
         with patch.object(
             actuator, "_power_limits_with_uuid", side_effect=RuntimeError("blip")
         ):
-            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-                "power_agent._persist_managed_gpus"
+            with (
+                patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+                patch("power_agent._persist_managed_gpus"),
             ):
                 with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
                     result = actuator.restore_default_by_uuid("GPU-A")
@@ -2183,8 +2221,9 @@ class TestOwnershipRetirement(unittest.TestCase):
             b"GPU-x", min_w=100, max_w=700
         )
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.apply_cap(0, 300)
 
@@ -2236,8 +2275,9 @@ class TestOwnershipRetirement(unittest.TestCase):
         )
         actuator._managed_uuid_by_idx[0] = "GPU-A"
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             result = actuator.restore_default(0)
 
@@ -2257,8 +2297,9 @@ class TestOwnershipRetirement(unittest.TestCase):
             "GPU-A", default_w=410, current_w=300
         )
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             result = actuator.restore_default_by_uuid("GPU-A")
 
@@ -2434,8 +2475,9 @@ class TestResolveIdxTopologyGrowth(unittest.TestCase):
             return {10: "GPU-B", 20: "GPU-A"}[gid]
 
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
-            with patch.object(actuator, "init", side_effect=fake_init), patch.object(
-                actuator, "_read_uuid_raw", side_effect=read_uuid
+            with (
+                patch.object(actuator, "init", side_effect=fake_init),
+                patch.object(actuator, "_read_uuid_raw", side_effect=read_uuid),
             ):
                 idx, scan_complete = actuator._resolve_idx_for_uuid("GPU-A")
 
@@ -2487,8 +2529,9 @@ class TestScanUuidIndexMap(unittest.TestCase):
             return {10: "GPU-B", 20: "GPU-A"}[gid]
 
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
-            with patch.object(actuator, "init", side_effect=fake_init), patch.object(
-                actuator, "_read_uuid_raw", side_effect=read_uuid
+            with (
+                patch.object(actuator, "init", side_effect=fake_init),
+                patch.object(actuator, "_read_uuid_raw", side_effect=read_uuid),
             ):
                 mapping, conclusive = actuator.scan_uuid_index_map()
 
@@ -2544,8 +2587,9 @@ class TestScanUuidIndexMap(unittest.TestCase):
             raise DCGMError(CONNECTION_NOT_VALID)  # persists across the retry
 
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
-            with patch.object(actuator, "init", side_effect=lambda: None), patch.object(
-                actuator, "_read_uuid_raw", side_effect=read_uuid
+            with (
+                patch.object(actuator, "init", side_effect=lambda: None),
+                patch.object(actuator, "_read_uuid_raw", side_effect=read_uuid),
             ):
                 mapping, conclusive = actuator.scan_uuid_index_map()
 
@@ -2576,8 +2620,9 @@ class TestRestoreUpdatesAppliedGauge(unittest.TestCase):
             "GPU-A", default_w=410
         )
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
+        with (
+            patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}),
+            patch("power_agent._persist_managed_gpus"),
         ):
             actuator.restore_default(0)
 

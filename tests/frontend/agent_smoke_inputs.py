@@ -15,8 +15,7 @@ LIST_DIRECTORY_PROMPT = (
 def write_codex_config(codex_home: Path, frontend_port: int) -> None:
     """Emit a minimal ~/.codex/config.toml pointing Codex at Dynamo."""
     codex_home.mkdir(parents=True, exist_ok=True)
-    (codex_home / "config.toml").write_text(
-        f"""
+    (codex_home / "config.toml").write_text(f"""
 model_max_output_tokens = 4096
 
 [model_providers.local]
@@ -24,8 +23,7 @@ name = "local-dynamo"
 base_url = "http://localhost:{frontend_port}/v1"
 wire_api = "responses"
 env_key = "LOCAL_API_KEY"
-        """.lstrip()
-    )
+        """.lstrip())
 
 
 def claude_subagent_definition(subagent_name: str) -> str:

@@ -71,9 +71,7 @@ def _enable_offline_with_mistral_patch():
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
     os.makedirs(patch_dir, exist_ok=True)
     with open(os.path.join(patch_dir, "sitecustomize.py"), "w") as f:
-        f.write(
-            textwrap.dedent(
-                """\
+        f.write(textwrap.dedent("""\
             import os
             if os.environ.get('HF_HUB_OFFLINE') == '1':
                 try:
@@ -92,9 +90,7 @@ def _enable_offline_with_mistral_patch():
                     _T._patch_mistral_regex = _safe
                 except (ImportError, AttributeError):
                     pass
-        """
-            )
-        )
+        """))
     existing_entries = [e for e in os.environ.get("PYTHONPATH", "").split(":") if e]
     os.environ["PYTHONPATH"] = ":".join([patch_dir] + existing_entries)
     logging.info(

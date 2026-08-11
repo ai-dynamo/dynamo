@@ -14,6 +14,7 @@ Usage: python3 extract_throughput.py <artifact_dir_or_jsonl> [--conc N]
 Each JSONL line: {"metadata": {...request_start_ns, request_end_ns,
 benchmark_phase, was_cancelled...}, "metrics": {request_latency, time_to_first_token, ...}}
 """
+
 import json
 import os
 import statistics as st

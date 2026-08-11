@@ -356,8 +356,7 @@ def parse_nvtx_stages(
             conn.close()
             return None
 
-        rows = conn.execute(
-            """
+        rows = conn.execute("""
             SELECT text, COUNT(*) as cnt,
                    AVG(end - start) as avg_ns,
                    MIN(end - start) as min_ns,
@@ -366,8 +365,7 @@ def parse_nvtx_stages(
             WHERE text IS NOT NULL AND end > start
             GROUP BY text
             ORDER BY avg_ns DESC
-        """
-        ).fetchall()
+        """).fetchall()
         conn.close()
 
         if not rows:
@@ -413,8 +411,7 @@ def parse_syscall_profile(
             conn.close()
             return None
 
-        rows = conn.execute(
-            """
+        rows = conn.execute("""
             SELECT nameId, COUNT(*) as cnt,
                    AVG(end - start) as avg_ns,
                    SUM(end - start) as total_ns
@@ -423,8 +420,7 @@ def parse_syscall_profile(
             GROUP BY nameId
             ORDER BY total_ns DESC
             LIMIT 20
-        """
-        ).fetchall()
+        """).fetchall()
 
         # Try to resolve names from StringIds table
         name_map = {}
@@ -475,13 +471,11 @@ def parse_nsys_context_switches(
             conn.close()
             return None
 
-        row = conn.execute(
-            """
+        row = conn.execute("""
             SELECT COUNT(*) as total,
                    AVG(endGlobalTid - startGlobalTid) as avg_duration
             FROM SCHED_EVENTS
-        """
-        ).fetchone()
+        """).fetchone()
         conn.close()
 
         if not row or row[0] == 0:

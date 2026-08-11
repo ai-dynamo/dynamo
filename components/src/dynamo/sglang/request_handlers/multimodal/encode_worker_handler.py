@@ -715,9 +715,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # this deployment, since a request we reject is not the place to
             # report which decoders are installed.
             validated = [
-                await validate_media_url(media_input, self._url_policy)
-                if isinstance(media_input, str)
-                else media_input
+                (
+                    await validate_media_url(media_input, self._url_policy)
+                    if isinstance(media_input, str)
+                    else media_input
+                )
                 for media_input in media_inputs
             ]
             # Without this preflight these deployments -- the ones MOST likely
@@ -772,9 +774,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             hit = (
                 prechecked_entries[i]
                 if i in prechecked_entries
-                else cache.get(cache_key)
-                if cache_key is not None
-                else None
+                else cache.get(cache_key) if cache_key is not None else None
             )
             if hit is not None:
                 source_label = " URL" if isinstance(media_input, str) else ""
@@ -929,9 +929,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         variant = variants[0]
         return variant, item[variant]
 
-    async def _prepare_image_inputs(
-        self, image_items: list[Any]
-    ) -> tuple[list[Any], list[Optional[str]], dict[int, Optional[CachedEmbedding]],]:
+    async def _prepare_image_inputs(self, image_items: list[Any]) -> tuple[
+        list[Any],
+        list[Optional[str]],
+        dict[int, Optional[CachedEmbedding]],
+    ]:
         """Prepare MMEncoder inputs and aligned embedding-cache keys.
 
         URL variants stay as strings so the existing SGLang loading path is

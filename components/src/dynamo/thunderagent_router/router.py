@@ -603,9 +603,9 @@ class ThunderAgentScheduler:
                 "used": worker_used,
                 "used_decayed": worker_used_decayed,
                 "utilization": worker_used / capacity if capacity else None,
-                "utilization_decayed": worker_used_decayed / capacity
-                if capacity
-                else None,
+                "utilization_decayed": (
+                    worker_used_decayed / capacity if capacity else None
+                ),
                 "active_programs": active_programs[worker_id],
             }
         return workers

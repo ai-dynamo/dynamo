@@ -174,7 +174,9 @@ def main(argv: list[str] | None = None) -> int:
                 for name, version, ptype in rows:
                     s.write(f"| {ptype} | {name} | {version} |\n")
             else:
-                s.write("✅ every shipped component above the baseline is attributed.\n")
+                s.write(
+                    "✅ every shipped component above the baseline is attributed.\n"
+                )
 
     if rows and args.fail_on_findings:
         logger.error("%d potentially-unattributed component(s) found", len(rows))

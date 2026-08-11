@@ -43,9 +43,11 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.registry = CollectorRegistry()
 
         # Patch prometheus_client metrics to use our test registry
-        with patch("dynamo.trtllm.metrics.Counter") as MockCounter, patch(
-            "dynamo.trtllm.metrics.Histogram"
-        ) as MockHistogram, patch("dynamo.trtllm.metrics.Gauge") as MockGauge:
+        with (
+            patch("dynamo.trtllm.metrics.Counter") as MockCounter,
+            patch("dynamo.trtllm.metrics.Histogram") as MockHistogram,
+            patch("dynamo.trtllm.metrics.Gauge") as MockGauge,
+        ):
 
             def make_counter(name, documentation, labelnames=None, **_kw):
                 return RealCounter(

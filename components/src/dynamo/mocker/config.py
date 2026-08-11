@@ -217,9 +217,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     worker_type = (
         "prefill"
         if getattr(args, "is_prefill_worker", False)
-        else "decode"
-        if getattr(args, "is_decode_worker", False)
-        else "aggregated"
+        else "decode" if getattr(args, "is_decode_worker", False) else "aggregated"
     )
     aic_backend = None
     aic_system = None

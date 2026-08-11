@@ -63,14 +63,11 @@ class BranchSampler(Protocol):
 
     branch: BranchSpace
 
-    def suggest(self, count: int) -> list[Suggestion]:
-        ...
+    def suggest(self, count: int) -> list[Suggestion]: ...
 
-    def observe(self, suggestion: Suggestion, metrics: dict[str, float]) -> None:
-        ...
+    def observe(self, suggestion: Suggestion, metrics: dict[str, float]) -> None: ...
 
-    def observe_infeasible(self, suggestion: Suggestion, reason: str) -> None:
-        ...
+    def observe_infeasible(self, suggestion: Suggestion, reason: str) -> None: ...
 
 
 def _decoder_for(choices: list[Any]) -> Callable[[Any], Any]:
@@ -151,9 +148,11 @@ class VizierBranchSampler:
                         parameter.name,
                         feasible_values=parameter.values,
                         default_value=parameter.default,
-                        scale_type=vz.ScaleType.LOG
-                        if parameter.log_scale
-                        else vz.ScaleType.LINEAR,
+                        scale_type=(
+                            vz.ScaleType.LOG
+                            if parameter.log_scale
+                            else vz.ScaleType.LINEAR
+                        ),
                     )
                 else:
                     root.add_categorical_param(

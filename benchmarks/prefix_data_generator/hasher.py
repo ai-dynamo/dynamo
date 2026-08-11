@@ -20,13 +20,11 @@ class Tokenizer(Protocol):
         add_special_tokens: bool,
         return_attention_mask: bool,
         return_token_type_ids: bool,
-    ) -> Mapping[str, Sequence[Sequence[int]]]:
-        ...
+    ) -> Mapping[str, Sequence[Sequence[int]]]: ...
 
 
 class PromptGenerator(Protocol):
-    def generate(self, *, mean: int, hash_ids: Sequence[int] | None = None) -> str:
-        ...
+    def generate(self, *, mean: int, hash_ids: Sequence[int] | None = None) -> str: ...
 
 
 class RollingHasher:

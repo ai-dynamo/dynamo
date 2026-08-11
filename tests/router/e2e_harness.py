@@ -426,8 +426,9 @@ def run_disagg_router_decisions_test(
     num_decode_workers: int,
     prefill_process_kwargs: dict[str, Any] | None = None,
     decode_process_kwargs: dict[str, Any] | None = None,
-    worker_context_factory: Callable[[str], ContextManager[tuple[Any, Any]]]
-    | None = None,
+    worker_context_factory: (
+        Callable[[str], ContextManager[tuple[Any, Any]]] | None
+    ) = None,
     test_payload: dict[str, Any] | None = None,
     test_kwargs: dict[str, Any] | None = None,
 ):

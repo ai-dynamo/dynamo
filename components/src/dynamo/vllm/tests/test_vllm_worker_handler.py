@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for WorkerHandler in combination with multimodal handling."""
+
 # [gluo FIXME] This suite of tests is added for MultimodalPDWorkerHandler,
 # which is now removed. Yet the concept of this tests is still valid that
 # we need to have unit tests for the worker handlers.

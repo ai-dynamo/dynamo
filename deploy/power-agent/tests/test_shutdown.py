@@ -98,9 +98,10 @@ class TestRunLoopRunsCleanupOnce(_ShutdownTestBase):
             power_agent._shutdown.set()  # SIGTERM equivalent
 
         agent = self._bare_agent(reconcile)
-        with patch.object(power_agent.signal, "signal"), patch.object(
-            power_agent, "_shutdown_cleanup"
-        ) as cleanup:
+        with (
+            patch.object(power_agent.signal, "signal"),
+            patch.object(power_agent, "_shutdown_cleanup") as cleanup,
+        ):
             agent.run()
 
         cleanup.assert_called_once_with(agent._actuator)
@@ -114,9 +115,10 @@ class TestRunLoopRunsCleanupOnce(_ShutdownTestBase):
             raise RuntimeError("reconcile blew up")
 
         agent = self._bare_agent(reconcile)
-        with patch.object(power_agent.signal, "signal"), patch.object(
-            power_agent, "_shutdown_cleanup"
-        ) as cleanup:
+        with (
+            patch.object(power_agent.signal, "signal"),
+            patch.object(power_agent, "_shutdown_cleanup") as cleanup,
+        ):
             agent.run()
 
         cleanup.assert_called_once_with(agent._actuator)

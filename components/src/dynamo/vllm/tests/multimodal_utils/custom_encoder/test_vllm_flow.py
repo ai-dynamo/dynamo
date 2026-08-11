@@ -38,8 +38,7 @@ class _ToyEncoder(VisionEncoderBackend):
 
     image_token_id = _IMG
 
-    def build(self, model_id):
-        ...
+    def build(self, model_id): ...
 
     def preprocess(self, raw):
         n = len(raw)

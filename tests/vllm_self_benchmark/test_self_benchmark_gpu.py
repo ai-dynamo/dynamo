@@ -371,9 +371,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
                 kind = (
                     "Prefill"
                     if self.is_prefill is True
-                    else "Decode"
-                    if self.is_prefill is False
-                    else "Aggregated"
+                    else "Decode" if self.is_prefill is False else "Aggregated"
                 )
                 logger.info(
                     f"{kind} worker ready (bench_mode={self.bench_mode}, "

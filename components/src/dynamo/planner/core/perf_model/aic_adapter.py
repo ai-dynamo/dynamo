@@ -295,9 +295,11 @@ class PlannerEnginePerfModel:
                 pick.moe_tp,
                 pick.moe_ep,
                 pick.dp,
-                self._capabilities.kv_cache_block_size
-                if self._capabilities is not None
-                else None,
+                (
+                    self._capabilities.kv_cache_block_size
+                    if self._capabilities is not None
+                    else None
+                ),
                 aic_extra,
             )
         return (

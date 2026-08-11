@@ -25,6 +25,7 @@ crd-ref-docs also renders links for some external dangerous types that are refer
 from the CRD but not emitted as sections. Strip those links so the published
 reference does not contain dead anchors.
 """
+
 import re
 import sys
 

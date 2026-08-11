@@ -23,8 +23,7 @@ def _run_isolated(script: str) -> None:
 
 
 def test_import_sweeper_has_no_jax_process_side_effects():
-    _run_isolated(
-        """
+    _run_isolated("""
         import logging
         import os
 
@@ -38,13 +37,11 @@ def test_import_sweeper_has_no_jax_process_side_effects():
         assert "JAX_PLATFORMS" not in os.environ
         assert logging.getLogger("jax._src.xla_bridge").level == logging.WARNING
         assert logging.getLogger("absl").level == logging.WARNING
-        """
-    )
+        """)
 
 
 def test_configure_vizier_runtime_is_explicit_opt_in():
-    _run_isolated(
-        """
+    _run_isolated("""
         import logging
         import os
 
@@ -56,5 +53,4 @@ def test_configure_vizier_runtime_is_explicit_opt_in():
         assert os.environ.get("JAX_PLATFORMS") == "cpu"
         assert logging.getLogger("jax._src.xla_bridge").level == logging.ERROR
         assert logging.getLogger("absl").level == logging.ERROR
-        """
-    )
+        """)

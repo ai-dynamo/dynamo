@@ -923,10 +923,12 @@ class Descriptor:
 
     def __init__(
         self,
-        data: torch.Tensor
-        | tuple[array_module.ndarray, Device | str]
-        | bytes
-        | tuple[int, int, Device | str, Any],
+        data: (
+            torch.Tensor
+            | tuple[array_module.ndarray, Device | str]
+            | bytes
+            | tuple[int, int, Device | str, Any]
+        ),
     ) -> None:
         """
         Memory descriptor for transferring data between workers.
@@ -1030,7 +1032,7 @@ class Descriptor:
 
         # Data is `bytes`.
         elif isinstance(data, (bytes, bytearray)):
-            (self._data_ptr, self._data_size) = self._buffer_to_ptr_size(data)
+            self._data_ptr, self._data_size = self._buffer_to_ptr_size(data)
             self._data_ref = data
 
             logger.debug(

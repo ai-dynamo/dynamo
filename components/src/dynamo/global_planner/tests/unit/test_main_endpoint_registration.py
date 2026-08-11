@@ -65,9 +65,10 @@ async def test_main_registers_both_endpoints_concurrently():
     args.min_total_gpus = -1
     args.intent_cache_ttl_seconds = 120.0
 
-    with patch.dict(
-        os.environ, {"DYN_NAMESPACE": "gp-ns", "POD_NAMESPACE": "default"}
-    ), patch("dynamo.global_planner.__main__.ScaleRequestHandler") as mock_handler_cls:
+    with (
+        patch.dict(os.environ, {"DYN_NAMESPACE": "gp-ns", "POD_NAMESPACE": "default"}),
+        patch("dynamo.global_planner.__main__.ScaleRequestHandler") as mock_handler_cls,
+    ):
         mock_handler_cls.return_value = MagicMock()
 
         # main never returns on its own (it awaits the endpoint futures

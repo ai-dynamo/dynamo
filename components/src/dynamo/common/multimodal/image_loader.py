@@ -248,8 +248,7 @@ class ImageLoader:
         image_mm_items: List[Dict[str, Any]],
         *,
         preserve_uuid_slots: Literal[False] = False,
-    ) -> list[Image.Image]:
-        ...
+    ) -> list[Image.Image]: ...
 
     @overload
     async def load_image_batch(
@@ -257,8 +256,7 @@ class ImageLoader:
         image_mm_items: List[Dict[str, Any]],
         *,
         preserve_uuid_slots: Literal[True],
-    ) -> list[Image.Image | None]:
-        ...
+    ) -> list[Image.Image | None]: ...
 
     async def load_image_batch(
         self,

@@ -170,8 +170,11 @@ def test_deprecated_publish_events_flag_alias_maps_and_logs(monkeypatch, caplog)
     warnings.warn(DeprecationWarning) from library code is not)."""
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+        ),
     ):
         config = parse_args(["--publish-events-and-metrics"])
     assert config.publish_events_and_metrics is True
@@ -192,8 +195,12 @@ def test_deprecated_publish_events_env_alias_maps_and_logs(monkeypatch, caplog):
     monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning,
+            match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated",
+        ),
     ):
         config = parse_args([])
     assert config.publish_events_and_metrics is True

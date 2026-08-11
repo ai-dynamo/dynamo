@@ -459,8 +459,7 @@ async def runtime(request, discovery_backend, request_plane):
     if ENABLE_ISOLATED_ETCD_AND_NATS:
         forked_marker = request.node.get_closest_marker("forked")
         if forked_marker is None:
-            pytest.fail(
-                f"""
+            pytest.fail(f"""
 Test '{request.node.name}' uses the 'runtime' fixture but is not marked with @pytest.mark.forked.
 This is required when ENABLE_ISOLATED_ETCD_AND_NATS=1.
 
@@ -472,8 +471,7 @@ Add @pytest.mark.forked decorator to run this test in a separate process:
 Or set ENABLE_ISOLATED_ETCD_AND_NATS=0 to use default ports (no forking needed).
 
 This is required because DistributedRuntime is a process-level singleton.
-"""
-            )
+""")
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, discovery_backend, request_plane)

@@ -45,8 +45,7 @@ class RealtimeSessionHandler(Protocol):
         self,
         request_stream: AsyncGenerator[Any, None],
         context: Context,
-    ) -> AsyncGenerator[dict, None]:
-        ...
+    ) -> AsyncGenerator[dict, None]: ...
 
 
 class RealtimeHandler:

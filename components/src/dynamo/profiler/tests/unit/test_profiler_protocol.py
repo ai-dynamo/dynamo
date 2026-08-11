@@ -1034,9 +1034,7 @@ def _make_dgd_with_workers(*worker_names: str) -> dict:
         component_type = (
             "prefill"
             if "prefill" in name.lower()
-            else "decode"
-            if "decode" in name.lower()
-            else "worker"
+            else "decode" if "decode" in name.lower() else "worker"
         )
         components.append(
             _make_component(

@@ -644,11 +644,13 @@ def _check_sglang_mm_hashes_present(items) -> None:
         return
     _logger.info(
         "sglang mm_hashes interop: %s",
-        "present"
-        if present
-        else "MISSING — image was built without the "
-        "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
-        "will degrade to text-prefix fallback.",
+        (
+            "present"
+            if present
+            else "MISSING — image was built without the "
+            "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
+            "will degrade to text-prefix fallback."
+        ),
     )
 
 

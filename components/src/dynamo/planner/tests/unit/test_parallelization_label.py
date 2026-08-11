@@ -9,6 +9,7 @@ collapsed distinct 5-tuples to the same string — notably
 ``aiconfigurator.sdk.picking`` ``groupby("parallel")`` dedup. These tests
 pin the post-fix unique encoding.
 """
+
 from __future__ import annotations
 
 import pytest

@@ -13,6 +13,7 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
 """
+
 from __future__ import annotations
 
 import argparse

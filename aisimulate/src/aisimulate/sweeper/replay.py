@@ -148,22 +148,18 @@ class RunnerCapabilities:
 class Runner(Protocol):
     """One worker-local replay executor."""
 
-    def run(self, spec: ReplaySpec) -> ReplayReport:
-        ...
+    def run(self, spec: ReplaySpec) -> ReplayReport: ...
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
 
 
 @runtime_checkable
 class RunnerFactory(Protocol):
     """Serializable factory used to create one reusable Runner per worker."""
 
-    def capabilities(self) -> RunnerCapabilities:
-        ...
+    def capabilities(self) -> RunnerCapabilities: ...
 
-    def create(self, worker_id: int) -> Runner:
-        ...
+    def create(self, worker_id: int) -> Runner: ...
 
 
 def _jsonable(value: Any) -> JSONValue:

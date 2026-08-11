@@ -48,9 +48,9 @@ class CancellableRequest:
 
     # Class-level tracking for thread-safe socket monitoring
     _socket_tracking_lock = threading.Lock()
-    _socket_trackers: Dict[
-        Any, Any
-    ] = {}  # Maps thread ID to CancellableRequest instance
+    _socket_trackers: Dict[Any, Any] = (
+        {}
+    )  # Maps thread ID to CancellableRequest instance
     _original_socket: Callable[..., Any] = socket.socket
 
     @classmethod

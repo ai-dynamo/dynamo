@@ -673,9 +673,9 @@ class VllmProcessor:
 
             # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
             if request_for_sampling.mm_processor_kwargs is not None:
-                dynamo_preproc[
-                    "mm_processor_kwargs"
-                ] = request_for_sampling.mm_processor_kwargs
+                dynamo_preproc["mm_processor_kwargs"] = (
+                    request_for_sampling.mm_processor_kwargs
+                )
 
             def new_post_processor() -> StreamingPostProcessor:
                 return StreamingPostProcessor(

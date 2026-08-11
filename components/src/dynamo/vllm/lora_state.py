@@ -19,9 +19,9 @@ class LoRAState:
         # Per-LoRA lock to serialize concurrent load/unload operations.
         # Weak values ensure lock entries are reclaimed once no coroutine keeps
         # a strong reference to that lock (held, queued, or local variable).
-        self.lora_load_locks: weakref.WeakValueDictionary[
-            str, asyncio.Lock
-        ] = weakref.WeakValueDictionary()
+        self.lora_load_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self.lora_load_locks_guard = threading.Lock()
 
     def resolve_request(

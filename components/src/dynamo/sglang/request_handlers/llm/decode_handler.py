@@ -188,9 +188,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[
-            str, Any
-        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
         if self._enable_frontend_decoding:
@@ -613,9 +613,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "total_tokens": input_tokens + completion_tokens,
                         }
                         if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            completion_usage["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:

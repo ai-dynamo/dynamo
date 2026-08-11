@@ -43,9 +43,9 @@ class DeployKey:
             tokenizer=d["tokenizer"],
             workers=d["workers"],
             num_models=d["num_models"],
-            env_overrides=frozenset(env.items())
-            if isinstance(env, dict)
-            else frozenset(env),
+            env_overrides=(
+                frozenset(env.items()) if isinstance(env, dict) else frozenset(env)
+            ),
         )
 
 

@@ -152,21 +152,27 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         block_size=_resolve_block_size_for_capacity(raw),
         max_num_batched_tokens=cast(
             int,
-            max_num_batched_tokens
-            if max_num_batched_tokens is not None
-            else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            (
+                max_num_batched_tokens
+                if max_num_batched_tokens is not None
+                else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            ),
         ),
         gpu_memory_utilization=cast(
             float,
-            gpu_memory_utilization
-            if gpu_memory_utilization is not None
-            else DEFAULT_GPU_MEMORY_UTILIZATION,
+            (
+                gpu_memory_utilization
+                if gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION
+            ),
         ),
         mem_fraction_static=cast(
             float,
-            mem_fraction_static
-            if mem_fraction_static is not None
-            else DEFAULT_MEM_FRACTION_STATIC,
+            (
+                mem_fraction_static
+                if mem_fraction_static is not None
+                else DEFAULT_MEM_FRACTION_STATIC
+            ),
         ),
         # None -> aic.py applies the TRT-LLM default.
         free_gpu_memory_fraction=free_gpu_memory_fraction,

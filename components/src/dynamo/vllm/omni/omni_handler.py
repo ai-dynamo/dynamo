@@ -650,9 +650,7 @@ class OmniHandler(BaseOmniHandler):
         # a proper generator is initialized in the backend.
         # This fixes issues where using the default global generator
         # might produce blurry images in some environments.
-        sp.seed = (
-            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
-        )
+        sp.seed = nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
@@ -708,9 +706,7 @@ class OmniHandler(BaseOmniHandler):
         )
         self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
         self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
-        sp.seed = (
-            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
-        )
+        sp.seed = nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
         self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)

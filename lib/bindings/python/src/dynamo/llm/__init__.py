@@ -62,8 +62,7 @@ from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 
 
 class RoutedEngine(Protocol):
-    async def generate(self, request: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        ...
+    async def generate(self, request: Any, **kwargs: Any) -> AsyncIterator[Any]: ...
 
 
 # Backward-compatible aliases

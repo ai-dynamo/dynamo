@@ -44,8 +44,7 @@ class MdcEntry:
 class MdcSource(Protocol):
     """Source of :class:`MdcEntry` records scoped to a sub-component type."""
 
-    def get_entries(self, sub_component_type: SubComponentType) -> list[MdcEntry]:
-        ...
+    def get_entries(self, sub_component_type: SubComponentType) -> list[MdcEntry]: ...
 
 
 def is_model_card(wrapper: dict) -> bool:

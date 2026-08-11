@@ -270,9 +270,9 @@ class KvConnectorLeader:
         # extract the critial aspects of the request that effect how the tokens are hashed
         request = KvbmRequest(
             request_id=request.request_id,
-            lora_name=request.lora_request.lora_name()
-            if request.lora_request
-            else None,
+            lora_name=(
+                request.lora_request.lora_name() if request.lora_request else None
+            ),
             salt_hash=request.cache_salt,
         )
 

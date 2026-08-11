@@ -151,9 +151,11 @@ class EngineProcess(ManagedProcess):
 
             logger.info(
                 "Extracted content: \n%s",
-                content[:200] + "..."
-                if isinstance(content, str) and len(content) > 200
-                else content,
+                (
+                    content[:200] + "..."
+                    if isinstance(content, str) and len(content) > 200
+                    else content
+                ),
             )
         except AssertionError as e:
             raise ResponseValidationError(str(e))

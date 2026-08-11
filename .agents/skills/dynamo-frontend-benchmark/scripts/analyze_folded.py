@@ -17,6 +17,7 @@ On-CPU: prints top self-time (exclusive) leaves -> where compute goes.
 Off-CPU (--offcpu): prints top innermost-user-frames + a primitive breakdown
    (futex/park vs epoll/network vs lock vs rayon) -> what threads wait on.
 """
+
 import re
 import sys
 from collections import defaultdict

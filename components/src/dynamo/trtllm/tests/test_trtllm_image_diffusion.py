@@ -445,12 +445,15 @@ class TestVideoHandlerConcurrency:
 
             requests = [self._make_request() for _ in range(3)]
 
-            with patch(
-                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-                return_value=b"fake_image_bytes",
-            ), patch(
-                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
-                return_value="http://fake/image.png",
+            with (
+                patch(
+                    "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                    return_value=b"fake_image_bytes",
+                ),
+                patch(
+                    "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                    return_value="http://fake/image.png",
+                ),
             ):
                 await asyncio.gather(
                     *(self._drain_generator(handler, req) for req in requests)
@@ -531,13 +534,16 @@ class TestImageHandlerResponseFormats:
             "response_format": "url",
         }
 
-        with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-            return_value=b"fake_image_bytes",
-        ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/images/test.png",
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"fake_image_bytes",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                return_value="https://cdn.example.com/media/images/test.png",
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)
@@ -593,13 +599,16 @@ class TestImageHandlerResponseFormats:
             # No response_format specified
         }
 
-        with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-            return_value=b"fake_image_bytes",
-        ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/images/test.png",
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"fake_image_bytes",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                return_value="https://cdn.example.com/media/images/test.png",
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)
@@ -651,13 +660,16 @@ class TestImageHandlerResponseFormats:
             "https://cdn.example.com/media/images/test_0.png",
             "https://cdn.example.com/media/images/test_1.png",
         ]
-        with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-            return_value=b"fake_image_bytes",
-        ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
-            side_effect=upload_urls,
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"fake_image_bytes",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                side_effect=upload_urls,
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)
@@ -740,13 +752,16 @@ class TestImageHandlerResponseFormats:
             "response_format": "url",
         }
 
-        with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-            return_value=b"fake_image_bytes",
-        ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/images/test_0.png",
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"fake_image_bytes",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                return_value="https://cdn.example.com/media/images/test_0.png",
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)
@@ -799,13 +814,16 @@ class TestImageHandlerResponseFormats:
             "https://cdn.example.com/media/images/test_0.png",
             "https://cdn.example.com/media/images/test_1.png",
         ]
-        with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-            return_value=b"fake_image_bytes",
-        ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
-            side_effect=upload_urls,
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"fake_image_bytes",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                side_effect=upload_urls,
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)

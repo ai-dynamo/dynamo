@@ -47,15 +47,13 @@ class MultimodalConfig:
 class EmbeddingsProcessorLike(Protocol):
     async def process_embeddings(
         self, request: SglangMultimodalRequest
-    ) -> tuple[torch.Tensor, int]:
-        ...
+    ) -> tuple[torch.Tensor, int]: ...
 
     def create_multimodal_image_item(
         self,
         embeddings: torch.Tensor,
         image_grid_thw: list[Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     def create_multimodal_video_item(
         self,
@@ -63,8 +61,7 @@ class EmbeddingsProcessorLike(Protocol):
         video_grid_thw: list[Any],
         second_per_grid_ts: list[float] | None = None,
         video_timestamps: list[list[float]] | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 class SglangUtils:

@@ -8,6 +8,7 @@ docs/fern/components/releases.data.ts — one line, inside the MAIN_TOT block,
 no RELEASES pin touched, and the result still parses through
 gen_llms_tables.py. Run from anywhere; exit 0 == safe to bump.
 """
+
 from __future__ import annotations
 
 import importlib.util

@@ -7,6 +7,7 @@ These fast unit tests import the installed tensorrt_llm module and verify the
 contracts Dynamo depends on for TRT-LLM MM-aware KV routing: Qwen image markers
 remain in-vocabulary, and request prompts carry ``multi_modal_uuids``.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace

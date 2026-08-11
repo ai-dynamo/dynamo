@@ -399,9 +399,11 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
 
             read_op = await self._connector.begin_read(
                 rdma_meta,
-                local_descriptors[0]
-                if len(local_descriptors) == 1
-                else local_descriptors,
+                (
+                    local_descriptors[0]
+                    if len(local_descriptors) == 1
+                    else local_descriptors
+                ),
             )
             await read_op.wait_for_completion()
 

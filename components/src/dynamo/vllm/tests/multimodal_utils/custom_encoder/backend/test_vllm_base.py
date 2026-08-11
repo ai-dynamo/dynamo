@@ -30,8 +30,7 @@ class _MinimalBackend(VisionEncoderBackend):
 
     image_token_id = 151655
 
-    def build(self, model_id):
-        ...
+    def build(self, model_id): ...
 
     def preprocess(self, raw):
         return Preprocessed(item=raw, cost=1)
@@ -46,8 +45,7 @@ class _PassthroughBackend(VisionEncoderBackend):
 
     image_token_id = 151655
 
-    def build(self, model_id):
-        ...
+    def build(self, model_id): ...
 
     def forward_batch(self, items, target_bucket=None):
         return [torch.zeros(1, 1) for _ in items]

@@ -7,6 +7,7 @@ which corrupted ``thorough.py`` sweep work_dir naming and the
 ``aiconfigurator.sdk.picking`` ``groupby("parallel")`` dedup. These tests
 pin the post-fix unique encoding.
 """
+
 from __future__ import annotations
 
 import pandas as pd

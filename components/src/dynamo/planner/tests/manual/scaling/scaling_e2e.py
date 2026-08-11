@@ -210,9 +210,9 @@ class ScalingE2ETest:
             "baseline_results": baseline_results,
             "trigger_results": trigger_results,
             "final_pod_counts": final_counts.__dict__ if final_counts else None,
-            "final_final_pod_counts": final_final_counts.__dict__
-            if final_final_counts
-            else None,
+            "final_final_pod_counts": (
+                final_final_counts.__dict__ if final_final_counts else None
+            ),
             "pod_history": [counts.__dict__ for counts in self.k8s_monitor.pod_history],
             "scaling_analysis": self.analyze_scaling_behavior(),
         }
@@ -286,9 +286,9 @@ class ScalingE2ETest:
             validation["test_passed"] = True
             validation["summary"] = "PASS: Successfully scaled from 1P1D to 2P1D"
         else:
-            validation[
-                "summary"
-            ] = "FAIL: Did not achieve expected 1P1D -> 2P1D scaling"
+            validation["summary"] = (
+                "FAIL: Did not achieve expected 1P1D -> 2P1D scaling"
+            )
 
         baseline = results.get("baseline_results", {})
         trigger = results.get("trigger_results", {})

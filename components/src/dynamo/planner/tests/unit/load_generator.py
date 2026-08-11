@@ -144,9 +144,10 @@ class LoadGenerator:
         stdout_path = os.path.join(artifact_dir, "aiperf.stdout.log")
         stderr_path = os.path.join(artifact_dir, "aiperf.stderr.log")
         try:
-            with open(stdout_path, "wb") as stdout_f, open(
-                stderr_path, "wb"
-            ) as stderr_f:
+            with (
+                open(stdout_path, "wb") as stdout_f,
+                open(stderr_path, "wb") as stderr_f,
+            ):
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=stdout_f,

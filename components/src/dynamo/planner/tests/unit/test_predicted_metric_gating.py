@@ -49,12 +49,11 @@ pytestmark = [
 
 def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
     """Minimal NativePlannerBase with a mocked Prometheus metrics object."""
-    with patch(
-        "dynamo.planner.core.base.PlannerPrometheusMetrics"
-    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
-        "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-    ), patch.dict(
-        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+    with (
+        patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+        patch("dynamo.planner.core.base.start_http_server"),
+        patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+        patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
     ):
         mock_metrics.return_value = Mock()
         config = PlannerConfig.model_construct(

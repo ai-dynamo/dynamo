@@ -1186,7 +1186,6 @@ class TestRequestHasImages:
 
 
 class _FakeConversationParams:
-
     """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
     is read back by the assertions."""
 

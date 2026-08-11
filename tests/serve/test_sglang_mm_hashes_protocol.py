@@ -22,6 +22,7 @@ routing:
      silently break MM-aware routing (workers recompute hashes internally,
      diverging from the router's pad_value substitution).
 """
+
 from __future__ import annotations
 
 import dataclasses

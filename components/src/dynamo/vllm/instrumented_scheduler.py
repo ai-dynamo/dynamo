@@ -3973,9 +3973,11 @@ class InstrumentedScheduler(AsyncScheduler):
         status = (
             "failed"
             if error is not None
-            else "partial"
-            if stop_reason is not None and not coverage_complete
-            else "complete"
+            else (
+                "partial"
+                if stop_reason is not None and not coverage_complete
+                else "complete"
+            )
         )
         usable = (
             error is None

@@ -192,9 +192,11 @@ class MultimodalEmbeddingCacheManager:
             "entries": len(self._cache),
             "current_bytes": self._current_bytes,
             "capacity_bytes": self._capacity_bytes,
-            "utilization": self._current_bytes / self._capacity_bytes
-            if self._capacity_bytes > 0
-            else 0,
+            "utilization": (
+                self._current_bytes / self._capacity_bytes
+                if self._capacity_bytes > 0
+                else 0
+            ),
             "hits": self._hits,
             "misses": self._misses,
             "evictions": self._evictions,

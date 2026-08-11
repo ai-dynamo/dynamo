@@ -171,9 +171,7 @@ def _run_collect_only_with_import_mutation(
     controller reporting path rather than the in-process raise.
     """
     dummy = tmp_path / "test_collection_env_guard_regression_dummy.py"
-    dummy.write_text(
-        textwrap.dedent(
-            f"""
+    dummy.write_text(textwrap.dedent(f"""
             import os
 
             os.environ["{_REGRESSION_ENV_VAR}"] = "leaked-at-import"
@@ -181,9 +179,7 @@ def _run_collect_only_with_import_mutation(
 
             def test_placeholder():
                 pass
-            """
-        )
-    )
+            """))
 
     env = os.environ.copy()
     env.pop(_REGRESSION_ENV_VAR, None)

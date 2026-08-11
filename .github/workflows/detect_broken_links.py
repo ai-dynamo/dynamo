@@ -705,9 +705,9 @@ def detect_problematic_symlinks(
 
             # Check if symlink is broken (target doesn't exist)
             if not symlink_path.exists():
-                symlink_info[
-                    "issue"
-                ] = f"Broken symlink: target '{target_path}' does not exist"
+                symlink_info["issue"] = (
+                    f"Broken symlink: target '{target_path}' does not exist"
+                )
                 problematic_symlinks["broken"].append(symlink_info)
                 logger.warning(f"Broken symlink found: {symlink} -> {target_path}")
                 continue
@@ -723,9 +723,9 @@ def detect_problematic_symlinks(
                     continue
             except (OSError, RuntimeError) as e:
                 if "Too many levels of symbolic links" in str(e):
-                    symlink_info[
-                        "issue"
-                    ] = "Circular symlink: too many levels of symbolic links"
+                    symlink_info["issue"] = (
+                        "Circular symlink: too many levels of symbolic links"
+                    )
                     problematic_symlinks["circular"].append(symlink_info)
                     logger.warning(f"Circular symlink found: {symlink}")
                     continue
@@ -735,9 +735,9 @@ def detect_problematic_symlinks(
                 try:
                     symlink_path.relative_to(git_root_path)
                 except ValueError:
-                    symlink_info[
-                        "issue"
-                    ] = f"External symlink: points outside repository to '{symlink_path}'"
+                    symlink_info["issue"] = (
+                        f"External symlink: points outside repository to '{symlink_path}'"
+                    )
                     problematic_symlinks["external"].append(symlink_info)
                     logger.warning(
                         f"External symlink found: {symlink} -> {symlink_path}"
@@ -746,17 +746,17 @@ def detect_problematic_symlinks(
 
             # Check for suspicious patterns (e.g., very long paths, unusual targets)
             if len(str(target_path)) > 200:
-                symlink_info[
-                    "issue"
-                ] = f"Suspicious symlink: unusually long target path ({len(str(target_path))} characters)"
+                symlink_info["issue"] = (
+                    f"Suspicious symlink: unusually long target path ({len(str(target_path))} characters)"
+                )
                 problematic_symlinks["suspicious"].append(symlink_info)
                 logger.info(f"Suspicious symlink found: {symlink} (long path)")
 
             # Check if target is in a different directory tree (potential maintenance issue)
             if "../" in str(target_path) and str(target_path).count("../") > 3:
-                symlink_info[
-                    "issue"
-                ] = f"Suspicious symlink: target requires many directory traversals ('{target_path}')"
+                symlink_info["issue"] = (
+                    f"Suspicious symlink: target requires many directory traversals ('{target_path}')"
+                )
                 problematic_symlinks["suspicious"].append(symlink_info)
                 logger.info(f"Suspicious symlink found: {symlink} (many traversals)")
 

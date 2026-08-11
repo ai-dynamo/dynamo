@@ -44,6 +44,7 @@ Usage:
 
 Exits 1 with the failing page/selector pairs listed.
 """
+
 from __future__ import annotations
 
 import argparse

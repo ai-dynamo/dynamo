@@ -67,9 +67,11 @@ class AiohttpClient(HttpClient):
                     "keepalive_timeout=%.1fs%s",
                     self._config.max_connections,
                     self._config.keepalive_timeout,
-                    f", total timeout forced to {self._config.per_call_timeout_override:.1f}s via env"
-                    if self._config.per_call_timeout_override is not None
-                    else "; total timeout set per-request",
+                    (
+                        f", total timeout forced to {self._config.per_call_timeout_override:.1f}s via env"
+                        if self._config.per_call_timeout_override is not None
+                        else "; total timeout set per-request"
+                    ),
                 )
         return self._session
 

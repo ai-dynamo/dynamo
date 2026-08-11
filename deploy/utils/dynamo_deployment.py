@@ -141,9 +141,9 @@ class DynamoDeploymentClient:
         self.model_name = model_name
         self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
-        self.deployment_spec: Optional[
-            Dict[str, Any]
-        ] = None  # Will store the full deployment spec
+        self.deployment_spec: Optional[Dict[str, Any]] = (
+            None  # Will store the full deployment spec
+        )
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
         self.port_forward_process: Optional[subprocess.Popen[bytes]] = None

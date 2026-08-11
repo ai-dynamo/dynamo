@@ -89,9 +89,11 @@ class HttpxClient(HttpClient):
                     self._config.max_keepalive,
                     self._config.connect_timeout,
                     self._config.pool_timeout,
-                    f"forced to {self._config.per_call_timeout_override:.1f}s via env"
-                    if self._config.per_call_timeout_override is not None
-                    else "set per-request",
+                    (
+                        f"forced to {self._config.per_call_timeout_override:.1f}s via env"
+                        if self._config.per_call_timeout_override is not None
+                        else "set per-request"
+                    ),
                 )
         return self._client
 

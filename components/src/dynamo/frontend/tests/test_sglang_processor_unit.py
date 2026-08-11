@@ -3179,9 +3179,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "D",
         ]
         assert [
-            choice["logprobs"]["content"][0]["logprob"]
-            if choice["logprobs"] is not None
-            else None
+            (
+                choice["logprobs"]["content"][0]["logprob"]
+                if choice["logprobs"] is not None
+                else None
+            )
             for choice in choices
         ] == [-0.1, -0.2, None, -0.4]
         assert choices[-1]["finish_reason"] == "stop"
@@ -3346,9 +3348,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                 )
             ]
             return [
-                item["data"]
-                if item.get("_dynamo_annotated") and "data" in item
-                else item
+                (
+                    item["data"]
+                    if item.get("_dynamo_annotated") and "data" in item
+                    else item
+                )
                 for item in raw_items
             ]
 

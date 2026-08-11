@@ -308,8 +308,7 @@ def pip_check(venv_python: Path) -> None:
 
 
 def direct_url_for(venv_python: Path, dist_name: str) -> dict[str, object]:
-    code = textwrap.dedent(
-        f"""
+    code = textwrap.dedent(f"""
         import importlib.metadata as metadata
         import json
 
@@ -317,8 +316,7 @@ def direct_url_for(venv_python: Path, dist_name: str) -> dict[str, object]:
         if not direct_url:
             raise SystemExit("missing direct_url.json for {dist_name}")
         print(direct_url)
-        """
-    )
+        """)
     proc = subprocess.run(
         [str(venv_python), "-c", code],
         check=True,

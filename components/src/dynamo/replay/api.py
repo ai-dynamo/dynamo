@@ -88,8 +88,7 @@ def run_trace_replay(
     *,
     replay_mode: Literal["offline"] = "offline",
     **kwargs: Unpack[_TraceReplayOptions],
-) -> ReplayReport:
-    ...
+) -> ReplayReport: ...
 
 
 @overload
@@ -98,8 +97,7 @@ def run_trace_replay(
     *,
     replay_mode: Literal["online"],
     **kwargs: Unpack[_TraceReplayOptions],
-) -> dict[str, Any]:
-    ...
+) -> dict[str, Any]: ...
 
 
 @overload
@@ -108,8 +106,7 @@ def run_trace_replay(
     *,
     replay_mode: str,
     **kwargs: Unpack[_TraceReplayOptions],
-) -> ReplayReport | dict[str, Any]:
-    ...
+) -> ReplayReport | dict[str, Any]: ...
 
 
 def run_trace_replay(
@@ -244,8 +241,7 @@ def run_synthetic_trace_replay(
     *,
     replay_mode: Literal["offline"] = "offline",
     **kwargs: Unpack[_SyntheticReplayOptions],
-) -> ReplayReport:
-    ...
+) -> ReplayReport: ...
 
 
 @overload
@@ -256,8 +252,7 @@ def run_synthetic_trace_replay(
     *,
     replay_mode: Literal["online"],
     **kwargs: Unpack[_SyntheticReplayOptions],
-) -> dict[str, Any]:
-    ...
+) -> dict[str, Any]: ...
 
 
 @overload
@@ -268,8 +263,7 @@ def run_synthetic_trace_replay(
     *,
     replay_mode: str,
     **kwargs: Unpack[_SyntheticReplayOptions],
-) -> ReplayReport | dict[str, Any]:
-    ...
+) -> ReplayReport | dict[str, Any]: ...
 
 
 def run_synthetic_trace_replay(

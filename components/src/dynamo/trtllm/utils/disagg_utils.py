@@ -90,12 +90,14 @@ class DisaggregatedParamsCodec:
         if not fglp:
             return
         params_dict["first_gen_log_probs"] = [
-            [
-                {"token_id": tid, "logprob": lp["logprob"], "rank": lp.get("rank")}
-                for tid, lp in pos.items()
-            ]
-            if isinstance(pos, dict)
-            else pos
+            (
+                [
+                    {"token_id": tid, "logprob": lp["logprob"], "rank": lp.get("rank")}
+                    for tid, lp in pos.items()
+                ]
+                if isinstance(pos, dict)
+                else pos
+            )
             for pos in fglp
         ]
 
@@ -112,14 +114,16 @@ class DisaggregatedParamsCodec:
         if not fglp:
             return
         params_dict["first_gen_log_probs"] = [
-            {
-                item["token_id"]: Logprob(
-                    logprob=item["logprob"], rank=item.get("rank")
-                )
-                for item in pos
-            }
-            if isinstance(pos, list)
-            else pos
+            (
+                {
+                    item["token_id"]: Logprob(
+                        logprob=item["logprob"], rank=item.get("rank")
+                    )
+                    for item in pos
+                }
+                if isinstance(pos, list)
+                else pos
+            )
             for pos in fglp
         ]
 

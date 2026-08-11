@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Protocol types for disaggregated omni stage workers and connectors.
-"""
+"""Protocol types for disaggregated omni stage workers and connectors."""
 
 import dataclasses
 import logging
@@ -27,8 +26,7 @@ class StageEngine(Protocol):
         request_id: str = "",
         *,
         sampling_params_list: Any = None,
-    ) -> AsyncGenerator[Any, None]:
-        ...
+    ) -> AsyncGenerator[Any, None]: ...
 
     def get_tokenizer(self) -> Any:
         """Return the tokenizer (may be async — callers should await)."""

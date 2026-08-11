@@ -31,8 +31,7 @@ KV_EVENT_DIAGNOSTIC_CODES = frozenset(get_args(KvEventDiagnosticCode))
 
 
 class LogReadable(Protocol):
-    def read_logs(self) -> str:
-        ...
+    def read_logs(self) -> str: ...
 
 
 @dataclass(frozen=True)

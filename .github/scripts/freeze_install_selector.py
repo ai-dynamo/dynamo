@@ -12,6 +12,7 @@ block is absent (older snapshots).
 Usage:
     freeze_install_selector.py <quickstart.mdx> <version>
 """
+
 from __future__ import annotations
 
 import re

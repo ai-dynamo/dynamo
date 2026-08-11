@@ -85,8 +85,7 @@ class TokenizerProtocol(Protocol):
         token_ids: List[int],
         skip_special_tokens: bool = True,
         clean_up_tokenization_spaces: bool = True,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 class MultimodalRequestProcessor:

@@ -142,9 +142,10 @@ class TestReleaseOnReuse(unittest.TestCase):
         pods = [_pod("bystander", {"team.example.com/foo": "bar"})]
         uid_to_annotation = agent._build_uid_to_annotation(pods)
 
-        with patch(
-            "power_agent._extract_pod_uid_from_cgroup", return_value="bystander"
-        ), patch("power_agent._persist_managed_gpus"):
+        with (
+            patch("power_agent._extract_pod_uid_from_cgroup", return_value="bystander"),
+            patch("power_agent._persist_managed_gpus"),
+        ):
             agent._reconcile_gpu(0, uid_to_annotation)
 
         return actuator
@@ -278,9 +279,10 @@ class TestReleaseDcgmReenumeration(unittest.TestCase):
         pods = [_pod("bystander", {"team.example.com/foo": "bar"})]
         uid_to_annotation = agent._build_uid_to_annotation(pods)
         persist = MagicMock()
-        with patch(
-            "power_agent._extract_pod_uid_from_cgroup", return_value="bystander"
-        ), patch("power_agent._persist_managed_gpus", persist):
+        with (
+            patch("power_agent._extract_pod_uid_from_cgroup", return_value="bystander"),
+            patch("power_agent._persist_managed_gpus", persist),
+        ):
             agent._reconcile_gpu(0, uid_to_annotation)
         return persist
 

@@ -439,9 +439,9 @@ class SystemInfo(NodeInfo):
         os_info.add_child(
             NodeInfo(
                 label="Execution context",
-                desc="container"
-                if self._is_inside_container()
-                else "host (non-docker)",
+                desc=(
+                    "container" if self._is_inside_container() else "host (non-docker)"
+                ),
                 status=NodeStatus.INFO,
             )
         )

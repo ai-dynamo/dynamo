@@ -99,7 +99,10 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 
 def extract_mm_urls(
     messages: list[dict[str, Any]],
-) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
+) -> tuple[
+    dict[str, list[dict[str, str]]] | None,
+    dict[str, list[str | None]] | None,
+]:
     """Extract media and vLLM image processor-cache UUIDs from chat messages.
 
     URL-backed parts become ``Url`` variants. Image parts with no URL and an

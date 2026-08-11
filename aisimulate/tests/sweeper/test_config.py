@@ -32,8 +32,7 @@ def _workload(**overrides):
 
 def test_backend_only_yaml_and_adapter_search_space_load(tmp_path):
     path = tmp_path / "sweep.yaml"
-    path.write_text(
-        """
+    path.write_text("""
 search_space:
   deployment_mode: [agg]
   backend: [vllm]
@@ -53,8 +52,7 @@ workload:
 sweep:
   max_rounds: 2
   candidates_per_round: 1
-"""
-    )
+""")
 
     config = SmartSearchConfig.from_yaml(path)
 

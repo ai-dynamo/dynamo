@@ -9,6 +9,7 @@ copy that survives the NVIDIA global theme, which replaces the project `css:`
 stylesheet at publish (#11952). This script regenerates the block between the
 `sync-site-css:begin/end` markers; `--check` exits 1 if the mirror is stale.
 """
+
 from __future__ import annotations
 
 import re

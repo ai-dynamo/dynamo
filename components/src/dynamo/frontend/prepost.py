@@ -38,8 +38,7 @@ class _Renderer(Protocol):
 
     async def render_messages_async(
         self, messages: Any, params: ChatParams
-    ) -> tuple[Any, dict[str, Any]]:
-        ...
+    ) -> tuple[Any, dict[str, Any]]: ...
 
 
 @dataclass

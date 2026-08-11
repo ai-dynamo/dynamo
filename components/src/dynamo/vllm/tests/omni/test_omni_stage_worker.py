@@ -497,13 +497,11 @@ def test_prepare_connector_payload_preserves_empty_attr_positions():
 
 def test_ensure_stage_connectors_adds_missing_shared_memory_edge(tmp_path):
     config_path = tmp_path / "glm_image.yaml"
-    config_path.write_text(
-        """
+    config_path.write_text("""
 stages:
   - stage_id: 0
   - stage_id: 1
-""".lstrip()
-    )
+""".lstrip())
     stage_configs = [
         SimpleNamespace(stage_id=0, engine_input_source=[]),
         SimpleNamespace(stage_id=1, engine_input_source=[0]),
@@ -521,15 +519,13 @@ stages:
 
 def test_ensure_stage_connectors_rejects_non_mapping_connectors(tmp_path):
     config_path = tmp_path / "glm_image.yaml"
-    config_path.write_text(
-        """
+    config_path.write_text("""
 connectors:
   - not-a-mapping
 stages:
   - stage_id: 0
   - stage_id: 1
-""".lstrip()
-    )
+""".lstrip())
     stage_configs = [
         SimpleNamespace(stage_id=0, engine_input_source=[]),
         SimpleNamespace(stage_id=1, engine_input_source=[0]),

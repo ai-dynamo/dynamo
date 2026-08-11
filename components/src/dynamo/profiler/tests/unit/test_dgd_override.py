@@ -51,9 +51,7 @@ def blueprint() -> dict:
 def _write_fake_cli(tmp_path: Path) -> Path:
     path = tmp_path / "dgd-apply-overrides"
     path.write_text(
-        f"#!{sys.executable}\n"
-        + textwrap.dedent(
-            """\
+        f"#!{sys.executable}\n" + textwrap.dedent("""\
             import json
             import os
             import sys
@@ -80,8 +78,7 @@ def _write_fake_cli(tmp_path: Path) -> Path:
             json.dump(result, sys.stdout)
             print("warning: synthetic warning", file=sys.stderr)
             print("synthetic diagnostic", file=sys.stderr)
-            """
-        ),
+            """),
         encoding="utf-8",
     )
     path.chmod(0o755)

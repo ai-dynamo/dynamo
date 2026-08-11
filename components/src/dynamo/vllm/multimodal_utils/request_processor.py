@@ -513,9 +513,11 @@ class VllmMultimodalRequestProcessor:
                         # Keep UUID-only slots as bare None so cache misses fail
                         # before model-specific vision processing.
                         chunks = [
-                            None
-                            if image is None
-                            else {"type": "image", "image": image, "uuid": None}
+                            (
+                                None
+                                if image is None
+                                else {"type": "image", "image": image, "uuid": None}
+                            )
                             for image in images
                         ]
                         vllm_mm_data[image_key] = (

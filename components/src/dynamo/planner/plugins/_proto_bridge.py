@@ -244,9 +244,11 @@ def _decode_bytes_by_pyd_schema(d: Any, pyd_cls: Type[BaseModel]) -> Any:
                 and isinstance(v, list)
             ):
                 out[k] = [
-                    _decode_bytes_by_pyd_schema(x, list_args[0])
-                    if isinstance(x, dict)
-                    else x
+                    (
+                        _decode_bytes_by_pyd_schema(x, list_args[0])
+                        if isinstance(x, dict)
+                        else x
+                    )
                     for x in v
                 ]
             else:

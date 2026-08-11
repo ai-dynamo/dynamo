@@ -6,6 +6,7 @@
 Stdout: one-line JSON: {"framework", "current", "latest", "upgrade_needed"}.
 Exit 0 on success regardless of upgrade_needed; non-zero only on real errors.
 """
+
 from __future__ import annotations
 
 import argparse

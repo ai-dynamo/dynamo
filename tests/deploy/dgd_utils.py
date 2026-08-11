@@ -1066,9 +1066,9 @@ class ManagedDeployment:
                     continue
 
                 for cs in container_statuses:
-                    state: Literal[
-                        "Waiting", "Terminated", "Running", "Unknown"
-                    ] = "Unknown"
+                    state: Literal["Waiting", "Terminated", "Running", "Unknown"] = (
+                        "Unknown"
+                    )
                     reason = ""
                     message = ""
                     exit_code: Optional[int] = None

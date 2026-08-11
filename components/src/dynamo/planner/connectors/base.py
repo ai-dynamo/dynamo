@@ -118,8 +118,7 @@ class PowerAwareConnector(Protocol):
     rather than silently falling back to a no-op.
     """
 
-    def get_graph_deployment(self) -> dict:
-        ...
+    def get_graph_deployment(self) -> dict: ...
 
     def get_component_power_configs(
         self,
@@ -128,8 +127,7 @@ class PowerAwareConnector(Protocol):
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
         deployment: Optional[dict] = None,
-    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
-        ...
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]: ...
 
     async def wait_for_settled_graph_deployment(
         self,
@@ -139,15 +137,13 @@ class PowerAwareConnector(Protocol):
         require_decode: bool = True,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-    ) -> dict:
-        ...
+    ) -> dict: ...
 
     async def get_power_aware_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-    ) -> tuple[int, int, bool]:
-        ...
+    ) -> tuple[int, int, bool]: ...
 
 
 _POWER_AWARE_REQUIRED: tuple[str, ...] = (

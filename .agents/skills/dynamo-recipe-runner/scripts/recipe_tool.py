@@ -110,9 +110,9 @@ def discover(root: Path) -> list[Recipe]:
                 path=str(recipe_dir.relative_to(root)),
                 deploy_yaml=str(deploy.relative_to(root)),
                 perf_yaml=str(perf.relative_to(root)) if perf.exists() else None,
-                model_cache_dir=str(model_cache.relative_to(root))
-                if model_cache.exists()
-                else None,
+                model_cache_dir=(
+                    str(model_cache.relative_to(root)) if model_cache.exists() else None
+                ),
                 gpu_count_hint=gpu_count_hint(text),
             )
         )
