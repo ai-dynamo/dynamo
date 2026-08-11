@@ -29,7 +29,7 @@ Dynamo 旨在同时满足以下目标：
 
 - **Prefill/decode 不均衡** 会在流量组合变化时导致 GPU 利用率不足（[DistServe](https://arxiv.org/abs/2401.09670)）。
 - **KV 重新计算** 会在路由忽略缓存重叠时增加 TTFT 并浪费计算资源（[DeepSeek](https://arxiv.org/abs/2501.12948)）。
-- 来自长上下文和并发的 **内存压力** 在没有多层缓存管理的情况下会超出 HBM 容量（[KVBM](https://docs.nvidia.com/dynamo/components/kvbm)、[Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html)、[AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html)、[FlexKV](https://github.com/taco-project/FlexKV)、[LMCache](https://lmcache.ai/)）。
+- 来自长上下文和并发的 **内存压力** 在没有 KV cache offloading 的情况下会超出 HBM 容量（[Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html)、[FlexKV](https://github.com/taco-project/FlexKV) 和 [LMCache](https://lmcache.ai/)）。
 - **动态需求** 会打破静态资源预置的假设（[AzureTrace](https://github.com/Azure/AzurePublicDataset)）。
 - **真实世界故障**（pod 重启、分区、热点过载）需要一等的恢复行为。
 
@@ -37,7 +37,7 @@ Dynamo 通过将服务、控制和状态传播拆分为明确的平面与控制�
 
 ## 架构概览
 
-![Dynamo 架构，展示 Request Plane（Client、Frontend、Router、Prefill/Decode workers）、Control Plane（Planner、Dynamo Operator、Dynamo Graph、Grove、Model Express、Runtime Resources）以及 Storage &amp; Events Plane（KVBM、NIXL、Local SSD/NFS/Remote Storage）](../../../../../assets/img/dynamo-architecture.svg "Dynamo Architecture")
+![Dynamo 架构，展示 request、control、storage 和 event planes](../../../../../assets/img/dynamo-architecture.svg "Dynamo Architecture")
 
 ## 系统模型
 
@@ -69,7 +69,7 @@ control plane 负责期望状态管理：
 storage/events plane 负责缓存状态可见性和移动：
 
 - **KV Events** 发布缓存生命周期转换。
-- **KVBM** 管理跨内存层级的 block 复用、驱逐以及 offload/recall。
+- **Backend offloading connectors** 在 GPU、host 和 storage tiers 之间移动可复用的 KV blocks。
 - **NIXL** 在 workers 和内存域之间执行高速 KV/data 传输。
 
 该路径针对缓存复用和跨 worker 交接效率进行优化。
@@ -84,10 +84,9 @@ storage/events plane 负责缓存状态可见性和移动：
 6. Decode 接收 KV 状态（通常通过 **NIXL** 传输路径）。
 7. Decode 通过 Frontend 流式返回 token。
 8. **KV Events** 更新缓存可见性，供未来路由决策使用。
-9. **KVBM** 可以根据压力和复用潜力 offload 或 recall KV blocks。
+9. 所选 backend 可以根据压力和复用潜力 offload 或 recall KV blocks。
 
-有关流程级细节，请参阅 [Architecture Flow](../../../../../pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md)。
-有关请求传输选项，请参阅 [Request Plane](../../../../../pages/developer-guide/knowledge-base/concepts/communication-planes/request-plane.md)。
+有关 request flow、runtime、discovery 和 transport 的详细信息，请参阅 [Architecture](../../../../../pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md)。
 
 ## 控制循环
 
@@ -143,14 +142,6 @@ Fault tolerance 嵌入在各层中：
 
 ## 性能依据
 
-### 分离式服务
-
-分离 prefill 和 decode 可以提升利用率，并支持按阶段扩缩容。
-
-![两个散点图，对比 disagg 和 baseline 配置在单节点与双节点上的性能](../../../../../assets/img/disagg-perf-benefit.png)
-
-*在 H100 上使用 vLLM 运行 R1 Distilled Llama 70B FP8 进行测试。3K ISL / 150 OSL。*
-
 ### KV-Aware Routing
 
 结合缓存重叠和负载信号的路由可以减少 prefill 重新计算并改善延迟。
@@ -159,14 +150,6 @@ Fault tolerance 嵌入在各层中：
 ![两个柱状图，对比 Random routing 和带 KV aware routing 的 Dynamo 在 Time To First Token（Dynamo 快 3 倍）与 Avg request latency（Dynamo 快 2 倍）上的表现。](../../../../../assets/img/kv-routing.png)
 
 *使用 2 个 H100 节点上的 R1 Distilled Llama 70B FP8，对 R1 发起 100K 个请求进行测试。平均 4K ISL / 800 OSL。*
-
-### KV Block Manager (KVBM)
-
-KVBM 通过多层内存 offload/recall 扩展有效缓存容量。
-
-![折线图，对比 Pure GPU prefix caching with vLLM 和 KVBM host offloading 在 TTFT（Time To First Token）上的表现](../../../../../assets/img/kvbm-agg-performance.png)
-
-*使用 H100 上的 Qwen3-8B，在不同 QPS 值下测试。平均 20K ISL / 100 OSL。*
 
 ### NIXL Data Transfer
 
@@ -180,12 +163,10 @@ NIXL 通过优化跨异构内存的 worker 间传输行为，降低分布式服�
 
 ## 相关文档
 
-- [Architecture Flow](../../../../../pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md)
+- [Architecture](../../../../../pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md)
 - [Router Design](../../../../../pages/developer-guide/knowledge-base/modular-components/router/router-design.md)
 - [Planner 设计](modular-components/planner/planner-design.md)
-- [Discovery Plane](../../../../../pages/developer-guide/knowledge-base/concepts/communication-planes/discovery-plane.md)
-- [Event Plane](../../../../../pages/developer-guide/knowledge-base/concepts/communication-planes/event-plane.md)
-- [Request Plane](../../../../../pages/developer-guide/knowledge-base/concepts/communication-planes/request-plane.md)
+- [Simulation](../../../../../pages/developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md)
 - [Fault Tolerance](../../../../../pages/kubernetes/fault-tolerance/introduction.md)
 - [Grove](../../../../../pages/developer-guide/knowledge-base/kubernetes/multinode/grove.md)
 

@@ -123,7 +123,7 @@ Each scheduler publishes metrics about its current state, including the number o
 
 The following features are not yet supported by the mocker:
 
-- **Multi-tier memory** - No support for offloading KV cache to CPU/disk or onboarding back to GPU; potential future integration with KVBM
+- **Multi-tier memory** - No support for offloading KV cache to CPU or disk, or for loading it back to GPU
 - **Multimodal support** - Currently only simulates text token processing; no vision encoder or cross-attention simulation
 - **Native Rust reference counting** - Work in progress to use native Rc/Arc for block reference counting, enabling natural RAII patterns for simpler tracking
 
