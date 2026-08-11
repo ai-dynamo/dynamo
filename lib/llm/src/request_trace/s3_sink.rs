@@ -334,7 +334,8 @@ impl S3Uploader {
     }
 
     async fn put_object(&self, key: String, body: Vec<u8>) -> Result<()> {
-        let location = ObjectPath::from(key);
+        let location = ObjectPath::parse(&key)
+            .with_context(|| format!("invalid request trace S3 object key {key:?}"))?;
         let attributes = Attributes::from_iter([(Attribute::ContentType, "application/gzip")]);
         tokio::time::timeout(
             S3_OPERATION_TIMEOUT,
@@ -529,6 +530,42 @@ mod tests {
             Some("application/gzip")
         );
         assert_eq!(result.bytes().await.unwrap().as_ref(), body.as_slice());
+    }
+
+    #[tokio::test]
+    async fn put_object_preserves_percent_encoded_key() {
+        let store = Arc::new(InMemory::new());
+        let uploader = S3Uploader {
+            store: store.clone(),
+            options: test_options(""),
+        };
+        let key = "traces/%2F/batch.jsonl.gz";
+        let body = vec![1, 2, 3, 4];
+
+        uploader
+            .put_object(key.to_string(), body.clone())
+            .await
+            .unwrap();
+
+        let location = ObjectPath::parse(key).unwrap();
+        let result = store.get(&location).await.unwrap();
+        assert_eq!(result.bytes().await.unwrap().as_ref(), body.as_slice());
+    }
+
+    #[tokio::test]
+    async fn put_object_rejects_key_with_empty_segment() {
+        let uploader = test_uploader("");
+
+        let error = uploader
+            .put_object("traces//batch.jsonl.gz".to_string(), vec![1, 2, 3, 4])
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid request trace S3 object key")
+        );
     }
 
     #[test]
