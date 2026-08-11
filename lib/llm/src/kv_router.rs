@@ -80,6 +80,38 @@ pub(crate) type WorkerSelectorFactory<Sel> = Arc<
     dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
 >;
 
+pub(crate) fn to_worker_selection_agent_context(
+    context: &crate::protocols::common::extensions::AgentContext,
+) -> dynamo_kv_router::WorkerSelectionAgentContext {
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
+    use dynamo_kv_router::{
+        WorkerSelectionAgentContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints,
+    };
+
+    // Keep this exhaustive so a new wire-level field must be handled here.
+    let AgentContext {
+        session_id,
+        parent_session_id,
+        session_final,
+        kv_hints,
+        input_trigger,
+    } = context;
+    let input_trigger = input_trigger.map(|trigger| match trigger {
+        InputTrigger::UserMessage => WorkerSelectionInputTrigger::UserMessage,
+        InputTrigger::ToolResult => WorkerSelectionInputTrigger::ToolResult,
+        InputTrigger::Other => WorkerSelectionInputTrigger::Other,
+    });
+    WorkerSelectionAgentContext::new(
+        session_id.clone(),
+        parent_session_id.clone(),
+        *session_final,
+        kv_hints
+            .as_ref()
+            .map(|hints| WorkerSelectionKvHints::new(hints.evict_session)),
+        input_trigger,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -779,7 +811,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -798,7 +830,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                agent_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -829,7 +861,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -848,7 +880,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                agent_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -878,7 +910,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -1017,7 +1049,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            agent_context,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1674,6 +1706,38 @@ mod tests {
             .expect("filtered workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+    }
+
+    #[test]
+    fn worker_selection_receives_complete_agent_context() {
+        use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
+        use dynamo_kv_router::WorkerSelectionInputTrigger;
+
+        let context = AgentContext {
+            session_id: "child-session".into(),
+            parent_session_id: Some("root-session".into()),
+            session_final: Some(true),
+            kv_hints: Some(KvHints {
+                evict_session: true,
+            }),
+            input_trigger: Some(InputTrigger::ToolResult),
+        };
+
+        let selection_context = to_worker_selection_agent_context(&context);
+
+        assert_eq!(selection_context.session_id(), "child-session");
+        assert_eq!(selection_context.parent_session_id(), Some("root-session"));
+        assert_eq!(selection_context.session_final(), Some(true));
+        assert!(
+            selection_context
+                .kv_hints()
+                .expect("KV hints")
+                .evict_session()
+        );
+        assert_eq!(
+            selection_context.input_trigger(),
+            Some(WorkerSelectionInputTrigger::ToolResult)
+        );
     }
 
     #[test]

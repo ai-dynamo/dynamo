@@ -24,12 +24,12 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 
 | Crate | Use it for |
 |---|---|
-| `basic` | One scorer and picker work for every worker type |
+| `basic` | Multiple scorers and one picker work for every worker type |
 | `disaggregated` | Prefill and decode workers need different components |
 | `catalog` | You need to register policy types for configuration |
 | `epp` | Worker selection runs in a standalone EPP |
 
-The basic policy scores active requests. The disaggregated policy scores active prefill tokens for prefill workers and projected decode blocks for decode workers. Both own their picker implementation.
+The basic policy adds an active-request cost and an uncached-request cost for every worker. The disaggregated policy scores active prefill work plus uncached request blocks for prefill workers, and projected decode blocks for decode workers. Both own their picker implementation.
 
 ## 1. Create the Policy Crate
 
@@ -48,6 +48,14 @@ A policy that lives in the Dynamo workspace can use the workspace dependencies s
 A scorer receives one eligible worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
 
 The [basic policy](basic/src/lib.rs) is the shortest complete implementation. The [disaggregated policy](disaggregated/src/lib.rs) shows how one factory selects different component types from `worker_type`.
+
+A policy can apply multiple scorers to every candidate. Dynamo calls them in order and adds their costs before the picker runs. The basic policy composes two scorers:
+
+```rust
+vec![Box::new(LeastBusyScorer), Box::new(UncachedBlocksScorer)]
+```
+
+For example, a worker with an active-request cost of `3` and an uncached-request cost of `5` reaches the picker with a total cost of `8`.
 
 Declare each optional input group that a component reads:
 

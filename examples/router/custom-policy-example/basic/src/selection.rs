@@ -30,6 +30,26 @@ impl WorkerScorer for LeastBusyScorer {
     }
 }
 
+/// Scores each candidate by the request blocks that are not in device memory.
+pub(crate) struct UncachedBlocksScorer;
+
+impl WorkerScorer for UncachedBlocksScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        let cache = candidate
+            .cache()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+        Ok((context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0))
+    }
+}
+
 /// Picks the candidate with the lowest accumulated scorer cost.
 pub(crate) struct LowestCostPicker;
 

@@ -96,7 +96,7 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
         priority_jump: 0.0,
         strict_priority: 0,
         policy_class: None,
-        session_id: None,
+        agent_context: None,
         overlap: OverlapSignals {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,

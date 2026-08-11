@@ -488,7 +488,7 @@ mod test_support {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            agent_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

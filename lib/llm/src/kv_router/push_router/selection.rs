@@ -54,7 +54,7 @@ impl<'a> RoutingRequestParts<'a> {
 pub(super) struct SelectionOptions {
     pub(super) affinity_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
-    pub(super) session_id: Option<String>,
+    pub(super) agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
 }
 
 struct BestMatchArgs<'a> {
@@ -68,7 +68,7 @@ struct BestMatchArgs<'a> {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
-    session_id: Option<String>,
+    agent_context: Option<dynamo_kv_router::WorkerSelectionAgentContext>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -94,7 +94,7 @@ where
                 args.priority_jump,
                 args.strict_priority,
                 args.policy_class,
-                args.session_id,
+                args.agent_context,
                 args.expected_output_tokens,
                 args.pinned_worker,
                 args.allowed_worker_ids,
@@ -185,7 +185,7 @@ where
         let SelectionOptions {
             affinity_worker,
             policy_class,
-            session_id,
+            agent_context,
         } = options;
         let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) =
@@ -204,7 +204,7 @@ where
                     priority_jump,
                     strict_priority,
                     policy_class,
-                    session_id,
+                    agent_context,
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -276,7 +276,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            agent_context,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
