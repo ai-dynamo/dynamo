@@ -1010,6 +1010,16 @@ overrides:
   - { ecosystem: dpkg, name: libxxf86vm1, license: "MIT", source: "Ubuntu 24.04 libxxf86vm1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: xkb-data, license: "MIT", source: "Ubuntu 24.04 xkb-data (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
 
+  # --- vLLM Jammy base dpkg packages syft/DEP-5 left UNKNOWN ---
+  - { ecosystem: dpkg, name: libogg0, license: "BSD-3-Clause", source: "Xiph.Org libogg 1.3.5 COPYING — https://github.com/xiph/ogg/blob/v1.3.5/COPYING" }
+  - { ecosystem: dpkg, name: libsnappy1v5, license: "BSD-3-Clause", source: "Google Snappy 1.1.8 COPYING — https://github.com/google/snappy/blob/1.1.8/COPYING" }
+  - { ecosystem: dpkg, name: libspeex1, license: "BSD-3-Clause", source: "Xiph.Org Speex COPYING — https://github.com/xiph/speex/blob/master/COPYING" }
+  - { ecosystem: dpkg, name: libtiff5, license: "libtiff", source: "LibTIFF 4.3.0 COPYRIGHT — https://gitlab.com/libtiff/libtiff/-/blob/v4.3.0/COPYRIGHT" }
+  - { ecosystem: dpkg, name: libwayland-server0, license: "MIT", source: "Wayland 1.20.0 COPYING — https://gitlab.freedesktop.org/wayland/wayland/-/blob/1.20.0/COPYING" }
+  - { ecosystem: dpkg, name: libxcb-dri2-0, license: "MIT", source: "X.Org libxcb COPYING — https://gitlab.freedesktop.org/xorg/lib/libxcb/-/blob/master/COPYING" }
+  - { ecosystem: dpkg, name: libxinerama1, license: "MIT", source: "X.Org libXinerama COPYING — https://gitlab.freedesktop.org/xorg/lib/libxinerama/-/blob/master/COPYING" }
+  - { ecosystem: dpkg, name: python3-more-itertools, license: "MIT", source: "more-itertools LICENSE — https://github.com/more-itertools/more-itertools/blob/8.10.0/LICENSE" }
+
   # --- vLLM-Omni kernel packages surfaced by the nvidia/cuda baseline (UNKNOWN
   #     to syft/pip; resolved from upstream) ---
   - { ecosystem: python, name: humming-kernels,               license: "Apache-2.0",                   source: "inclusionAI/humming JIT GEMM kernels — https://github.com/inclusionAI/humming/blob/main/LICENSE (Apache-2.0)" }

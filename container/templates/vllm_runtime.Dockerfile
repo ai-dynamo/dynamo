@@ -256,9 +256,10 @@ RUN apt-get update && \
 
 {% if device == "cuda" %}
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
-# against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
-# codec packages and replace them with the LGPL-only in-tree ffmpeg built in
-# wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
+# against libx264/libx265/libmp3lame. Purge the explicitly-named ffmpeg + codec
+# packages, the JACK client library orphaned by that purge, and the unused
+# lsb-release reporting utility. Replace ffmpeg with the LGPL-only in-tree build
+# from wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
 # libvpx). PyAV, torchaudio, torchvision, soundfile and Pillow all bundle their
 # own libraries and do not link the system ffmpeg/codecs, so removing them is
 # safe. dpkg-query keeps the match robust across base-image/arch version
@@ -276,7 +277,7 @@ RUN apt-get update && \
 # dead weight, not a compliance issue.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)|^(libjack-jackd2-0|lsb-release)$' \
         || true); \
     if [ -n "$purge" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \

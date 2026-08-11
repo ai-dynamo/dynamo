@@ -2565,6 +2565,204 @@ name = "ucf"
 allow = ["GPL-2.0-only"]
 reason = "Update Configuration File framework; Debian system component invoked as a separate process during package configuration — mere aggregation"
 
+# --- vLLM Jammy runtime [[exceptions]] ---
+# The upstream vLLM image is based on Ubuntu 22.04, whose package names differ
+# from the Ubuntu 24.04 variants already reviewed above. Keep these exact-name
+# exceptions narrow: only the license identifiers reported for the Jammy
+# packages are allowed.
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-11"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain retained for torch.compile/inductor runtime JIT; compiler is mere aggregation and GCC's runtime library exception applies to generated code"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-11"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain retained for torch.compile/inductor runtime JIT; compiler is mere aggregation and GCC's runtime library exception applies to generated code"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-11"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain retained for torch.compile/inductor runtime JIT; compiler is mere aggregation and GCC's runtime library exception applies to generated code"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-11-base"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain runtime support retained for torch.compile/inductor runtime JIT; covered by the GCC Runtime Library Exception"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-12-base"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain runtime support inherited from the Jammy base image; covered by the GCC Runtime Library Exception"
+
+[[exceptions]]
+type = "dpkg"
+name = "libappstream4"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Jammy variant of the reviewed libappstream5 system component; LGPL library is dynamically linked and GPL utilities are mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libasan6"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain runtime library inherited from the Jammy base image; covered by the GCC Runtime Library Exception"
+
+[[exceptions]]
+type = "dpkg"
+name = "libasound2"
+allow = ["LGPL-2.1-only"]
+reason = "Jammy base-image system library; dynamically linked and not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdw1"
+allow = ["GPL-2.0-only"]
+reason = "Jammy variant of the reviewed libdw1t64 base-image system component; separate dynamically linked system library"
+
+[[exceptions]]
+type = "dpkg"
+name = "libelf1"
+allow = ["GPL-2.0-only"]
+reason = "Jammy variant of the reviewed libelf1t64 base-image system component; separate dynamically linked system library"
+
+[[exceptions]]
+type = "dpkg"
+name = "libflac8"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Jammy variant of the reviewed libflac12t64 base-image library; LGPL components are dynamically linked and GPL components are mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgcc-11-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain development support retained for torch.compile/inductor runtime JIT; covered by the GCC Runtime Library Exception"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdbm-compat4"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Jammy variant of the reviewed libgdbm-compat4t64 system component; separate system library and mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdbm6"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Jammy variant of the reviewed libgdbm6t64 system component; separate system library and mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libglib2.0-0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Jammy variant of the reviewed libglib2.0-0t64 base-image library; dynamically linked and not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libicu70"
+allow = ["GPL-3.0-only"]
+reason = "Jammy variant of the reviewed libicu74 system component; GPL-licensed tooling/data in the source package is mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libjpeg-turbo8"
+allow = ["LGPL-2.1-only"]
+reason = "Jammy base-image system library; LGPL component is dynamically linked and not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmpg123-0"
+allow = ["LGPL-2.1-only"]
+reason = "Jammy variant of the reviewed libmpg123-0t64 base-image library; dynamically linked and not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpgm-5.3-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "Jammy variant of the reviewed libpgm-5.3-0t64 base-image library; dynamically linked and not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpng16-16"
+allow = ["GPL-2.0-or-later"]
+reason = "Jammy variant of the reviewed libpng16-16t64 system component; GPL-licensed utilities in the source package are mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.10-minimal"
+allow = ["GPL-2.0-only"]
+reason = "Jammy system Python component; GPL-licensed source-package files are mere aggregation and are not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.10-stdlib"
+allow = ["GPL-2.0-only"]
+reason = "Jammy system Python component; GPL-licensed source-package files are mere aggregation and are not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.12"
+allow = ["GPL-2.0-only"]
+reason = "System Python component; GPL-licensed source-package files are mere aggregation and are not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libstdc++-11-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain development support retained for torch.compile/inductor runtime JIT; covered by the GCC Runtime Library Exception"
+
+[[exceptions]]
+type = "dpkg"
+name = "libtsan0"
+allow = ["GPL-2.0-or-later"]
+reason = "GNU toolchain runtime library inherited from the Jammy base image; covered by the GCC Runtime Library Exception"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.10"
+allow = ["GPL-2.0-only"]
+reason = "Jammy system Python interpreter; GPL-licensed source-package files are mere aggregation and are not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.10-minimal"
+allow = ["GPL-2.0-only"]
+reason = "Jammy system Python interpreter; GPL-licensed source-package files are mere aggregation and are not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmpdec3"
+allow = ["GPL-2.0-or-later"]
+reason = "Required by Jammy's libpython3.10-stdlib for decimal arithmetic; the runtime library is BSD-2-Clause and GPL-2.0-or-later applies only to separate Debian packaging files"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnsl-dev"
+allow = ["LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Development dependency of Jammy libc6-dev retained for torch.compile/inductor runtime JIT; libnsl is a separate LGPL system library and is not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "libtirpc-dev"
+allow = ["GPL-2.0-only", "LGPL-2.1-or-later"]
+reason = "Development dependency of Jammy libc6-dev retained for torch.compile/inductor runtime JIT; the headers and library are BSD-licensed while GPL applies to separate Debian packaging and LGPL to an ancillary source file"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-keyring"
+allow = ["GPL-3.0-only"]
+reason = "Upstream keyring runtime is PSF-2.0 OR MIT; GPL-3.0-only applies only to separate Debian packaging files, and the system package is not incorporated into Dynamo's Apache-2.0 code"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-pyparsing"
+allow = ["GPL-2.0-only", "GPL-3.0-only"]
+reason = "The shipped pyparsing runtime is MIT; GPL-2.0-only and GPL-3.0-only apply only to example files in the source package that are not installed in the Jammy binary package"
+
 # --- Rust [[exceptions]] ---
 
 [[exceptions]]
@@ -2704,13 +2902,13 @@ reason = "Base-image system library: LGPL components are dynamically linked and 
 [[exceptions]]
 type = "dpkg"
 name = "libopenal-data"
-allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
 reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
 
 [[exceptions]]
 type = "dpkg"
 name = "libopenal1"
-allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
 reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
 
 [[exceptions]]
