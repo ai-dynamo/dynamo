@@ -76,7 +76,7 @@ Bold = recommended pick per SKU: B200 disagg wins (+6.2%); H200 AGG wins (1P3D d
    - **B200 variants** (agentic + `vllm-agg-b200`, `sglang-agg`, `sglang-disagg-b200`): **8 B200 GPUs per worker** (TP=8 fills the box, x86_64). Totals: **AGG `agg-b200-agentic` = 8** (1 node); **DisAgg `disagg-b200-agentic` (1P1D) = 16** (1 prefill + 1 decode pod, across 2 nodes).
    - **H200 variants**: **8 H200 GPUs per worker** (public FP8 checkpoint, `max_model_len=86016`). Totals: **AGG `agg-h200-agentic` = 8** (1 node — the recommended H200 pick); **DisAgg `disagg-h200-agentic` (1P3D) = 32** (1 prefill + 3 decode pods, across 4 nodes).
    - **GB200 variants** (`vllm-agg-gb200`, `vllm-disagg-gb200`, `sglang-agg-gb200`, `sglang-disagg-gb200`): **2 GB200 nodes per worker**, each 4 GPUs (one NVL4 tray), on the **same NVLink72 clique**. Label `nvidia.com/gpu.product=NVIDIA-GB200`, taint `kubernetes.io/arch=arm64:NoSchedule`, and install the **DRA / ComputeDomain controller** (`kubectl get crd | grep computedomain`) — each manifest's `ComputeDomain` CR + `resourceClaims` co-locate the pod set on one NVLink72 fabric.
-3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Pro`.
+3. **HuggingFace token** with access to the checkpoint your variant serves — `deepseek-ai/DeepSeek-V4-Pro` (public FP8) for the H200, GB200, Day-0 B200, and SGLang variants, or `nvidia/DeepSeek-V4-Pro-NVFP4` for the two agentic B200 variants (`vllm/agg-b200-agentic`, `vllm/disagg-b200-agentic`).
 
 ## Quick Start
 
@@ -91,14 +91,35 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token-here" \
   -n ${NAMESPACE}
 
-# Download model into the model-cache PVC.
+# Storage for the checkpoint.
 # Edit model-cache/model-cache.yaml and set storageClassName to a RWX class in your cluster.
 # The PVC requests 1500Gi; DeepSeek-V4-Pro is ~865 GB on disk (64 safetensors shards,
 # FP4+FP8 mixed) and typically takes 1.5-3 hours to download on first apply.
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+Then download **the checkpoint your variant serves**. Each checkpoint is ~865 GB and the PVC holds
+one, not both, so the download Job takes a single `MODEL_NAME`. Its default is the public FP8
+checkpoint, which 9 of the 11 variants request:
+
+```bash
+# H200 agentic, GB200, Day-0 B200, and all SGLang variants — public FP8 (the Job default):
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+```
+
+```bash
+# vllm/agg-b200-agentic and vllm/disagg-b200-agentic only — NVFP4:
+sed 's|value: deepseek-ai/DeepSeek-V4-Pro$|value: nvidia/DeepSeek-V4-Pro-NVFP4|' \
+  model-cache/model-download.yaml | kubectl apply -f - -n ${NAMESPACE}
+```
+
+```bash
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
+
+> [!IMPORTANT]
+> The workers mount the PVC read-only with `HF_HUB_OFFLINE=1`, so they cannot fetch a checkpoint the
+> Job did not download. Downloading the wrong one leaves the worker unable to start.
 
 ### Deploy
 

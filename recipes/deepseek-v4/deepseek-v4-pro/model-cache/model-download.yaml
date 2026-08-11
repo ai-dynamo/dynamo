@@ -22,6 +22,12 @@ spec:
             - secretRef:
                 name: hf-token-secret
           env:
+            # One checkpoint per PVC: each is ~865 GB and the PVC in the README requests 1500Gi,
+            # so both do not fit. The default serves the 9 variants that ask for the public FP8
+            # checkpoint. Override with "nvidia/DeepSeek-V4-Pro-NVFP4" for the two NVFP4 variants,
+            # vllm/agg-b200-agentic and vllm/disagg-b200-agentic.
+            - name: MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4-Pro
             - name: HF_HOME
               value: /model-store
             # Default "1" = fast: XET buffers use up to ~64 GB RAM, so the Job requests "64Gi" below
@@ -33,11 +39,7 @@ spec:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
-              # Downloads ONE checkpoint per your SKU (each is ~865 GB; the PVC in the README
-              # holds one, not both). B200 (NVFP4) is active by default; for H200, comment the
-              # NVFP4 line and uncomment the public FP8 line instead.
-              hf download --max-workers 4 nvidia/DeepSeek-V4-Pro-NVFP4   # B200 recipes (NVFP4) - default
-              # hf download --max-workers 4 deepseek-ai/DeepSeek-V4-Pro  # H200 recipes (public FP8)
+              hf download --max-workers 4 "$MODEL_NAME"
           resources:
             requests:
               cpu: "2"
