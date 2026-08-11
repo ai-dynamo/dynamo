@@ -1570,10 +1570,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 empty = SchedulerOutput(
                     scheduled_new_reqs=[],
                     scheduled_cached_reqs=CachedRequestData.make_empty(),
-                    # vLLM's persistent input batch retains rows by membership
-                    # in this map. Keep the benchmark requests resident while
-                    # an async admission or measurement output is in flight,
-                    # but schedule zero model work for them.
+                    # Zero-valued membership retains benchmark rows in vLLM's
+                    # persistent input batch without scheduling model work.
                     num_scheduled_tokens=dict.fromkeys(self._bench_active_req_ids, 0),
                     total_num_scheduled_tokens=0,
                     scheduled_spec_decode_tokens={},
@@ -1600,10 +1598,8 @@ class InstrumentedScheduler(AsyncScheduler):
                     empty.ec_connector_metadata = (
                         self.ec_connector.build_connector_meta(empty)
                     )
-                # This frame does not advance scheduler request state and must
-                # not create AsyncScheduler output placeholders. The map is a
-                # worker-side residency signal only; update_from_output passes
-                # a sanitized copy into normal scheduler output processing.
+                # Do not advance request state or create async placeholders.
+                # The parent update receives a copy without retention entries.
                 return empty
 
         return self._schedule_and_record_time(throttle_prefills)
@@ -3733,10 +3729,8 @@ class InstrumentedScheduler(AsyncScheduler):
             pass  # fall through to inject next point
 
         elif self._bench_active_req_ids:
-            # The point deadline is rank-local. READY must unconditionally
-            # proceed to the re-armed ADP barrier; otherwise one rank can send
-            # a result while a peer sends ready. Soft timeouts stop the sweep
-            # at the next synchronized point boundary instead.
+            # Rank-local deadlines cannot decide whether READY enters the ADP
+            # measurement barrier. Soft timeouts stop between points.
             if (
                 self._bench_decode_stage == _DecodePointStage.READY
                 and getattr(self, "_bench_extra_steps_left", 0) > 0
@@ -3755,15 +3749,10 @@ class InstrumentedScheduler(AsyncScheduler):
                         )
                     self._bench_extra_steps_left -= 1
                     self._bench_decode_stage = _DecodePointStage.MEASURING
-                    # Re-arm the READY/GO barrier so attention-DP ranks cannot
-                    # run a retention frame on one rank while peers run the
-                    # measured batch. schedule() records the timestamp after
-                    # this barrier, keeping synchronization out of the sample.
+                    # Re-arm the ADP barrier; schedule() timestamps after it.
                     self._bench_sync_pending = True
                     return steady
-                # Feasibility reserves the steady step's slots. Failing fast
-                # lets _bench_abort notify attention-DP peers instead of making
-                # one rank wait on a barrier that another rank never enters.
+                # Abort a reserved-slot failure so ADP peers do not wait.
                 raise RuntimeError(
                     "failed to allocate the reserved steady-state decode slots"
                 )
@@ -3771,8 +3760,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 _DecodePointStage.ADMITTING,
                 _DecodePointStage.MEASURING,
             }:
-                # The scheduler emits retention-only empty outputs while these
-                # GPU passes are in flight, so neither pass is dispatched twice.
+                # Wait without redispatching an in-flight pass.
                 return None
             if len(self._bench_current_fpms) < getattr(self, "_bench_expected_fpms", 1):
                 if not self._bench_point_result_timed_out():

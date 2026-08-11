@@ -3512,9 +3512,7 @@ def test_steady_step_dispatches_after_local_deadline_then_waits_then_saves():
     stub._bench_extra_steps_left = 1
     stub._bench_expected_fpms = 2
     stub._bench_decode_stage = _DecodePointStage.READY
-    # The point deadline is rank-local. Once admission has completed, it must
-    # not let one ADP rank skip the measurement READY barrier while its peers
-    # enter it.
+    # Expiry must not let an ADP rank skip the measurement barrier.
     stub._bench_point_deadline = time.monotonic() - 1.0
     stub._bench_current_point = BenchmarkPoint(point_type="decode", batch_size=1)
     stub._bench_sync_pending = False
@@ -3556,8 +3554,7 @@ def test_steady_step_unavailable_fails_even_after_the_local_deadline():
     stub._bench_make_steady_step = MagicMock(return_value=None)
     stub._bench_save_current_point = MagicMock()
 
-    # Feasibility reserved this allocation. Fail fast so the schedule wrapper
-    # can abort peers instead of letting another rank wait at the barrier.
+    # A reserved-slot failure must abort rather than strand ADP peers.
     with pytest.raises(RuntimeError, match="reserved steady-state decode slots"):
         InstrumentedScheduler._bench_step_decode(stub)
     stub._bench_save_current_point.assert_not_called()
