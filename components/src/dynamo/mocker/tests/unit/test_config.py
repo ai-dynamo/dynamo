@@ -505,12 +505,14 @@ def test_mocker_cli_ignores_explicit_g1_backend_for_sglang():
     )
 
     assert args.g1_backend == "native"
+
+
 def test_mocker_cli_propagates_aic_systems_path():
     args = parse_args(
         [
             "--aic-perf-model",
             "--aic-systems-path",
-            "/tmp/aic-systems",
+            "/opt/aic-systems",
             "--model-path",
             "/models/mock",
             "--num-gpu-blocks-override",
@@ -520,7 +522,7 @@ def test_mocker_cli_propagates_aic_systems_path():
 
     engine_args = CONFIG.build_mocker_engine_args(args)
 
-    assert engine_args.aic_systems_path == "/tmp/aic-systems"
+    assert engine_args.aic_systems_path == "/opt/aic-systems"
 
 
 def test_mocker_cli_aic_systems_path_overrides_extra_engine_args(tmp_path):
@@ -529,18 +531,18 @@ def test_mocker_cli_aic_systems_path_overrides_extra_engine_args(tmp_path):
         json.dumps(
             {
                 "num_gpu_blocks": 128,
-                "aic_systems_path": "/embedded",
+                "aic_systems_path": "/opt/aic-systems-embedded",
             }
         )
     )
     args = make_args(
         extra_engine_args=config_path,
-        aic_systems_path="/explicit",
+        aic_systems_path="/opt/aic-systems-explicit",
     )
 
     engine_args = CONFIG.load_mocker_engine_args(args)
 
-    assert engine_args.aic_systems_path == "/explicit"
+    assert engine_args.aic_systems_path == "/opt/aic-systems-explicit"
 
 
 def test_mocker_cli_accepts_max_model_len():
@@ -793,7 +795,7 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             aic_perf_model=True,
             model_path="/models/mock",
             aic_system="h200_sxm",
-            aic_systems_path="/tmp/aic-systems",
+            aic_systems_path="/opt/aic-systems",
             aic_tp_size=4,
             max_num_batched_tokens=4096,
             gpu_memory_utilization=0.8,
@@ -802,14 +804,14 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     )
 
     assert engine_args.num_gpu_blocks == 46000
-    assert engine_args.aic_systems_path == "/tmp/aic-systems"
+    assert engine_args.aic_systems_path == "/opt/aic-systems"
     assert engine_args.gpu_memory_utilization == 0.8
     assert engine_args.mem_fraction_static == 0.7
     assert calls == [
         {
             "backend_name": "vllm",
             "system": "h200_sxm",
-            "systems_path": "/tmp/aic-systems",
+            "systems_path": "/opt/aic-systems",
             "model_path": "/models/mock",
             "tp_size": 4,
             "block_size": 64,

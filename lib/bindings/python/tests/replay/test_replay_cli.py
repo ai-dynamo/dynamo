@@ -40,7 +40,7 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
         SimpleNamespace(
             aic_backend="vllm",
             aic_system="h200_sxm",
-            aic_systems_path="/tmp/aic-systems",
+            aic_systems_path="/opt/aic-systems",
             aic_model_path="moonshotai/Kimi-K2-Instruct",
             aic_backend_version=None,
             aic_tp_size=2,
@@ -61,7 +61,7 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
     assert captured_kwargs == {
         "aic_backend": "vllm",
         "aic_system": "h200_sxm",
-        "aic_systems_path": "/tmp/aic-systems",
+        "aic_systems_path": "/opt/aic-systems",
         "aic_model_path": "moonshotai/Kimi-K2-Instruct",
         "aic_tp_size": 2,
         "aic_backend_version": None,
@@ -90,13 +90,13 @@ def test_replay_cli_aic_systems_path_overrides_engine_json(monkeypatch):
     monkeypatch.setattr(replay_main, "MockEngineArgs", FakeMockEngineArgs)
 
     config = replay_main._load_engine_args(
-        '{"block_size":64,"aic_systems_path":"/embedded"}',
-        aic_systems_path="/explicit",
+        '{"block_size":64,"aic_systems_path":"/opt/aic-systems-embedded"}',
+        aic_systems_path="/opt/aic-systems-explicit",
     )
 
     assert config == captured
     assert captured["block_size"] == 64
-    assert captured["aic_systems_path"] == "/explicit"
+    assert captured["aic_systems_path"] == "/opt/aic-systems-explicit"
 
 
 def test_replay_cli_aic_systems_path_alone_does_not_enable_router_aic():
@@ -104,7 +104,7 @@ def test_replay_cli_aic_systems_path_alone_does_not_enable_router_aic():
         SimpleNamespace(
             aic_backend=None,
             aic_system=None,
-            aic_systems_path="/tmp/aic-systems",
+            aic_systems_path="/opt/aic-systems",
             aic_model_path=None,
             aic_backend_version=None,
             aic_tp_size=None,

@@ -240,13 +240,13 @@ def test_aic_systems_path_reaches_rust_config_and_model_identity(
 
     local = PlannerEnginePerfModel(
         worker_type="prefill",
-        config=_config(systems_path="/tmp/aic-systems"),
+        config=_config(systems_path="/opt/aic-systems"),
         capabilities=_caps(),
     )
     assert fake_engine_factory.last_kwargs is not None
     assert (
         fake_engine_factory.last_kwargs["aic_config"]["systems_path"]
-        == "/tmp/aic-systems"
+        == "/opt/aic-systems"
     )
 
     bundled = PlannerEnginePerfModel(

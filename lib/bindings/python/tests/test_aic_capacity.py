@@ -103,7 +103,7 @@ def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
         tp_size=1,
         block_size=10,
         max_num_batched_tokens=128,
-        systems_path="/tmp/aic-systems",
+        systems_path="/opt/aic-systems",
         gpu_memory_utilization=0.8,
     )
 
@@ -115,7 +115,7 @@ def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
     assert kw["scheduler_block_size"] == 10
     assert kw["max_num_tokens"] == 128
     assert kw["tp_size"] == 1
-    assert kw["systems_path"] == "/tmp/aic-systems"
+    assert kw["systems_path"] == "/opt/aic-systems"
 
 
 def test_estimate_num_gpu_blocks_maps_sglang_to_static_fraction(monkeypatch):
@@ -419,7 +419,7 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
         comm_dtype="fp8",
         nextn=2,
         nextn_accept_rates="0.85,0.3",
-        systems_path="/tmp/aic-systems",
+        systems_path="/opt/aic-systems",
     )
 
     assert captured["gemm_quant_mode"] == common.GEMMQuantMode.int4_wo
@@ -435,7 +435,7 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
             "system": "h200_sxm",
             "backend": "vllm",
             "version": "0.19.0",
-            "systems_paths": "/tmp/aic-systems",
+            "systems_paths": "/opt/aic-systems",
         }
     ]
 
@@ -457,7 +457,7 @@ def test_create_session_forwards_systems_path(monkeypatch):
         system="h200_sxm",
         model_path="/models/mock",
         tp_size=4,
-        systems_path="/tmp/aic-systems",
+        systems_path="/opt/aic-systems",
     )
 
-    assert captured["kwargs"]["systems_path"] == "/tmp/aic-systems"
+    assert captured["kwargs"]["systems_path"] == "/opt/aic-systems"

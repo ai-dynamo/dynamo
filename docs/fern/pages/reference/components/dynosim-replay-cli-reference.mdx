@@ -247,6 +247,10 @@ router-side `--aic-*` flags below.
   GPU SKU for the perf model, for example `h200_sxm`, `h100_sxm`, `b200`.
 </ParamField>
 
+<ParamField path="aic_systems_path" type="path" default="null">
+  Local AI Configurator systems root containing custom system specifications or performance data.
+</ParamField>
+
 <ParamField path="aic_model_path" type="string" default="null">
   HuggingFace model identifier used by the perf model. Equivalent of `--model-path` in
   `dynamo.mocker`.
@@ -272,11 +276,7 @@ router-side `--aic-*` flags below.
 
 ## Router-side AIC prompt-load flags
 
-Top-level flags used only for router-side prompt-load modeling, together with
-`router_prefill_load_model: "aic"` in `--router-config`. Engine timing AIC still belongs in the
-engine-args JSON above. Both surfaces accept the MoE parallelism fields; for Kimi-style TP-only MoE
-configs, set `--aic-moe-tp-size` equal to `--aic-tp-size`, with `--aic-moe-ep-size 1` and
-`--aic-attention-dp-size 1`.
+Top-level flags configure router-side prompt-load modeling together with `router_prefill_load_model: "aic"` in `--router-config`. Engine timing AIC still belongs in the engine-args JSON above, except that `--aic-systems-path` overrides `aic_systems_path` in aggregated, prefill, and decode engine JSON as well as configuring router-side AIC. Both surfaces accept the MoE parallelism fields; for Kimi-style TP-only MoE configs, set `--aic-moe-tp-size` equal to `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
 
 <ParamField path="--aic-backend" type="string" default="null">
   Backend for the router-side perf model.
@@ -286,6 +286,10 @@ configs, set `--aic-moe-tp-size` equal to `--aic-tp-size`, with `--aic-moe-ep-si
 
 <ParamField path="--aic-system" type="string" default="null">
   GPU SKU for the router-side perf model, for example `h200_sxm`.
+</ParamField>
+
+<ParamField path="--aic-systems-path" type="path" default="null">
+  Local AI Configurator systems root. Overrides `aic_systems_path` in worker engine JSON and is forwarded to router-side AIC prompt-load modeling.
 </ParamField>
 
 <ParamField path="--aic-backend-version" type="string" default="auto">
