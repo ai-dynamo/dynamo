@@ -219,7 +219,12 @@ impl RankState {
     }
 
     /// Leave authoritative state and the admission cursor unchanged after a
-    /// non-authoritative snapshot failure. A later live event may trigger a retry.
+    /// non-authoritative snapshot failure.
+    ///
+    /// The production fetch path performs bounded retries before completion. This
+    /// transition is the defensive fallback for a failure delivered directly to
+    /// the state machine; it deliberately waits for the next live event instead of
+    /// starting an unbounded autonomous retry loop.
     pub(super) fn retry_after_failed_snapshot(&mut self) {
         self.recovery_inflight = false;
     }

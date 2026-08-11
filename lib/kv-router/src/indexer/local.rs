@@ -659,9 +659,11 @@ impl LocalKvIndexer {
         // channels before dumping; each lower tier handles its dump request behind prior mutations
         // on every FIFO lane. Every returned tier is therefore at least N but may include a
         // different suffix after N. Recovery replays the complete tail after N, and ownership
-        // mutations converge under duplicate replay. Do not add a global application lock merely
-        // to align snapshot times. Any tier dump failure fails this complete response; the recovery
-        // cursor must not advance.
+        // mutations converge under duplicate replay. A duplicate remove may report BlockNotFound;
+        // any ownership it encounters from ahead of that remove was created by a later tail store,
+        // which ordered replay reapplies. Do not add a global application lock merely to align
+        // snapshot times. Any tier dump failure fails this complete response; the recovery cursor
+        // must not advance.
         let mut events = indexer.dump_events().await?;
         for (tier, lower_tier) in lower_tiers {
             let tier_events = lower_tier.dump_events().await?;

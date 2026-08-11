@@ -751,11 +751,11 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             if task_cancel.is_cancelled() {
                 return;
             }
-            client
+            let complete_initial = client
                 .clone()
                 .finish_recovery(key, binding, task_cancel, result)
                 .await;
-            if initial_recovery {
+            if initial_recovery && complete_initial {
                 client.target.complete_initial_recovery(key.0, key.1).await;
             }
         });
@@ -801,12 +801,12 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         binding: Arc<SourceBinding>,
         cancel: CancellationToken,
         result: Result<WorkerKvQueryResponse>,
-    ) {
+    ) -> bool {
         if cancel.is_cancelled() {
-            return;
+            return false;
         }
         let Some(slot) = self.slots.get(&key).map(|entry| entry.clone()) else {
-            return;
+            return false;
         };
         let mut slot = slot.lock().await;
         if cancel.is_cancelled()
@@ -815,7 +815,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 .as_ref()
                 .is_some_and(|active| Arc::ptr_eq(active, &binding))
         {
-            return;
+            return false;
         }
 
         let (recovered_events, recovered_cursor) = match result {
@@ -832,7 +832,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     );
                     self.fence_corrupt_recovery_locked(key, &binding.source_id, &mut slot)
                         .await;
-                    return;
+                    return true;
                 }
                 (
                     events,
@@ -854,7 +854,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         "Ignoring unsupported domain-scoped recovery snapshot"
                     );
                     slot.rank.retry_after_failed_snapshot();
-                    return;
+                    return false;
                 }
                 if !recovery_events_match_source(key, &events) {
                     tracing::error!(
@@ -865,7 +865,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     );
                     self.fence_corrupt_recovery_locked(key, &binding.source_id, &mut slot)
                         .await;
-                    return;
+                    return true;
                 }
                 if let Err(error) = self
                     .target
@@ -874,7 +874,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 {
                     slot.fence_for_reset(binding.source_id.clone());
                     tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to transactionally replace rank from recovery tree dump; rank remains fenced");
-                    return;
+                    return true;
                 }
                 (Vec::new(), CursorState::Initial.advance_to(last_event_id))
             }
@@ -890,7 +890,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     "Worker tree dump failed; leaving authoritative state and cursor unchanged"
                 );
                 slot.rank.retry_after_failed_snapshot();
-                return;
+                return false;
             }
             Ok(response) => {
                 tracing::warn!(
@@ -901,13 +901,13 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 );
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
                     .await;
-                return;
+                return true;
             }
             Err(error) => {
                 tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "KV recovery failed; continuing with degraded live events");
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
                     .await;
-                return;
+                return true;
             }
         };
 
@@ -931,13 +931,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         {
             slot.fence_for_reset(binding.source_id.clone());
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected a recovery event; rank remains fenced");
-            return;
+            return true;
         }
         slot.rank = rank_after_admission;
         drop(slot);
         if let Some(start_event_id) = next_recovery_start {
             self.schedule_recovery_after_current(key, binding, start_event_id);
         }
+        true
     }
 
     async fn finish_degraded_locked(
@@ -1011,14 +1012,29 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 .and_then(|result| result)
             };
             match result {
+                Ok(WorkerKvQueryResponse::TreeDumpFailed {
+                    last_event_id,
+                    message,
+                }) => {
+                    last_error = Some(anyhow::anyhow!(
+                        "worker tree dump failed at event {last_event_id}: {message}"
+                    ));
+                }
+                Ok(WorkerKvQueryResponse::TreeDump { reset_scope, .. })
+                    if reset_scope != ResetScope::All =>
+                {
+                    last_error = Some(anyhow::anyhow!(
+                        "worker returned unsupported recovery snapshot scope {reset_scope:?}"
+                    ));
+                }
                 Ok(response) => return Ok(response),
                 Err(error) => {
                     last_error = Some(error);
-                    if attempt + 1 < RECOVERY_MAX_RETRIES {
-                        let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    }
                 }
+            }
+            if attempt + 1 < RECOVERY_MAX_RETRIES {
+                let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
         }
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("KV recovery returned no response")))
@@ -1271,9 +1287,10 @@ mod tests {
                 self.slow_started.notify_one();
                 std::future::pending().await
             } else {
-                Ok(WorkerKvQueryResponse::TreeDumpFailed {
-                    last_event_id: 0,
-                    message: "test".to_string(),
+                Ok(WorkerKvQueryResponse::TooNew {
+                    requested_start: None,
+                    requested_end: None,
+                    newest_available: 0,
                 })
             }
         }
@@ -1810,11 +1827,44 @@ mod tests {
         .await
         .expect("healthy recovery remained blocked behind another target's retry backoff")
         .unwrap();
+        assert!(matches!(response, WorkerKvQueryResponse::TooNew { .. }));
+        slow.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_dump_failure_is_retried_before_degraded_fallback() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let (_tx, rx) = watch::channel(membership_view(&serving, &kv_endpoint, std::iter::empty()));
+        let transport = Arc::new(MockTransport::default());
+        transport.responses.lock().await.extend([
+            WorkerKvQueryResponse::TreeDump {
+                events: Vec::new(),
+                last_event_id: 7,
+                reset_scope: ResetScope::All,
+            },
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 6,
+                message: "snapshot temporarily unavailable".to_string(),
+            },
+        ]);
+        let client =
+            WorkerQueryClient::new_target_for_test(RecordingTarget::default(), rx, transport);
+        let target = source(&kv_endpoint, 1).recovery_target.unwrap();
+
+        let response = client
+            .fetch_recovery_response((1, 0), target, None, None)
+            .await
+            .unwrap();
+
         assert!(matches!(
             response,
-            WorkerKvQueryResponse::TreeDumpFailed { .. }
+            WorkerKvQueryResponse::TreeDump {
+                last_event_id: 7,
+                reset_scope: ResetScope::All,
+                ..
+            }
         ));
-        slow.abort();
     }
 
     #[tokio::test]
@@ -2078,7 +2128,7 @@ mod tests {
         client.handle_live_batch(100, vec![store(1)]).await;
         let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
-        client
+        let complete_initial = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
@@ -2090,6 +2140,7 @@ mod tests {
                 }),
             )
             .await;
+        assert!(complete_initial);
 
         let events = kv_indexer.dump_events().await.unwrap();
         assert!(!contains_block(&events, 1));
@@ -2127,7 +2178,7 @@ mod tests {
         kv_indexer.shutdown();
         kv_indexer.event_sender().closed().await;
 
-        client
+        let complete_initial = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
@@ -2140,6 +2191,7 @@ mod tests {
                 }),
             )
             .await;
+        assert!(complete_initial);
 
         let slot = client
             .slots
@@ -2174,7 +2226,7 @@ mod tests {
         client.handle_live_batch(100, vec![store(2)]).await;
         let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
-        client
+        let complete_initial = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
@@ -2186,6 +2238,7 @@ mod tests {
                 }),
             )
             .await;
+        assert!(!complete_initial);
 
         assert!(target.calls.lock().await.is_empty());
         let slot = client

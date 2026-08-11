@@ -506,6 +506,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 resp: resp_tx,
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
         let applied = resp_rx
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;

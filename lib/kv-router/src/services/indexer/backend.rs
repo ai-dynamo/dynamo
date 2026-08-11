@@ -48,7 +48,7 @@ impl Indexer {
     /// `event.storage_tier.is_gpu()` and to the appropriate lower-tier
     /// indexer otherwise. `Cleared` events fan out to their applicable physical
     /// indexes according to the event's reset scope.
-    pub async fn apply_event_routed(&self, event: RouterEvent) {
+    pub async fn apply_event_routed(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {
@@ -57,7 +57,7 @@ impl Indexer {
                         lower_tier.record_unsupported_residency_event(&event);
                     }
                 }
-                return;
+                return Ok(());
             }
         };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
@@ -67,19 +67,24 @@ impl Indexer {
                 lower_tier,
             } => {
                 if is_clear {
-                    if targets_primary
-                        && let Err(error) = primary
+                    let mut reset_error = None;
+                    if targets_primary {
+                        if let Err(error) = primary
                             .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
                             .await
-                    {
-                        tracing::warn!(%error, "Failed to reset primary residency");
-                        return;
+                        {
+                            tracing::warn!(%error, "Failed to reset primary residency");
+                            reset_error = Some(error);
+                        }
                     }
                     for indexer in lower_tier.all() {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
                             tracing::warn!(%error, "Failed to reset lower-tier residency");
-                            return;
+                            reset_error.get_or_insert(error);
                         }
+                    }
+                    if let Some(error) = reset_error {
+                        return Err(error);
                     }
                 } else if targets_primary {
                     primary.apply_event(event).await;
@@ -95,17 +100,21 @@ impl Indexer {
                 lower_tier,
             } => {
                 if is_clear {
-                    if targets_primary
-                        && let Err(error) = primary.apply_event_and_wait(event.clone()).await
-                    {
-                        tracing::warn!(%error, "Failed to reset primary residency");
-                        return;
+                    let mut reset_error = None;
+                    if targets_primary {
+                        if let Err(error) = primary.apply_event_and_wait(event.clone()).await {
+                            tracing::warn!(%error, "Failed to reset primary residency");
+                            reset_error = Some(error);
+                        }
                     }
                     for indexer in lower_tier.all() {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
                             tracing::warn!(%error, "Failed to reset lower-tier residency");
-                            return;
+                            reset_error.get_or_insert(error);
                         }
+                    }
+                    if let Some(error) = reset_error {
+                        return Err(error);
                     }
                 } else if targets_primary {
                     primary.apply_event(event).await;
@@ -117,6 +126,7 @@ impl Indexer {
                 }
             }
         }
+        Ok(())
     }
 
     pub async fn remove_worker(&self, worker_id: WorkerId) {
@@ -325,7 +335,9 @@ mod tests {
     use super::test_util::store_event;
     use super::*;
     use crate::indexer::KvIndexerInterface;
-    use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+    use crate::protocols::{
+        KvCacheEvent, LocalBlockHash, ResidencyDomain, StorageTier, WorkerWithDpRank,
+    };
 
     /// Apply a Device store and a HostPinned store anchored on it. The tiered
     /// query must surface both tier hits, and the device-tier `find_matches`
@@ -345,7 +357,8 @@ mod tests {
                 &[11, 12],
                 StorageTier::Device,
             ))
-            .await;
+            .await
+            .unwrap();
 
         indexer
             .apply_event_routed(store_event(
@@ -356,7 +369,8 @@ mod tests {
                 &[13],
                 StorageTier::HostPinned,
             ))
-            .await;
+            .await
+            .unwrap();
 
         // Flush primary so the in-flight events are observable by the query.
         if let Indexer::Single { primary, .. } = &indexer {
@@ -407,7 +421,8 @@ mod tests {
                 &[11, 12],
                 StorageTier::Device,
             ))
-            .await;
+            .await
+            .unwrap();
         source
             .apply_event_routed(store_event(
                 worker.worker_id,
@@ -417,7 +432,8 @@ mod tests {
                 &[13],
                 StorageTier::HostPinned,
             ))
-            .await;
+            .await
+            .unwrap();
         source
             .apply_event_routed(store_event(
                 worker.worker_id,
@@ -427,7 +443,8 @@ mod tests {
                 &[14],
                 StorageTier::Disk,
             ))
-            .await;
+            .await
+            .unwrap();
 
         if let Indexer::Single {
             primary,
@@ -461,7 +478,7 @@ mod tests {
 
         let replayed = create_indexer(block_size, 1);
         for event in dump {
-            replayed.apply_event_routed(event).await;
+            replayed.apply_event_routed(event).await.unwrap();
         }
         if let Indexer::Single {
             primary,
@@ -503,6 +520,50 @@ mod tests {
             Some(1),
             "disk should report 1 additional block after replay"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_reports_partial_failure_after_attempting_every_tier() {
+        let indexer = create_indexer(4, 1);
+        let worker = WorkerWithDpRank::new(7, 0);
+        let (failed_tier, healthy_tier) = match &indexer {
+            Indexer::Single { lower_tier, .. } => (
+                lower_tier.get_or_create(StorageTier::HostPinned),
+                lower_tier.get_or_create(StorageTier::Disk),
+            ),
+            Indexer::Concurrent { .. } => unreachable!("test creates the single indexer"),
+        };
+
+        indexer
+            .apply_event_routed(store_event(
+                worker.worker_id,
+                worker.dp_rank,
+                1,
+                &[],
+                &[11],
+                StorageTier::Disk,
+            ))
+            .await
+            .unwrap();
+        let _ = healthy_tier.dump_events().await.unwrap();
+        failed_tier.shutdown();
+
+        let error = indexer
+            .apply_event_routed(RouterEvent::with_residency_domain(
+                worker.worker_id,
+                KvCacheEvent {
+                    event_id: 2,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: worker.dp_rank,
+                },
+                StorageTier::Device,
+                ResidencyDomain::Worker,
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, KvRouterError::IndexerOffline));
+        assert!(healthy_tier.dump_events().await.unwrap().is_empty());
     }
 }
 

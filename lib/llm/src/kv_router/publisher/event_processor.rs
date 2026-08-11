@@ -150,6 +150,10 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                     ?residency_domain,
                                     "Fencing KV event publisher after local reset failure"
                                 );
+                                // NOTE: This token owns the publisher's discovery and recovery
+                                // advertisement too. Once the local reset barrier fails, withdrawing
+                                // the complete source is the only safe way to avoid advertising a
+                                // cursor whose local snapshot has diverged.
                                 cancellation_token.cancel();
                                 break 'event_batch;
                             }

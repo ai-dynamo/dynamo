@@ -1601,7 +1601,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
 
         for worker_id in [1, 2] {
@@ -1665,7 +1666,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(2, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")

@@ -571,10 +571,14 @@ impl<'de> Visitor<'de> for WireResidencyDomainVisitor {
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E> {
+        // Explicit null is malformed. Only an omitted field selects legacy
+        // semantics; treating null as omission would turn a malformed clear
+        // into an all-domain reset.
         Ok(WireResidencyDomain::Invalid)
     }
 
     fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        // MessagePack nil follows the same contract as JSON null above.
         Ok(WireResidencyDomain::Invalid)
     }
 
@@ -1238,6 +1242,8 @@ impl RouterEvent {
         event: KvCacheEvent,
         storage_tier: StorageTier,
     ) -> Self {
+        // Canonical in-process events are worker-owned, including clears. A
+        // missing domain is reserved for decoding legacy wire payloads.
         Self::with_residency_domain(worker_id, event, storage_tier, ResidencyDomain::Worker)
     }
 
@@ -1640,8 +1646,14 @@ mod tests {
                 ExplicitDomainEvent {
                     worker_id: 7,
                     storage_tier: StorageTier::HostPinned,
-                    residency_domain: serde_json::json!("worker"),
+                    residency_domain: serde_json::Value::Null,
                     event: stored(6),
+                },
+                ExplicitDomainEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::HostPinned,
+                    residency_domain: serde_json::json!("worker"),
+                    event: stored(7),
                 },
             ];
             let decoded: Vec<RouterEvent> =
@@ -1651,7 +1663,7 @@ mod tests {
                 .filter(|event| event.resolved_residency_domain().is_ok())
                 .map(|event| event.event.event_id)
                 .collect();
-            assert_eq!(applied_ids, vec![4, 6]);
+            assert_eq!(applied_ids, vec![4, 7]);
         }
     }
 

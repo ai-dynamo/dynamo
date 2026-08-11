@@ -63,8 +63,8 @@ impl RouterHintExtensions {
         }
     }
 }
-type WorkerBlockIndex =
-    FxHashMap<ResidencyOwner, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
+type OwnerBlockIndex = FxHashMap<ExternalSequenceBlockHash, TransitionKey>;
+type WorkerBlockIndex = FxHashMap<ResidencyOwner, OwnerBlockIndex>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
@@ -441,6 +441,9 @@ impl LowerTierIndexer {
 
         for (owner, block_map) in worker_blocks {
             for (block_hash, key) in block_map {
+                // NOTE: LowerTierIndexer intentionally has no physical-tier identity. Device is
+                // a placeholder here; every recovery/export boundary must retag these events with
+                // the registry tier before validating or replaying them.
                 events.push(RouterEvent::with_residency_domain(
                     owner.worker.worker_id,
                     KvCacheEvent {
@@ -464,6 +467,44 @@ impl LowerTierIndexer {
         }
 
         events
+    }
+
+    fn worker_block_counts(worker_blocks: &WorkerBlockIndex) -> FxHashMap<WorkerWithDpRank, usize> {
+        let mut domain_blocks: FxHashMap<
+            WorkerWithDpRank,
+            (Option<&OwnerBlockIndex>, Option<&OwnerBlockIndex>),
+        > = FxHashMap::default();
+
+        for (owner, blocks) in worker_blocks {
+            let entry = domain_blocks.entry(owner.worker).or_default();
+            match owner.domain {
+                ResidencyDomain::Worker => entry.0 = Some(blocks),
+                ResidencyDomain::CacheOwner => entry.1 = Some(blocks),
+            }
+        }
+
+        domain_blocks
+            .into_iter()
+            .map(|(worker, (worker_blocks, cache_owner_blocks))| {
+                let count = match (worker_blocks, cache_owner_blocks) {
+                    (Some(blocks), None) | (None, Some(blocks)) => blocks.len(),
+                    (Some(worker_blocks), Some(cache_owner_blocks)) => {
+                        let (smaller, larger) = if worker_blocks.len() <= cache_owner_blocks.len() {
+                            (worker_blocks, cache_owner_blocks)
+                        } else {
+                            (cache_owner_blocks, worker_blocks)
+                        };
+                        worker_blocks.len() + cache_owner_blocks.len()
+                            - smaller
+                                .keys()
+                                .filter(|block_hash| larger.contains_key(*block_hash))
+                                .count()
+                    }
+                    (None, None) => 0,
+                };
+                (worker, count)
+            })
+            .collect()
     }
 
     pub fn query_contiguous_hits<S>(
@@ -693,20 +734,8 @@ impl SyncIndexer for LowerTierIndexer {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
                 }
                 WorkerTask::Stats(sender) => {
-                    let mut worker_blocks_by_owner: FxHashMap<
-                        WorkerWithDpRank,
-                        FxHashSet<ExternalSequenceBlockHash>,
-                    > = FxHashMap::default();
-                    for (owner, blocks) in &worker_blocks {
-                        worker_blocks_by_owner
-                            .entry(owner.worker)
-                            .or_default()
-                            .extend(blocks.keys().copied());
-                    }
                     let stats = WorkerLookupStats::from_worker_block_counts(
-                        worker_blocks_by_owner
-                            .iter()
-                            .map(|(worker, blocks)| (*worker, blocks.len())),
+                        Self::worker_block_counts(&worker_blocks),
                     );
                     let _ = sender.send(stats);
                 }
@@ -1137,6 +1166,11 @@ mod tests {
                 .get(&worker),
             Some(&2),
             "one physical walk may cross ownership domains for the same routing worker"
+        );
+        assert_eq!(
+            LowerTierIndexer::worker_block_counts(&index.worker_blocks).get(&worker),
+            Some(&4),
+            "statistics project duplicate domain ownership as one physical block"
         );
 
         index
