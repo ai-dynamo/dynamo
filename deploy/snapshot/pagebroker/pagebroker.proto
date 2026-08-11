@@ -1,0 +1,99 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto2";
+package snapshot.pagebroker;
+option go_package = "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker";
+
+message FilesystemStorage
+{
+  required string directory = 1;
+}
+message StorageBackend
+{
+  oneof kind
+  {
+    FilesystemStorage filesystem = 1;
+  }
+}
+message PosixCopyIOEngine {}
+message IOEngine
+{
+  oneof kind
+  {
+    PosixCopyIOEngine posix_copy = 1;
+  }
+}
+
+message StagedRestoreRequest
+{
+  required StorageBackend source = 1;
+  required IOEngine io_engine = 2;
+}
+// Allows a future GPU engine to read source data without a staging directory.
+message DirectRestoreRequest
+{
+  required StorageBackend source = 1;
+  required IOEngine io_engine = 2;
+}
+message PrepareStagedCheckpointRequest
+{
+  required StorageBackend destination = 1;
+  required IOEngine io_engine = 2;
+}
+message CommitRequest {}
+message AbortRequest {}
+
+message Request
+{
+  required string request_id = 1;
+  required string transaction_id = 2;
+  oneof command
+  {
+    StagedRestoreRequest staged_restore = 3;
+    PrepareStagedCheckpointRequest prepare_staged_checkpoint = 4;
+    CommitRequest commit = 5;
+    AbortRequest abort = 6;
+    DirectRestoreRequest direct_restore = 7;
+  }
+}
+
+message StagedRestoreDirectory
+{
+  required string image_directory = 1;
+}
+message DirectRestoreReady {}
+message StagedCheckpointDirectory
+{
+  required string image_directory = 1;
+}
+message CommitComplete {}
+message AbortComplete {}
+message Failure
+{
+  enum Code {
+    UNSPECIFIED = 0;
+    INVALID_REQUEST = 1;
+    TRANSACTION_NOT_FOUND = 2;
+    TRANSACTION_CONFLICT = 3;
+    INSUFFICIENT_STORAGE = 4;
+    STORAGE_ERROR = 5;
+    INTERNAL_ERROR = 6;
+  }
+  required Code code = 1;
+  required string message = 2;
+}
+message Response
+{
+  required string request_id = 1;
+  required string transaction_id = 2;
+  oneof result
+  {
+    StagedRestoreDirectory staged_restore_directory = 3;
+    StagedCheckpointDirectory staged_checkpoint_directory = 4;
+    CommitComplete commit_complete = 5;
+    AbortComplete abort_complete = 6;
+    Failure failure = 7;
+    DirectRestoreReady direct_restore_ready = 8;
+  }
+}
