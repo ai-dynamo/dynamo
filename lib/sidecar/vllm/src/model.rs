@@ -21,6 +21,7 @@ struct ModelIdentity {
 pub(crate) struct DiscoveredModel {
     pub source: String,
     pub served_name: String,
+    pub supports_multimodal: bool,
     identity: ModelIdentity,
     server: pb::ServerInfo,
 }
@@ -68,6 +69,7 @@ impl DiscoveredModel {
         Ok(Self {
             source,
             served_name,
+            supports_multimodal: model.supports_multimodal,
             identity,
             server,
         })
