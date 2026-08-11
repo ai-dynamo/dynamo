@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from types import SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS
@@ -39,6 +40,36 @@ def test_child_command_launches_default_multi_tag_runner():
         "--device-type",
         "cuda",
     ]
+
+
+def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(
+        runner.importlib,
+        "import_module",
+        lambda name: (
+            calls.append(("import", name))
+            or SimpleNamespace(main=lambda argv: calls.append(("main", argv)))
+        ),
+    )
+
+    runner.main(["--use-v1", "--device", "3"])
+
+    assert calls == [
+        ("import", "gpu_memory_service.v1.cli"),
+        ("main", ["--device", "3"]),
+    ]
+    assert server._child_command(3, "cuda", use_v1=True) == [
+        sys.executable,
+        "-m",
+        "gpu_memory_service",
+        "--use-v1",
+        "--device",
+        "3",
+    ]
+    with pytest.raises(SystemExit):
+        server.main(["--use-v1", "--device-type", "xpu"])
+    assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
 
 
 class _Process:

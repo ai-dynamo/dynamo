@@ -120,12 +120,14 @@ fn pass() -> EnginePassResult {
     let request_id = Uuid::from_u128(1);
     EnginePassResult {
         end_ms: 1.0,
+        token_completion_ms: 1.0,
         completed_requests: 1,
         output_signals: vec![OutputSignal {
             uuid: request_id,
             token_id: Some(1),
             completed: true,
             rejected: false,
+            cached_tokens: None,
             handoff_delay_ms: None,
         }],
         admissions: vec![AdmissionEvent {
@@ -233,6 +235,7 @@ async fn midpass_cancellation_is_observed_without_controls_and_suppresses_pendin
     assert!(pending.pass.output_signals.is_empty());
     assert_eq!(pending.pass.completed_requests, 0);
     assert_eq!(pending.pass.accept_length_output_tokens, 0);
+    assert_eq!(pending.pass.accept_length_decode_forwards, 0);
 }
 
 #[tokio::test]
@@ -243,6 +246,52 @@ async fn explicit_discard_suppresses_pending_output_after_noop_cancellation() {
     assert!(pending.pass.output_signals.is_empty());
     assert_eq!(pending.pass.completed_requests, 0);
     assert_eq!(pending.pass.accept_length_output_tokens, 0);
+    assert_eq!(pending.pass.accept_length_decode_forwards, 0);
+}
+
+#[test]
+fn output_suppression_repairs_stale_accept_length_counters() {
+    let mut pass = pass();
+    let surviving = Uuid::from_u128(2);
+    pass.output_signals.extend([
+        OutputSignal {
+            uuid: surviving,
+            token_id: Some(2),
+            completed: false,
+            rejected: false,
+            cached_tokens: None,
+            handoff_delay_ms: None,
+        },
+        OutputSignal {
+            uuid: surviving,
+            token_id: Some(3),
+            completed: true,
+            rejected: false,
+            cached_tokens: None,
+            handoff_delay_ms: None,
+        },
+        OutputSignal {
+            uuid: surviving,
+            token_id: Some(4),
+            completed: true,
+            rejected: true,
+            cached_tokens: None,
+            handoff_delay_ms: None,
+        },
+    ]);
+    pass.accept_length_output_tokens = 0;
+    pass.accept_length_decode_forwards = 0;
+    let mut pending = PendingLivePass {
+        pass,
+        kv_events: Vec::new(),
+        admissions_published: false,
+        pass_start_kv_published: false,
+    };
+
+    pending.suppress_request_outputs(Uuid::from_u128(1));
+
+    assert_eq!(pending.pass.accept_length_output_tokens, 2);
+    assert_eq!(pending.pass.accept_length_decode_forwards, 1);
 }
 
 #[tokio::test]

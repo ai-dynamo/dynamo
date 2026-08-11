@@ -12,13 +12,22 @@ from typing import Any, Optional, Type
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
+    get_multimodal_test_image_bytes,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
 
+# Same triangle clip the http fixtures use (see tests/serve/conftest.py), so the
+# local-file and NVDEC paths describe identical content and can assert the same
+# word. Keeping them different subjects is what let expectations drift from the
+# footage they were written against.
 LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+    WORKSPACE_DIR, "lib/llm/tests/data/media/triangle_240p_10.mp4"
 ).resolve()
 LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
@@ -333,7 +342,9 @@ class Base64LazyChatPayload(ChatPayload):
             object.__setattr__(self, "_b64_materialized", True)
 
 
-def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
+def make_image_payload_b64(
+    expected_response: list[str], *, repeat_count: int = 1
+) -> ChatPayload:
     """Inline-base64 PNG variant of :func:`make_image_payload`.
 
     The image bytes are read lazily on first `.body` access so pytest
@@ -344,7 +355,7 @@ def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         max_tokens=100,
         temperature=0.0,
-        repeat_count=1,
+        repeat_count=repeat_count,
     )
 
 
@@ -363,6 +374,30 @@ def make_video_payload(expected_response: list[str]) -> ChatPayload:
         temperature=0.0,
         max_tokens=100,
     )
+
+
+def _make_http_video_payload(url: str, expected_response: list[str]) -> ChatPayload:
+    return chat_payload(
+        [
+            {"type": "text", "text": "Describe the video in detail"},
+            {"type": "video_url", "video_url": {"url": url}},
+        ],
+        repeat_count=1,
+        expected_response=expected_response,
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+
+def make_h264_video_payload(expected_response: list[str]) -> ChatPayload:
+    """Video payload whose clip is fetched over http so the request exercises the
+    NVDEC hardware-decode path (H.264). file:// video is not hardware-decoded."""
+    return _make_http_video_payload(MULTIMODAL_VIDEO_H264_URL, expected_response)
+
+
+def make_hevc_video_payload(expected_response: list[str]) -> ChatPayload:
+    """H.265/HEVC counterpart of make_h264_video_payload (NVDEC hardware decode)."""
+    return _make_http_video_payload(MULTIMODAL_VIDEO_H265_URL, expected_response)
 
 
 def make_audio_payload(expected_response: list[str]) -> ChatPayload:

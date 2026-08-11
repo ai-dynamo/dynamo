@@ -91,7 +91,6 @@ vllm-rs serve "$MODEL" \
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "127.0.0.1:${VLLM_GRPC_PORT}" \
-    --model-path "$MODEL" &
+    --vllm-endpoint "127.0.0.1:${VLLM_GRPC_PORT}" &
 
 wait_any_exit

@@ -45,6 +45,10 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::ConnectionTimeout,
         ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
+        // A stream that ends mid-generation means this worker dropped the
+        // request. Quarantine it, or a migration retry can reselect the same
+        // worker before discovery removal catches up.
+        ErrorType::Backend(BackendError::StreamIncomplete),
     ];
     match_error_chain(err, INHIBITED, &[])
 }
@@ -1436,7 +1440,7 @@ where
             "Selected worker is overloaded, please retry later".into(),
         );
         Err(DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
+            .error_type(ErrorType::WorkerOverloaded)
             .message("Selected worker is overloaded, please retry later")
             .cause(cause)
             .build()
@@ -1541,8 +1545,7 @@ where
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::ResourceExhausted], &[])
-                    {
+                    } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
                         // Backpressure: worker said "my queue is full,
                         // retry later". Mark overloaded so this FE skips it on
                         // the next selection; the next ActiveLoad event from the
@@ -1929,6 +1932,35 @@ mod tests {
         assert_eq!(state.load(7), 0);
         drop(stream);
         assert_eq!(state.load(7), 0, "drop must not release twice after EOF");
+    }
+
+    /// A mid-generation stream end means the worker dropped the request, so it
+    /// must quarantine — otherwise a migration retry can reselect the same
+    /// worker before discovery removal catches up.
+    ///
+    /// This pins `is_inhibited` against the migration layer's migratable set:
+    /// a worker fault that is migratable must also inhibit, or migration
+    /// bounces off the same dead worker.
+    #[test]
+    fn stream_incomplete_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::StreamIncomplete))
+            .message("stream ended before generation completed")
+            .build();
+        assert!(
+            is_inhibited(&err),
+            "StreamIncomplete must inhibit; it is migratable, so leaving it out \
+             lets a retry reselect the failed worker"
+        );
+
+        let cancelled = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client went away")
+            .build();
+        assert!(
+            !is_inhibited(&cancelled),
+            "client cancellation is not a worker fault"
+        );
     }
 
     #[test]
@@ -2348,9 +2380,12 @@ mod tests {
             .await
             .unwrap_err();
 
+        // A *selected* worker being overloaded is single-worker overload, distinct
+        // from pool-wide exhaustion: migration may retry elsewhere. Previously
+        // both collapsed to ResourceExhausted, which blocked that retry.
         assert!(match_error_chain(
             error.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
         assert!(
