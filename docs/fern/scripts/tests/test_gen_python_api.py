@@ -475,9 +475,9 @@ def test_discovered_symbols_are_deterministically_ordered(
     all_modules: list[api_discovery.Module],
 ) -> None:
     """Symbols on every module page are grouped Classes-then-Functions,
-    alphabetical within each group, so page diffs stay reviewable."""
+    ordered by name and qualified name, so page diffs stay reviewable."""
     for module in all_modules:
-        order = [(s.kind, s.name) for s in module.symbols]
+        order = [(s.kind, s.name, s.qualname) for s in module.symbols]
         assert order == sorted(order), f"{module.name}: symbols not sorted"
 
 

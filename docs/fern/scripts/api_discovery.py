@@ -226,7 +226,7 @@ def discover_module(loader: GriffeLoader, spec: tuple[str, str, str]) -> Module:
     symbols = tuple(
         sorted(
             _collect_symbols(name, griffe_mod),
-            key=lambda s: (s.kind, s.name),
+            key=lambda s: (s.kind, s.name, s.qualname),
         )
     )
     return Module(
