@@ -2,21 +2,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Write Custom Routing Strategies
-subtitle: Build Rust scorers and pickers for the Dynamo frontend or EPP
+subtitle: Build Rust filters, scorers, and pickers for the Dynamo frontend or EPP
 ---
 
 <Warning>
-**Experimental.** A custom worker-selection policy controls how Dynamo scores eligible workers and selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
+**Experimental.** A custom worker-selection policy controls how Dynamo filters and scores eligible workers, then selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
 </Warning>
 
 ## How It Works
 
-This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `WorkerScorer` assigns a finite cost to each eligible worker, Dynamo adds costs from all configured scorers, and a `WorkerPicker` chooses one row from the scored candidates. Lower costs rank first by convention, but the picker can implement deterministic selection, sampling, tie-breaking, or policy-local state. Dynamo continues to own discovery, eligibility, score validation, accounting, and reservation.
+This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `WorkerFilter` can exclude a host-eligible worker, a `WorkerScorer` assigns a finite cost to each remaining worker, Dynamo adds costs from all configured scorers, and a `WorkerPicker` chooses one row from the scored candidates. Filters run in declaration order before scoring, and rejecting every worker returns an error. Lower costs rank first by convention, but the picker can implement deterministic selection, sampling, tie-breaking, or policy-local state. Dynamo continues to own discovery, eligibility, score validation, accounting, and reservation.
 
 ```mermaid
 flowchart LR
     Request["Incoming request"] --> Eligibility["Dynamo eligibility filters"]
-    Eligibility --> Scorers["WorkerScorer(s)<br/>one cost per worker"]
+    Eligibility --> Filters["WorkerFilter(s)<br/>keep or reject each worker"]
+    Filters --> Scorers["WorkerScorer(s)<br/>one cost per worker"]
     Scorers --> Sum["Dynamo sums scorer costs"]
     Sum --> Picker["WorkerPicker<br/>one candidate row"]
     Picker --> Validate["Dynamo validates the row"]
@@ -29,11 +30,12 @@ For multiple compile-checked policies, see the [custom policy examples](https://
 
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
+| `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
 | `WorkerScorer` | Request context and one eligible worker | One finite cost | The rule ranks workers or adds a penalty |
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
 | Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
-An external policy owns both its scorers and its picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
+An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
 
 ## Build the Policy
 
@@ -81,6 +83,41 @@ cargo add \
   --features standalone-selection \
   dynamo-kv-router
 ```
+
+</Step>
+<Step title="Implement an optional filter">
+
+Use a filter only for a hard requirement. This example keeps workers with at least the configured number of device-resident overlap blocks:
+
+```rust
+use dynamo_kv_router::{
+    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
+};
+
+struct MinimumDeviceOverlapFilter {
+    minimum_blocks: f64,
+}
+
+impl WorkerFilter for MinimumDeviceOverlapFilter {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE
+    }
+
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        let cache = candidate
+            .cache()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+        Ok(cache.device_overlap_blocks() >= self.minimum_blocks)
+    }
+}
+```
+
+Pass filters to `WorkerSelectionPolicy::new_with_filters`. Use `WorkerSelectionPolicy::new` when the policy has no filters.
 
 </Step>
 <Step title="Implement the scorer">
@@ -271,7 +308,7 @@ Add one focused test for each policy decision and one registration test for ever
 
 ## Available Signals
 
-Request context and worker identity are always available. Dynamo calculates optional per-worker signals only for groups that a scorer or picker requests.
+Request context and worker identity are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
 ### Request Context
 
@@ -326,7 +363,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 
 The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-A scorer reads requested groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every group that it reads.
+A filter or scorer reads requested groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every group that it reads.
 
 ## Link the Policy Into Dynamo
 
@@ -414,11 +451,13 @@ Standalone EPP supplies `select` as `worker_type` because it selects from one wo
 
 ## Policy Contract
 
+- Return `true` from a filter to keep a worker and `false` to reject it.
+- Expect filters to run in declaration order before scoring. Rejecting every worker returns an error.
 - Return finite scorer costs.
 - Return a valid picker row.
 - Treat candidate order as unspecified.
 - Request only the signal groups that the component reads.
-- Keep blocking I/O and panics out of `score` and `pick`.
+- Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
 - Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
 - Build the policy against the same Dynamo revision as the frontend or EPP.
 - If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.

@@ -3,7 +3,7 @@
 
 //! Factory and registration for the `least-busy` policy.
 //!
-//! The policy optionally filters workers by effective cache overlap, then ranks
+//! The policy optionally filters workers by device cache overlap, then ranks
 //! the remaining workers by active requests.
 
 mod filter;
@@ -17,24 +17,24 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyRegistryError,
 };
 use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
-use filter::MinimumEffectiveOverlapFilter;
+use filter::MinimumDeviceOverlapFilter;
 use selection::{LeastBusyScorer, RequestAwarePicker, UncachedBlocksScorer};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameters {
     #[serde(default)]
-    min_effective_overlap_blocks: Option<f64>,
+    min_device_overlap_blocks: Option<f64>,
 }
 
-fn validate_min_effective_overlap_blocks(
-    min_effective_overlap_blocks: Option<f64>,
+fn validate_min_device_overlap_blocks(
+    min_device_overlap_blocks: Option<f64>,
 ) -> Result<(), WorkerSelectionPolicyProviderError> {
-    if let Some(value) = min_effective_overlap_blocks
+    if let Some(value) = min_device_overlap_blocks
         && (!value.is_finite() || value <= 0.0)
     {
         return Err(WorkerSelectionPolicyProviderError::new(
-            "min_effective_overlap_blocks must be a finite positive number",
+            "min_device_overlap_blocks must be a finite positive number",
         ));
     }
     Ok(())
@@ -44,19 +44,17 @@ fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     let parameters: Parameters = parameters.deserialize()?;
-    validate_min_effective_overlap_blocks(parameters.min_effective_overlap_blocks)?;
-    let min_effective_overlap_blocks = parameters.min_effective_overlap_blocks;
+    validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
+    let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
-            let filters: Vec<Box<dyn WorkerFilter>> = min_effective_overlap_blocks.map_or_else(
-                Vec::new,
-                |min_effective_overlap_blocks| {
-                    vec![Box::new(MinimumEffectiveOverlapFilter {
-                        min_effective_overlap_blocks,
+            let filters: Vec<Box<dyn WorkerFilter>> =
+                min_device_overlap_blocks.map_or_else(Vec::new, |min_device_overlap_blocks| {
+                    vec![Box::new(MinimumDeviceOverlapFilter {
+                        min_device_overlap_blocks,
                     }) as Box<dyn WorkerFilter>]
-                },
-            );
+                });
             WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
                 worker_type,
@@ -79,11 +77,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validates_min_effective_overlap_blocks() {
-        assert!(validate_min_effective_overlap_blocks(None).is_ok());
-        assert!(validate_min_effective_overlap_blocks(Some(8.0)).is_ok());
-        assert!(validate_min_effective_overlap_blocks(Some(0.0)).is_err());
-        assert!(validate_min_effective_overlap_blocks(Some(-1.0)).is_err());
-        assert!(validate_min_effective_overlap_blocks(Some(f64::NAN)).is_err());
+    fn validates_min_device_overlap_blocks() {
+        assert!(validate_min_device_overlap_blocks(None).is_ok());
+        assert!(validate_min_device_overlap_blocks(Some(8.0)).is_ok());
+        assert!(validate_min_device_overlap_blocks(Some(0.0)).is_err());
+        assert!(validate_min_device_overlap_blocks(Some(-1.0)).is_err());
+        assert!(validate_min_device_overlap_blocks(Some(f64::NAN)).is_err());
     }
 }

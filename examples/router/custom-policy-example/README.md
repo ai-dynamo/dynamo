@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Custom Worker Selection Policies
 
-Use this example as the build guide for a custom Rust worker-selection policy. It covers the full path from `WorkerScorer` and `WorkerPicker` implementations to a linked Python frontend or standalone Endpoint Picker Provider (EPP).
+Use this example as the build guide for a custom Rust worker-selection policy. It covers the full path from `WorkerFilter`, `WorkerScorer`, and `WorkerPicker` implementations to a linked Python frontend or standalone Endpoint Picker Provider (EPP).
 
 ## What You Are Building
 
@@ -13,7 +13,7 @@ Use this example as the build guide for a custom Rust worker-selection policy. I
 policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 ```
 
-- The policy crate owns the scoring and picking algorithm.
+- The policy crate owns the filtering, scoring, and picking algorithm.
 - The catalog gives each policy type a stable name.
 - The YAML file creates named policy instances and supplies parameters.
 - The frontend or EPP links the catalog at compile time.
@@ -24,12 +24,12 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 
 | Crate | Use it for |
 |---|---|
-| `basic` | Multiple scorers and one picker work for every worker type |
+| `basic` | An optional device-overlap filter, multiple scorers, and one picker work for every worker type |
 | `disaggregated` | Prefill and decode workers need different components |
 | `catalog` | You need to register policy types for configuration |
 | `epp` | Worker selection runs in a standalone EPP |
 
-The basic policy adds an active-request cost and an uncached-request cost for every worker. Its picker normally chooses the lowest total cost, but tool-result turns choose the worker with the most device overlap through `session_context().input_trigger()`. The disaggregated policy scores active prefill work plus uncached request blocks for prefill workers, and projected decode blocks for decode workers. Both own their picker implementation.
+The basic policy can require a minimum device-resident overlap, then adds an active-request cost and an uncached-request cost for every remaining worker. Its picker normally chooses the lowest total cost, but tool-result turns choose the worker with the most device overlap through `session_context().input_trigger()`. The disaggregated policy scores active prefill work plus uncached request blocks for prefill workers, and projected decode blocks for decode workers. Both own their picker implementation.
 
 ## 1. Create the Policy Crate
 
@@ -43,11 +43,11 @@ serde = { version = "1", features = ["derive"] }
 
 A policy that lives in the Dynamo workspace can use the workspace dependencies shown in [`basic/Cargo.toml`](basic/Cargo.toml).
 
-## 2. Implement the Scorer and Picker
+## 2. Implement the Filter, Scorers, and Picker
 
-A scorer receives one eligible worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
+A filter receives one host-eligible worker and returns whether to keep it. Use filters for hard requirements. A scorer receives one kept worker and returns a finite cost. Lower costs are better. A picker receives all scored rows and returns one row index.
 
-The [basic policy](basic/src/lib.rs) is the shortest complete implementation. The [disaggregated policy](disaggregated/src/lib.rs) shows how one factory selects different component types from `worker_type`.
+The [basic policy](basic/src/lib.rs) is the shortest complete implementation, and its [filter](basic/src/filter.rs) shows how to request and use raw device-overlap data. The [disaggregated policy](disaggregated/src/lib.rs) shows how one factory selects different component types from `worker_type`.
 
 A policy can apply multiple scorers to every candidate. Dynamo calls them in order and adds their costs before the picker runs. The basic policy composes two scorers:
 
@@ -67,12 +67,12 @@ fn required_worker_inputs(&self) -> WorkerInputs {
 
 If a component needs both groups, use `WorkerInputs::CACHE | WorkerInputs::LOAD`. Do not request unused groups because Dynamo calculates and retains those columns for each eligible worker.
 
-Keep these rules in the scorer and picker:
+Keep these rules in every filter, scorer, and picker:
 
 - Return an error instead of panicking.
 - Return finite scorer costs.
 - Treat candidate order as unspecified.
-- Keep blocking I/O out of `score` and `pick`.
+- Keep blocking I/O out of `keep`, `score`, and `pick`.
 - Keep mutable policy state inside the factory-created policy.
 
 ## 3. Parse Parameters and Build the Factory
@@ -129,6 +129,10 @@ worker_selection:
     - name: least-busy
       type: least-busy
       parameters: {}
+    - name: cache-affinity
+      type: least-busy
+      parameters:
+        min_device_overlap_blocks: 8
     - name: disaggregated-load
       type: disaggregated-load
       parameters: {}
@@ -141,6 +145,8 @@ worker_selection:
 - The override value `default` selects Dynamo's built-in policy.
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.
+
+The optional `min_device_overlap_blocks` parameter is a hard filter. If every host-eligible worker is below the threshold, Dynamo returns HTTP 503.
 
 ## 6. Build and Test
 
@@ -215,7 +221,7 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 - Make sure that each component declares every input group that it reads.
 - Check every parameter before the factory is created.
 - Exercise each `worker_type` branch.
-- Prove that scorer failures and invalid picker rows do not reserve a worker.
+- Prove that filter failures, all-filtered candidate sets, scorer failures, and invalid picker rows do not reserve a worker.
 - Benchmark stateful or input-heavy policies at the expected worker count.
 
 The [custom routing API reference](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) lists the available context and worker signals.
