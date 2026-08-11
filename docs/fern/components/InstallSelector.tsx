@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Hardware-aware local install selector. Unsupported Intel XPU combinations
+ * Hardware-aware install selector. Unsupported Intel XPU combinations
  * stay visible but disabled so readers can understand the support boundary.
  */
 "use client";
@@ -177,7 +177,7 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
       <style>{LOCAL_SELECTOR_CSS}</style>
       <section className="lqs-panel" aria-label="Dynamo install selector">
         <div className="lqs-head">
-          <h3>Choose your local build</h3>
+          <h3>Choose your build</h3>
           <p>Unavailable combinations remain visible to show the current support boundary.</p>
         </div>
 

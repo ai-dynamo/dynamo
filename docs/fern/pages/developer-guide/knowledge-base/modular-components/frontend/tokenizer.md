@@ -18,12 +18,13 @@ It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, pos
 
 The `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built encoder optimized for throughput on supported BPE `tokenizer.json` models.
 It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
+It supports segmented encoding so renderers can distinguish trusted control tokens from ordinary content.
 
 Use this backend when tokenization is a measurable bottleneck, for example on high-concurrency prefill-heavy workloads.
 
 #### `basetenkenizer` Native Encoder and Decoder
 
-The `basetenkenizer` backend uses the Baseten Tokenizer implementation exposed by `dynamo-tokenizers`, a high-performance Rust BPE implementation for inference. Unlike the hybrid `fastokens` path, it performs both encoding and decoding natively and supports segmented encoding for renderers that must preserve trusted control-token boundaries.
+The `basetenkenizer` backend uses the Baseten Tokenizer implementation exposed by `dynamo-tokenizers`, a high-performance Rust BPE implementation for inference. It performs both encoding and decoding natively and supports segmented encoding for renderers that must preserve trusted control-token boundaries.
 
 Use this backend for supported `tokenizer.json` models when you need Baseten Tokenizer behavior, including token-compatible Kimi tokenizer artifacts.
 

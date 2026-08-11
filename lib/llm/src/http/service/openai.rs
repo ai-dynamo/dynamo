@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    error::HttpError,
+    error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -48,8 +48,12 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
-    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
+    SessionAffinityId, agent_context_from_headers, apply_header_routing_overrides,
+    session_affinity_from_headers,
+};
+use crate::protocols::common::input_trigger::{
+    classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -58,11 +62,19 @@ use crate::protocols::openai::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
     },
+    classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     delta_common,
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
-    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    pooling::{
+        NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
+        PoolingEndianness, PoolingOutput,
+    },
+    responses::{
+        NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
+        chat_completion_to_response,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -121,6 +133,8 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    #[serde(skip)]
+    metric_error_type: Option<ErrorType>,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -159,7 +173,26 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
-    classify_error_for_metrics(response.0, &response.1.message)
+    response
+        .1
+        .metric_error_type
+        .clone()
+        .unwrap_or_else(|| classify_error_for_metrics(response.0, &response.1.message))
+}
+
+fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
+    const CONTEXT: &str = "Failed to convert responses request";
+
+    match error.downcast_ref::<ResponsesConversionError>() {
+        Some(ResponsesConversionError::InvalidArgument(message)) => ErrorMessage::from_anyhow(
+            invalid_argument(format!("{CONTEXT}: {message}")).into(),
+            CONTEXT,
+        ),
+        Some(ResponsesConversionError::NotImplemented(message)) => {
+            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        }
+        None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -211,6 +244,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -243,6 +277,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -260,6 +295,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -279,6 +315,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -302,6 +339,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -328,6 +366,7 @@ impl ErrorMessage {
                 error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -346,6 +385,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -360,6 +400,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -378,6 +419,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    metric_error_type: None,
                 }),
             );
         }
@@ -407,6 +449,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
                     details: None,
+                    metric_error_type: Some(ErrorType::Validation),
                 }),
             );
         }
@@ -449,6 +492,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    metric_error_type: None,
                 }),
             ),
             Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
@@ -465,6 +509,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            metric_error_type: None,
         }
     }
 }
@@ -488,6 +533,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
             .into_response()
@@ -553,11 +599,25 @@ pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<T>, ErrorResponse> {
+    context_from_headers_with_input_trigger(request, request_id, headers, |_| None)
+}
+
+fn context_from_headers_with_input_trigger<T, F>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+    classify_input_trigger: F,
+) -> Result<Context<T>, ErrorResponse>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&T) -> Option<InputTrigger>,
+{
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(agent_context) = agent_context_from_headers(headers) {
+    if let Some(mut agent_context) = agent_context_from_headers(headers) {
+        agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(headers) {
@@ -667,7 +727,10 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_completion_request(request))
+        })?;
     let context = request.context();
 
     // create the connection handles
@@ -849,6 +912,17 @@ async fn completions_single(
 
         Ok(sse_stream.into_response())
     } else {
+        // Preserve typed backend errors before the completions aggregator turns
+        // them into strings. In particular, Python ValueError/TypeError arrives
+        // as Backend(InvalidArgument) and must remain an HTTP 400.
+        let stream = check_for_backend_error(stream, None)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
+
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
@@ -965,6 +1039,28 @@ fn aggregate_batch_completion_usage(
     }
 }
 
+type BoxedCompletionResponseStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>;
+
+/// Check each prompt stream before merging a non-streaming completion batch.
+///
+/// `select_all` cannot safely provide this check after merging because a normal
+/// event from one prompt may arrive before a typed backend error from another.
+/// Poll all streams concurrently so batch startup is not serialized.
+async fn check_completion_batch_streams<S>(
+    streams: Vec<S>,
+) -> Result<Vec<BoxedCompletionResponseStream>, ErrorResponse>
+where
+    S: futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send + 'static,
+{
+    futures::future::try_join_all(
+        streams
+            .into_iter()
+            .map(|stream| check_for_backend_error(stream, None)),
+    )
+    .await
+}
+
 /// Handle batch prompt completions (multiple prompts with n choices each)
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
@@ -1067,7 +1163,23 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    // Merge all streams
+    let all_streams: Vec<BoxedCompletionResponseStream> = if streaming {
+        all_streams
+            .into_iter()
+            .map(|stream| Box::pin(stream) as BoxedCompletionResponseStream)
+            .collect()
+    } else {
+        check_completion_batch_streams(all_streams)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?
+    };
+
+    // Merge all streams after every non-streaming prompt has passed its own
+    // backend-error preflight.
     let merged_stream = stream::select_all(all_streams);
     let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
@@ -1337,6 +1449,411 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
     Ok(floats)
 }
 
+#[tracing::instrument(skip_all)]
+async fn classify(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateClassifyRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service or model is not ready
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
+
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (mirrors `embeddings` / `completions_single`).
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+
+    // Classification, like embeddings, is a pooling task returned as a single
+    // (non-streaming) response.
+    let streaming = false;
+
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Classify,
+        streaming,
+        &request_id,
+    );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state.manager().get_classify_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+
+    // issue the generate call on the engine
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Fold the (single-response) stream into one classification response.
+    let response = NvCreateClassifyResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(e),
+                "Failed to fold classification stream",
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message,
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
+}
+
+fn validate_pooling_cache_salt(cache_salt: Option<&str>) -> Result<(), ErrorResponse> {
+    if cache_salt == Some("") {
+        return Err(pooling_or_classify_bad_request(
+            "Parameter 'cache_salt' must be a non-empty string if provided.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryMetadataItem {
+    index: u32,
+    embed_dtype: &'static str,
+    endianness: &'static str,
+    start: usize,
+    end: usize,
+    shape: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryUsage {
+    prompt_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryMetadata {
+    id: String,
+    created: u64,
+    model: String,
+    data: Vec<PoolingBinaryMetadataItem>,
+    usage: PoolingBinaryUsage,
+}
+
+fn build_pooling_binary_response(
+    response: NvCreatePoolingResponse,
+    include_metadata: bool,
+    embed_dtype: PoolingEmbedDType,
+    endianness: PoolingEndianness,
+) -> anyhow::Result<Response> {
+    let NvCreatePoolingResponse {
+        id,
+        created,
+        model,
+        data,
+        usage,
+        ..
+    } = response;
+
+    let mut chunks = Vec::with_capacity(data.len());
+    let mut metadata_items = Vec::with_capacity(if include_metadata { data.len() } else { 0 });
+    let mut offset = 0usize;
+
+    for item in data {
+        let encoded = match item.data {
+            PoolingOutput::Base64(encoded) => encoded,
+            _ => anyhow::bail!(
+                "binary pooling output at index {} was not base64 encoded",
+                item.index
+            ),
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid base64 in binary pooling output at index {}: {e}",
+                    item.index
+                )
+            })?;
+        let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "binary pooling response size overflow at index {}",
+                item.index
+            )
+        })?;
+
+        if include_metadata {
+            let shape = item.shape.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "binary pooling output at index {} is missing its tensor shape",
+                    item.index
+                )
+            })?;
+            let expected_len =
+                shape
+                    .iter()
+                    .try_fold(embed_dtype.byte_width(), |size, &dimension| {
+                        let dimension = usize::try_from(dimension).map_err(|_| {
+                            anyhow::anyhow!(
+                                "binary pooling tensor dimension overflow at index {}",
+                                item.index
+                            )
+                        })?;
+                        size.checked_mul(dimension).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "binary pooling tensor size overflow at index {}",
+                                item.index
+                            )
+                        })
+                    })?;
+            anyhow::ensure!(
+                bytes.len() == expected_len,
+                "binary pooling output at index {} has {} bytes, but shape {:?} with dtype {} requires {}",
+                item.index,
+                bytes.len(),
+                shape,
+                embed_dtype.as_str(),
+                expected_len
+            );
+            metadata_items.push(PoolingBinaryMetadataItem {
+                index: item.index,
+                embed_dtype: embed_dtype.as_str(),
+                endianness: endianness.as_str(),
+                start: offset,
+                end,
+                shape,
+            });
+        }
+
+        chunks.push(Bytes::from(bytes));
+        offset = end;
+    }
+
+    let metadata = if include_metadata {
+        Some(serde_json::to_string(&PoolingBinaryMetadata {
+            id,
+            created,
+            model,
+            data: metadata_items,
+            usage: PoolingBinaryUsage {
+                prompt_tokens: usage.prompt_tokens,
+                total_tokens: usage.total_tokens,
+            },
+        })?)
+    } else {
+        None
+    };
+
+    let body = Body::from_stream(stream::iter(
+        chunks
+            .into_iter()
+            .map(Ok::<Bytes, std::convert::Infallible>),
+    ));
+    let mut builder =
+        Response::builder().header(axum::http::header::CONTENT_TYPE, "application/octet-stream");
+    if let Some(metadata) = metadata {
+        builder = builder.header("metadata", metadata);
+    }
+    Ok(builder.body(body)?)
+}
+
+#[tracing::instrument(skip_all)]
+async fn pooling(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreatePoolingRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service or model is not ready
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
+    let response_encoding = request.encoding_format;
+    let response_dtype = request.embed_dtype.unwrap_or_default();
+    let response_endianness = request.endianness.unwrap_or_default();
+
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (mirrors `embeddings` / `completions_single`).
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+
+    // Pooling, like embeddings, is a single (non-streaming) response.
+    let streaming = false;
+
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Pooling,
+        streaming,
+        &request_id,
+    );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    // vLLM currently rejects dimensionality reduction on `/pooling`.
+    if request.dimensions.is_some() {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(pooling_or_classify_bad_request(
+            "dimensions is currently not supported".to_string(),
+        ));
+    }
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state.manager().get_pooling_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+
+    // issue the generate call on the engine
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Fold the (single-response) stream into one pooling response.
+    let response = NvCreatePoolingResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold pooling stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    let response = match response_encoding {
+        PoolingEncodingFormat::Float | PoolingEncodingFormat::Base64 => {
+            Json(response).into_response()
+        }
+        PoolingEncodingFormat::Bytes | PoolingEncodingFormat::BytesOnly => {
+            build_pooling_binary_response(
+                response,
+                response_encoding == PoolingEncodingFormat::Bytes,
+                response_dtype,
+                response_endianness,
+            )
+            .map_err(|e| {
+                let err_response =
+                    ErrorMessage::from_anyhow(e, "Failed to build pooling binary response");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?
+        }
+    };
+
+    inflight.mark_ok();
+    Ok(response)
+}
+
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -1379,7 +1896,10 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_chat_request(request))
+        })?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -1468,6 +1988,7 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -1496,6 +2017,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -1704,24 +2226,20 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 ///
 /// Returns `Err(ErrorResponse)` if the first non-annotation event is a backend
 /// error, `Ok(stream)` otherwise.
-pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
-    + Send
-    + Unpin
-    + 'static,
+pub(super) async fn check_for_backend_error<T>(
+    stream: impl futures::Stream<Item = Annotated<T>> + Send + 'static,
     timeout: Option<std::time::Duration>,
-) -> Result<
-    std::pin::Pin<
-        Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-    >,
-    ErrorResponse,
-> {
+) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ErrorResponse>
+where
+    T: serde::Serialize + Send + 'static,
+{
     use futures::stream::StreamExt;
 
+    let mut stream = Box::pin(stream);
     // Single deadline captured at entry so the peek window is bounded in total,
     // not per-iteration.
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
-    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    let mut buffered: Vec<Annotated<T>> = Vec::new();
 
     loop {
         let next = match deadline {
@@ -1771,6 +2289,7 @@ fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorRe
                 error_type: map_error_code_to_error_type(status_code),
                 code: status_code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         ),
     }
@@ -2461,7 +2980,10 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_response_request(request))
+        })?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2591,11 +3113,7 @@ async fn responses(
             error = %e,
             "Failed to convert NvCreateResponse to UnifiedRequest",
         );
-        let err_response = ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "Failed to convert responses request: "
-                + &e.to_string(),
-        );
+        let err_response = responses_conversion_error_response(e);
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -2606,6 +3124,14 @@ async fn responses(
     let mut chat_request = unified_request.into_inner();
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+    if let Err(error) = chat_request.validate() {
+        let err_response = ErrorMessage::from_anyhow(
+            invalid_argument(error.to_string()).into(),
+            "Invalid responses request",
+        );
+        inflight_guard.mark_error(ErrorType::Validation);
         return Err(err_response);
     }
 
@@ -2898,15 +3424,15 @@ pub(crate) fn model_not_ready_message(model_name: &str) -> String {
 /// namespace.
 ///
 /// Returns `503 Service Unavailable` with a structured body when the model
-/// isn't ready to serve. Models the frontend has never heard of fall through
-/// here; the per-handler engine lookup later in the request path returns a
-/// 404 instead, which is the right shape for "unknown model".
+/// isn't ready to serve. Models absent from the committed catalog, including
+/// discovered models still being built, fall through here; the per-handler
+/// engine lookup later in the request path returns a 404 instead.
 pub(crate) fn check_model_serving_ready(
     state: &Arc<service_v2::State>,
     model_name: &str,
 ) -> Result<(), ErrorResponse> {
-    let Some(model) = state.manager().get_model(model_name) else {
-        // Unknown model — let the per-endpoint engine accessor produce the
+    let Some(model) = state.manager().get_committed_model(model_name) else {
+        // Not committed — let the per-endpoint engine accessor produce the
         // canonical 404. The readiness gate has nothing to say.
         return Ok(());
     };
@@ -3055,6 +3581,44 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
+/// Create an Axum [`Router`] for the `/v1/classify` endpoint (sequence
+/// classification / cross-encoder pooling). If no path is provided, the
+/// default path is `/v1/classify`. Deployments migrating clients from native
+/// `vllm-serve` (which mounts a bare `/classify`) can set the path via
+/// `DYN_HTTP_SVC_CLASSIFY_PATH`.
+pub fn classify_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/classify".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(classify))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the `/v1/pooling` endpoint (raw pooler output
+/// from pooling-runner models). If no path is provided, the default path is
+/// `/v1/pooling`. Deployments migrating clients from native `vllm-serve`
+/// (which mounts a bare `/pooling`) can set the path via
+/// `DYN_HTTP_SVC_POOLING_PATH`.
+pub fn pooling_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/pooling".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(pooling))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
 /// Create an Axum [`Router`] for the OpenAI Batch API skeleton.
 ///
 /// The first slice exposes the route and protocol shape. Durable file storage,
@@ -3166,20 +3730,20 @@ async fn get_model_openai(
     // per-model readiness sub-resource (Mechanism 4). This means a model
     // literally named `foo/ready` is still retrievable and never shadowed.
     //
-    // Exact match is resolved against ALL registered models (`get_model`), not
-    // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
-    // still wins over the readiness sub-resource of a sibling `foo`.
+    // Exact match is resolved against every committed model, not just the
+    // displayable ones, so a committed-but-not-yet-ready `foo/ready` still
+    // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
-    if state.manager().get_model(model_id).is_some() {
+    if state.manager().get_committed_model(model_id).is_some() {
         return get_model_retrieve(&state, model_id);
     }
 
-    // Readiness sub-resource. Resolves against all registered models (above
-    // exact check failed, so `model_id` is not itself a registered model);
-    // the whole point of this endpoint is to diagnose models that are
-    // registered but not yet ready, so it must find them too.
+    // Readiness sub-resource. Resolves against all committed models (above
+    // exact check failed, so `model_id` is not itself a committed model);
+    // the whole point of this endpoint is to diagnose committed models that
+    // are not yet ready, so it must find them too.
     if let Some(base) = model_id.strip_suffix("/ready")
-        && state.manager().get_model(base).is_some()
+        && state.manager().get_committed_model(base).is_some()
     {
         return get_model_readiness(&state, base);
     }
@@ -3238,7 +3802,7 @@ fn get_model_readiness(
 ) -> Result<Response, ErrorResponse> {
     let model = state
         .manager()
-        .get_model(model_id)
+        .get_committed_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
     Ok(Json(model.namespace_readiness()).into_response())
 }
@@ -3374,6 +3938,7 @@ async fn images_edits(
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         ));
     }
@@ -3739,10 +4304,16 @@ async fn audio_speech(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -3756,12 +4327,17 @@ async fn audio_speech(
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold audio stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold audio stream")
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     // Check for failure before marking success
     if response.status == "failed" {
+        // Without this the guard drops on its default and books this 400 as an
+        // internal error.
+        inflight.mark_error(ErrorType::Validation);
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
     }
 
@@ -3813,10 +4389,12 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+    use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
     use crate::protocols::openai::responses::NvCreateResponse;
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
@@ -3826,6 +4404,139 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    fn binary_pooling_response() -> NvCreatePoolingResponse {
+        NvCreatePoolingResponse {
+            id: "pool-request".to_string(),
+            object: "list".to_string(),
+            created: 123,
+            model: "test-model".to_string(),
+            data: vec![
+                PoolingData {
+                    index: 0,
+                    object: "pooling".to_string(),
+                    data: PoolingOutput::Base64(
+                        base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4]),
+                    ),
+                    shape: Some(vec![2]),
+                },
+                PoolingData {
+                    index: 1,
+                    object: "pooling".to_string(),
+                    data: PoolingOutput::Base64(
+                        base64::engine::general_purpose::STANDARD.encode([5, 6, 7, 8]),
+                    ),
+                    shape: Some(vec![1, 2]),
+                },
+            ],
+            usage: PoolingUsage {
+                prompt_tokens: 7,
+                total_tokens: 7,
+                completion_tokens: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn pooling_bytes_response_has_vllm_metadata_and_chunked_body() {
+        let response = build_pooling_binary_response(
+            binary_pooling_response(),
+            true,
+            PoolingEmbedDType::Float16,
+            PoolingEndianness::Big,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(response.headers()["metadata"].to_str().unwrap()).unwrap();
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "id": "pool-request",
+                "created": 123,
+                "model": "test-model",
+                "data": [
+                    {
+                        "index": 0,
+                        "embed_dtype": "float16",
+                        "endianness": "big",
+                        "start": 0,
+                        "end": 4,
+                        "shape": [2]
+                    },
+                    {
+                        "index": 1,
+                        "embed_dtype": "float16",
+                        "endianness": "big",
+                        "start": 4,
+                        "end": 8,
+                        "shape": [1, 2]
+                    }
+                ],
+                "usage": {"prompt_tokens": 7, "total_tokens": 7}
+            })
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[tokio::test]
+    async fn pooling_bytes_only_response_omits_metadata() {
+        let mut source = binary_pooling_response();
+        for item in &mut source.data {
+            item.shape = None;
+        }
+        let response = build_pooling_binary_response(
+            source,
+            false,
+            PoolingEmbedDType::Float32,
+            PoolingEndianness::Native,
+        )
+        .unwrap();
+
+        assert!(response.headers().get("metadata").is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn pooling_bytes_metadata_requires_tensor_shape() {
+        let mut response = binary_pooling_response();
+        response.data[0].shape = None;
+
+        let error = build_pooling_binary_response(
+            response,
+            true,
+            PoolingEmbedDType::Float32,
+            PoolingEndianness::Native,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing its tensor shape"));
+    }
+
+    #[test]
+    fn pooling_bytes_metadata_validates_tensor_size() {
+        let mut response = binary_pooling_response();
+        response.data[0].shape = Some(vec![3]);
+
+        let error = build_pooling_binary_response(
+            response,
+            true,
+            PoolingEmbedDType::Float16,
+            PoolingEndianness::Native,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires 6"));
+    }
 
     #[test]
     fn test_chat_completions_template_preserves_explicit_zero_temperature() {
@@ -4042,6 +4753,19 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_max_output_tokens_reaches_chat_budget_field() {
+        let mut response_request = make_base_request();
+        response_request.inner.max_output_tokens = Some(256);
+
+        let unified_request: UnifiedRequest = response_request.try_into().unwrap();
+        let chat_request = unified_request.into_inner();
+        let stop_conditions = chat_request.extract_stop_conditions().unwrap();
+
+        assert_eq!(chat_request.inner.max_completion_tokens, Some(256));
+        assert_eq!(stop_conditions.max_tokens, Some(256));
+    }
+
+    #[test]
     fn test_openai_nvext_rejects_agent_context() {
         let err = serde_json::from_value::<NvExt>(serde_json::json!({
             "agent_context": {
@@ -4063,6 +4787,7 @@ mod tests {
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
                 kv_hints: None,
+                input_trigger: None,
             },
         );
 
@@ -4078,6 +4803,42 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+    }
+
+    #[test]
+    fn test_context_from_headers_classifies_only_agent_requests() {
+        let calls = std::cell::Cell::new(0);
+        let classify = |_: &()| {
+            calls.set(calls.get() + 1);
+            Some(InputTrigger::Other)
+        };
+
+        context_from_headers_with_input_trigger(
+            (),
+            "request-1".to_string(),
+            &HeaderMap::new(),
+            classify,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers_with_input_trigger(
+            (),
+            "request-2".to_string(),
+            &headers,
+            classify,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            source
+                .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+                .unwrap()
+                .input_trigger,
+            Some(InputTrigger::Other)
+        );
     }
 
     #[test]
@@ -4104,6 +4865,19 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn empty_pooling_cache_salt_is_rejected() {
+        assert!(validate_pooling_cache_salt(None).is_ok());
+        assert!(validate_pooling_cache_salt(Some("salt")).is_ok());
+
+        let response = validate_pooling_cache_salt(Some("")).unwrap_err();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Parameter 'cache_salt' must be a non-empty string if provided."
+        );
     }
 
     #[test]
@@ -4166,28 +4940,37 @@ mod tests {
     }
 
     #[test]
-    fn test_resource_exhausted_error_response_from_anyhow() {
+    fn overload_errors_preserve_the_http_529_contract() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
         use dynamo_runtime::pipeline::error::PipelineError;
 
-        let cause = PipelineError::ServiceOverloaded(
-            "All workers are busy, please retry later".to_string(),
-        );
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
-            .message("All workers are busy, please retry later")
-            .cause(cause)
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0.as_u16(), 529);
-        assert_eq!(response.1.code, 529);
-        assert_eq!(response.1.error_type, "Overloaded");
-        assert_eq!(response.1.message, "Service temporarily overloaded");
-        assert!(
-            !response.1.message.contains("All workers are busy"),
-            "client response must not include the underlying engine message"
-        );
+        for (error_type, message) in [
+            (
+                ErrorType::ResourceExhausted,
+                "All workers are busy, please retry later",
+            ),
+            (
+                ErrorType::WorkerOverloaded,
+                "Selected worker is overloaded, please retry later",
+            ),
+        ] {
+            let cause = PipelineError::ServiceOverloaded(message.to_string());
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .cause(cause)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0.as_u16(), 529);
+            assert_eq!(response.1.code, 529);
+            assert_eq!(response.1.error_type, "Overloaded");
+            assert_eq!(response.1.message, "Service temporarily overloaded");
+            assert!(
+                !response.1.message.contains(message),
+                "client response must not include the underlying engine message"
+            );
+        }
     }
 
     #[test]
@@ -5084,6 +5867,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_completion_backend_invalid_argument_surfaces_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateCompletionResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
+                    .build(),
+            ),
+        };
+
+        let error_response =
+            match check_for_backend_error(stream::iter(vec![error_event]), None).await {
+                Ok(_) => panic!("typed completion error must fail"),
+                Err(error_response) => error_response,
+            };
+
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(error_response.1.error_type, "Bad Request");
+        assert!(
+            error_response
+                .1
+                .message
+                .contains("does not currently support logprobs >= 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_completion_checks_every_stream_for_backend_errors() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let normal_event = Annotated::<NvCreateCompletionResponse> {
+            data: Some(make_completion_chunk("ok", None, None)),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let error_event = Annotated::<NvCreateCompletionResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("invalid second prompt")
+                    .build(),
+            ),
+        };
+
+        let result = check_completion_batch_streams(vec![
+            stream::iter(vec![normal_event]),
+            stream::iter(vec![error_event]),
+        ])
+        .await;
+
+        let error_response = match result {
+            Ok(_) => panic!("an error in any batch prompt must fail the request"),
+            Err(error_response) => error_response,
+        };
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(error_response.1.error_type, "Bad Request");
+        assert_eq!(error_response.1.message, "invalid second prompt");
+    }
+
+    #[tokio::test]
     async fn test_check_for_backend_error_with_json_error_and_code() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
@@ -5534,6 +6393,20 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn untyped_responses_conversion_errors_remain_internal() {
+        let response = responses_conversion_error_response(anyhow::anyhow!(
+            "internal response conversion details"
+        ));
+
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "Failed to convert responses request");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Internal
         );
     }
 
@@ -6563,6 +7436,7 @@ mod tests {
             content: Some(vec![ChatCompletionTokenLogprob {
                 token: "h".to_string(),
                 logprob: -0.5,
+                token_id: None,
                 bytes: Some(vec![104]),
                 top_logprobs: vec![],
             }]),

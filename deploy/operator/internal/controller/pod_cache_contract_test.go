@@ -16,15 +16,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 func TestProjectedPodSupportsControllerContract(t *testing.T) {
@@ -43,6 +46,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 				consts.KubeLabelDynamoFailoverEngineGroupMember: consts.KubeLabelValueTrue,
 				batchv1.JobNameLabel:                            "profiling-job",
 				"job-name":                                      "profiling-job",
+				snapshotprotocol.RestoreTargetLabel:             consts.KubeLabelValueTrue,
 			},
 			Annotations: map[string]string{
 				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
@@ -57,6 +61,11 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 				Name:    consts.MainContainerName,
 				Command: []string{"python"},
 				Args:    []string{"-m", "dynamo.vllm"},
+			}},
+			InitContainers: []corev1.Container{{
+				Name:          gms.ServerContainerName,
+				Image:         "discarded-image",
+				RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 			}},
 			Volumes: []corev1.Volume{{
 				Name: "topology",
@@ -78,6 +87,9 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 					ExitCode: 23, Reason: "Error", Message: "profiling failed",
 				}},
 			}},
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: gms.ServerContainerName, RestartCount: 1,
+			}},
 		},
 	})
 
@@ -87,12 +99,21 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 	})
 
 	t.Run("failover", func(t *testing.T) {
-		assert.True(t, failoverCascadePredicate().Create(event.CreateEvent{Object: pod}))
+		assert.False(t, failoverCascadePredicate().Create(event.CreateEvent{Object: pod}),
+			"Snapshot restore targets must be excluded from failover cascade")
+	})
+
+	t.Run("GMS Pod replacement", func(t *testing.T) {
+		assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
 	})
 
 	t.Run("checkpoint and snapshot", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace}}
-		snapshot := buildPodSnapshot(ckpt, "checkpoint-id", pod)
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{TargetContainerName: "main"}},
+		}
+		snapshot, err := buildPodSnapshot(ckpt, "checkpoint-id", pod)
+		require.NoError(t, err)
 		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
 		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
 		require.NoError(t, validateSourcePod(snapshot, pod))
@@ -113,7 +134,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 		reconciler := &DynamoGraphDeploymentRequestReconciler{
 			Client:   client,
-			Recorder: record.NewFakeRecorder(1),
+			Recorder: events.NewFakeRecorder(1),
 		}
 		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace}}
 		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "profiling-job", Namespace: pod.Namespace}}

@@ -142,6 +142,28 @@ to the software decode path where one exists.
 > For the other formats, install a decode carrier alongside, or transcode the input to
 > H.264/H.265 before sending it.
 
+### Installing a software decoder
+
+To decode a format NVDEC does not cover — or H.264/H.265 on a host with no NVDEC —
+explicitly install the backend's decode package at the validated version bounds:
+
+```bash
+# vLLM: video + audio input
+pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5' 'av>=18.0.0,<19'
+
+# SGLang: video input
+pip install --no-deps 'decord2>=3.4.0,<4'
+
+# TensorRT-LLM: video input
+pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
+```
+
+Nothing installs automatically — this is a deliberate operator step. The images also ship
+an installer with the same bounds plus idempotency and air-gap support
+(`python -m dynamo.common.utils.install_media_decoders <backend>`); see
+[Additional Media Decoders](additional-media-decoders.md) for the full workflow,
+including baking the install into an image layer for Kubernetes.
+
 ## Hardware encode (NVENC)
 
 There is nothing to enable. Dynamo does not use NVENC on any path.

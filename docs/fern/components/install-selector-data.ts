@@ -59,8 +59,14 @@ function dockerCommand(image: string, tag: string): string {
   return `docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/${image}:${tag}`;
 }
 
-function stableWheelCommand(backend: Backend, version: string): string {
-  const wheel = version === CURRENT_VERSION.slice(1) ? CURRENT_WHEEL : version;
+function stableWheelCommand(
+  backend: Backend,
+  version: string,
+  wheelOverride?: string,
+): string {
+  const wheel =
+    wheelOverride ??
+    (version === CURRENT_VERSION.slice(1) ? CURRENT_WHEEL : version);
   const prerelease = backend.id === "sglang" ? "--prerelease=allow " : "";
   return `uv pip install ${prerelease}"ai-dynamo[${backend.extra}]==${wheel}"`;
 }
@@ -84,7 +90,7 @@ function stableEntries(backend: Backend): InstallEntry[] {
         commands: {
           container: dockerCommand(`${backend.image}-runtime`, version),
           ...(backend.extra
-            ? { wheel: stableWheelCommand(backend, version) }
+            ? { wheel: stableWheelCommand(backend, version, release.wheel) }
             : {}),
         },
       };

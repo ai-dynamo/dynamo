@@ -1161,6 +1161,8 @@ const (
 // multiple ServiceRoles depending on the deployment topology:
 //
 //   - single-node, no GMS: 1 role (RoleMain)
+//   - single-node, forceScalingGroup: 1 role (RoleMain with a single pod;
+//     the PCSG replica count carries the horizontal scale)
 //   - multinode, no GMS:    2 roles (RoleLeader + RoleWorker)
 //   - single-node, inter-pod GMS: 1 engine PCLQ (replicated) + 1 RoleGMS
 //     weight-server PCLQ
@@ -1218,6 +1220,8 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 		return expandMultinodeRoles(componentName, numberOfNodes)
 	case isInterPodGMS:
 		return expandSingleNodeGMSRoles(componentName, component.GetTotalEnginePods())
+	case component.IsGroveScalingGroupForced():
+		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
 		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
@@ -1230,6 +1234,12 @@ func expandSingleNodeRoles(componentName string, componentReplicas *int32) []Ser
 	}
 	return []ServiceRole{
 		{Name: componentName, Role: RoleMain, Replicas: replicas},
+	}
+}
+
+func expandSingleNodeScalingGroupRoles(componentName string) []ServiceRole {
+	return []ServiceRole{
+		{Name: componentName, Role: RoleMain, Replicas: 1},
 	}
 }
 
@@ -1274,7 +1284,7 @@ func LongestPodCliqueNameForDGDComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 ) string {
 	lowerComponentName := strings.ToLower(componentName)
-	if component == nil || (component.GetNumberOfNodes() <= 1 && !component.IsInterPodGMSEnabled()) {
+	if component == nil || !component.UsesPCSG() {
 		return lowerComponentName
 	}
 
@@ -1301,7 +1311,7 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 		componentName := component.ComponentName
 		lowerName := strings.ToLower(componentName)
 		var budget int
-		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+		if component.UsesPCSG() {
 			// PCSG = lowerName, PCLQ = longest rendered role name.
 			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
 		} else {
@@ -2537,7 +2547,7 @@ func GenerateGrovePodCliqueSet(
 		isMultinode := numberOfNodes > 1
 		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
-		usesPCSG := isMultinode || isInterPodGMS
+		usesPCSG := component.UsesPCSG()
 		roles := expandRolesForComponent(componentName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 

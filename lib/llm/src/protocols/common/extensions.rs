@@ -68,9 +68,23 @@ pub struct KvHints {
     pub evict_session: bool,
 }
 
+/// Causal trigger that produced an incoming agent request.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTrigger {
+    /// A new human/user message initiated the turn.
+    UserMessage,
+    /// A tool or function result was fed back, continuing the turn.
+    ToolResult,
+    /// Any request not triggered by a user message or tool result.
+    Other,
+}
+
 /// Identity metadata for agentic workloads.
+// Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
+// format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
+// across the N-2 mixed-version compatibility window.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     /// Stable reasoning/tool session identifier.
     pub session_id: String,
@@ -88,6 +102,13 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hints: Option<KvHints>,
+
+    /// Causal trigger that produced the request, derived from inbound request content.
+    #[builder(default, setter(strip_option))]
+    // Optional for v1.2/v1.3 payloads during the v1.4/v1.5 N-2 window.
+    // TODO(v1.6): Make required after v1.3 falls outside the N-2 window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_trigger: Option<InputTrigger>,
 }
 
 impl AgentContext {
@@ -262,6 +283,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
             kv_hints,
+            input_trigger: None,
         }
     }
 }
@@ -717,6 +739,12 @@ mod tests {
         fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
             Some(&self.unsupported_fields)
         }
+    }
+
+    #[test]
+    fn agent_context_accepts_missing_input_trigger() {
+        let context: AgentContext = serde_json::from_str(r#"{"session_id":"root"}"#).unwrap();
+        assert_eq!(context.input_trigger, None);
     }
 
     #[test]
