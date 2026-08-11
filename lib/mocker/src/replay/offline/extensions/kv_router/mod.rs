@@ -423,10 +423,11 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         now_ms: f64,
     ) -> Result<PlacementEffects> {
         let request_metadata = request.metadata();
+        let effective_max_output_tokens = request_metadata.effective_max_output_tokens();
         let max_output_tokens = metadata
             .max_output_tokens_override()
-            .map_or(request_metadata.max_output_tokens, |override_tokens| {
-                request_metadata.max_output_tokens.min(override_tokens)
+            .map_or(effective_max_output_tokens, |override_tokens| {
+                effective_max_output_tokens.min(override_tokens)
             });
         let request_id = request_metadata
             .uuid
@@ -555,7 +556,7 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         self.on_compact_request_arrival_for_session(
             request,
-            request.max_output_tokens,
+            request.effective_max_output_tokens(),
             replay_hashes,
             session_id,
             now_ms,
