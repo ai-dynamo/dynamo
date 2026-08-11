@@ -154,16 +154,34 @@ SPDX-License-Identifier: Apache-2.0
 
     <p class="lede">Answers: what is the system doing now, and where does the time go?</p>
       <details class="grp">
-        <summary>Official benchmarks<span class="cnt">none catalogued</span></summary>
+        <summary>Official benchmarks<span class="cnt">3 named · 0 runnable in-tree</span></summary>
         <div class="body">
-          <div class="empty"><b>Not yet catalogued.</b> Third-party or standardised suites where the harness, the workload, and the success metrics are all fixed externally, and Dynamo is plugged in as the system under test. The distinguishing property is that none of the three is ours to choose — so the result is comparable across systems, and the only variable is Dynamo itself.</div>
+          <p class="lede" style="margin-bottom:12px">Harness, workload, and success metric are all fixed externally; Dynamo is plugged in as the system under test. None of the three is ours to choose, which is what makes the result comparable across systems — and what means a poor showing cannot be answered by changing the workload.</p>
+          <table>
+            <thead><tr><th style="width:22%">Suite</th><th style="width:34%">What it fixes</th><th>In-tree status</th></tr></thead>
+            <tbody>
+              <tr><td><b>SemiAnalysis</b><br><small style="color:var(--muted)">InferenceMAX</small></td><td>Workload and reporting defined by the publisher; run across vendors for comparison</td><td><span class="glyph" style="color:var(--critical)">✕</span>No harness, config, or recipe in-tree. Referenced in <code>README.md</code> only</td></tr>
+              <tr><td><b>Artificial Analysis</b></td><td>Independent third-party measurement; methodology and endpoints controlled by the publisher</td><td><span class="glyph" style="color:var(--critical)">✕</span>No reference anywhere in the repository</td></tr>
+              <tr><td><b>MLPerf</b><br><small style="color:var(--muted)">MLCommons</small></td><td>Formal submission rules — fixed dataset, accuracy target, and latency constraints, with closed and open divisions</td><td><span class="glyph" style="color:var(--critical)">✕</span>No submission harness in-tree. Referenced in <code>README.md</code> only</td></tr>
+            </tbody>
+          </table>
+          <div class="note"><b>None of the three is reproducible from this repository.</b> All are externally defined, so the workload cannot be adjusted to suit a result — which is exactly their value, and also why standing one up is a project rather than a script. Being named in the README is not the same as having a runnable configuration.</div>
         </div>
       </details>
 
       <details class="grp">
-        <summary>Customer / use-case focused benchmarks<span class="cnt">none catalogued</span></summary>
+        <summary>Customer / use-case focused benchmarks<span class="cnt">3 named · machinery only</span></summary>
         <div class="body">
-          <div class="empty"><b>Not yet catalogued.</b> Benchmarks built to demonstrate a specific feature, or to match the workload of a particular deployment. The harness is ours, and the workload is chosen to make the feature's effect visible — which means the result is meaningful for that use case and not directly comparable to anything else. Each needs its assumed input distribution recorded, or it cannot be told apart from a tuned demo.</div>
+          <p class="lede" style="margin-bottom:12px">The harness is ours and the workload is chosen to make a feature's effect visible. That makes the result meaningful for the use case and not comparable to anything else — so each one needs its assumed input distribution recorded, or it cannot be told apart from a tuned demo.</p>
+          <table>
+            <thead><tr><th style="width:22%">Benchmark</th><th style="width:34%">What it is built to show</th><th>In-tree status</th></tr></thead>
+            <tbody>
+              <tr><td><b>Multimodal image</b></td><td>Image-request throughput and latency as image count, size, and reuse ratio vary</td><td><span class="glyph" style="color:var(--warning)">▲</span><code>benchmarks/multimodal/image/</code> — 3 AIPerf scripts (small, large, 50% ISL ratio) plus <code>generate_aiperf_images/</code> and <code>jsonl/</code>. No stated input distribution</td></tr>
+              <tr><td><b>EPD</b><br><small style="color:var(--muted)">encode / prefill / decode</small></td><td>Whether splitting the encoder onto its own worker beats an aggregated multimodal worker</td><td><span class="glyph" style="color:var(--warning)">▲</span>Launch scripts across all three backends (<code>vllm</code>, <code>sglang</code>, <code>trtllm</code>) and <code>benchmarks/multimodal/embedding_transfer/</code>. No benchmark definition pairing the arms</td></tr>
+              <tr><td><b>Multimodal routing</b></td><td>Whether routing a request to a worker that already holds its encoded embedding beats routing without that knowledge</td><td><span class="glyph" style="color:var(--warning)">▲</span><code>--route-to-encoder</code> wired in <code>common/backend/worker.py</code>. No benchmark measures it</td></tr>
+            </tbody>
+          </table>
+          <div class="note"><b>All three have machinery but no benchmark definition.</b> Scripts, launch paths, and flags exist; what is missing in each case is the pair of arms, the fixed workload, and the deciding statistic that would turn them into a comparison. That is the gap between "we can run this configuration" and "we can say whether it is better."</div>
         </div>
       </details>
 
