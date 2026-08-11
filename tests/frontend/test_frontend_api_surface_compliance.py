@@ -768,11 +768,14 @@ def test_parent_context_requires_observed_parent_session() -> None:
             }
         }
     ]
-    assert not _trace_contains_agent_parent_context(records)
+    assert _trace_contains_agent_parent_context(records)
+    assert not _trace_contains_agent_parent_context(
+        records, require_observed_parent=True
+    )
 
     records.insert(0, {"agent_context": {"session_id": "root"}})
     records[1]["agent_context"]["parent_session_id"] = "root"
-    assert _trace_contains_agent_parent_context(records)
+    assert _trace_contains_agent_parent_context(records, require_observed_parent=True)
 
 
 def _assert_agent_context_in_trace(
@@ -801,13 +804,20 @@ def _assert_agent_context_in_trace(
 
 
 def _assert_agent_parent_context_in_trace(
-    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
+    trace_path: Path,
+    source_label: str,
+    start_index: int,
+    timeout_s: float = 30.0,
+    *,
+    require_observed_parent: bool = False,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
         last_records = _read_request_trace_records_since(trace_path, start_index)
-        if _trace_contains_agent_parent_context(last_records):
+        if _trace_contains_agent_parent_context(
+            last_records, require_observed_parent=require_observed_parent
+        ):
             return
         time.sleep(0.2)
 
@@ -835,13 +845,19 @@ def _trace_contains_agent_context(records: list[dict]) -> bool:
     return False
 
 
-def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
-    session_ids = {
-        agent_context["session_id"]
-        for record in records
-        if (agent_context := record.get("agent_context"))
-        and agent_context.get("session_id")
-    }
+def _trace_contains_agent_parent_context(
+    records: list[dict], *, require_observed_parent: bool = False
+) -> bool:
+    session_ids = (
+        {
+            agent_context["session_id"]
+            for record in records
+            if (agent_context := record.get("agent_context"))
+            and agent_context.get("session_id")
+        }
+        if require_observed_parent
+        else set()
+    )
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
@@ -853,7 +869,9 @@ def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
         session_id = agent_context.get("session_id")
         if not session_id:
             continue
-        if parent_session_id == session_id or parent_session_id not in session_ids:
+        if parent_session_id == session_id:
+            continue
+        if require_observed_parent and parent_session_id not in session_ids:
             continue
         return True
     return False
@@ -1040,7 +1058,10 @@ def _run_codex_subagent_smoke(
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
     _assert_agent_parent_context_in_trace(
-        request_trace_path, "codex subagent", trace_start_index
+        request_trace_path,
+        "codex subagent",
+        trace_start_index,
+        require_observed_parent=True,
     )
 
 
