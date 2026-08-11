@@ -5,9 +5,11 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -38,5 +40,11 @@ func TestRunActionCancellationIsBounded(t *testing.T) {
 	}
 	if duration > helperWaitDelay+time.Second {
 		t.Fatalf("runAction() took %s after cancellation", duration)
+	}
+}
+
+func TestNormalizeProcessGroupKillErrorReportsFinishedProcess(t *testing.T) {
+	if err := normalizeProcessGroupKillError(syscall.ESRCH); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("normalizeProcessGroupKillError() error = %v, want %v", err, os.ErrProcessDone)
 	}
 }

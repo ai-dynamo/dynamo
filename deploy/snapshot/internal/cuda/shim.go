@@ -2,7 +2,9 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -63,7 +65,7 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
 	}
 	cmd.WaitDelay = helperWaitDelay
 	details := snapshotruntime.ProcessDetails{
@@ -104,4 +106,11 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		"output", out,
 	)
 	return nil
+}
+
+func normalizeProcessGroupKillError(err error) error {
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
 }
