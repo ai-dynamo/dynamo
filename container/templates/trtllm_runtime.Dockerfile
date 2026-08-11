@@ -79,7 +79,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
-    rm -f /usr/local/bin/etcd && \
+    rm -f \
+        /usr/local/bin/etcd \
+        /usr/local/bin/etcdctl \
+        /usr/local/bin/etcdutl && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
@@ -285,8 +288,8 @@ CMD ["/bin/bash"]
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
-# without this, upstream's /workspace, /home/ubuntu, single-file
-# /usr/local/bin/etcd, and preinstalled opencv (cv2/ + vendored
+# without this, upstream's /workspace, /home/ubuntu, standalone
+# /usr/local/bin/etcd* tools, and preinstalled opencv (cv2/ + vendored
 # opencv_python_headless.libs/ + dist-info) would leak alongside our content.
 # Keep this list in sync with any deletion RUNs in the stages above.
 #
@@ -296,7 +299,10 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # replaces paths that match, so without dropping the old tree first, the base
 # image's 2.1.0 libraries — the ones carrying h264/hevc/aac — would ship
 # alongside the upgraded ones and the upgrade would buy nothing.
-RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
+RUN rm -rf /workspace /home/ubuntu \
+    /usr/local/bin/etcd \
+    /usr/local/bin/etcdctl \
+    /usr/local/bin/etcdutl \
     /usr/local/lib/python3.12/dist-packages/cv2 \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
