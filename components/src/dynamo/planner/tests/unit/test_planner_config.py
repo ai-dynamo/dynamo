@@ -133,6 +133,64 @@ def test_all_fields_work():
     assert config.throughput_adjustment_interval_seconds == 60
 
 
+def test_component_min_endpoints_inherit_legacy_default():
+    config = PlannerConfig(namespace="test-ns", mode="disagg", min_endpoint=2)
+
+    assert config.effective_prefill_min_endpoint == 2
+    assert config.effective_decode_min_endpoint == 2
+    assert config.active_min_endpoints() == (2, 2)
+    assert config.control_api_port == 9086
+
+
+def test_component_min_endpoints_override_independently():
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="disagg",
+        min_endpoint=2,
+        prefill_min_endpoint=3,
+        decode_min_endpoint=4,
+        control_api_port=0,
+    )
+
+    assert config.active_min_endpoints() == (3, 4)
+    assert config.control_api_port == 0
+
+
+@pytest.mark.parametrize(
+    "mode,field",
+    [
+        ("prefill", "decode_min_endpoint"),
+        ("decode", "prefill_min_endpoint"),
+        ("agg", "prefill_min_endpoint"),
+        ("agg", "decode_min_endpoint"),
+    ],
+)
+def test_component_min_endpoints_reject_inactive_static_fields(mode, field):
+    with pytest.raises(ValidationError, match=field):
+        PlannerConfig(namespace="test-ns", mode=mode, **{field: 2})
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("min_endpoint", 0),
+        ("prefill_min_endpoint", 0),
+        ("decode_min_endpoint", 0),
+        ("control_api_port", -1),
+        ("control_api_port", 65536),
+    ],
+)
+def test_min_endpoint_and_control_port_ranges(field, value):
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", mode="disagg", **{field: value})
+
+
+def test_agg_active_min_endpoint_uses_legacy_field():
+    config = PlannerConfig(namespace="test-ns", mode="agg", min_endpoint=5)
+
+    assert config.active_min_endpoints() == (None, 5)
+
+
 def test_throughput_metrics_source_default():
     """throughput_metrics_source defaults to 'frontend'."""
     config = PlannerConfig(namespace="test-ns")

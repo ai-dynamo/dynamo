@@ -41,6 +41,15 @@ from dynamo.planner.plugins.types import HoldPolicy
 logger = logging.getLogger(__name__)
 
 
+def resolve_min_endpoint(config: object, component: str) -> int:
+    """Resolve a component floor with legacy ``min_endpoint`` inheritance."""
+
+    field = "prefill_min_endpoint" if component == "prefill" else "decode_min_endpoint"
+    value = getattr(config, field, None)
+    legacy_value = getattr(config, "min_endpoint")
+    return legacy_value if value is None else value
+
+
 def _prometheus_ssl_verify_default() -> bool:
     return os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower() in (
         "1",
@@ -405,7 +414,39 @@ class PlannerConfig(BaseModel):
     ``min_total_gpus`` flag for cross-DGD enforcement; the two are
     orthogonal and can both be set.
     """
-    min_endpoint: int = SLAPlannerDefaults.min_endpoint
+    min_endpoint: int = Field(
+        default=SLAPlannerDefaults.min_endpoint,
+        ge=1,
+        description=(
+            "Legacy endpoint floor. Component-specific minimums inherit this value "
+            "when unset. Aggregated mode always uses this field."
+        ),
+    )
+    prefill_min_endpoint: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_min_endpoint,
+        ge=1,
+        description=(
+            "Minimum prefill endpoints. When unset, inherits min_endpoint. "
+            "Supported in disagg and prefill modes."
+        ),
+    )
+    decode_min_endpoint: Optional[int] = Field(
+        default=SLAPlannerDefaults.decode_min_endpoint,
+        ge=1,
+        description=(
+            "Minimum decode endpoints. When unset, inherits min_endpoint. "
+            "Supported in disagg and decode modes."
+        ),
+    )
+    control_api_port: int = Field(
+        default=SLAPlannerDefaults.control_api_port,
+        ge=0,
+        le=65535,
+        description=(
+            "Port for the localhost-only runtime minimum-endpoint API. "
+            "Set to 0 to disable the API."
+        ),
+    )
 
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
@@ -774,6 +815,19 @@ class PlannerConfig(BaseModel):
         if self.ttft_ms <= 0:
             raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
 
+        if self.mode == "prefill" and self.decode_min_endpoint is not None:
+            raise ValueError("decode_min_endpoint is not supported when mode='prefill'")
+        if self.mode == "decode" and self.prefill_min_endpoint is not None:
+            raise ValueError("prefill_min_endpoint is not supported when mode='decode'")
+        if self.mode == "agg" and (
+            self.prefill_min_endpoint is not None
+            or self.decode_min_endpoint is not None
+        ):
+            raise ValueError(
+                "prefill_min_endpoint and decode_min_endpoint are not supported "
+                "when mode='agg'; use min_endpoint"
+            )
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)
@@ -1008,6 +1062,30 @@ class PlannerConfig(BaseModel):
 
     def scaling_enabled(self) -> bool:
         return self.enable_throughput_scaling or self.enable_load_scaling
+
+    @property
+    def effective_prefill_min_endpoint(self) -> int:
+        """Resolved prefill floor after applying legacy inheritance."""
+
+        return resolve_min_endpoint(self, "prefill")
+
+    @property
+    def effective_decode_min_endpoint(self) -> int:
+        """Resolved decode floor after applying legacy inheritance."""
+
+        return resolve_min_endpoint(self, "decode")
+
+    def active_min_endpoints(self) -> tuple[Optional[int], Optional[int]]:
+        """Return effective ``(prefill, decode)`` floors for the active mode."""
+
+        if self.mode == "prefill":
+            return self.effective_prefill_min_endpoint, None
+        if self.mode in ("decode", "agg"):
+            return None, self.effective_decode_min_endpoint
+        return (
+            self.effective_prefill_min_endpoint,
+            self.effective_decode_min_endpoint,
+        )
 
 
 if __name__ == "__main__":

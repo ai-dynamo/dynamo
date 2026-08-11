@@ -34,7 +34,11 @@ class BasePlannerDefaults:
     # See dynamo.planner.core.budget.proportional_clamp_pair for the
     # tolerance band semantics.
     min_gpu_budget = -1
-    min_endpoint = 1  # applies to both decode and prefill
+    min_endpoint = 1  # legacy shared floor for decode and prefill
+    prefill_min_endpoint = None
+    decode_min_endpoint = None
+    # Localhost-only runtime configuration API (0 disables).
+    control_api_port = 9086
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
     # Port for exposing planner's own metrics (0 means disabled)

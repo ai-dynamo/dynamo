@@ -57,6 +57,8 @@ spec:
   # features:
   #   planner:
   #     min_endpoint: 2
+  #     prefill_min_endpoint: 2
+  #     decode_min_endpoint: 3
   #   mocker:
   #     enabled: false
 

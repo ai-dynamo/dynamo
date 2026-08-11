@@ -107,11 +107,13 @@ Whatever target you choose, a few knobs bound what the Planner is allowed to do.
 
 | Field | Default | What it protects |
 |---|---|---|
-| `min_endpoint` | `1` | Floor on replicas per worker type. Raise it above your steady-state traffic floor so the Planner never scales below what you always need. |
+| `min_endpoint` | `1` | Legacy shared replica floor and the floor for aggregated mode. |
+| `prefill_min_endpoint` | `null` | Prefill replica floor for disaggregated or prefill-only mode; inherits `min_endpoint` when unset. |
+| `decode_min_endpoint` | `null` | Decode replica floor for disaggregated or decode-only mode; inherits `min_endpoint` when unset. |
 | `max_gpu_budget` | `8` | Ceiling on total GPUs the Planner may allocate. Your cost cap — scaling never exceeds it. |
 | `load_scaling_down_sensitivity` | `80` | How eagerly load-based scaling removes replicas (0 = never, 100 = aggressive). Lower it to scale down less often. |
 
-`min_endpoint` and `load_scaling_down_sensitivity` matter most because of how scale-down works: when the Planner removes a worker, it terminates it **without draining in-flight requests**, so requests mid-prefill on that worker fail. In disaggregated deployments this can also fail decode workers waiting on a KV-cache transfer from the terminated prefill worker. To reduce the blast radius, set `min_endpoint` above your steady-state floor and lower `load_scaling_down_sensitivity` so scale-down fires less often. See [Current Limitations](../../developer-guide/knowledge-base/modular-components/planner/overview.md#current-limitations) for the full caveat.
+The endpoint floors and `load_scaling_down_sensitivity` matter most because of how scale-down works: when the Planner removes a worker, it terminates it **without draining in-flight requests**, so requests mid-prefill on that worker fail. In disaggregated deployments this can also fail decode workers waiting on a KV-cache transfer from the terminated prefill worker. To reduce the blast radius, set each component floor above its steady-state requirement and lower `load_scaling_down_sensitivity` so scale-down fires less often. See [Current Limitations](../../developer-guide/knowledge-base/modular-components/planner/overview.md#current-limitations) for the full caveat.
 
 </Step>
 <Step title="Validate before you scale for real" id="validate-before-you-scale-for-real">
