@@ -180,7 +180,8 @@ pub use offline::{
     WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState, canonical_engine_pool_metadata,
     canonical_router_metadata, canonical_topology, simulate_controlled_aggregated,
     simulate_controlled_aggregated_kv_router_with_options,
-    simulate_controlled_aggregated_with_options, with_runtime_evidence,
+    simulate_controlled_aggregated_with_options,
+    simulate_controlled_heterogeneous_aggregated_kv_router_with_options, with_runtime_evidence,
 };
 pub use validate::validate_replay_args_mode;
 

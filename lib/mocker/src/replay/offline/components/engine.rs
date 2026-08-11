@@ -179,6 +179,60 @@ where
         component
     }
 
+    /// Build one logical worker from each supplied engine configuration.
+    ///
+    /// Unlike [`Self::new_ranked`], each worker may use a different DP width,
+    /// scheduler limit, KV capacity, and performance model. Stable scheduler
+    /// IDs are assigned densely across the resulting heterogeneous groups.
+    pub(in crate::replay::offline) fn new_heterogeneous_ranked(
+        stage: SimulationWorkerStage,
+        pass_mode: EnginePassMode,
+        worker_args: Vec<MockEngineArgs>,
+    ) -> Self {
+        debug_assert!(!worker_args.is_empty());
+        let default_args = worker_args[0].clone();
+        let total_ranks = worker_args
+            .iter()
+            .map(|args| args.dp_size.max(1) as usize)
+            .sum();
+        let mut workers = Vec::with_capacity(total_ranks);
+        let mut worker_groups = Vec::with_capacity(worker_args.len());
+        for (worker_id, args) in worker_args.into_iter().enumerate() {
+            let dp_size = args.dp_size.max(1) as usize;
+            let mut rank_ids = Vec::with_capacity(dp_size);
+            for dp_rank in 0..dp_size {
+                let rank_id = workers.len();
+                workers.push(Some(OfflineWorkerState::new_with_rank(
+                    rank_id,
+                    worker_id as u64,
+                    dp_rank as u32,
+                    args.clone(),
+                    Observation::CAPTURE_RAW,
+                )));
+                rank_ids.push(rank_id);
+            }
+            worker_groups.push(Some(rank_ids));
+        }
+        let live_group_count = worker_groups.len();
+        let mut component = Self {
+            stage,
+            pass_mode,
+            workers,
+            worker_groups,
+            live_group_count,
+            total_in_flight: 0,
+            ready_groups: BTreeSet::new(),
+            deferred_ready_groups: BTreeSet::new(),
+            pending_removal: BTreeSet::new(),
+            pending_startup: BTreeSet::new(),
+            args: default_args,
+            capture_raw: Observation::CAPTURE_RAW,
+            observation: PhantomData,
+        };
+        component.refresh_all_groups();
+        component
+    }
+
     /// Set the engine args used when adding workers dynamically.
     pub(in crate::replay::offline) fn set_scaling_args(
         &mut self,

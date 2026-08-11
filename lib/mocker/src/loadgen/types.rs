@@ -259,7 +259,22 @@ impl ReplayRequestPayload {
         }
     }
 
-    pub(crate) fn routing_constraints(&self) -> &RoutingConstraints {
+    /// Routing constraints attached to this replay request.
+    pub fn routing_constraints(&self) -> &RoutingConstraints {
+        match self {
+            Self::Materialized {
+                routing_constraints,
+                ..
+            }
+            | Self::Deferred {
+                routing_constraints,
+                ..
+            } => routing_constraints,
+        }
+    }
+
+    /// Mutable routing constraints for an external controlled-replay source.
+    pub fn routing_constraints_mut(&mut self) -> &mut RoutingConstraints {
         match self {
             Self::Materialized {
                 routing_constraints,

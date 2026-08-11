@@ -32,6 +32,7 @@ pub use controlled::{
     ControlledReplayOptions, ReplayWorkSource, ReplayWorkSourceContext, ReplayWorkSubmission,
     simulate_controlled_aggregated, simulate_controlled_aggregated_kv_router_with_options,
     simulate_controlled_aggregated_with_options,
+    simulate_controlled_heterogeneous_aggregated_kv_router_with_options,
 };
 pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{

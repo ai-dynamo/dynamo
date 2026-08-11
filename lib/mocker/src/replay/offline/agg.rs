@@ -48,7 +48,7 @@ use anyhow::bail;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use uuid::Uuid;
 
 fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
@@ -266,6 +266,106 @@ where
                 Vec::new();
                 num_workers.saturating_mul(args.dp_size.max(1) as usize)
             ],
+            #[cfg(test)]
+            stepped: false,
+        })
+    }
+
+    pub(in crate::replay::offline) fn new_composed_heterogeneous(
+        worker_args: &[MockEngineArgs],
+        worker_taints: &[HashSet<String>],
+        admission: Admission,
+        create_placement: impl FnOnce(
+            &[MockEngineArgs],
+            &[HashSet<String>],
+            Vec<WorkerTopology>,
+        ) -> anyhow::Result<PlacementPolicyImpl>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !worker_args.is_empty(),
+            "heterogeneous replay requires at least one worker"
+        );
+        anyhow::ensure!(
+            worker_taints.is_empty() || worker_taints.len() == worker_args.len(),
+            "worker_taints must be empty or contain exactly one entry per replay worker: got {} for {} workers",
+            worker_taints.len(),
+            worker_args.len(),
+        );
+        let worker_args = worker_args
+            .iter()
+            .cloned()
+            .map(MockEngineArgs::normalized)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let block_size = worker_args[0].block_size;
+        let gpus_per_worker = worker_args[0].aic_gpus_per_worker();
+        for (worker_id, args) in worker_args.iter().enumerate() {
+            anyhow::ensure!(
+                args.block_size == block_size,
+                "heterogeneous worker {worker_id} uses block_size {}, expected {block_size}",
+                args.block_size,
+            );
+            anyhow::ensure!(
+                args.aic_gpus_per_worker() == gpus_per_worker,
+                "heterogeneous worker {worker_id} uses {} GPUs, expected {gpus_per_worker}",
+                args.aic_gpus_per_worker(),
+            );
+            anyhow::ensure!(
+                args.worker_max_num_seqs.is_empty(),
+                "heterogeneous worker {worker_id} must set max_num_seqs directly"
+            );
+            anyhow::ensure!(
+                args.worker_taints.is_empty(),
+                "heterogeneous worker {worker_id} must provide taints to the replay entrypoint"
+            );
+        }
+        let progress = ReplayProgress::new(
+            CoreAdmissionSource::total_requests(&admission),
+            "offline replay",
+        );
+        #[cfg(test)]
+        let scheduler_count: usize = worker_args
+            .iter()
+            .map(|args| args.dp_size.max(1) as usize)
+            .sum();
+        let dp_size = worker_args
+            .iter()
+            .map(|args| args.dp_size.max(1))
+            .max()
+            .unwrap_or(1);
+        let mut engine = EngineComponent::<Observation>::new_heterogeneous_ranked(
+            SimulationWorkerStage::Aggregated,
+            EnginePassMode::Visible,
+            worker_args.clone(),
+        );
+        engine.set_scaling_args(worker_args[0].clone(), Observation::CAPTURE_RAW);
+        let placement = create_placement(&worker_args, worker_taints, engine.active_topology())?;
+
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(0, gpus_per_worker);
+
+        Ok(Self {
+            now_ms: 0.0,
+            dp_size,
+            next_event_seq: 0,
+            next_scaling_tick_ordinal: 0,
+            admission,
+            requests: FxHashMap::default(),
+            engine,
+            collector,
+            events: BinaryHeap::new(),
+            placement,
+            progress,
+            #[cfg(test)]
+            stats: AggRuntimeStats::default(),
+            #[cfg(not(test))]
+            stats: AggRuntimeStats,
+            fpm_buffer: LatestFpmBuffer::default(),
+            traffic: TrafficAccumulator::new(),
+            max_sim_time_ms: None,
+            scaling_policy: None,
+            collect_fpm: false,
+            #[cfg(test)]
+            worker_active_requests: vec![Vec::new(); scheduler_count],
             #[cfg(test)]
             stepped: false,
         })
