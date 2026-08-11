@@ -91,6 +91,9 @@ def _make_handler(
         )
 
     handler.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    # register_engine_routes() wires the model-taint route from generate_endpoint;
+    # None is fine here since the route's handler is never invoked in these tests.
+    handler.generate_endpoint = None
     return handler
 
 
