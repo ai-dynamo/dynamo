@@ -128,19 +128,11 @@ title: 请求迁移
   - 标签：
     - `model`：正在服务的模型名称
     - `migration_type`：可以是 `new_request`（初始连接失败）或 `ongoing_request`（stream 中途断开）
-- `dynamo_frontend_model_migration_success_total`：跟踪成功在其他 worker 上恢复的迁移事件数
+- `dynamo_frontend_model_migration_duration_seconds`：从识别可迁移故障到替代响应流建立、迁移失败或请求取消的耗时直方图；通过直方图的 `_count` 序列按结果统计已完成的迁移事件
   - 标签：
     - `model`：正在服务的模型名称
     - `migration_type`：迁移事件类型
-- `dynamo_frontend_model_migration_failure_total`：跟踪未能恢复的迁移事件数
-  - 标签：
-    - `model`：正在服务的模型名称
-    - `migration_type`：迁移事件类型
-- `dynamo_frontend_model_migration_duration_seconds`：从识别可迁移故障到替代响应流建立或迁移终止的耗时直方图
-  - 标签：
-    - `model`：正在服务的模型名称
-    - `migration_type`：迁移事件类型
-    - `outcome`：可以是 `success`（已恢复）或 `failure`（未恢复）
+    - `outcome`：可以是 `success`（已恢复）、`failure`（未恢复）或 `cancelled`（请求已取消）
 - `dynamo_frontend_model_migration_max_seq_len_exceeded_total`：跟踪因为序列长度超过已配置的 `--migration-max-seq-len` 而禁用迁移的次数的计数器
   - 标签：
     - `model`：正在服务的模型名称
@@ -149,9 +141,8 @@ title: 请求迁移
 ```text
 dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
-dynamo_frontend_model_migration_success_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 2
-dynamo_frontend_model_migration_failure_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
 dynamo_frontend_model_migration_duration_seconds_count{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B",outcome="success"} 2
+dynamo_frontend_model_migration_duration_seconds_count{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B",outcome="failure"} 1
 dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2
 ```
 

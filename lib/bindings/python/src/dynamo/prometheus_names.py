@@ -143,11 +143,6 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
-    # Total number of request migrations that recovered on another worker
-    MODEL_MIGRATION_SUCCESS_TOTAL = "model_migration_success_total"
-    # Total number of request migrations that did not recover
-    MODEL_MIGRATION_FAILURE_TOTAL = "model_migration_failure_total"
-
     MODEL_MIGRATION_DURATION_SECONDS = "model_migration_duration_seconds"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
