@@ -118,7 +118,7 @@ packages:
   # etcd — coordination store, downloaded as a release binary in dynamo_base and
   # placed at /usr/local/bin (no apt metadata).
   - name: etcd
-    version: v3.5.30
+    version: v3.5.33
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
@@ -133,7 +133,7 @@ packages:
   # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
   # may not survive into the final runtime layer attribution reliably).
   - name: nats-server
-    version: v2.12.12
+    version: v2.12.14
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:
