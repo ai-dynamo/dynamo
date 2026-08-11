@@ -3473,7 +3473,9 @@ def test_decode_ctx1_point_is_clamped_and_recorded_at_measured_coordinate():
     assert stub._bench_current_point.benchmark_id == 6
 
 
-def test_steady_step_dispatch_then_wait_then_save():
+def test_steady_step_dispatches_after_local_deadline_then_waits_then_saves():
+    import time
+
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_drain_pending = False
     stub._bench_active_req_ids = {"__bench_0"}
@@ -3481,7 +3483,10 @@ def test_steady_step_dispatch_then_wait_then_save():
     stub._bench_extra_steps_left = 1
     stub._bench_expected_fpms = 2
     stub._bench_decode_stage = _DecodePointStage.READY
-    stub._bench_point_deadline = 0.0
+    # The point deadline is rank-local. Once admission has completed, it must
+    # not let one ADP rank skip the measurement READY barrier while its peers
+    # enter it.
+    stub._bench_point_deadline = time.monotonic() - 1.0
     stub._bench_current_point = BenchmarkPoint(point_type="decode", batch_size=1)
     stub._bench_sync_pending = False
     steady_output = SimpleNamespace(total_num_scheduled_tokens=1)
@@ -3508,7 +3513,7 @@ def test_steady_step_dispatch_then_wait_then_save():
     assert stub._bench_drain_pending is True
 
 
-def test_steady_step_unavailable_fails_before_the_adp_measurement_barrier():
+def test_steady_step_unavailable_fails_even_after_the_local_deadline():
     import time
 
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
@@ -3518,7 +3523,7 @@ def test_steady_step_unavailable_fails_before_the_adp_measurement_barrier():
     stub._bench_extra_steps_left = 1
     stub._bench_expected_fpms = 2
     stub._bench_decode_stage = _DecodePointStage.READY
-    stub._bench_point_deadline = 0.0  # no deadline yet -> not timed out
+    stub._bench_point_deadline = time.monotonic() - 1.0
     stub._bench_make_steady_step = MagicMock(return_value=None)
     stub._bench_save_current_point = MagicMock()
 
@@ -3529,14 +3534,7 @@ def test_steady_step_unavailable_fails_before_the_adp_measurement_barrier():
     stub._bench_save_current_point.assert_not_called()
     assert stub._bench_extra_steps_left == 1
 
-    # Once the deadline passes, the point flows into the normal save path
-    # (where the admission-only FPM fails shape validation and the group
-    # skips together).
-    stub._bench_point_deadline = time.monotonic() - 1.0
-    stub._bench_cleanup_requests = MagicMock()
-    stub._bench_transition_to_timeout_done = MagicMock(return_value=False)
-    assert InstrumentedScheduler._bench_step_decode(stub) is None
-    stub._bench_save_current_point.assert_called_once_with()
+    stub._bench_save_current_point.assert_not_called()
 
 
 def test_steady_step_rejects_a_partial_batch_before_dispatch():

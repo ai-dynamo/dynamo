@@ -3729,10 +3729,13 @@ class InstrumentedScheduler(AsyncScheduler):
             pass  # fall through to inject next point
 
         elif self._bench_active_req_ids:
+            # The point deadline is rank-local. READY must unconditionally
+            # proceed to the re-armed ADP barrier; otherwise one rank can send
+            # a result while a peer sends ready. Soft timeouts stop the sweep
+            # at the next synchronized point boundary instead.
             if (
                 self._bench_decode_stage == _DecodePointStage.READY
                 and getattr(self, "_bench_extra_steps_left", 0) > 0
-                and not self._bench_point_result_timed_out()
             ):
                 steady = self._bench_make_steady_step()
                 if steady is not None:
