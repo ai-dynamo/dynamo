@@ -117,6 +117,21 @@ def test_build_sampling_params_forces_delta_token_mode():
     assert sampling_params.output_kind == RequestOutputKind.DELTA
 
 
+def test_build_sampling_params_allows_internal_final_only_mode():
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": {"dynamo_internal_final_only": True},
+    }
+
+    sampling_params = build_sampling_params(request, default_sampling_params={})
+
+    assert sampling_params.detokenize is False
+    assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
+
+
 @pytest.mark.asyncio
 async def test_generate_tokens_passes_delta_chunks_without_cumulative_slicing():
     responses = [

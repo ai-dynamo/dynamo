@@ -157,6 +157,19 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--receive-custom-encoder-artifacts",
+            env_var="DYN_RECEIVE_CUSTOM_ENCODER_ARTIFACTS",
+            default=False,
+            help=(
+                "Receive precomputed CustomEncoder artifacts from encoder_result "
+                "using --embedding-transfer-mode instead of loading and running "
+                "the CustomEncoder in this worker. Requires --custom-encoder-class "
+                "to select and validate the decoder adapter."
+            ),
+        )
+
         add_argument(
             g,
             flag_name="--embedding-transfer-mode",
@@ -445,6 +458,7 @@ class DynamoVllmConfig(ConfigBase):
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
+    receive_custom_encoder_artifacts: bool = False
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
@@ -621,6 +635,11 @@ class DynamoVllmConfig(ConfigBase):
         --use-vllm-tokenizer text mode where it is never invoked.
         """
         if not self.custom_encoder_class:
+            if self.receive_custom_encoder_artifacts:
+                raise ValueError(
+                    "--receive-custom-encoder-artifacts requires "
+                    "--custom-encoder-class."
+                )
             return
         if not self.enable_multimodal:
             raise ValueError(

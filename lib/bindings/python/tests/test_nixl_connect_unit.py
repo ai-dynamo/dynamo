@@ -132,3 +132,20 @@ async def test_wait_for_completion_raises_on_errored_status(testable_active_op):
 
     with pytest.raises(RuntimeError, match=r"ERRORED|errored|error"):
         await op.wait_for_completion()
+
+
+def test_connection_forwards_progress_thread_setting(monkeypatch):
+    from dynamo import nixl_connect
+
+    agent_config = MagicMock(name="agent-config")
+    agent = MagicMock(name="agent")
+    config_factory = MagicMock(return_value=agent_config)
+    agent_factory = MagicMock(return_value=agent)
+    monkeypatch.setattr(nixl_connect.nixl_api, "nixl_agent_config", config_factory)
+    monkeypatch.setattr(nixl_connect.nixl_api, "nixl_agent", agent_factory)
+
+    connector = nixl_connect.Connector(enable_progress_thread=False)
+    connection = nixl_connect.Connection(connector, 1)
+
+    config_factory.assert_called_once_with(enable_prog_thread=False)
+    agent_factory.assert_called_once_with(connection.name, agent_config)

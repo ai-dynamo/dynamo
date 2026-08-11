@@ -354,3 +354,10 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
+
+    def test_receive_artifacts_requires_custom_encoder_class(self):
+        config = create_config()
+        config.custom_encoder_class = None
+        config.receive_custom_encoder_artifacts = True
+        with pytest.raises(ValueError, match="custom-encoder-class"):
+            config._validate_custom_encoder()

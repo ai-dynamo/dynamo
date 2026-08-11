@@ -15,6 +15,7 @@ SERVED_MODEL_NAME="${DYN_SERVED_MODEL_NAME:-$MODEL}"
 DECODER_MODEL_NAME="${DYN_DECODER_MODEL_NAME:-${SERVED_MODEL_NAME}-remote-vllm}"
 DECODER_COMPONENT="${DYN_DECODER_COMPONENT:-remote-vllm}"
 ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder}"
+EMBEDDING_TRANSFER_MODE="${DYN_EMBEDDING_TRANSFER_MODE:-nixl-read}"
 CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$REPO_ROOT/examples/custom_encoder/templates/qwen_vl.jinja}"
 WORKER_GPU="${DYN_WORKER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -26,6 +27,7 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "User Ensemble Worker with Remote vLLM" "$MODEL" "$HTTP_PORT" \
     "Worker GPU:      $WORKER_GPU" \
     "Encoder:         $ENCODER_CLASS" \
+    "Artifact transfer: $EMBEDDING_TRANSFER_MODE" \
     "Decoder endpoint: dynamo.$DECODER_COMPONENT.generate"
 
 export DYN_REQUEST_PLANE=tcp
@@ -44,6 +46,8 @@ python -m dynamo.vllm \
     --endpoint "dyn://dynamo.$DECODER_COMPONENT.generate" \
     --endpoint-types none \
     --custom-encoder-class "$ENCODER_CLASS" \
+    --receive-custom-encoder-artifacts \
+    --embedding-transfer-mode "$EMBEDDING_TRANSFER_MODE" \
     --enable-multimodal \
     --enable-prompt-embeds \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -57,6 +61,7 @@ python -m examples.custom_backend.user_ensemble.worker \
     --model "$MODEL" \
     --served-model-name "$SERVED_MODEL_NAME" \
     --encoder-class "$ENCODER_CLASS" \
+    --embedding-transfer-mode "$EMBEDDING_TRANSFER_MODE" \
     --custom-jinja-template "$CUSTOM_JINJA_TEMPLATE" \
     --max-model-len "$MAX_MODEL_LEN" \
     --decoder-component "$DECODER_COMPONENT" \

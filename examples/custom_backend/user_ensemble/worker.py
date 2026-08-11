@@ -23,10 +23,15 @@ from dynamo.common.backend import (
     WorkerConfig,
 )
 from dynamo.common.backend.run import run
+from dynamo.common.constants import EmbeddingTransferMode
+from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingSender
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.constants import INTERNAL_FINAL_ONLY_EXTRA_ARG
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
+    create_custom_encoder_artifact_sender,
+    export_custom_encoder_artifacts,
 )
 from dynamo.vllm.multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -134,6 +139,7 @@ class UserEnsembleEngine(LLMEngine):
         decoder_model_name: str,
         decoder_connect_timeout: float,
         max_model_len: int,
+        embedding_transfer_mode: EmbeddingTransferMode,
         classifier: Classifier | None = None,
     ) -> None:
         self.model_name = model_name
@@ -146,11 +152,13 @@ class UserEnsembleEngine(LLMEngine):
         self._decoder_model_name = decoder_model_name
         self._decoder_connect_timeout = decoder_connect_timeout
         self._max_model_len = max_model_len
+        self._embedding_transfer_mode = embedding_transfer_mode
         self._classifier = classifier or DummyClassifier()
 
         self._decoder_runtime: Runtime | None = None
         self._decoder_client: DecoderClient | None = None
         self._encoder: Encoder | None = None
+        self._artifact_sender: AbstractEmbeddingSender | None = None
 
     @classmethod
     async def from_args(
@@ -176,6 +184,11 @@ class UserEnsembleEngine(LLMEngine):
         parser.add_argument("--custom-jinja-template", default=None)
         parser.add_argument("--encoder-class", required=True)
         parser.add_argument("--max-model-len", type=int, default=4096)
+        parser.add_argument(
+            "--embedding-transfer-mode",
+            choices=[mode.value for mode in EmbeddingTransferMode],
+            default=EmbeddingTransferMode.NIXL_READ.value,
+        )
         parser.add_argument("--decoder-namespace", default=None)
         parser.add_argument("--decoder-component", default="remote-vllm")
         parser.add_argument("--decoder-endpoint", default="generate")
@@ -214,6 +227,7 @@ class UserEnsembleEngine(LLMEngine):
             decoder_model_name=decoder_model_name,
             decoder_connect_timeout=args.decoder_connect_timeout,
             max_model_len=args.max_model_len,
+            embedding_transfer_mode=EmbeddingTransferMode(args.embedding_transfer_mode),
         )
         worker_config = WorkerConfig(
             namespace=args.namespace,
@@ -236,6 +250,9 @@ class UserEnsembleEngine(LLMEngine):
         encoder = AsyncVisionEncoder(backend, name="ensemble-vision-encoder")
         self._encoder = encoder
         encoder.load(self.model_name)
+        self._artifact_sender = create_custom_encoder_artifact_sender(
+            self._embedding_transfer_mode
+        )
 
         runtime = DistributedRuntime(
             asyncio.get_running_loop(),
@@ -265,20 +282,29 @@ class UserEnsembleEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        encoder, decoder_client = self._request_resources()
+        encoder, decoder_client, artifact_sender = self._request_resources()
         image_url = self._single_image_url(request)
         artifacts = await encoder.encode([image_url])
+        encoder_result, transfer_completions = await export_custom_encoder_artifacts(
+            artifact_sender, artifacts
+        )
 
         classification = asyncio.create_task(self._classifier.classify(artifacts))
         decoding = asyncio.create_task(
-            self._generate_remote_final(decoder_client, request, context)
+            self._generate_remote_final(
+                decoder_client, request, encoder_result, context
+            )
         )
+        transfers = asyncio.gather(*transfer_completions)
         try:
-            await asyncio.gather(classification, decoding)
+            await asyncio.gather(classification, decoding, transfers)
         except BaseException:
             classification.cancel()
             decoding.cancel()
-            await asyncio.gather(classification, decoding, return_exceptions=True)
+            transfers.cancel()
+            await asyncio.gather(
+                classification, decoding, transfers, return_exceptions=True
+            )
             raise
 
         decoded = decoding.result()
@@ -293,6 +319,7 @@ class UserEnsembleEngine(LLMEngine):
         encoder = self._encoder
         runtime = self._decoder_runtime
         self._encoder = None
+        self._artifact_sender = None
         self._decoder_client = None
         self._decoder_runtime = None
 
@@ -305,11 +332,19 @@ class UserEnsembleEngine(LLMEngine):
         self,
         client: DecoderClient,
         request: GenerateRequest,
+        encoder_result: dict[str, Any],
         context: Context,
     ) -> GenerateChunk:
         self._validate_output_options(request)
         remote_request = cast(GenerateRequest, dict(request))
         remote_request["model"] = self._decoder_model_name
+        remote_request["encoder_result"] = encoder_result
+        extra_args = dict(remote_request.get("extra_args") or {})
+        extra_args[INTERNAL_FINAL_ONLY_EXTRA_ARG] = True
+        remote_request["extra_args"] = extra_args
+        remote_request.pop("multi_modal_data", None)
+        remote_request.pop("mm_processor_kwargs", None)
+        remote_request.pop("mm_routing_info", None)
 
         token_ids: list[int] = []
         terminal: GenerateChunk | None = None
@@ -361,10 +396,16 @@ class UserEnsembleEngine(LLMEngine):
             context.stop_generating()
             raise
 
-    def _request_resources(self) -> tuple[Encoder, DecoderClient]:
-        if self._encoder is None or self._decoder_client is None:
+    def _request_resources(
+        self,
+    ) -> tuple[Encoder, DecoderClient, AbstractEmbeddingSender]:
+        if (
+            self._encoder is None
+            or self._decoder_client is None
+            or self._artifact_sender is None
+        ):
             raise RuntimeError("UserEnsembleEngine.generate() called before start()")
-        return self._encoder, self._decoder_client
+        return self._encoder, self._decoder_client, self._artifact_sender
 
     @staticmethod
     def _validate_output_options(request: GenerateRequest) -> None:

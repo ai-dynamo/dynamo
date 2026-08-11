@@ -51,6 +51,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.embedding_transfer import (
+    AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
@@ -87,7 +88,11 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import (
+    INTERNAL_FINAL_ONLY_EXTRA_ARG,
+    DisaggregationMode,
+    EmbeddingTransferMode,
+)
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -95,6 +100,9 @@ from .multimodal_utils.custom_encoder import (
     CustomEncoderAdapter,
     VisionEncoderBackend,
     create_custom_encoder_adapter,
+    create_custom_encoder_artifact_receiver,
+    has_transferred_custom_encoder_artifacts,
+    receive_custom_encoder_artifacts,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
@@ -114,6 +122,7 @@ BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_FINAL_ONLY_REQUEST_OUTPUT_KIND = RequestOutputKind.FINAL_ONLY
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
@@ -808,11 +817,16 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
-    # Dynamo's internal token path consumes disjoint token deltas. This mirrors
-    # the SGLang integration and lets vLLM's stream_interval gate reduce backend
-    # bridge pressure before chunks cross into Dynamo.
+    # Dynamo's internal token path normally consumes disjoint token deltas. An
+    # internal aggregate caller may opt into one terminal response when it owns
+    # accumulation and does not expose the nested stream directly.
     sampling_params.detokenize = False
-    sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
+    extra_args = request.get("extra_args") or {}
+    sampling_params.output_kind = (
+        _FINAL_ONLY_REQUEST_OUTPUT_KIND
+        if extra_args.get(INTERNAL_FINAL_ONLY_EXTRA_ARG) is True
+        else _DELTA_REQUEST_OUTPUT_KIND
+    )
 
     return sampling_params
 
@@ -1061,6 +1075,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # the actor thread) — see _load_custom_encoder below for why.
         self._custom_encoder: Optional[AsyncVisionEncoder] = None
         self._custom_encoder_adapter: Optional[CustomEncoderAdapter] = None
+        self._custom_encoder_artifact_receiver: Optional[
+            AbstractEmbeddingReceiver
+        ] = None
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -1149,6 +1166,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self.model_config,
             config.engine_args,
         )
+        if config.receive_custom_encoder_artifacts:
+            self._custom_encoder_adapter = adapter
+            self._custom_encoder_artifact_receiver = create_custom_encoder_artifact_receiver(
+                config.embedding_transfer_mode  # type: ignore[arg-type]
+            )
+            logger.info(
+                "Configured transferred CustomEncoder artifacts from %s with %s",
+                custom_encoder_class,
+                type(adapter).__name__,
+            )
+            return
         encoder = AsyncVisionEncoder(backend)
         encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
@@ -2580,7 +2608,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # GC would only end the thread, never call close().
             self._custom_encoder.shutdown()
             self._custom_encoder = None
-            self._custom_encoder_adapter = None
+        self._custom_encoder_adapter = None
+        self._custom_encoder_artifact_receiver = None
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()
@@ -3037,23 +3066,43 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
-        The CustomEncoder consumes image URLs directly and emits artifacts. Returns
+        The CustomEncoder either consumes image URLs locally or imports artifacts
+        from ``encoder_result``. Returns
         ``(prepared_prompt, error)``:
         - images present: ``(prepared_prompt, None)``,
         - no image content: ``(None, None)`` — text-only request, nothing
           to assemble or extract (non-image modalities are rejected above),
         - failure: ``(None, error_dict)`` for the caller to yield.
         """
-        # Internal invariant: callers guard on `self._custom_encoder is not None`
-        # before reaching here. Use an explicit raise (not assert, which is
-        # stripped under `python -O`) so a future mis-wire fails loudly.
-        if self._custom_encoder is None:
-            raise RuntimeError(
-                "_assemble_custom_encoder_prompt called without a CustomEncoder"
-            )
         if self._custom_encoder_adapter is None:
             raise RuntimeError(
                 "_assemble_custom_encoder_prompt called without an adapter"
+            )
+
+        receiver = self._custom_encoder_artifact_receiver
+        if receiver is not None:
+            received = None
+            try:
+                received = await receive_custom_encoder_artifacts(
+                    receiver, request.get("encoder_result")
+                )
+                prepared = self._custom_encoder_adapter.prepare_prompt(
+                    request.get("token_ids") or [], received.artifacts
+                )
+                return prepared, None
+            except Exception as exc:
+                msg = f"CustomEncoder artifact transfer failed: {exc}"
+                logger.exception("Request %s: %s", request_id, msg)
+                return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            finally:
+                if received is not None:
+                    received.release()
+
+        # Internal invariant: local mode must have loaded the encoder. Use an
+        # explicit raise because asserts are stripped under ``python -O``.
+        if self._custom_encoder is None:
+            raise RuntimeError(
+                "_assemble_custom_encoder_prompt called without a CustomEncoder"
             )
         mm_map = request.get("multi_modal_data") or {}
         # CustomEncoder handles images only. Reject any non-image modality
@@ -3140,12 +3189,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
         has_mm_data = request.get("multi_modal_data") is not None
+        has_custom_encoder_artifacts = has_transferred_custom_encoder_artifacts(request)
         custom_prompt: EmbedsPrompt | TokensPrompt | None = None
 
         if (
             mode == DisaggregationMode.AGGREGATED
-            and self._custom_encoder is not None
-            and has_mm_data
+            and self._custom_encoder_adapter is not None
+            and (has_mm_data or has_custom_encoder_artifacts)
         ):
             # A configured CustomEncoder owns the aggregated image path. Bypass
             # raw-media loading and let its decoder-selected adapter prepare the

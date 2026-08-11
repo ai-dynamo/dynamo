@@ -799,9 +799,17 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
     Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        enable_progress_thread: bool = True,
+        completion_poll_ms: float = 5,
+    ):
         self._nixl_connect = _load_nixl_connect()
-        self.connector = self._nixl_connect.Connector()
+        self.connector = self._nixl_connect.Connector(
+            enable_progress_thread=enable_progress_thread
+        )
+        self.completion_poll_ms = completion_poll_ms
 
     @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
@@ -846,7 +854,9 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
             serialized_request=readable_op.metadata().model_dump(),
         )
-        return request, readable_op.wait_for_completion()
+        return request, readable_op.wait_for_completion(
+            min_poll_ms=self.completion_poll_ms
+        )
 
 
 class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
@@ -861,10 +871,15 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         embedding_hidden_size: int = 8 * 1024,
         max_item_mm_token: int = 1024,
         max_items: int = 1024,
+        enable_progress_thread: bool = True,
+        completion_poll_ms: float = 5,
     ) -> None:
         super().__init__()
         self._nixl_connect = _load_nixl_connect()
-        self.connector = self._nixl_connect.Connector()
+        self.connector = self._nixl_connect.Connector(
+            enable_progress_thread=enable_progress_thread
+        )
+        self.completion_poll_ms = completion_poll_ms
         self.tensor_id_counter = 0
         self.aggregated_op_create_time = 0
         self.aggregated_op_wait_time = 0
@@ -928,7 +943,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             read_op = await self.connector.begin_read(readable_metadata, descriptor)
         with _nvtx.annotate("mm:nixl:wait_completion", color="pink"):
             # Wait for the read operation to complete
-            await read_op.wait_for_completion()
+            await read_op.wait_for_completion(min_poll_ms=self.completion_poll_ms)
         logging.debug(
             f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
         )

@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 pytest.importorskip(
     "dynamo._core.backend",
@@ -20,6 +21,7 @@ pytest.importorskip(
     reason="a full vLLM installation is required by the custom encoder package",
 )
 
+from dynamo.common.multimodal.embedding_transfer import TransferRequest  # noqa: E402
 from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
 from examples.custom_backend.user_ensemble.worker import (  # noqa: E402
     UserEnsembleEngine,
@@ -101,6 +103,27 @@ class _FakeRuntime:
         self.shutdown_calls += 1
 
 
+class _FakeArtifactSender:
+    def __init__(self) -> None:
+        self.tensors: list[torch.Tensor] = []
+
+    async def send_embeddings(
+        self, embeddings: torch.Tensor, stage_embeddings: bool = False
+    ):
+        assert stage_embeddings is True
+        self.tensors.append(embeddings)
+        completion = asyncio.get_running_loop().create_future()
+        completion.set_result(None)
+        return (
+            TransferRequest(
+                embeddings_shape=list(embeddings.shape),
+                embedding_dtype_str=str(embeddings.dtype).removeprefix("torch."),
+                serialized_request={"fake": len(self.tensors)},
+            ),
+            completion,
+        )
+
+
 class _RecordingClassifier:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -119,6 +142,7 @@ def _engine(classifier=None) -> UserEnsembleEngine:
     engine._decoder_model_name = "test-model-remote-vllm"
     engine._classifier = classifier or _RecordingClassifier()
     engine._encoder = None
+    engine._artifact_sender = _FakeArtifactSender()
     engine._decoder_client = None
     engine._decoder_runtime = None
     return engine
@@ -155,7 +179,7 @@ async def _collect(
 
 
 async def test_local_artifacts_feed_classifier_and_remote_deltas_join_on_terminal():
-    artifact = object()
+    artifact = torch.ones((1, 4), dtype=torch.bfloat16)
     artifacts = [artifact]
     classifier = _RecordingClassifier()
     encoder = _FakeEncoder(artifacts)
@@ -188,11 +212,28 @@ async def test_local_artifacts_feed_classifier_and_remote_deltas_join_on_termina
 
     assert encoder.calls == [["data:image/png;base64,image-0"]]
     assert classifier.artifacts is artifacts
+    assert engine._artifact_sender.tensors == artifacts
     assert decoder.contexts == [context]
     assert decoder.requests == [
         {
-            **request,
             "model": "test-model-remote-vllm",
+            "token_ids": [1, 2, 3],
+            "sampling_options": {"n": 1},
+            "stop_conditions": {"max_tokens": 8},
+            "output_options": {},
+            "extra_args": {"dynamo_internal_final_only": True},
+            "encoder_result": {
+                "custom_encoder_artifacts": [
+                    {
+                        "kind": "tensor",
+                        "transfer": {
+                            "embeddings_shape": [1, 4],
+                            "embedding_dtype_str": "bfloat16",
+                            "serialized_request": {"fake": 1},
+                        },
+                    }
+                ]
+            },
         }
     ]
     assert chunks == [
@@ -234,7 +275,7 @@ async def test_classifier_and_remote_decoder_run_concurrently():
             return stream()
 
     engine = _engine(BarrierClassifier())
-    engine._encoder = _FakeEncoder([object()])
+    engine._encoder = _FakeEncoder([torch.ones((1, 4))])
     engine._decoder_client = BarrierDecoder()
 
     [terminal] = await _collect(engine, _request())
@@ -267,7 +308,7 @@ async def test_classifier_failure_cancels_remote_decoder_context():
 
     context = _context()
     engine = _engine(FailingClassifier())
-    engine._encoder = _FakeEncoder([object()])
+    engine._encoder = _FakeEncoder([torch.ones((1, 4))])
     engine._decoder_client = BlockingDecoder()
 
     with pytest.raises(RuntimeError, match="classifier failed"):
@@ -279,7 +320,7 @@ async def test_classifier_failure_cancels_remote_decoder_context():
 
 async def test_remote_annotated_error_stops_context():
     engine = _engine()
-    engine._encoder = _FakeEncoder([object()])
+    engine._encoder = _FakeEncoder([torch.ones((1, 4))])
     engine._decoder_client = _FakeDecoderClient(
         [_FakeResponse(error=True, comments=["engine unavailable"])]
     )
@@ -294,7 +335,7 @@ async def test_remote_annotated_error_stops_context():
 @pytest.mark.parametrize("image_count", [0, 2])
 async def test_rejects_non_single_image_requests(image_count: int):
     engine = _engine()
-    engine._encoder = _FakeEncoder([object()])
+    engine._encoder = _FakeEncoder([torch.ones((1, 4))])
     engine._decoder_client = _FakeDecoderClient()
 
     with pytest.raises(InvalidArgument, match="exactly one image"):
@@ -314,7 +355,7 @@ async def test_rejects_unsupported_remote_output_modes(
     error: str,
 ):
     engine = _engine()
-    engine._encoder = _FakeEncoder([object()])
+    engine._encoder = _FakeEncoder([torch.ones((1, 4))])
     engine._decoder_client = _FakeDecoderClient()
     request = _request()
     request["sampling_options"] = sampling_options

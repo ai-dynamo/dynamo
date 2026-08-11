@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 import torch
 
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     Qwen3VLImageEncoding,
@@ -66,6 +67,7 @@ def _qwen_adapter():
 async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder_artifact_receiver = None
     handler._custom_encoder = SimpleNamespace(
         encode=AsyncMock(return_value=[torch.ones((2, 4), dtype=torch.bfloat16)])
     )
@@ -89,6 +91,7 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
 async def test_custom_encoder_handler_preserves_string_error_contract():
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder_artifact_receiver = None
     handler._custom_encoder = SimpleNamespace(
         encode=AsyncMock(side_effect=RuntimeError("encoder failed"))
     )
@@ -111,6 +114,7 @@ async def test_custom_encoder_handler_preserves_string_error_contract():
 async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _qwen_adapter()
+    handler._custom_encoder_artifact_receiver = None
     handler._custom_encoder = SimpleNamespace(
         encode=AsyncMock(
             return_value=[
@@ -137,3 +141,45 @@ async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
     image = prompt["multi_modal_data"]["image"]
     assert image["image_embeds"].shape == (1, 8)
     assert image["image_grid_thw"].tolist() == [[1, 2, 2]]
+
+
+async def test_custom_encoder_handler_imports_transferred_tensor_and_releases_it():
+    class Receiver:
+        def __init__(self):
+            self.released = []
+
+        async def receive_embeddings(self, request):
+            assert request.embeddings_shape == [2, 4]
+            return 17, torch.ones((2, 4), dtype=torch.bfloat16)
+
+        def release_tensor(self, tensor_id):
+            self.released.append(tensor_id)
+
+    receiver = Receiver()
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = None
+    handler._custom_encoder_artifact_receiver = receiver
+    transfer = TransferRequest(
+        embeddings_shape=[2, 4],
+        embedding_dtype_str="bfloat16",
+        serialized_request={"opaque": "descriptor"},
+    )
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {
+            "token_ids": [1, 99, 2],
+            "encoder_result": {
+                "custom_encoder_artifacts": [
+                    {"kind": "tensor", "transfer": transfer.model_dump()}
+                ]
+            },
+        },
+        "request-id",
+    )
+
+    assert error is None
+    assert prompt is not None
+    assert tuple(prompt["prompt_embeds"].shape) == (4, 4)
+    assert prompt["prompt_token_ids"] == [1, 99, 99, 2]
+    assert receiver.released == [17]

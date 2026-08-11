@@ -247,7 +247,9 @@ class AbstractOperation(ABC):
         return self._operation_kind
 
     @abstractmethod
-    async def wait_for_completion(self) -> None:
+    async def wait_for_completion(
+        self, min_poll_ms=5, max_poll_ms=100, backoff_factor=1.5
+    ) -> None:
         """
         Blocks the caller asynchronously until the operation has completed.
         """
@@ -620,7 +622,12 @@ class Connection:
         # If NIXL bindings are absent, `nixl_api` is a `_NixlImportProxy`
         # and the next line raises the deferred ImportError on attribute
         # access — no explicit guard needed.
-        self._nixl = nixl_api.nixl_agent(self._name)
+        self._nixl = nixl_api.nixl_agent(
+            self._name,
+            nixl_api.nixl_agent_config(
+                enable_prog_thread=getattr(connector, "enable_progress_thread", True)
+            ),
+        )
 
         self._remote_refs: dict[str, int] = {}  # ref-count remote agents
         self._remote_refs_lock = threading.Lock()
@@ -698,6 +705,7 @@ class Connector:
     def __init__(
         self,
         worker_id: Optional[str] = None,
+        enable_progress_thread: bool = True,
     ) -> None:
         """
         Creates a new Connector instance.
@@ -706,6 +714,8 @@ class Connector:
         ----------
         worker_id : Optional[str], optional
             Unique identifier of the worker, defaults to a new UUID when `None`.
+        enable_progress_thread : bool, optional
+            Whether the NIXL agent runs a background progress thread.
 
         Raises
         ------
@@ -717,10 +727,13 @@ class Connector:
         )
         if not isinstance(worker_id, str) or len(worker_id) == 0:
             raise TypeError("Argument `worker_id` must be a non-empty `str` or `None`.")
+        if not isinstance(enable_progress_thread, bool):
+            raise TypeError("Argument `enable_progress_thread` must be a `bool`.")
 
         self._connection_count: int = 0
         self._worker_id = worker_id
         self._hostname = socket.gethostname()
+        self._enable_progress_thread = enable_progress_thread
 
         self._shared_connection: Optional[Connection] = None
         self._shared_connection_lock = asyncio.Lock()
@@ -756,6 +769,12 @@ class Connector:
         Get the name of the current worker's host.
         """
         return self._hostname
+
+    @property
+    def enable_progress_thread(self) -> bool:
+        """Whether the NIXL agent runs a background progress thread."""
+
+        return self._enable_progress_thread
 
     @cached_property
     def is_cuda_available(self) -> bool:
@@ -1710,11 +1729,17 @@ class ReadOperation(ActiveOperation):
             else [self._local_desc_list]
         )
 
-    async def wait_for_completion(self) -> None:
+    async def wait_for_completion(
+        self, min_poll_ms=5, max_poll_ms=100, backoff_factor=1.5
+    ) -> None:
         """
         Blocks the caller asynchronously until the operation has completed.
         """
-        await super()._wait_for_completion_()
+        await super()._wait_for_completion_(
+            min_poll_ms=min_poll_ms,
+            max_poll_ms=max_poll_ms,
+            backoff_factor=backoff_factor,
+        )
 
 
 class ReadableOperation(PassiveOperation):
@@ -1748,11 +1773,17 @@ class ReadableOperation(PassiveOperation):
     def __repr__(self) -> str:
         return super().__repr__()
 
-    async def wait_for_completion(self) -> None:
+    async def wait_for_completion(
+        self, min_poll_ms=5, max_poll_ms=100, backoff_factor=1.5
+    ) -> None:
         """
         Blocks the caller asynchronously until the operation has completed.
         """
-        await super()._wait_for_completion_()
+        await super()._wait_for_completion_(
+            min_poll_ms=min_poll_ms,
+            max_poll_ms=max_poll_ms,
+            backoff_factor=backoff_factor,
+        )
 
 
 class RdmaMetadata(BaseModel):
