@@ -132,6 +132,8 @@ pub enum PolicyQueueEvent<'a> {
     },
     Completed {
         request_id: &'a str,
+        /// Final input-plus-output context when the response path observed it.
+        context_tokens: Option<usize>,
     },
     Aborted {
         request_id: &'a str,
