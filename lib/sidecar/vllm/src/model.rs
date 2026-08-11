@@ -73,11 +73,18 @@ impl DiscoveredModel {
         })
     }
 
-    pub(crate) fn ensure_same_identity(&self, observed: &Self) -> Result<(), DynamoError> {
+    pub(crate) fn ensure_startup_compatible(&self, observed: &Self) -> Result<(), DynamoError> {
         if self.identity != observed.identity {
             return Err(client::protocol_error(format!(
                 "model identity changed between bootstrap and startup: expected {:?}, observed {:?}",
                 self.identity, observed.identity
+            )));
+        }
+        let expected_dp_size = self.data_parallel_size();
+        let observed_dp_size = observed.data_parallel_size();
+        if expected_dp_size != observed_dp_size {
+            return Err(client::protocol_error(format!(
+                "data-parallel size changed between bootstrap and startup: expected {expected_dp_size}, observed {observed_dp_size}"
             )));
         }
         Ok(())

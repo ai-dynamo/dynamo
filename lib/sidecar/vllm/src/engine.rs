@@ -165,7 +165,7 @@ impl LLMEngine for VllmSidecarEngine {
             .await?;
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
-        self.model.ensure_same_identity(&observed)?;
+        self.model.ensure_startup_compatible(&observed)?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -333,7 +333,11 @@ impl LLMEngine for VllmSidecarEngine {
         let expected_dp_size = self.model.data_parallel_size();
         let mut ranks = HashSet::new();
         let mut sources = Vec::new();
-        for source in client.kv_event_sources().await? {
+        let reported_sources = client.kv_event_sources().await?;
+        if reported_sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        for source in reported_sources {
             if source.transport != "zmq" {
                 tracing::warn!(
                     transport = %source.transport,
