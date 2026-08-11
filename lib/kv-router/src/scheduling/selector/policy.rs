@@ -163,7 +163,7 @@ impl WorkerSelectionContext<'_> {
         self.track_prefill_tokens
     }
 
-    /// Return the complete session context supplied with this request.
+    /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
         self.request.session_context.as_ref()
     }

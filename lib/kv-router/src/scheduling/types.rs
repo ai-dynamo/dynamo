@@ -281,7 +281,7 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
-    /// Create the complete session context passed to worker selection.
+    /// Create the session metadata available to worker selection.
     pub fn new(
         session_id: String,
         parent_session_id: Option<String>,

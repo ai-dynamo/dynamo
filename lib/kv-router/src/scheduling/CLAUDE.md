@@ -118,7 +118,7 @@ The `selector` module contains the public Rust contract for custom worker scorer
 - Trace a proposed value to its source before you expose it. Record whether it is raw state, a derived estimate, or an intermediate in Dynamo's default formula.
 - Expose raw facts or complete user-facing abstractions. Do not expose partial credit, weighted overlap, legacy arithmetic, or another intermediate whose meaning depends on the default policy.
 - Keep struct fields private. Add the narrowest accessor that supports the approved use case.
-- When a protocol context is copied into a worker-selection type, destructure the source without `..` and map every field. A new source field must cause a compile error until its policy meaning, cost, documentation, and contract test are reviewed.
+- When a protocol context is projected into a worker-selection type, destructure the source without `..` and handle every field explicitly. Map only approved policy fields. Bind each field that stays internal by name and explain why. A new source field must cause a compile error until its policy meaning, cost, documentation, and contract test are reviewed.
 - Return `Option` for absent data. Do not replace absence with a sentinel value.
 - Document the source, units, lifetime, staleness, missing-data behavior, weighting, and clamping for each public value.
 - Require callers to name each `WorkerInputs` group that they use. Do not add a public `ALL` shortcut.

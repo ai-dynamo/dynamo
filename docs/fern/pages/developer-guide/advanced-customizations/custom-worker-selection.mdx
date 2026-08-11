@@ -288,7 +288,7 @@ Request context and worker identity are always available. Dynamo calculates opti
 
 ### Session Context
 
-`session_context()` returns `None` when the request has no session metadata. This policy-facing view is separate from Dynamo's internal request protocol. When present, it provides:
+`session_context()` returns `None` when the request has no session metadata. This policy-facing view contains selected session metadata; it is not Dynamo's internal request envelope. When present, it provides:
 
 | Accessor | Meaning |
 |---|---|
