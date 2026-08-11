@@ -1,6 +1,14 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-sglang-gb300-agg-agentic-cd
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-sglang-gb300-agg-agentic-cd
+---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -19,9 +27,34 @@ spec:
       replicas: 1
       podTemplate:
         spec:
+          # Token for internal testing only
+          imagePullSecrets:
+            - name: k3-nvcr-token
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      # For internal testing only
+                      - key: dedicated
+                        operator: In
+                        values: [GoldenPrairie]
+                      # Replace with your clique / rack ID
+                      - key: nvidia.com/gpu.clique
+                        operator: In
+                        values: [0e804531-7d0e-ce6f-a1f4-9a9854394a7f.1]
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values: [arm64]
+
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: GoldenPrairie
+              effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-kimi-k3-dev.1
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-38fe980b-arm64
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -37,15 +70,8 @@ spec:
                 - --model-name
                 - moonshotai/Kimi-K3
                 - --model-path
-                - moonshotai/Kimi-K3
+                - /model
                 - --trust-remote-code
-              env:
-                - name: HF_HOME
-                  value: /model-cache
-                - name: HF_HUB_OFFLINE
-                  value: "1"
-                - name: TRANSFORMERS_OFFLINE
-                  value: "1"
               ports:
                 - name: http
                   containerPort: 8000
@@ -60,43 +86,61 @@ spec:
                   memory: 32Gi
                   ephemeral-storage: 16Gi
               volumeMounts:
-                - name: model-cache
-                  mountPath: /model-cache
+                - name: model-weight
+                  mountPath: /model
                   readOnly: true
           volumes:
-            - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
+            # For internal testing only - local storage
+            - name: model-weight
+              hostPath:
+                path: /mnt/k8s-disks/0/models/model_weight
+                type: Directory
 
     - name: SglangWorker
       type: worker
       replicas: 3
+      multinode:
+        nodeCount: 2
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
+          # Token for internal testing only
+          imagePullSecrets:
+            - name: k3-nvcr-token
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
                 nodeSelectorTerms:
                   - matchExpressions:
-                      - key: nvidia.com/gpu.product
+                      # For internal testing only
+                      - key: dedicated
                         operator: In
-                        values:
-                          - NVIDIA-GB300
+                        values: [GoldenPrairie]
+                      # Replace with your clique / rack ID
+                      - key: nvidia.com/gpu.clique
+                        operator: In
+                        values: [0e804531-7d0e-ce6f-a1f4-9a9854394a7f.1]
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values: [arm64]
+          # For internal testing only
           tolerations:
-            - key: nvidia.com/gpu
+            - key: dedicated
               operator: Equal
-              value: "true"
+              value: GoldenPrairie
               effect: NoSchedule
+          resourceClaims:
+            - name: kimi-k3-sglang-gb300-agg-agentic-cd
+              resourceClaimTemplateName: kimi-k3-sglang-gb300-agg-agentic-cd
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-kimi-k3-dev.1
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-38fe980b-arm64
               imagePullPolicy: Always
               command: [python3, -m, dynamo.sglang]
               args:
                 - --model-path
-                - moonshotai/Kimi-K3
+                - /model
                 - --served-model-name
                 - moonshotai/Kimi-K3
                 - --trust-remote-code
@@ -121,11 +165,12 @@ spec:
                 - --speculative-algorithm
                 - DSPARK
                 - --speculative-draft-model-path
-                - RadixArk/Kimi-K3-DSpark
+                - /draft
                 - --speculative-dspark-block-size
                 - "7"
-                - --enable-linear-replayssm-spec
                 - --enable-nccl-nvls
+                - --kv-cache-dtype
+                - fp8_e4m3
                 - --enable-metrics
                 - --host
                 - 0.0.0.0
@@ -133,11 +178,10 @@ spec:
                 - "30000"
                 - --kv-events-config
                 - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+                - --enable-metrics
               env:
                 - name: DYN_FORWARDPASS_METRIC_PORT
                   value: ""
-                - name: HF_HOME
-                  value: /model-cache
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
@@ -158,7 +202,7 @@ spec:
                   value: "1"
                 - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
                   value: "1"
-                # Synthetic DSPARK acceptance length for performance benchmarking.
+                # For perf benchmarking only
                 - name: SGLANG_SIMULATE_ACC_LEN
                   value: "4.05"
                 - name: SGLANG_SIMULATE_ACC_METHOD
@@ -168,16 +212,18 @@ spec:
                   containerPort: 9090
                   protocol: TCP
               resources:
+                claims:
+                  - name: kimi-k3-sglang-gb300-agg-agentic-cd
                 requests:
                   cpu: "64"
                   memory: 512Gi
                   ephemeral-storage: 64Gi
-                  nvidia.com/gpu: "8"
+                  nvidia.com/gpu: "4"
                 limits:
                   cpu: "64"
                   memory: 512Gi
                   ephemeral-storage: 64Gi
-                  nvidia.com/gpu: "8"
+                  nvidia.com/gpu: "4"
               securityContext:
                 runAsUser: 0
                 capabilities:
@@ -190,10 +236,19 @@ spec:
                 periodSeconds: 30
                 timeoutSeconds: 5
               volumeMounts:
+                - name: model-weight
+                  mountPath: /model
+                  readOnly: true
                 - name: model-cache
-                  mountPath: /model-cache
+                  mountPath: /draft
+                  subPath: models/RadixArk/Kimi-K3-DSpark
                   readOnly: true
           volumes:
+            # Internal testing only - local model
+            - name: model-weight
+              hostPath:
+                path: /mnt/k8s-disks/0/models/model_weight
+                type: Directory
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache

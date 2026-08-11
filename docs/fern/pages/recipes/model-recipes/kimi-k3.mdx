@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and model parallelism run over NVLink; multi-node targets use MNNVL through Kubernetes ComputeDomains. Pick your framework, GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and model parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your framework, GPU architecture and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -101,6 +101,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 <div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
 
 - A Kubernetes cluster with the Dynamo platform installed and 24x GB300 GPUs available across 3 nodes. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `moonshotai/Kimi-K3` and `RadixArk/Kimi-K3-DSpark`.
 
 </div>
