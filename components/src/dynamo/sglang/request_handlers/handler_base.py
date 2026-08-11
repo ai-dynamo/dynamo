@@ -605,11 +605,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         )
         self._pause_lock = asyncio.Lock()
 
-        # Serialise concurrent scale_elastic_ep calls. SGLang tracks a single
-        # in-flight elastic-EP scale phase on the tokenizer manager; two callers
-        # racing through it would corrupt that state. One handler exists per
-        # worker process, so all concurrent HTTP callers share this lock and
-        # only one scale operation runs at a time.
+        # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
+        # phase, so concurrent scale_elastic_ep calls must not overlap.
         self._scale_ep_lock = asyncio.Lock()
 
         # LoRA tracking (via LoraMixin)
@@ -878,19 +875,16 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         }
 
     def _supports_elastic_ep(self) -> bool:
-        """Whether the underlying SGLang engine exposes runtime elastic-EP
-        scaling.
+        """Whether this handler's engine can serve runtime elastic-EP scaling.
 
-        The runtime API ``tokenizer_manager.scale_elastic_ep`` only exists on
-        SGLang >= 0.5.16. Older builds lack it, so the elastic-EP routes are not
-        registered and a caller gets a 404 rather than an ``AttributeError``.
+        Not every worker qualifies: encode-only workers run with ``engine=None``,
+        and some engine stand-ins (e.g. route unit-test doubles) have no
+        ``tokenizer_manager``. Probe for the ``scale_elastic_ep`` entry point so
+        those cases skip the route instead of registering one that fails at call
+        time.
         """
         if self.engine is None:
             return False
-        # register_engine_routes() calls this on any engine object, including the
-        # bare stand-ins some route unit tests pass, so probe for tokenizer_manager
-        # defensively rather than assume it (direct access is only safe inside the
-        # handlers, which are reachable only once the route is registered).
         tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
         return tokenizer_manager is not None and hasattr(
             tokenizer_manager, "scale_elastic_ep"
@@ -998,9 +992,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weights_from_ipc": self.update_weights_from_ipc,
             "control/update_weight_version": self.update_weight_version,
         }
-        # Elastic-EP scale-up is only exposed when the engine actually supports
-        # it (SGLang >= 0.5.16). Capability-gated so older SGLang builds and
-        # non-EP deployments don't advertise a route that would 500.
+        # Register elastic-EP scaling only on workers whose engine can serve it
+        # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
             built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
             built_in_routes[
