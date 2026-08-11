@@ -275,6 +275,7 @@ async fn test_streaming_without_usage() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_detokenize_metrics_flush_once_at_stream_completion() {
     let request = create_chat_request(None, None);
     let response_generator = request.response_generator("test-detokenize-metrics".to_string());
@@ -309,9 +310,101 @@ async fn test_detokenize_metrics_flush_once_at_stream_completion() {
         assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
     }
 
-    // Polling past the final backend chunk reaches stream completion and emits the
-    // internal usage item. The per-request totals must be flushed exactly once here.
+    // Polling past the final backend chunk emits the internal usage item. The state
+    // is still live, so the per-request totals must remain local.
     assert!(transformed_stream.next().await.is_some());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+    assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+
+    // The next poll drops the completed state and flushes its totals once.
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
+
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_detokenize_metrics_flush_when_stream_is_dropped() {
+    let request = create_chat_request(None, None);
+    let response_generator = request.response_generator("test-detokenize-drop".to_string());
+    let tracker = response_generator.tracker();
+
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let tracked = tracker.clone();
+    let outputs = build_backend_outputs_with_cached_tokens(None);
+    let stream = stream::iter(outputs.into_iter().map(move |output| {
+        tracked.record_detokenize_latency(Duration::from_micros(10));
+        Annotated::from_data(output)
+    }));
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let mut transformed_stream = Box::pin(OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        ctx,
+        false,
+        false,
+        None,
+        Default::default(),
+    ));
+
+    for _ in 0..2 {
+        assert!(transformed_stream.next().await.is_some());
+        assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+        assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+    }
+
+    drop(transformed_stream);
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 2.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 20.0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_detokenize_metrics_flush_on_postprocessor_cancellation() {
+    let request = create_chat_request(None, None);
+    let response_generator = request.response_generator("test-detokenize-cancel".to_string());
+    let tracker = response_generator.tracker();
+
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let tracked = tracker.clone();
+    let mut outputs = build_backend_outputs_with_cached_tokens(None);
+    outputs[1].finish_reason = Some(FinishReason::Error("test error".to_string()));
+    let stream = stream::iter(outputs.into_iter().map(move |output| {
+        tracked.record_detokenize_latency(Duration::from_micros(10));
+        Annotated::from_data(output)
+    }));
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let mut transformed_stream = Box::pin(OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    ));
+
+    assert!(transformed_stream.next().await.is_some());
+    let error = transformed_stream.next().await.expect("error response");
+    assert!(error.is_error());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+    assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+
+    // The next backend item observes the cancellation and drops the state.
+    assert!(transformed_stream.next().await.is_none());
+    assert!(ctx.is_stopped());
     assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
     assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
 
