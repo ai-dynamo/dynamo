@@ -117,11 +117,12 @@ impl AnthropicStreamConverter {
     /// Two distinct orderings matter here, and only the first is something a
     /// current backend actually produces:
     ///
-    /// - Within a single call, the `backend_id`/name and the argument fragments
-    ///   may arrive in either order — arguments can begin before the chunk
-    ///   carrying the backend id and name. We therefore record whichever fields
-    ///   are present on each chunk and defer emitting the block until the identity
-    ///   is complete (see `is_emit_ready`). This is the case the fixtures exercise.
+    /// - Within a single call, the `backend_id`/`name` and the argument
+    ///   fragments may arrive in either order — arguments can begin before the
+    ///   chunk carrying the backend id and name. We therefore record whichever
+    ///   fields are present on each chunk and defer emitting the block until the
+    ///   identity is complete (see `is_emit_ready`). This is the case the
+    ///   fixtures exercise.
     /// - Across parallel calls, the in-tree `dynamo-parsers-v2` parsers emit one
     ///   call at a time with a monotonically increasing `index` (call 0's chunks
     ///   all precede call 1's), so indices are never interleaved today. Indexing
