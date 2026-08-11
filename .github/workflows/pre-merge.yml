@@ -81,11 +81,20 @@ jobs:
       with:
         python-version: '3.13'
     - name: Install recipe check dependencies
-      run: python3 -m pip install 'pytest>=8.0' 'pyyaml>=6.0'
+      # These packages provide options and warning types from the repository's
+      # shared pytest configuration. The recipe tests themselves do not import
+      # them.
+      run: |
+        python3 -m pip install \
+          'pytest>=8.0' \
+          'pyyaml>=6.0' \
+          'pydantic>=2' \
+          'pytest-asyncio>=1.0' \
+          'pytest-benchmark>=4'
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators
-      run: python3 -m pytest -c /dev/null --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py
 
   api-docs:
     name: Generated API References

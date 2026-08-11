@@ -159,7 +159,7 @@ objects, so it re-inserts non-SPDX comments from the source YAML before matching
 rendered fields. It does not copy comments inside literal block scalars because those
 already render in place. It also refreshes the central OpenAPI schema from the
 operator CRDs. `scripts/kustomize-matrix.py check` validates all generated overlays,
-manifests, and the schema; the pre-commit hook runs the same command.
+manifests, and the schema; the Recipe Check CI job runs the same command.
 It also reports artifacts left by a moved matrix. Normal generation leaves those
 artifacts in place; after reviewing them, clean them explicitly:
 

@@ -173,14 +173,6 @@ repos:
       language: system
       files: ^docs/fern/scripts/check_component_imports\.py$
       pass_filenames: false
-    - id: check-kustomize-matrix
-      name: Check generated recipe Kustomize manifests
-      entry: python3 scripts/kustomize-matrix.py check
-      language: python
-      pass_filenames: false
-      additional_dependencies:
-        - pyyaml==6.0.3
-      files: ^(deploy/operator/config/crd/bases/nvidia\.com_dynamographdeployment(request)?s\.yaml|recipes/(kustomize/components/.*|.*/(\.kustomize-matrix\.yaml|kustomize/.*\.(ya?ml|json)|deploy(-[^/]+)?\.yaml))|scripts/(generate_kustomize_openapi|kustomize_matrix|kustomize-matrix)\.py)$
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py
