@@ -75,12 +75,13 @@ BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
-# 2048, not 512: the compliance worker runs a qwen3-style *reasoning* model,
-# and its <think> tokens count against max_output_tokens. At 512 the "System
-# Prompt" case can exhaust the budget mid-think and return
-# status=incomplete/{"reason": "max_output_tokens"} — an assertion failure
-# that has nothing to do with API compliance. 2048 keeps the worst-case
-# response under a minute while leaving thinking headroom.
+# 2048, not 512: when the small compliance model has a bad sampling day it
+# can ramble to whatever cap is set and come back status=incomplete /
+# {"reason": "max_output_tokens"} — an assertion failure that has nothing to
+# do with API compliance (observed on the "System Prompt" case). The real
+# de-flaking is the temperature=0 default injected below; the larger cap is
+# headroom so a long-but-terminating greedy answer still completes. Worst
+# case stays under a minute per response.
 OPENRESPONSES_MAX_OUTPUT_TOKENS = 2048
 CLAUDE_SUBAGENT_NAME = "dynamo-subagent-smoke"
 CLAUDE_SUBAGENT_TIMEOUT_S = 45
@@ -342,6 +343,11 @@ def _patch_openresponses_suite(install_dir: Path) -> None:
         "      ...body,\n"
         "      max_output_tokens: body.max_output_tokens ?? "
         f"{OPENRESPONSES_MAX_OUTPUT_TOKENS},\n"
+        # Greedy decoding unless a case asks otherwise: the suite asserts API
+        # behavior, not model creativity, and sampled runs of the small
+        # compliance model can degenerate into repetition loops that blow the
+        # token cap and fail completedStatus for reasons unrelated to the API.
+        "      temperature: body.temperature ?? 0,\n"
         "      stream: streaming,\n"
         "    }),"
     )
