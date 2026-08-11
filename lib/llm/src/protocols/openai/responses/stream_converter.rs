@@ -1383,13 +1383,27 @@ mod tests {
             ..default_params()
         };
         let mut conv = ResponseStreamConverter::new("test-model".into(), params);
-        let _ = conv.process_chunk(&tool_call_chunk(
+        let added_events = conv.process_chunk(&tool_call_chunk(
             0,
             Some("call-1"),
             Some("spawn_agent"),
             Some(r#"{"agent_type":"worker"}"#),
         ));
-        let _ = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        let done_events = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+
+        for (events, expected_type) in [
+            (&added_events, "response.output_item.added"),
+            (&done_events, "response.output_item.done"),
+        ] {
+            let event = events
+                .iter()
+                .find(|event| event_type(event) == expected_type)
+                .unwrap();
+            assert!(
+                format!("{event:?}").contains(r#"\"namespace\":\"agents\""#),
+                "{expected_type} did not preserve the namespace"
+            );
+        }
 
         let OutputItem::FunctionCall(call) = &conv.completed_output()[0] else {
             panic!("expected function call");

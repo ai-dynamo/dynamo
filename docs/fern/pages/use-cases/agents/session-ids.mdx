@@ -30,7 +30,7 @@ Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-
 </ParamField>
 
 <ParamField path="X-Dynamo-Parent-Session-ID" type="string">
-  Parent session when using subagents. Maps to `agent_context.parent_session_id`.
+  Parent session when using subagents. Values up to 256 bytes map to `agent_context.parent_session_id` when they differ from the session ID.
 </ParamField>
 
 <ParamField path="X-Dynamo-Session-Final" type="boolean">
@@ -54,6 +54,8 @@ Dynamo also recognizes the current stable identity headers emitted by the follow
 
     - `thread-id` to `session_id`
     - `x-codex-parent-thread-id` to `parent_session_id` for child threads
+
+    When session affinity is enabled, each thread has its own affinity key. KV-aware routing can still select workers with shared prefix blocks.
 
   </Tab>
   <Tab title="OpenCode">

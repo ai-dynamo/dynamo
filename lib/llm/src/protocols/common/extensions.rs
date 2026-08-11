@@ -1079,11 +1079,40 @@ mod tests {
 
     #[test]
     fn agent_context_ignores_self_parent_header() {
+        for (root_header, child_header, parent_header) in [
+            (HEADER_CODEX_THREAD_ID, None, HEADER_CODEX_PARENT_THREAD_ID),
+            (
+                HEADER_CLAUDE_CODE_SESSION_ID,
+                Some(HEADER_CLAUDE_CODE_AGENT_ID),
+                HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(root_header, "root".parse().unwrap());
+            if let Some(child_header) = child_header {
+                headers.insert(child_header, "child".parse().unwrap());
+            }
+            let session_id = child_header.map_or("root", |_| "child");
+            headers.insert(parent_header, session_id.parse().unwrap());
+
+            assert_eq!(
+                agent_context_from_headers(&headers)
+                    .unwrap()
+                    .parent_session_id,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn agent_context_ignores_oversized_parent_header() {
         let mut headers = HeaderMap::new();
-        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(HEADER_CODEX_THREAD_ID, "child".parse().unwrap());
         headers.insert(
             HEADER_CODEX_PARENT_THREAD_ID,
-            "codex-thread".parse().unwrap(),
+            "p".repeat(crate::session_affinity::MAX_SESSION_AFFINITY_ID_BYTES + 1)
+                .parse()
+                .unwrap(),
         );
 
         assert_eq!(

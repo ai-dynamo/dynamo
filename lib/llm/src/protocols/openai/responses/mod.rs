@@ -3,7 +3,7 @@
 
 pub mod stream_converter;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
@@ -661,9 +661,11 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
      -> anyhow::Result<()> {
         if let Some(previous_namespace) = origins.get(name) {
             if previous_namespace.as_deref() != namespace {
-                return Err(anyhow::anyhow!(
-                    "Responses function tool name '{name}' is ambiguous after namespace flattening"
-                ));
+                return Err(ResponsesConversionError::InvalidArgument(
+                    "Responses function tool names are ambiguous after namespace flattening"
+                        .to_string(),
+                )
+                .into());
             }
         } else {
             origins.insert(name.to_owned(), namespace.map(str::to_owned));
@@ -698,6 +700,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
                     }
                 }
             }
+            // Only function tools are forwarded to Chat Completions.
             _ => {}
         }
     }
@@ -1010,6 +1013,7 @@ pub struct ResponseParams {
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub safety_identifier: Option<String>,
+    pub(crate) function_namespaces: OnceLock<HashMap<String, Option<String>>>,
 }
 
 impl ResponseParams {
@@ -1021,28 +1025,38 @@ impl ResponseParams {
     }
 
     fn namespace_for_function(&self, name: &str) -> Option<String> {
-        let tools = self.tools.as_deref()?;
-        if tools
-            .iter()
-            .any(|tool| matches!(tool, Tool::Function(function) if function.name == name))
-        {
-            return None;
-        }
-
-        let mut namespaces = tools.iter().filter_map(|tool| {
-            let Tool::Namespace(namespace) = tool else {
-                return None;
-            };
-            namespace
-                .tools
-                .iter()
-                .any(|tool| matches!(tool, NamespaceToolParamTool::Function(function) if function.name == name))
-                .then_some(namespace.name.as_str())
-        });
-        let namespace = namespaces.next()?;
-        namespaces
-            .all(|other_namespace| other_namespace == namespace)
-            .then(|| namespace.to_owned())
+        self.function_namespaces
+            .get_or_init(|| {
+                let mut origins = HashMap::new();
+                for tool in self.tools.as_deref().unwrap_or_default() {
+                    match tool {
+                        Tool::Function(function) => {
+                            origins.insert(function.name.clone(), None);
+                        }
+                        Tool::Namespace(namespace) => {
+                            for tool in &namespace.tools {
+                                let NamespaceToolParamTool::Function(function) = tool else {
+                                    continue;
+                                };
+                                let origin = Some(namespace.name.clone());
+                                origins
+                                    .entry(function.name.clone())
+                                    .and_modify(|previous| {
+                                        if previous != &origin {
+                                            *previous = None;
+                                        }
+                                    })
+                                    .or_insert(origin);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                origins
+            })
+            .get(name)
+            .cloned()
+            .flatten()
     }
 }
 
@@ -1060,6 +1074,17 @@ pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
                     ft.strict = Some(true);
                 }
                 Tool::Function(ft)
+            }
+            Tool::Namespace(mut namespace) => {
+                for tool in &mut namespace.tools {
+                    let NamespaceToolParamTool::Function(function) = tool else {
+                        continue;
+                    };
+                    if function.strict.is_none() {
+                        function.strict = Some(true);
+                    }
+                }
+                Tool::Namespace(namespace)
             }
             other => other,
         })
@@ -2573,8 +2598,12 @@ mod tests {
         let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Responses function tool name 'lookup' is ambiguous after namespace flattening"
+            "Responses function tool names are ambiguous after namespace flattening"
         );
+        assert!(matches!(
+            error.downcast_ref::<ResponsesConversionError>(),
+            Some(ResponsesConversionError::InvalidArgument(_))
+        ));
     }
 
     #[test]
@@ -2596,7 +2625,7 @@ mod tests {
         let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Responses function tool name 'lookup' is ambiguous after namespace flattening"
+            "Responses function tool names are ambiguous after namespace flattening"
         );
     }
 
@@ -2635,6 +2664,20 @@ mod tests {
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert_eq!(chat_req.inner.tools.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_normalize_tools_sets_namespace_function_strict() {
+        let tools = serde_json::from_value(serde_json::json!([{
+            "type": "namespace",
+            "name": "agents",
+            "description": "Subagent tools",
+            "tools": [{"type": "function", "name": "spawn_agent"}]
+        }]))
+        .unwrap();
+
+        let normalized = serde_json::to_value(normalize_tools(tools)).unwrap();
+        assert_eq!(normalized[0]["tools"][0]["strict"], true);
     }
 
     #[allow(deprecated)]
@@ -2791,11 +2834,14 @@ mod tests {
             ..Default::default()
         };
 
+        assert!(params.function_namespaces.get().is_none());
+
         let response = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
             panic!("expected function call");
         };
         assert_eq!(call.namespace.as_deref(), Some("agents"));
+        assert!(params.function_namespaces.get().is_some());
     }
 
     #[test]

@@ -3076,6 +3076,7 @@ async fn responses(
         prompt_cache_key: request.inner.prompt_cache_key.clone(),
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
+        function_namespaces: Default::default(),
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -6343,6 +6344,19 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::Internal
+        );
+    }
+
+    #[test]
+    fn invalid_responses_conversion_errors_are_client_errors() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::InvalidArgument("ambiguous tools".to_string()).into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
         );
     }
 
