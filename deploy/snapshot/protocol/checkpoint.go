@@ -155,6 +155,10 @@ func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string,
 	const persistJobFileScript = `set -eu
 job_file="$1"
 shift
+if [ -z "${CUDA_CHECKPOINT_JOB_FILE:-}" ]; then
+    echo "CUDA_CHECKPOINT_JOB_FILE is missing; cuda-checkpoint --launch-job requires NVIDIA driver 610 or newer" >&2
+    exit 1
+fi
 umask 077
 cat "$CUDA_CHECKPOINT_JOB_FILE" > "$job_file"
 export CUDA_CHECKPOINT_JOB_FILE="$job_file"

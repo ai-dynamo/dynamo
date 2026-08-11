@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -97,7 +98,7 @@ func TestStageJobFileRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := filepath.Join(processRoot, jobFile)
-	if err := os.Symlink(filepath.Join("..", "..", "..", "secret"), source); err != nil {
+	if err := os.Symlink(filepath.Join("..", "secret"), source); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,9 +162,25 @@ func TestCheckpointProcessTreePersistsStateAfterEveryProcessCheckpoint(t *testin
 	tempDir := t.TempDir()
 	trace := filepath.Join(tempDir, "trace")
 	helper := filepath.Join(tempDir, "cuda-checkpoint-helper")
-	script := "#!/bin/sh\n" +
-		"printf '%s %s\\n' \"$2\" \"$4\" >> \"" + trace + "\"\n" +
-		"if [ \"$2\" = checkpoint ]; then printf '|%s' \"$4\" >> \"$6\"; fi\n"
+	script := `#!/bin/sh
+action=""
+pid=""
+job_file=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --pid) pid="$2"; shift 2 ;;
+        --job-file) job_file="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ "$job_file" != "$DYNAMO_TEST_JOB_FILE" ]; then
+    printf 'job file = %s, want %s\n' "$job_file" "$DYNAMO_TEST_JOB_FILE" >&2
+    exit 1
+fi
+printf '%s %s\n' "$action" "$pid" >> "$DYNAMO_TEST_TRACE"
+if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
+`
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +199,8 @@ func TestCheckpointProcessTreePersistsStateAfterEveryProcessCheckpoint(t *testin
 	if err := os.WriteFile(filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("DYNAMO_TEST_TRACE", trace)
+	t.Setenv("DYNAMO_TEST_JOB_FILE", liveJobFile)
 
 	if _, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, logr.Discard()); err != nil {
 		t.Fatalf("CheckpointProcessTree() error = %v", err)
@@ -199,6 +218,45 @@ func TestCheckpointProcessTreePersistsStateAfterEveryProcessCheckpoint(t *testin
 	}
 	if got, want := string(artifact), "initial|101|202"; got != want {
 		t.Fatalf("persisted job state = %q, want %q", got, want)
+	}
+}
+
+func TestSetLiveJobFileOwner(t *testing.T) {
+	jobFile := filepath.Join(t.TempDir(), "job-file")
+	if err := os.WriteFile(jobFile, []byte("job-state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	wantUID, wantGID := os.Getuid(), os.Getgid()
+	if os.Geteuid() == 0 {
+		wantUID, wantGID = 1234, 2345
+	}
+	if err := SetLiveJobFileOwner(jobFile, wantUID, wantGID); err != nil {
+		t.Fatalf("SetLiveJobFileOwner() error = %v", err)
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Stat(jobFile, &stat); err != nil {
+		t.Fatal(err)
+	}
+	if gotUID, gotGID := int(stat.Uid), int(stat.Gid); gotUID != wantUID || gotGID != wantGID {
+		t.Fatalf("job file ownership = %d:%d, want %d:%d", gotUID, gotGID, wantUID, wantGID)
+	}
+}
+
+func TestSetLiveJobFileOwnerRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("job-state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	jobFile := filepath.Join(dir, "job-file")
+	if err := os.Symlink(target, jobFile); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetLiveJobFileOwner(jobFile, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("SetLiveJobFileOwner() accepted a symlink")
 	}
 }
 

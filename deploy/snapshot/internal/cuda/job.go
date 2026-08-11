@@ -140,17 +140,17 @@ func prepareLiveJobFile(sourcePath, destinationPath string) error {
 	return copyRegularFile(sourcePath, destinationPath, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC)
 }
 
-func copyRegularFile(sourcePath, destinationPath string, destinationFlags int) error {
+func copyRegularFile(sourcePath, destinationPath string, destinationFlags int) (err error) {
 	fd, err := unix.Open(sourcePath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
 	source := os.NewFile(uintptr(fd), sourcePath)
-	if source == nil {
-		_ = unix.Close(fd)
-		return fmt.Errorf("open source %q", sourcePath)
-	}
-	defer source.Close()
+	defer func() {
+		if closeErr := source.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close source %q: %w", sourcePath, closeErr)
+		}
+	}()
 
 	info, err := source.Stat()
 	if err != nil {
@@ -165,11 +165,11 @@ func copyRegularFile(sourcePath, destinationPath string, destinationFlags int) e
 		return err
 	}
 	destination := os.NewFile(uintptr(destinationFD), destinationPath)
-	if destination == nil {
-		_ = unix.Close(destinationFD)
-		return fmt.Errorf("open destination %q", destinationPath)
-	}
-	defer destination.Close()
+	defer func() {
+		if closeErr := destination.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close destination %q: %w", destinationPath, closeErr)
+		}
+	}()
 
 	if err := destination.Chmod(0600); err != nil {
 		return err
@@ -178,4 +178,31 @@ func copyRegularFile(sourcePath, destinationPath string, destinationFlags int) e
 		return err
 	}
 	return destination.Sync()
+}
+
+// SetLiveJobFileOwner makes the restore-time working copy accessible to the
+// restored workload without following a replacement symlink.
+func SetLiveJobFileOwner(jobFile string, uid, gid int) error {
+	fd, err := unix.Open(jobFile, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("open live CUDA checkpoint job file %q: %w", jobFile, err)
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("stat live CUDA checkpoint job file %q: %w", jobFile, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return fmt.Errorf("live CUDA checkpoint job file %q is not a regular file", jobFile)
+	}
+	if err := unix.Fchown(fd, uid, gid); err != nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("set live CUDA checkpoint job file %q owner to %d:%d: %w", jobFile, uid, gid, err)
+	}
+	if err := unix.Close(fd); err != nil {
+		return fmt.Errorf("close live CUDA checkpoint job file %q: %w", jobFile, err)
+	}
+	return nil
 }

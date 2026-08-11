@@ -358,9 +358,6 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
-	}
-
-	for _, pid := range cudaPIDs {
 		if err := unlock(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid, jobFile)

@@ -150,6 +150,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()
+	if cudaRestoreJobFile != "" {
+		uid, gid, err := snapshotruntime.ReadProcessFilesystemIDs("/proc", int(restoredPID))
+		if err != nil {
+			return nil, 0, fmt.Errorf("read restored process credentials: %w", err)
+		}
+		if err := cuda.SetLiveJobFileOwner(cudaRestoreJobFile, uid, gid); err != nil {
+			return nil, 0, fmt.Errorf("set CUDA checkpoint job file ownership: %w", err)
+		}
+	}
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read restored process table: %w", err)

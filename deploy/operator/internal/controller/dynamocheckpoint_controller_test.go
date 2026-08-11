@@ -132,7 +132,7 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 }
 
 func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, original []string) {
-	t.Helper()
+	// Verify the complete stable launch-job wrapper.
 	assert.Equal(t, []string{"cuda-checkpoint"}, container.Command)
 	require.GreaterOrEqual(t, len(container.Args), 6)
 	assert.Equal(t, []string{"--launch-job", "/bin/sh", "-c"}, container.Args[:3])
@@ -260,6 +260,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
 
 	// Multi-GPU: wrapping decision uses target-container GPU resources.
+	t.Log("Wrap the target command for a resource-limit multi-GPU workload")
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
@@ -297,6 +298,7 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 
+	t.Log("Wrap only the target container in a multi-container checkpoint job")
 	main := &job.Spec.Template.Spec.Containers[0]
 	requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm"})
 	require.NotNil(t, main.ReadinessProbe)
@@ -427,6 +429,7 @@ func TestBuildCheckpointJobDRAResourceClaimsForCudaCheckpoint(t *testing.T) {
 			}
 			require.NoError(t, err)
 
+			t.Log("Verify the DRA launch-job wrapping decision")
 			main := &job.Spec.Template.Spec.Containers[0]
 			if tt.wantWrap {
 				requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm"})
