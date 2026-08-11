@@ -146,7 +146,7 @@ enum AdmissionCommand {
 
 #[derive(Debug, Clone, Copy)]
 enum PolicyRequestOutcome {
-    Completed,
+    Completed { context_tokens: Option<usize> },
     Aborted,
 }
 
@@ -271,6 +271,7 @@ pub struct SchedulerQueue<
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
+    has_queue_policy: bool,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     _marker: PhantomData<fn() -> (Sel, RF)>,
@@ -433,6 +434,7 @@ impl<
             slots,
             workers_with_configs,
             queueing_enabled,
+            has_queue_policy,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             _marker: PhantomData,
@@ -648,10 +650,18 @@ impl<
         self.update_after(Some(worker), None).await;
     }
 
-    pub(crate) async fn complete_request(&self, request_id: &str, worker: WorkerWithDpRank) {
+    pub(crate) async fn complete_request(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        context_tokens: Option<usize>,
+    ) {
         self.update_after(
             Some(worker),
-            Some((request_id.to_owned(), PolicyRequestOutcome::Completed)),
+            Some((
+                request_id.to_owned(),
+                PolicyRequestOutcome::Completed { context_tokens },
+            )),
         )
         .await;
     }
@@ -709,6 +719,10 @@ impl<
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.supports_overlap_refresh
+    }
+
+    pub(crate) fn has_queue_policy(&self) -> bool {
+        self.has_queue_policy
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -1033,7 +1047,10 @@ impl<
 
     fn handle_policy_finished(&mut self, request_id: &str, outcome: PolicyRequestOutcome) -> bool {
         let event = match outcome {
-            PolicyRequestOutcome::Completed => PolicyQueueEvent::Completed { request_id },
+            PolicyRequestOutcome::Completed { context_tokens } => PolicyQueueEvent::Completed {
+                request_id,
+                context_tokens,
+            },
             PolicyRequestOutcome::Aborted => PolicyQueueEvent::Aborted { request_id },
         };
         self.pending.policy_event(event)
@@ -1643,6 +1660,7 @@ mod tests {
         deferred: StdMutex<Option<PolicyQueueId>>,
         dispatched: AtomicUsize,
         completed: AtomicUsize,
+        completed_context_tokens: AtomicUsize,
     }
 
     struct DeferOncePolicy {
@@ -1666,9 +1684,15 @@ mod tests {
                 PolicyQueueEvent::Dispatched { .. } => {
                     self.state.dispatched.fetch_add(1, Ordering::Relaxed);
                 }
-                PolicyQueueEvent::Completed { request_id } => {
+                PolicyQueueEvent::Completed {
+                    request_id,
+                    context_tokens,
+                } => {
                     assert_eq!(request_id, "policy-request");
                     self.state.completed.fetch_add(1, Ordering::Relaxed);
+                    self.state
+                        .completed_context_tokens
+                        .store(context_tokens.unwrap_or_default(), Ordering::Relaxed);
                 }
                 _ => {}
             }
@@ -2186,9 +2210,10 @@ mod tests {
             .free(&"policy-request".to_owned(), Instant::now())
             .unwrap();
         queue
-            .complete_request("policy-request", response.best_worker)
+            .complete_request("policy-request", response.best_worker, Some(48))
             .await;
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
+        assert_eq!(state.completed_context_tokens.load(Ordering::Relaxed), 48);
     }
 
     #[test]

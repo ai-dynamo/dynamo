@@ -1307,6 +1307,18 @@ where
         self.scheduler.free_if_worker(request_id, worker).await
     }
 
+    /// Release a completed booking with its final input-plus-output context.
+    pub async fn complete_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        context_tokens: usize,
+    ) -> Result<(), SequenceError> {
+        self.scheduler
+            .complete_if_worker(request_id, worker, context_tokens)
+            .await
+    }
+
     /// Release an aborted booking only if it still belongs to `worker`.
     pub async fn abort_if_worker(
         &self,

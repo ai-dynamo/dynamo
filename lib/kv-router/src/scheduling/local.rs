@@ -38,6 +38,12 @@ enum WorkerConfigReconcileOutcome {
     Rejected,
 }
 
+#[derive(Clone, Copy)]
+enum RequestOutcome {
+    Completed(Option<usize>),
+    Aborted,
+}
+
 pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
     P: SequencePublisher,
@@ -524,8 +530,15 @@ where
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
         self.slots.free(&request_id, Instant::now())?;
+        if !self.queue.has_queue_policy() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
+            return Ok(());
+        }
         match worker {
-            Some(worker) => self.queue.complete_request(&request_id, worker).await,
+            Some(worker) => self.queue.complete_request(&request_id, worker, None).await,
             None => self.queue.update().await,
         }
         Ok(())
@@ -540,7 +553,23 @@ where
         request_id: &str,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
-        self.release_if_worker(request_id, worker, true).await
+        self.release_if_worker(request_id, worker, RequestOutcome::Completed(None))
+            .await
+    }
+
+    /// Release a completed booking with its final input-plus-output context.
+    pub async fn complete_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        context_tokens: usize,
+    ) -> Result<(), SequenceError> {
+        self.release_if_worker(
+            request_id,
+            worker,
+            RequestOutcome::Completed(Some(context_tokens)),
+        )
+        .await
     }
 
     /// Release a booking as an aborted request only if it still belongs to `worker`.
@@ -549,24 +578,34 @@ where
         request_id: &str,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
-        self.release_if_worker(request_id, worker, false).await
+        self.release_if_worker(request_id, worker, RequestOutcome::Aborted)
+            .await
     }
 
     async fn release_if_worker(
         &self,
         request_id: &str,
         worker: WorkerWithDpRank,
-        completed: bool,
+        outcome: RequestOutcome,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
+        if !self.queue.has_queue_policy() {
+            self.slots
+                .free_if_worker(&request_id, worker, Instant::now())?;
+            self.queue.update_worker(worker).await;
+            return Ok(());
+        }
         let owned = self.slots.request_worker(&request_id) == Some(worker);
         self.slots
             .free_if_worker(&request_id, worker, Instant::now())?;
         if owned {
-            if completed {
-                self.queue.complete_request(&request_id, worker).await;
-            } else {
-                self.queue.abort_request(&request_id, worker).await;
+            match outcome {
+                RequestOutcome::Completed(context_tokens) => {
+                    self.queue
+                        .complete_request(&request_id, worker, context_tokens)
+                        .await;
+                }
+                RequestOutcome::Aborted => self.queue.abort_request(&request_id, worker).await,
             }
         } else {
             self.queue.update_worker(worker).await;

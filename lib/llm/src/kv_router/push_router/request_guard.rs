@@ -55,14 +55,14 @@ where
         }
     }
 
-    async fn release(&mut self, completed: bool) {
+    async fn release(&mut self, completed_context_tokens: Option<usize>) {
         if self.freed {
             return;
         }
         if self.scheduler_tracked {
-            let result = if completed {
+            let result = if let Some(context_tokens) = completed_context_tokens {
                 self.chooser
-                    .free_if_worker(&self.context_id, self.worker)
+                    .complete_if_worker(&self.context_id, self.worker, context_tokens)
                     .await
             } else {
                 self.chooser
@@ -74,7 +74,7 @@ where
                     request_id = %self.context_id,
                     worker = ?self.worker,
                     %error,
-                    completed,
+                    completed = completed_context_tokens.is_some(),
                     "Failed to release request"
                 );
             }
@@ -82,12 +82,12 @@ where
         self.freed = true;
     }
 
-    async fn complete(&mut self) {
-        self.release(true).await;
+    async fn complete(&mut self, context_tokens: usize) {
+        self.release(Some(context_tokens)).await;
     }
 
     async fn abort(&mut self) {
-        self.release(false).await;
+        self.release(None).await;
     }
 }
 
@@ -284,6 +284,10 @@ impl OutputBlockTracker {
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
         Some(OutputBlockUpdate { decay_fraction })
     }
+
+    fn context_tokens(&self, cumulative_osl: usize) -> usize {
+        self.isl_tokens.saturating_add(cumulative_osl)
+    }
 }
 
 /// Coordinates scheduler cleanup, observability, and streamed load tracking.
@@ -414,7 +418,10 @@ where
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
-        self.cleanup.complete().await;
+        let context_tokens = self
+            .output_blocks
+            .context_tokens(self.observability.cumulative_osl());
+        self.cleanup.complete(context_tokens).await;
     }
 
     pub(super) async fn abort(&mut self) {
