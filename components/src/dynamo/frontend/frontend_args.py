@@ -562,7 +562,9 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Fall back to HuggingFace when the selected fastokens or "
                 "basetenkenizer backend cannot load the model tokenizer. Use "
-                "--no-tokenizer-fallback to fail during startup instead."
+                "--no-tokenizer-fallback to fail model initialization instead. "
+                "In dynamic mode, discovery retries the load while the frontend "
+                "continues running."
             ),
             env_value_type=parse_bool,
         )
