@@ -14,8 +14,11 @@ use super::prometheus_names::{frontend_perf, name_prefix, tokio_perf as names};
 use crate::MetricsRegistry;
 
 const QUEUE_DEPTH_THRESHOLD_PER_WORKER: usize = 4;
+const QUEUE_DEPTH_RECOVERY_THRESHOLD_PER_WORKER: usize = 2;
 const QUEUE_OVERLOAD_DURATION: Duration = Duration::from_secs(15);
 const QUEUE_OVERLOAD_LOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const QUEUE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const QUEUE_SAMPLE_MAX_GAP: Duration = Duration::from_secs(2);
 
 fn tokio_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::TOKIO, suffix)
@@ -138,6 +141,14 @@ pub static TOKIO_WORKER_OVERFLOW_COUNT_TOTAL: Lazy<IntCounterVec> = Lazy::new(||
     .expect("tokio worker_overflow_count_total")
 });
 
+pub static TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::new(
+        tokio_metric_name(names::QUEUE_OVERLOAD_WARNINGS_TOTAL),
+        "Number of warnings for sustained Tokio runnable queue pressure",
+    )
+    .expect("tokio queue_overload_warnings_total counter")
+});
+
 // --- Event loop canary ---
 pub static EVENT_LOOP_DELAY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     Histogram::with_opts(
@@ -216,6 +227,9 @@ pub fn ensure_tokio_perf_metrics_registered(registry: &MetricsRegistry) {
             .add_metric(Box::new(TOKIO_WORKER_OVERFLOW_COUNT_TOTAL.clone()))
             .ok();
         registry
+            .add_metric(Box::new(TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.clone()))
+            .ok();
+        registry
             .add_metric(Box::new(EVENT_LOOP_DELAY_SECONDS.clone()))
             .ok();
         registry
@@ -243,6 +257,7 @@ pub fn ensure_tokio_perf_metrics_registered_prometheus(
     registry.register(Box::new(TOKIO_WORKER_LOCAL_QUEUE_DEPTH.clone()))?;
     registry.register(Box::new(TOKIO_WORKER_STEAL_COUNT_TOTAL.clone()))?;
     registry.register(Box::new(TOKIO_WORKER_OVERFLOW_COUNT_TOTAL.clone()))?;
+    registry.register(Box::new(TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.clone()))?;
     registry.register(Box::new(EVENT_LOOP_DELAY_SECONDS.clone()))?;
     registry.register(Box::new(EVENT_LOOP_STALL_TOTAL.clone()))?;
     let _ = PROMETHEUS_REGISTERED.set(());
@@ -255,8 +270,7 @@ pub fn ensure_tokio_perf_metrics_registered_prometheus(
 pub async fn tokio_metrics_and_canary_loop(cancel: CancellationToken) {
     let canary_interval = Duration::from_millis(10);
     let stall_threshold = Duration::from_millis(5);
-    let collect_interval = Duration::from_secs(1);
-    let mut next_collect = Instant::now() + collect_interval;
+    let mut next_collect = Instant::now() + QUEUE_SAMPLE_INTERVAL;
     let mut prev_counters = PrevWorkerCounters::new();
     let mut queue_overload = QueueOverloadLogState::default();
     loop {
@@ -273,60 +287,106 @@ pub async fn tokio_metrics_and_canary_loop(cancel: CancellationToken) {
         if delay > stall_threshold {
             EVENT_LOOP_STALL_TOTAL.inc();
         }
-        if Instant::now() >= next_collect {
-            let now = Instant::now();
-            next_collect = now + collect_interval;
+        let now = Instant::now();
+        if now >= next_collect {
+            next_collect = now + QUEUE_SAMPLE_INTERVAL;
             let queue_depths = sample_tokio_metrics(&mut prev_counters);
             if let Some(overload_duration) = queue_overload.observe(now, &queue_depths) {
-                tracing::warn!(
-                    worker_count = queue_depths.worker_count,
-                    queue_depth_threshold = queue_depths.threshold,
-                    global_queue_depth = queue_depths.global,
-                    worker_local_queue_depth_total = queue_depths.local,
-                    total_queue_depth = queue_depths.total,
-                    overload_duration_seconds = overload_duration.as_secs(),
-                    "Frontend Tokio runtime may be overloaded: runnable task queue has remained high"
-                );
+                warn_queue_overload(&queue_depths, overload_duration);
             }
         }
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+fn warn_queue_overload(queue_depths: &QueueDepthSnapshot, overload_duration: Duration) {
+    TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.inc();
+    tracing::warn!(
+        worker_count = queue_depths.worker_count,
+        total_queue_depth_threshold = queue_depths.total_threshold(),
+        worker_local_queue_depth_threshold = queue_depths.worker_local_threshold(),
+        global_queue_depth = queue_depths.global,
+        worker_local_queue_depth_total = queue_depths.local_total,
+        worker_local_queue_depth_max = queue_depths.local_max,
+        total_queue_depth = queue_depths.total(),
+        overload_duration_seconds = overload_duration.as_secs(),
+        "Tokio runtime may be overloaded: runnable task queues have remained high. Possible causes include CPU contention, blocking work on async workers, long-running task polls, or too few runtime workers."
+    );
+}
+
+#[derive(Debug)]
 struct QueueDepthSnapshot {
     worker_count: usize,
-    threshold: usize,
     global: usize,
-    local: usize,
-    total: usize,
+    local_total: usize,
+    local_max: usize,
 }
 
 impl QueueDepthSnapshot {
-    fn new(worker_count: usize, global: usize, local: usize) -> Self {
-        Self {
-            worker_count,
-            threshold: worker_count.saturating_mul(QUEUE_DEPTH_THRESHOLD_PER_WORKER),
-            global,
-            local,
-            total: global.saturating_add(local),
-        }
+    fn effective_worker_count(&self) -> usize {
+        self.worker_count.max(1)
+    }
+
+    fn total(&self) -> usize {
+        self.global.saturating_add(self.local_total)
+    }
+
+    fn total_threshold(&self) -> usize {
+        self.effective_worker_count()
+            .saturating_mul(QUEUE_DEPTH_THRESHOLD_PER_WORKER)
+    }
+
+    fn worker_local_threshold(&self) -> usize {
+        QUEUE_DEPTH_THRESHOLD_PER_WORKER
+    }
+
+    fn total_recovery_threshold(&self) -> usize {
+        self.effective_worker_count()
+            .saturating_mul(QUEUE_DEPTH_RECOVERY_THRESHOLD_PER_WORKER)
+    }
+
+    fn is_high_pressure(&self) -> bool {
+        self.total() >= self.total_threshold() || self.local_max >= self.worker_local_threshold()
+    }
+
+    fn has_recovered(&self) -> bool {
+        self.total() < self.total_recovery_threshold()
+            && self.local_max < QUEUE_DEPTH_RECOVERY_THRESHOLD_PER_WORKER
     }
 }
 
 #[derive(Default)]
 struct QueueOverloadLogState {
     overload_started_at: Option<Instant>,
+    last_sample_at: Option<Instant>,
     last_warning_at: Option<Instant>,
 }
 
 impl QueueOverloadLogState {
     fn observe(&mut self, now: Instant, queue_depths: &QueueDepthSnapshot) -> Option<Duration> {
-        if queue_depths.total < queue_depths.threshold {
-            self.overload_started_at = None;
+        if self.overload_started_at.is_none() {
+            if queue_depths.is_high_pressure() {
+                self.start_episode(now);
+            }
             return None;
         }
 
-        let overload_started_at = *self.overload_started_at.get_or_insert(now);
+        if self.last_sample_at.is_some_and(|last_sample_at| {
+            now.saturating_duration_since(last_sample_at) > QUEUE_SAMPLE_MAX_GAP
+        }) {
+            self.reset_episode();
+            if queue_depths.is_high_pressure() {
+                self.start_episode(now);
+            }
+            return None;
+        }
+
+        self.last_sample_at = Some(now);
+        if queue_depths.has_recovered() {
+            self.reset_episode();
+            return None;
+        }
+
+        let overload_started_at = self.overload_started_at.expect("active overload episode");
         let overload_duration = now.saturating_duration_since(overload_started_at);
         if overload_duration < QUEUE_OVERLOAD_DURATION {
             return None;
@@ -340,6 +400,18 @@ impl QueueOverloadLogState {
 
         self.last_warning_at = Some(now);
         Some(overload_duration)
+    }
+
+    fn start_episode(&mut self, now: Instant) {
+        self.overload_started_at = Some(now);
+        self.last_sample_at = Some(now);
+        self.last_warning_at = None;
+    }
+
+    fn reset_episode(&mut self) {
+        self.overload_started_at = None;
+        self.last_sample_at = None;
+        self.last_warning_at = None;
     }
 }
 
@@ -387,12 +459,14 @@ fn sample_tokio_metrics(prev: &mut PrevWorkerCounters) -> QueueDepthSnapshot {
     let num_workers = metrics.num_workers();
     prev.ensure_capacity(num_workers);
     let mut local_queue_depth: usize = 0;
+    let mut max_local_queue_depth: usize = 0;
 
     for w in 0..num_workers {
         let worker_label = w.to_string();
         let mean_poll = metrics.worker_mean_poll_time(w);
         let worker_local_queue_depth = metrics.worker_local_queue_depth(w);
         local_queue_depth = local_queue_depth.saturating_add(worker_local_queue_depth);
+        max_local_queue_depth = max_local_queue_depth.max(worker_local_queue_depth);
 
         TOKIO_WORKER_MEAN_POLL_TIME_NS
             .with_label_values(&[&worker_label])
@@ -429,56 +503,115 @@ fn sample_tokio_metrics(prev: &mut PrevWorkerCounters) -> QueueDepthSnapshot {
             .set((busy_proxy * 1000.0) as i64);
     }
 
-    QueueDepthSnapshot::new(num_workers, global_queue_depth, local_queue_depth)
+    QueueDepthSnapshot {
+        worker_count: num_workers,
+        global: global_queue_depth,
+        local_total: local_queue_depth,
+        local_max: max_local_queue_depth,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn queue_depth_threshold_scales_with_worker_count() {
-        assert_eq!(QueueDepthSnapshot::new(1, 0, 0).threshold, 4);
-        assert_eq!(QueueDepthSnapshot::new(4, 0, 0).threshold, 16);
-        assert_eq!(QueueDepthSnapshot::new(16, 0, 0).threshold, 64);
+    fn snapshot(
+        worker_count: usize,
+        global: usize,
+        local_total: usize,
+        local_max: usize,
+    ) -> QueueDepthSnapshot {
+        QueueDepthSnapshot {
+            worker_count,
+            global,
+            local_total,
+            local_max,
+        }
+    }
+
+    fn observe_high_pressure_for(
+        state: &mut QueueOverloadLogState,
+        start: Instant,
+        duration: Duration,
+        queue_depths: &QueueDepthSnapshot,
+    ) -> Option<Duration> {
+        let seconds = duration.as_secs();
+        let mut result = None;
+        for second in 0..=seconds {
+            result = state.observe(start + Duration::from_secs(second), queue_depths);
+        }
+        result
     }
 
     #[test]
-    fn queue_depth_snapshot_adds_global_and_local_queues() {
-        assert_eq!(
-            QueueDepthSnapshot::new(4, 7, 9),
-            QueueDepthSnapshot {
-                worker_count: 4,
-                threshold: 16,
-                global: 7,
-                local: 9,
-                total: 16,
-            }
-        );
+    fn queue_depth_thresholds_scale_with_worker_count() {
+        for (workers, entry, recovery) in [(0, 4, 2), (1, 4, 2), (4, 16, 8), (16, 64, 32)] {
+            let queue_depths = snapshot(workers, 0, 0, 0);
+            assert_eq!(queue_depths.total_threshold(), entry);
+            assert_eq!(queue_depths.total_recovery_threshold(), recovery);
+        }
     }
 
     #[test]
-    fn queue_overload_requires_sustained_pressure_and_resets() {
+    fn queue_pressure_uses_total_depth_and_hottest_worker() {
+        assert!(!snapshot(4, 7, 8, 3).is_high_pressure());
+        assert!(snapshot(4, 7, 9, 3).is_high_pressure());
+        assert!(snapshot(4, 0, 4, 4).is_high_pressure());
+
+        assert!(!snapshot(4, 0, 8, 1).has_recovered());
+        assert!(!snapshot(4, 0, 7, 2).has_recovered());
+        assert!(snapshot(4, 0, 7, 1).has_recovered());
+    }
+
+    #[test]
+    fn queue_overload_requires_sustained_pressure_with_hysteresis() {
         let start = Instant::now();
-        let overloaded = QueueDepthSnapshot::new(4, 8, 8);
-        let below_threshold = QueueDepthSnapshot::new(4, 7, 8);
+        let overloaded = snapshot(4, 8, 8, 3);
+        let hysteresis_band = snapshot(4, 0, 8, 1);
         let mut state = QueueOverloadLogState::default();
 
-        assert_eq!(state.observe(start, &overloaded), None);
         assert_eq!(
-            state.observe(
-                start + QUEUE_OVERLOAD_DURATION - Duration::from_nanos(1),
-                &overloaded
+            observe_high_pressure_for(
+                &mut state,
+                start,
+                QUEUE_OVERLOAD_DURATION - Duration::from_secs(1),
+                &overloaded,
             ),
             None
         );
         assert_eq!(
-            state.observe(start + QUEUE_OVERLOAD_DURATION, &below_threshold),
+            state.observe(
+                start + QUEUE_OVERLOAD_DURATION - Duration::from_millis(1),
+                &hysteresis_band,
+            ),
             None
         );
+        assert_eq!(
+            state.observe(start + QUEUE_OVERLOAD_DURATION, &hysteresis_band),
+            Some(QUEUE_OVERLOAD_DURATION)
+        );
+    }
 
-        let restarted_at = start + QUEUE_OVERLOAD_DURATION + Duration::from_secs(1);
+    #[test]
+    fn sampling_gap_restarts_overload_episode() {
+        let start = Instant::now();
+        let overloaded = snapshot(1, 2, 2, 2);
+        let mut state = QueueOverloadLogState::default();
+
+        assert_eq!(state.observe(start, &overloaded), None);
+        assert_eq!(
+            state.observe(start + QUEUE_SAMPLE_MAX_GAP, &overloaded),
+            None
+        );
+        let restarted_at =
+            start + QUEUE_SAMPLE_MAX_GAP + QUEUE_SAMPLE_MAX_GAP + Duration::from_millis(1);
         assert_eq!(state.observe(restarted_at, &overloaded), None);
+        for second in 1..QUEUE_OVERLOAD_DURATION.as_secs() {
+            assert_eq!(
+                state.observe(restarted_at + Duration::from_secs(second), &overloaded),
+                None
+            );
+        }
         assert_eq!(
             state.observe(restarted_at + QUEUE_OVERLOAD_DURATION, &overloaded),
             Some(QUEUE_OVERLOAD_DURATION)
@@ -486,32 +619,83 @@ mod tests {
     }
 
     #[test]
-    fn queue_overload_warnings_are_rate_limited_across_episodes() {
+    fn warnings_repeat_per_episode() {
         let start = Instant::now();
-        let overloaded = QueueDepthSnapshot::new(1, 2, 2);
-        let below_threshold = QueueDepthSnapshot::new(1, 1, 2);
+        let overloaded = snapshot(1, 2, 2, 2);
+        let recovered = snapshot(1, 0, 1, 1);
         let mut state = QueueOverloadLogState::default();
 
-        assert_eq!(state.observe(start, &overloaded), None);
-        let first_warning_at = start + QUEUE_OVERLOAD_DURATION;
         assert_eq!(
-            state.observe(first_warning_at, &overloaded),
+            observe_high_pressure_for(&mut state, start, QUEUE_OVERLOAD_DURATION, &overloaded),
             Some(QUEUE_OVERLOAD_DURATION)
         );
+        for second in (QUEUE_OVERLOAD_DURATION.as_secs() + 1)
+            ..(QUEUE_OVERLOAD_DURATION + QUEUE_OVERLOAD_LOG_INTERVAL).as_secs()
+        {
+            assert_eq!(
+                state.observe(start + Duration::from_secs(second), &overloaded),
+                None
+            );
+        }
+        assert_eq!(
+            state.observe(
+                start + QUEUE_OVERLOAD_DURATION + QUEUE_OVERLOAD_LOG_INTERVAL,
+                &overloaded,
+            ),
+            Some(QUEUE_OVERLOAD_DURATION + QUEUE_OVERLOAD_LOG_INTERVAL)
+        );
 
+        let recovered_at =
+            start + QUEUE_OVERLOAD_DURATION + QUEUE_OVERLOAD_LOG_INTERVAL + Duration::from_secs(1);
+        assert_eq!(state.observe(recovered_at, &recovered), None);
+        let second_episode_at = recovered_at + Duration::from_secs(1);
         assert_eq!(
-            state.observe(first_warning_at + Duration::from_secs(1), &below_threshold),
-            None
+            observe_high_pressure_for(
+                &mut state,
+                second_episode_at,
+                QUEUE_OVERLOAD_DURATION,
+                &overloaded,
+            ),
+            Some(QUEUE_OVERLOAD_DURATION)
         );
-        let second_episode_at = first_warning_at + Duration::from_secs(2);
-        assert_eq!(state.observe(second_episode_at, &overloaded), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sampler_reports_runtime_worker_and_queue_depths() {
+        let queue_depths = sample_tokio_metrics(&mut PrevWorkerCounters::new());
+
+        assert_eq!(queue_depths.worker_count, 2);
+        assert_eq!(queue_depths.total_threshold(), 8);
+        assert!(queue_depths.local_max <= queue_depths.local_total);
         assert_eq!(
-            state.observe(second_episode_at + QUEUE_OVERLOAD_DURATION, &overloaded),
-            None
+            queue_depths.total(),
+            queue_depths.global.saturating_add(queue_depths.local_total)
         );
-        assert_eq!(
-            state.observe(first_warning_at + QUEUE_OVERLOAD_LOG_INTERVAL, &overloaded),
-            Some(QUEUE_OVERLOAD_LOG_INTERVAL - Duration::from_secs(2))
+    }
+
+    #[test]
+    fn warning_counter_increments_and_is_registered() {
+        let before = TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.get();
+        warn_queue_overload(&snapshot(1, 2, 2, 2), QUEUE_OVERLOAD_DURATION);
+        assert_eq!(TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.get(), before + 1.0);
+
+        let metrics_registry = MetricsRegistry::new();
+        ensure_tokio_perf_metrics_registered(&metrics_registry);
+        assert!(
+            metrics_registry
+                .get_prometheus_registry()
+                .gather()
+                .iter()
+                .any(|family| family.name() == "dynamo_tokio_queue_overload_warnings_total")
+        );
+
+        let prometheus_registry = prometheus::Registry::new();
+        ensure_tokio_perf_metrics_registered_prometheus(&prometheus_registry).unwrap();
+        assert!(
+            prometheus_registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "dynamo_tokio_queue_overload_warnings_total")
         );
     }
 }
