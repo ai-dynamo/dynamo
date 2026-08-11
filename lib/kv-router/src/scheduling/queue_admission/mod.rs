@@ -68,7 +68,8 @@ pub struct PolicyQueueRequest<'a> {
 }
 
 impl<'a> PolicyQueueRequest<'a> {
-    pub(crate) fn new(
+    /// Create a request view for testing a queue policy outside the scheduler host.
+    pub fn new(
         id: PolicyQueueId,
         request_id: &'a str,
         context_tokens: usize,
