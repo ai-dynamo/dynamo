@@ -31,7 +31,7 @@ The protocol does not support multimodal input, LoRA, encode workers, beam searc
 
 ## Run
 
-Start a vLLM build with the split Inference and Control services. Data-parallel routing requires a build containing [vLLM PR #51178](https://github.com/vllm-project/vllm/pull/51178) or a release that includes it:
+Start a vLLM build with the split Inference and Control services. Data-parallel routing requires support for the per-request `x-data-parallel-rank` gRPC metadata:
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
