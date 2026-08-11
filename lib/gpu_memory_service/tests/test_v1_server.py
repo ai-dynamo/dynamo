@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
 import threading
 from time import monotonic
 
@@ -12,25 +13,46 @@ import pytest
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1.client.session import _GMSClientSession
-from gpu_memory_service.v1.protocol import HandshakeRequest, send_message
+from gpu_memory_service.v1.protocol import (
+    AllocateRequest,
+    HandshakeRequest,
+    HandshakeResponse,
+    receive_message,
+    send_message,
+)
+from gpu_memory_service.v1.server import rpc as rpc_module
 from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
 
 
-def _serve(path: str, vmm: FakeVMM):
-    manager = GMSServerMemoryManager("GPU-0", vmm, 0)
-    server = GMSRPCServer(path, manager)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return manager, server, thread
-
-
 def _stop(server: GMSRPCServer, thread: threading.Thread) -> None:
     server.shutdown()
     server.server_close()
-    thread.join(timeout=10)
+    thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+@pytest.fixture
+def serve():
+    running: list[tuple[GMSRPCServer, threading.Thread]] = []
+
+    def start(path: str, vmm: FakeVMM) -> GMSServerMemoryManager:
+        manager = GMSServerMemoryManager("GPU-0", vmm, 0)
+        server = GMSRPCServer(path, manager)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+        except BaseException:
+            server.server_close()
+            raise
+        running.append((server, thread))
+        return manager
+
+    yield start
+
+    for server, thread in reversed(running):
+        _stop(server, thread)
 
 
 def _connect_in_thread(path: str, lock_type: RequestedLockType):
@@ -46,21 +68,77 @@ def _connect_in_thread(path: str, lock_type: RequestedLockType):
     return result, connected, thread
 
 
+def test_socket_has_private_mode_at_bind(tmp_path, monkeypatch) -> None:
+    path = str(tmp_path / "gms.sock")
+    modes_at_chmod: list[int] = []
+    chmod = rpc_module.os.chmod
+
+    def observe_chmod(socket_path: str, mode: int) -> None:
+        modes_at_chmod.append(stat.S_IMODE(os.stat(socket_path).st_mode))
+        chmod(socket_path, mode)
+
+    monkeypatch.setattr(rpc_module.os, "chmod", observe_chmod)
+    with GMSRPCServer(
+        path,
+        GMSServerMemoryManager("GPU-0", FakeVMM(granularity=64), 0),
+    ):
+        assert modes_at_chmod == [0o600]
+
+
 @pytest.mark.timeout(10)
-def test_client_waits_for_server_startup_and_deadlines_absent_socket(tmp_path) -> None:
+def test_connected_session_times_out_stalled_rpc(tmp_path) -> None:
+    path = str(tmp_path / "stalled.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen()
+    release = threading.Event()
+
+    def stall() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            request, received_fd = receive_message(connection)
+            assert isinstance(request, HandshakeRequest)
+            assert received_fd < 0
+            send_message(
+                connection,
+                HandshakeResponse(GrantedLockType.RW, "nonce", "GPU-0"),
+            )
+            request, received_fd = receive_message(connection)
+            assert isinstance(request, AllocateRequest)
+            assert received_fd < 0
+            assert release.wait(5)
+
+    thread = threading.Thread(target=stall, daemon=True)
+    thread.start()
+    try:
+        session = _GMSClientSession(
+            path,
+            RequestedLockType.RW,
+            connect_timeout=0.2,
+        )
+        with pytest.raises(ConnectionError, match="AllocateRequest failed"):
+            session.allocate("stalled", 64)
+    finally:
+        release.set()
+        listener.close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.timeout(10)
+def test_client_waits_for_server_startup_and_deadlines_absent_socket(
+    tmp_path, serve
+) -> None:
     path = str(tmp_path / "gms.sock")
     result, connected, client_thread = _connect_in_thread(path, RequestedLockType.RW)
     assert not connected.wait(0.1)
     assert client_thread.is_alive()
 
-    _manager, server, server_thread = _serve(path, FakeVMM(granularity=64))
-    try:
-        assert connected.wait(5)
-        result.pop().close()
-        client_thread.join(timeout=5)
-        assert not client_thread.is_alive()
-    finally:
-        _stop(server, server_thread)
+    serve(path, FakeVMM(granularity=64))
+    assert connected.wait(5)
+    result.pop().close()
+    client_thread.join(timeout=5)
+    assert not client_thread.is_alive()
 
     started_at = monotonic()
     with pytest.raises(ConnectionError, match="GMS sidecar socket"):
@@ -74,10 +152,10 @@ def test_client_waits_for_server_startup_and_deadlines_absent_socket(tmp_path) -
 
 
 @pytest.mark.timeout(10)
-def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch) -> None:
+def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch, serve) -> None:
     path = str(tmp_path / "gms.sock")
     vmm = FakeVMM(granularity=64)
-    _manager, server, server_thread = _serve(path, vmm)
+    serve(path, vmm)
     writer = _GMSClientSession(path, RequestedLockType.RW)
     writer.allocate("ephemeral", 64)
 
@@ -106,17 +184,17 @@ def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch) -> None:
     close_thread.join(timeout=5)
     assert not close_thread.is_alive()
     assert not vmm.server_handles
-    _stop(server, server_thread)
 
 
 @pytest.mark.timeout(10)
 def test_sessions_commit_share_prioritize_writer_and_release_on_disconnect(
     tmp_path,
     monkeypatch,
+    serve,
 ) -> None:
     path = str(tmp_path / "gms.sock")
     vmm = FakeVMM(granularity=64)
-    manager, server, server_thread = _serve(path, vmm)
+    manager = serve(path, vmm)
     first_writer = _GMSClientSession(path, RequestedLockType.RW)
     first_writer.allocate("aborted", 64)
 
@@ -193,4 +271,3 @@ def test_sessions_commit_share_prioritize_writer_and_release_on_disconnect(
     ):
         thread.join(timeout=5)
         assert not thread.is_alive()
-    _stop(server, server_thread)

@@ -637,10 +637,6 @@ type DynamoGraphDeploymentRequestList struct {
 	Items           []DynamoGraphDeploymentRequest `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
-}
-
 // SetPhase updates the Phase field in the DGDR status.
 func (d *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
 	d.Status.Phase = phase

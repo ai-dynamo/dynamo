@@ -21,6 +21,7 @@ if not HAS_GMS:
 from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
 from gpu_memory_service.cli.args import parse_args
+from gpu_memory_service.v1 import device as v1_device
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -70,6 +71,14 @@ def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         server.main(["--use-v1", "--device-type", "xpu"])
     assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
+
+
+def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
+    monkeypatch.setattr(v1_device, "get_device_uuid", lambda _device: "GPU-0")
+
+    with pytest.raises(ValueError, match="too long for AF_UNIX"):
+        v1_device.get_socket_path(0, "weights")
 
 
 class _Process:

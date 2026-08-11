@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -91,7 +91,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &commoncontroller.RuntimeConfig{},
 		ScaleClient:   scaleClient,
 		DockerSecretRetriever: &mockDockerSecretRetriever{

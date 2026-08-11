@@ -122,13 +122,13 @@ When DGDSA is enabled, it becomes the **source of truth** for replica counts. Th
 When DGDSA is enabled, use `kubectl scale` on the adapter (not the DGD):
 
 ```bash
-# ✅ Correct - scale via DGDSA
+# ✅ Correct - scale via the DGDSA
 kubectl scale dgdsa sglang-agg-decode --replicas=3
 
-# ❌ Blocked - direct DGD edit rejected by webhook
-kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"replicas":3}}}}'
-# Error: spec.services[decode].replicas cannot be modified directly when scaling adapter is enabled;
-#        use 'kubectl scale dgdsa/sglang-agg-decode --replicas=3' or update the DynamoGraphDeploymentScalingAdapter instead
+# ❌ Blocked - editing the component's replicas directly is rejected by the webhook
+kubectl edit dgd sglang-agg   # setting spec.components[1].replicas on the decode component
+# Error: spec.components[1].replicas: Forbidden: cannot be modified directly when scaling
+#        adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead
 ```
 
 ## Enabling DGDSA for a Service
@@ -136,20 +136,28 @@ kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"re
 By default, no DGDSA is created for services, allowing direct replica management via the DGD. To enable autoscaling via HPA, KEDA, or Planner, explicitly enable the scaling adapter:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-agg
 spec:
-  services:
-    Frontend:
-      replicas: 2        # ← No DGDSA by default, direct edits allowed
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 2          # No DGDSA by default, direct replica edits allowed
+      # ...podTemplate omitted for brevity
 
-    decode:
+    - name: decode
+      type: decode
       replicas: 1
-      scalingAdapter:
-        enabled: true    # ← DGDSA created, managed via adapter
+      scalingAdapter: {}   # DGDSA created, managed via adapter
+      # ...podTemplate omitted for brevity
 ```
+
+> [!NOTE]
+> In `nvidia.com/v1beta1`, `scalingAdapter` is a marker: including it — even as the empty object
+> `scalingAdapter: {}` — creates the DGDSA. Omit the field to keep direct replica management.
 
 **When to enable DGDSA:**
 - You want to use HPA, KEDA, or Planner for autoscaling
