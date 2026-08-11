@@ -79,7 +79,7 @@ The driver hides their incompatible model, mode, gateway-auth, and environment c
 When request tracing is enabled, group rows by `agent_context.session_id` and inspect the trigger sequence:
 
 ```bash
-jq -r '[.event.agent_context.session_id, .event.agent_context.input_trigger] | @tsv' request-trace.jsonl
+jq -r '[.agent_context.session_id, .agent_context.input_trigger] | @tsv' request-trace.jsonl
 ```
 
 Foreground turns should normally begin with `user_message`; tool feedback should appear as `tool_result`. Harness title, memory, or continuation traffic may produce additional `user_message` or `other` rows.
