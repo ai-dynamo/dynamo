@@ -45,6 +45,7 @@ mod activation;
 mod admission;
 mod conditional_bypass;
 mod query;
+mod reservations;
 
 use admission::InnerPrefillRouter;
 
@@ -171,6 +172,7 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     binding: ArcSwapOption<PrefillBinding<Sel>>,
+    reservations: reservations::PrefillReservationRegistry<Sel>,
     target: Mutex<Option<EndpointId>>,
     target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
     /// Reference to the decode-side `KvRouter` so conditional disagg can peek

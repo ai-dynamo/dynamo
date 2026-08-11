@@ -92,6 +92,7 @@ where
     ) -> Arc<Self> {
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            reservations: Default::default(),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_router: None,
@@ -141,6 +142,7 @@ where
 
         let router = Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            reservations: Default::default(),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_router,
@@ -160,6 +162,7 @@ where
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
         });
 
+        Self::spawn_reservation_reaper(&router);
         tokio::spawn(Self::drive_target(
             Arc::downgrade(&router),
             target_rx,
