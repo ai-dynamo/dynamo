@@ -504,21 +504,18 @@ class TestNParameter:
         assert handler.generator.generate.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_n_is_clamped_to_max(self, handler, mock_context):
-        """n above MAX_IMAGES_PER_REQUEST is clamped, mirroring the
-        num_inference_steps clamping behavior."""
-        from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
-            MAX_IMAGES_PER_REQUEST,
-        )
-
+    async def test_n_above_max_is_rejected(self, handler, mock_context):
+        """n above MAX_IMAGES_PER_REQUEST is rejected, matching the TRT-LLM
+        image handler's [1, 10] validation (no silent clamping)."""
         self._mock_one_image(handler)
 
         results = []
         async for result in handler.generate(self._request(n=99), mock_context):
             results.append(result)
 
-        assert len(results[0]["data"]) == MAX_IMAGES_PER_REQUEST
-        assert handler.generator.generate.call_count == MAX_IMAGES_PER_REQUEST
+        assert results[0]["data"] == []
+        assert "n must be in [1, 10]" in results[0]["error"]
+        assert handler.generator.generate.call_count == 0
 
     @pytest.mark.asyncio
     async def test_n_below_one_is_an_error(self, handler, mock_context):
@@ -530,5 +527,5 @@ class TestNParameter:
             results.append(result)
 
         assert results[0]["data"] == []
-        assert "n must be >= 1" in results[0]["error"]
+        assert "n must be in [1, 10]" in results[0]["error"]
         assert handler.generator.generate.call_count == 0

@@ -26,10 +26,12 @@ logger = logging.getLogger(__name__)
 MAX_NUM_INFERENCE_STEPS = 50
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 7.5
-# Upper bound for the OpenAI `n` request field. The engine generates one
-# image per call, so `n` is served as sequential generations; the cap keeps
-# a single request from monopolizing the worker.
-MAX_IMAGES_PER_REQUEST = 8
+# Bounds for the OpenAI `n` request field, matching the TRT-LLM image
+# handler (num_images_per_prompt in [1, 10]) and the OpenAI API limit. The
+# engine generates one image per call, so `n` is served as sequential
+# generations; the bound keeps a single request from monopolizing the
+# worker.
+MAX_IMAGES_PER_REQUEST = 10
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -120,14 +122,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             width, height = self._parse_size(req.size)
 
             num_images = req.n
-            if num_images < 1:
-                raise ValueError(f"n must be >= 1, got {num_images}")
-            if num_images > MAX_IMAGES_PER_REQUEST:
-                logger.warning(
-                    f"n={num_images} exceeds max {MAX_IMAGES_PER_REQUEST}, "
-                    "clamping"
+            if not 1 <= num_images <= MAX_IMAGES_PER_REQUEST:
+                raise ValueError(
+                    f"n must be in [1, {MAX_IMAGES_PER_REQUEST}], "
+                    f"got {num_images}"
                 )
-                num_images = MAX_IMAGES_PER_REQUEST
 
             # The engine produces one image per call, so serve OpenAI `n`
             # semantics as n sequential generations. With an explicit seed use
