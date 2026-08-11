@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import importlib
 import importlib.util
 import json
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +78,16 @@ def make_args(**overrides):
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+def _load_replay_main():
+    try:
+        distribution("aisimulate")
+    except PackageNotFoundError:
+        pytest.skip(
+            "Dynamo replay CLI tests require the optional AISimulate distribution"
+        )
+    return importlib.import_module("dynamo.replay.main")
 
 
 def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
@@ -388,8 +400,9 @@ def test_build_mocker_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
+@pytest.mark.planner
 def test_replay_engine_args_keeps_max_model_len_explicit_only():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     engine_args = replay_main._load_engine_args(
         json.dumps(
@@ -403,8 +416,9 @@ def test_replay_engine_args_keeps_max_model_len_explicit_only():
     assert engine_args.max_model_len is None
 
 
+@pytest.mark.planner
 def test_replay_engine_args_preserves_explicit_max_model_len():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     engine_args = replay_main._load_engine_args(
         json.dumps(
@@ -419,8 +433,9 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
+@pytest.mark.planner
 def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     engine_args = replay_main._load_engine_args(
         json.dumps(
@@ -435,8 +450,9 @@ def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
     assert engine_args.dp_size == 4
 
 
+@pytest.mark.planner
 def test_replay_rejects_mismatched_dp_topology():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
         replay_main._load_engine_args(
@@ -450,8 +466,9 @@ def test_replay_rejects_mismatched_dp_topology():
         )
 
 
+@pytest.mark.planner
 def test_replay_rejects_dp_topology_without_aic_attention_dp():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
         replay_main._load_engine_args(

@@ -28,6 +28,7 @@ if not _core_available:
     collect_ignore.extend(
         str(Path(__file__).parent / test_file)
         for test_file in (
+            "test_aic.py",
             "test_replay_cli.py",
             "test_runner.py",
             "test_traffic.py",

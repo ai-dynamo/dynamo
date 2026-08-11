@@ -18,6 +18,7 @@ from .replay_utils import (
     _partial_router_config,
     _prefill_args,
     _report_summary,
+    _require_aisimulate_distribution,
     _router_config,
     _sglang_args,
     _vllm_args,
@@ -453,7 +454,9 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
     assert report.summary["completed_requests"] == len(report.per_request)
 
 
+@pytest.mark.planner
 def test_planner_replay_accepts_multi_shard_dynamo_trace(tmp_path):
+    _require_aisimulate_distribution()
     trace_paths = []
     for index in range(2):
         trace_path = tmp_path / f"trace-{index}.jsonl"

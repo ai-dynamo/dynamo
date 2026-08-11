@@ -20,6 +20,19 @@ except ModuleNotFoundError:  # Python 3.10
 pytestmark = pytest.mark.timeout(30)
 
 
+def _source_checkout_roots() -> tuple[Path, Path]:
+    """Return the AISimulate and repository roots for source-only contracts."""
+    aisimulate_root = Path(__file__).resolve().parents[2]
+    repo_root = aisimulate_root.parent
+    source_tree_markers = (
+        aisimulate_root / "pyproject.toml",
+        repo_root / "Cargo.toml",
+    )
+    if not all(path.is_file() for path in source_tree_markers):
+        pytest.skip("requires the Dynamo source checkout, not only the installed wheel")
+    return aisimulate_root, repo_root
+
+
 def test_aisimulate_distribution_publishes_aisimulate_sweeper_package():
     distribution = importlib.metadata.distribution("aisimulate")
     packaged_files = {str(path) for path in distribution.files or ()}
@@ -102,12 +115,12 @@ def test_ai_dynamo_registers_optional_sweeper_providers():
 
 
 def test_aisimulate_builds_a_planner_local_native_runtime_wheel():
-    root = Path(__file__).resolve().parents[2]
+    root, repo_root = _source_checkout_roots()
     project = tomllib.loads((root / "pyproject.toml").read_text())
     wheel_builder = (
-        root.parent / "container/templates/wheel_builder.Dockerfile"
+        repo_root / "container/templates/wheel_builder.Dockerfile"
     ).read_text()
-    release_workflow = (root.parent / ".github/workflows/release.yml").read_text()
+    release_workflow = (repo_root / ".github/workflows/release.yml").read_text()
 
     assert project["build-system"]["build-backend"] == "maturin"
     assert project["tool"]["maturin"]["module-name"] == "aisimulate._runtime"
@@ -120,8 +133,7 @@ def test_aisimulate_builds_a_planner_local_native_runtime_wheel():
 
 
 def test_runtime_wheel_context_covers_every_root_workspace_member():
-    root = Path(__file__).resolve().parents[2]
-    repo_root = root.parent
+    _, repo_root = _source_checkout_roots()
     workspace = tomllib.loads((repo_root / "Cargo.toml").read_text())
     wheel_builder = (
         repo_root / "container/templates/wheel_builder.Dockerfile"

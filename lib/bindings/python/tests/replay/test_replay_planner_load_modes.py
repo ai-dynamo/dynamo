@@ -100,19 +100,23 @@ def test_trace_closed_loop(tmp_path):
     assert report.summary["completed_requests"] == 2
 
 
-def test_planner_callback_error_preserves_python_exception_type():
+@pytest.mark.parametrize("callback_method", ["initial_tick_ms", "on_tick"])
+def test_planner_callback_error_preserves_python_exception_type(callback_method):
     # A raising planner callback must propagate its original Python exception
     # type (here ValueError) out of replay — not a generic Exception — so
     # callback failures stay diagnosable (type + traceback preserved across the
     # Rust seam).
     class _RaisingPlanner:
         def initial_tick_ms(self):
+            if callback_method == "initial_tick_ms":
+                raise ValueError("boom from initial_tick_ms")
             return 0.0  # Run the callback before the replay can finish.
 
         def on_tick(self, metrics):
+            assert callback_method == "on_tick"
             raise ValueError("boom from on_tick")
 
-    with pytest.raises(ValueError, match="boom from on_tick"):
+    with pytest.raises(ValueError, match=f"boom from {callback_method}"):
         run_mocker_synthetic_trace_replay(
             64,
             16,

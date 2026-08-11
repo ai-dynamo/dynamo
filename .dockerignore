@@ -25,12 +25,22 @@
 **/*.libtorch_model_store/*
 **/.git
 **/.github
+# Planner test images validate the release packaging contract without copying
+# the rest of the GitHub metadata into every Docker build context.
+!.github
+.github/*
+!.github/workflows
+.github/workflows/*
+!.github/workflows/release.yml
 **/*backup*/
 .dockerignore
 **/target/*
 **/*safetensors
 container/Dockerfile*
 container/**/*.Dockerfile
+# The Planner-only source-contract tests inspect this template from the test
+# image; keep every other generated/template Dockerfile excluded.
+!container/templates/wheel_builder.Dockerfile
 container/render.py
 container/context.yaml
 # container/compliance/ is now COPY'd into each image's `licenses` Dockerfile

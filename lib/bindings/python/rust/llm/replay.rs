@@ -16,6 +16,7 @@ use dynamo_mocker::loadgen::{
 use dynamo_mocker::replay::{
     ReplayArgsMode, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
 };
+use parking_lot::Mutex;
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
@@ -1124,11 +1125,13 @@ pub fn run_mocker_trace_replay(
         }
     };
     let report = if let Some(callback) = scaling_policy {
+        let callback_error = PyReplayScalingErrorSlot::default();
         run(Some(Box::new(PyReplayScalingPolicy {
             callback,
             capture_lifecycle_evidence: capture_planner_details,
+            callback_error: callback_error.clone(),
         })))
-        .map_err(scaling_run_err_to_pyerr)?
+        .map_err(|error| scaling_run_err_to_pyerr(error, &callback_error))?
     } else {
         py.allow_threads(move || run(None)).map_err(to_pyerr)?
     };
@@ -1651,11 +1654,13 @@ pub fn run_mocker_synthetic_trace_replay(
         }
     };
     let report = if let Some(callback) = scaling_policy {
+        let callback_error = PyReplayScalingErrorSlot::default();
         run(Some(Box::new(PyReplayScalingPolicy {
             callback,
             capture_lifecycle_evidence: capture_planner_details,
+            callback_error: callback_error.clone(),
         })))
-        .map_err(scaling_run_err_to_pyerr)?
+        .map_err(|error| scaling_run_err_to_pyerr(error, &callback_error))?
     } else {
         py.allow_threads(move || run(None)).map_err(to_pyerr)?
     };
@@ -2368,13 +2373,34 @@ fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
 
 /// Convert a scaling-run error back into a `PyErr`, preserving the original
 /// Python exception (its type and traceback) when the failure originated in a
-/// scaling callback (`initial_tick_ms` / `on_tick` stash the `PyErr` via
-/// `anyhow::Error::new`). Non-Python errors (e.g. a simulation dead-end) fall
-/// back to the generic conversion.
-fn scaling_run_err_to_pyerr(err: anyhow::Error) -> PyErr {
+/// scaling callback. Replay classifies the Rust-facing failure as
+/// `ReplayError::Scaling`, so the binding retains the original `PyErr`
+/// separately instead of relying on it to remain the root anyhow error.
+/// Non-Python errors (e.g. a simulation dead-end) fall back to the generic
+/// conversion.
+fn scaling_run_err_to_pyerr(
+    err: anyhow::Error,
+    callback_error: &PyReplayScalingErrorSlot,
+) -> PyErr {
+    if let Some(py_err) = callback_error.take() {
+        return py_err;
+    }
     match err.downcast::<PyErr>() {
         Ok(py_err) => py_err,
         Err(other) => to_pyerr(other),
+    }
+}
+
+#[derive(Clone, Default)]
+struct PyReplayScalingErrorSlot(Arc<Mutex<Option<PyErr>>>);
+
+impl PyReplayScalingErrorSlot {
+    fn record(&self, py: Python<'_>, error: &PyErr) {
+        *self.0.lock() = Some(error.clone_ref(py));
+    }
+
+    fn take(&self) -> Option<PyErr> {
+        self.0.lock().take()
     }
 }
 
@@ -2383,6 +2409,7 @@ fn scaling_run_err_to_pyerr(err: anyhow::Error) -> PyErr {
 struct PyReplayScalingPolicy {
     callback: Py<PyAny>,
     capture_lifecycle_evidence: bool,
+    callback_error: PyReplayScalingErrorSlot,
 }
 
 impl ReplayScalingPolicy for PyReplayScalingPolicy {
@@ -2391,13 +2418,16 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
     }
 
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
-        Python::with_gil(|py| {
+        let result = Python::with_gil(|py| {
             self.callback
                 .bind(py)
                 .call_method0("initial_tick_ms")?
                 .extract::<f64>()
-        })
-        .map_err(anyhow::Error::new)
+        });
+        if let Err(error) = &result {
+            Python::with_gil(|py| self.callback_error.record(py, error));
+        }
+        result.map_err(anyhow::Error::new)
     }
 
     fn on_tick(
@@ -2417,7 +2447,7 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
             draining_prefill_ids,
             draining_decode_ids,
         } = snapshot;
-        Python::with_gil(|py| -> PyResult<ReplayScalingDecision> {
+        let result = Python::with_gil(|py| -> PyResult<ReplayScalingDecision> {
             let non_draining_prefill_count = active_prefill_ids.len() + starting_prefill_ids.len();
             let non_draining_decode_count = active_decode_ids.len() + starting_decode_ids.len();
             let total_prefill_count = non_draining_prefill_count + draining_prefill_ids.len();
@@ -2474,7 +2504,10 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
                 target_decode: decision.get_item("target_decode")?.extract()?,
                 next_tick_ms: decision.get_item("next_tick_ms")?.extract()?,
             })
-        })
-        .map_err(anyhow::Error::new)
+        });
+        if let Err(error) = &result {
+            Python::with_gil(|py| self.callback_error.record(py, error));
+        }
+        result.map_err(anyhow::Error::new)
     }
 }
