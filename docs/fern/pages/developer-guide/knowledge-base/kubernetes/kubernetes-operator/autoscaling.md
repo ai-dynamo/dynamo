@@ -122,13 +122,13 @@ When DGDSA is enabled, it becomes the **source of truth** for replica counts. Th
 When DGDSA is enabled, use `kubectl scale` on the adapter (not the DGD):
 
 ```bash
-# ✅ Correct - scale via DGDSA
+# ✅ Correct - scale via the DGDSA
 kubectl scale dgdsa sglang-agg-decode --replicas=3
 
-# ❌ Blocked - direct DGD edit rejected by webhook
-kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"replicas":3}}}}'
-# Error: spec.services[decode].replicas cannot be modified directly when scaling adapter is enabled;
-#        use 'kubectl scale dgdsa/sglang-agg-decode --replicas=3' or update the DynamoGraphDeploymentScalingAdapter instead
+# ❌ Blocked - editing the component's replicas directly is rejected by the webhook
+kubectl edit dgd sglang-agg   # setting spec.components[1].replicas on the decode component
+# Error: spec.components[1].replicas: Forbidden: cannot be modified directly when scaling
+#        adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead
 ```
 
 ## Enabling DGDSA for a Service
