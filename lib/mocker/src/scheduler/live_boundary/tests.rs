@@ -127,6 +127,7 @@ fn pass() -> EnginePassResult {
             token_id: Some(1),
             completed: true,
             rejected: false,
+            cached_tokens: None,
             handoff_delay_ms: None,
         }],
         admissions: vec![AdmissionEvent {
@@ -258,6 +259,7 @@ fn output_suppression_repairs_stale_accept_length_counters() {
             token_id: Some(2),
             completed: false,
             rejected: false,
+            cached_tokens: None,
             handoff_delay_ms: None,
         },
         OutputSignal {
@@ -265,6 +267,7 @@ fn output_suppression_repairs_stale_accept_length_counters() {
             token_id: Some(3),
             completed: true,
             rejected: false,
+            cached_tokens: None,
             handoff_delay_ms: None,
         },
         OutputSignal {
@@ -272,6 +275,7 @@ fn output_suppression_repairs_stale_accept_length_counters() {
             token_id: Some(4),
             completed: true,
             rejected: true,
+            cached_tokens: None,
             handoff_delay_ms: None,
         },
     ]);
