@@ -95,7 +95,6 @@ class GenerateChunk(TypedDict, total=False):
 
     token_ids: Required[list[int]]
     index: Required[int]
-    text: str
     finish_reason: str
     completion_usage: dict[str, Any]
     disaggregated_params: dict[str, Any]
