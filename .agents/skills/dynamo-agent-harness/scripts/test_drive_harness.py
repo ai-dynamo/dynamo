@@ -1,10 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+import importlib.util
+import sys
 import unittest
+from types import ModuleType
 from unittest.mock import patch
 
-import drive_harness
+if importlib.util.find_spec("acp") is None:
+    acp = ModuleType("acp")
+    acp.PROTOCOL_VERSION = 1
+    acp.spawn_agent_process = None
+    acp.text_block = lambda text: text
+    sys.modules["acp"] = acp
+
+drive_harness = importlib.import_module("drive_harness")
 
 
 class EmptyClient:
