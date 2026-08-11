@@ -38,6 +38,10 @@ struct FakeVllm {
     hang_before_headers: Arc<AtomicBool>,
     headers_pending: Arc<AtomicBool>,
     release_headers: Arc<Notify>,
+    hold_before_first_token: Arc<AtomicBool>,
+    close_before_first_token: Arc<AtomicBool>,
+    first_token_pending: Arc<AtomicBool>,
+    release_first_token: Arc<Notify>,
     server_stream_dropped: Arc<AtomicBool>,
 }
 
@@ -120,6 +124,10 @@ impl pb::inference_server::Inference for FakeVllm {
             "nested": {"flags": [true, null, "opaque"]},
         });
         let hang = self.hang.load(Ordering::SeqCst);
+        let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
+        let close_before_first_token = self.close_before_first_token.load(Ordering::SeqCst);
+        let first_token_pending = self.first_token_pending.clone();
+        let release_first_token = self.release_first_token.clone();
         let dropped = self.server_stream_dropped.clone();
 
         let stream = async_stream::try_stream! {
@@ -146,6 +154,15 @@ impl pb::inference_server::Inference for FakeVllm {
                 prompt_info: Some(prompt_info),
                 outputs: None,
             };
+
+            if hold_before_first_token {
+                first_token_pending.store(true, Ordering::SeqCst);
+                release_first_token.notified().await;
+                first_token_pending.store(false, Ordering::SeqCst);
+            }
+            if close_before_first_token {
+                return;
+            }
 
             if hang {
                 loop {
@@ -482,6 +499,22 @@ fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
+fn decode_request() -> PreprocessedRequest {
+    let mut request = request();
+    request.prefill_result = Some(PrefillResult {
+        disaggregated_params: json!({
+            "do_remote_decode": false,
+            "do_remote_prefill": true,
+            "remote_engine_id": "prefill-0",
+            "remote_host": "127.0.0.1",
+            "remote_port": 20097,
+            "remote_block_ids": [7, 8],
+        }),
+        prompt_tokens_details: None,
+    });
+    request
+}
+
 fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmSidecarEngine {
     let transport = GrpcTransportConfig {
         connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
@@ -813,6 +846,108 @@ async fn cancellation_interrupts_pending_response_headers() {
     let terminal = stream.next().await.unwrap().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
     server.service.release_headers.notify_waiters();
+}
+
+#[tokio::test]
+async fn decode_cancellation_waits_for_submission_and_first_token() {
+    let service = FakeVllm::default();
+    service.hang_before_headers.store(true, Ordering::SeqCst);
+    service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let generate = engine.generate(
+        decode_request(),
+        GenerateContext::new(context.clone(), None),
+    );
+    tokio::pin!(generate);
+
+    tokio::select! {
+        _ = &mut generate => panic!("decode returned before response headers were gated"),
+        _ = async {
+            while !server.service.headers_pending.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    assert_eq!(server.service.requests.lock().await.len(), 1);
+    context.stop_generating();
+    tokio::select! {
+        _ = &mut generate => panic!("decode cancellation returned before response headers"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+    }
+
+    server.service.release_headers.notify_one();
+    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(2), &mut generate)
+        .await
+        .expect("decode response headers")
+        .expect("decode stream");
+    let next = stream.next();
+    tokio::pin!(next);
+    tokio::select! {
+        _ = &mut next => panic!("decode returned before the first token was gated"),
+        _ = async {
+            while !server.service.first_token_pending.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    assert!(
+        !server.service.server_stream_dropped.load(Ordering::SeqCst),
+        "decode stream dropped before the first token"
+    );
+    tokio::select! {
+        _ = &mut next => panic!("decode cancellation completed before the first token"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+    }
+
+    server.service.release_first_token.notify_one();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), &mut next)
+        .await
+        .expect("first token did not release decode cancellation")
+        .expect("cancelled terminal")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    drop(stream);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !server.service.server_stream_dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server stream dropped after first token");
+}
+
+#[tokio::test]
+async fn decode_cancellation_maps_premature_eof_to_cancelled() {
+    let service = FakeVllm::default();
+    service
+        .close_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Decode, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(
+            decode_request(),
+            GenerateContext::new(context.clone(), None),
+        )
+        .await
+        .expect("decode stream");
+    context.stop_generating();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("premature EOF did not release decode cancellation")
+        .expect("cancelled terminal")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
 #[tokio::test]
