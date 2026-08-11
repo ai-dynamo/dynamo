@@ -283,8 +283,8 @@ pub struct DirectRequest {
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
     pub arrival_timestamp_ms: Option<f64>,
-    /// TODO: Replay maps this to router queue priority only; mock-engine
-    /// scheduling does not consume it yet.
+    /// Unified Dynamo scheduling priority. The vLLM mocker schedules higher
+    /// values first; replay also maps this into router queue priority.
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub priority: i32,
     /// NOTE: Strict priority orders the router's pending queue only. It does

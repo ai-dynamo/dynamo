@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
@@ -49,6 +50,11 @@ pub(crate) enum RequestStatus {
 
 pub(crate) struct VllmRequestState {
     pub(crate) sequence: RequestKvState,
+    /// Unified Dynamo request priority. Higher values are scheduled first.
+    pub(crate) priority: i32,
+    /// Monotonic arrival order assigned when the request first enters this
+    /// scheduler. Requeues retain this value so equal priorities remain FIFO.
+    pub(crate) arrival_order: u64,
     pub(crate) status: RequestStatus,
     pub(crate) num_computed_tokens: usize,
     pub(crate) num_preemptions: usize,
@@ -110,10 +116,102 @@ impl VllmRequestState {
     }
 }
 
+/// A queue entry ordered by Dynamo priority descending, then original arrival
+/// ascending. The UUID tie-breaker makes the ordering total without affecting
+/// FIFO order because every scheduler-assigned arrival order is unique.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WaitingRequest {
+    uuid: Uuid,
+    priority: i32,
+    arrival_order: u64,
+}
+
+impl WaitingRequest {
+    fn from_state(uuid: Uuid, request: &VllmRequestState) -> Self {
+        Self {
+            uuid,
+            priority: request.priority,
+            arrival_order: request.arrival_order,
+        }
+    }
+}
+
+impl Ord for WaitingRequest {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // `BTreeSet::first` yields the smallest entry. Invert the priority
+        // comparison so a larger Dynamo priority is scheduled first.
+        other
+            .priority
+            .cmp(&self.priority)
+            .then_with(|| self.arrival_order.cmp(&other.arrival_order))
+            .then_with(|| self.uuid.cmp(&other.uuid))
+    }
+}
+
+impl PartialOrd for WaitingRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Stable priority queue used by the vLLM waiting path. It intentionally keeps
+/// the small queue-shaped inspection API used by scheduler diagnostics and
+/// tests while making dequeue order explicit.
+#[derive(Default)]
+pub(crate) struct StablePriorityQueue {
+    entries: BTreeSet<WaitingRequest>,
+}
+
+impl StablePriorityQueue {
+    fn insert(&mut self, entry: WaitingRequest) {
+        let inserted = self.entries.insert(entry);
+        debug_assert!(inserted, "waiting queue inserted a duplicate request");
+    }
+
+    fn remove(&mut self, entry: &WaitingRequest) {
+        self.entries.remove(entry);
+    }
+
+    fn remove_uuid(&mut self, uuid: Uuid) {
+        let stale = self
+            .entries
+            .iter()
+            .find(|entry| entry.uuid == uuid)
+            .copied();
+        if let Some(entry) = stale {
+            self.entries.remove(&entry);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn front(&self) -> Option<&Uuid> {
+        self.entries.first().map(|entry| &entry.uuid)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Uuid> {
+        self.entries.iter().map(|entry| &entry.uuid)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, uuid: &Uuid) -> bool {
+        self.entries.iter().any(|entry| &entry.uuid == uuid)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SchedulerState {
-    pub(crate) waiting: VecDeque<Uuid>,
+    pub(crate) waiting: StablePriorityQueue,
     waiting_members: FxHashSet<Uuid>,
+    next_arrival_order: u64,
     pub(crate) running: VecDeque<Uuid>,
     running_members: FxHashSet<Uuid>,
     pub(crate) requests: FxHashMap<Uuid, VllmRequestState>,
@@ -168,11 +266,25 @@ impl SchedulerState {
             .unwrap_or_default()
     }
 
+    fn next_arrival_order(&mut self) -> u64 {
+        let arrival_order = self.next_arrival_order;
+        self.next_arrival_order = self
+            .next_arrival_order
+            .checked_add(1)
+            .expect("vLLM scheduler arrival order overflowed");
+        arrival_order
+    }
+
     fn push_waiting(&mut self, uuid: Uuid) {
         if !self.waiting_members.insert(uuid) {
             return;
         }
-        self.waiting.push_back(uuid);
+        let request = self
+            .requests
+            .get(&uuid)
+            .expect("waiting request missing from state map");
+        self.waiting
+            .insert(WaitingRequest::from_state(uuid, request));
     }
 
     fn insert_waiting(&mut self, uuid: Uuid, request: VllmRequestState) {
@@ -181,50 +293,48 @@ impl SchedulerState {
         self.push_waiting(uuid);
     }
 
-    fn prepend_waiting(&mut self, uuid: Uuid) {
-        if !self.waiting_members.insert(uuid) {
-            return;
-        }
-        self.waiting.push_front(uuid);
+    /// Requeue a request using its original priority and arrival order. This
+    /// applies to preemption and swap-in resumption, so neither lifecycle can
+    /// change the stable order among equal-priority requests.
+    fn requeue_waiting(&mut self, uuid: Uuid) {
+        self.push_waiting(uuid);
     }
 
     /// Remove `uuid` from the waiting queue and from the
-    /// `waiting_members` set. Shared between `transition_to_running`
-    /// (which then promotes to running) and the offload admission
-    /// hook's parking path (which keeps the request in `Waiting`
-    /// status while parked on a swap-in).
+    /// `waiting_members` set. Shared between `transition_to_running`, terminal
+    /// cleanup, and the offload admission hook's swap-in parking path.
     fn remove_from_waiting(&mut self, uuid: Uuid) {
-        if let Some(position) = self.waiting.iter().position(|waiting| *waiting == uuid) {
-            self.waiting.remove(position);
+        if self.waiting_members.remove(&uuid) {
+            if let Some(request) = self.requests.get(&uuid) {
+                self.waiting
+                    .remove(&WaitingRequest::from_state(uuid, request));
+            } else {
+                // Keep cancellation/removal robust if a previous lifecycle
+                // transition left a stale queue entry behind.
+                self.waiting.remove_uuid(uuid);
+            }
         }
-        self.waiting_members.remove(&uuid);
     }
 
-    fn next_waiting_uuid(&mut self, prefer_materialized: bool) -> Option<Uuid> {
+    fn next_waiting_uuid(&mut self) -> Option<Uuid> {
         loop {
-            let uuid = *self.waiting.front()?;
-            if self.waiting_members.contains(&uuid)
-                && self
-                    .requests
-                    .get(&uuid)
-                    .is_some_and(|request| request.status != RequestStatus::Running)
-            {
-                break;
+            let entry = *self.waiting.entries.first()?;
+            let is_live = self.waiting_members.contains(&entry.uuid)
+                && self.requests.get(&entry.uuid).is_some_and(|request| {
+                    request.status != RequestStatus::Running
+                        && WaitingRequest::from_state(entry.uuid, request) == entry
+                });
+            if is_live {
+                return Some(entry.uuid);
             }
-            self.waiting.pop_front();
-            self.waiting_members.remove(&uuid);
-        }
 
-        if prefer_materialized {
-            return self.waiting.iter().copied().find(|uuid| {
-                self.waiting_members.contains(uuid)
-                    && self
-                        .requests
-                        .get(uuid)
-                        .is_some_and(VllmRequestState::prompt_is_prebuilt)
-            });
+            // Terminal removal and lifecycle transitions eagerly delete their
+            // entry. Retain this head cleanup as a defensive path for any
+            // stale entry left by an interrupted transition without scanning
+            // the whole queue on every admission.
+            self.waiting.entries.remove(&entry);
+            self.waiting_members.remove(&entry.uuid);
         }
-        self.waiting.front().copied()
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
@@ -256,7 +366,7 @@ impl SchedulerState {
     }
 
     pub(crate) fn take_completed(&mut self, uuid: &Uuid) -> Option<VllmRequestState> {
-        self.waiting_members.remove(uuid);
+        self.remove_from_waiting(*uuid);
         self.running_members.remove(uuid);
         self.requests.remove(uuid)
     }
@@ -293,7 +403,7 @@ impl SchedulerState {
         self.preemptions_total += 1;
         let signals = request.sequence.reset_legacy_with_signal();
         request.debug_assert_invariants(uuid);
-        self.prepend_waiting(uuid);
+        self.requeue_waiting(uuid);
         Some(PreemptedRequest {
             uuid,
             signals,
@@ -362,10 +472,38 @@ impl SchedulerState {
                 );
                 request.debug_assert_invariants(*uuid);
             }
-            debug_assert!(
-                self.waiting.len() >= self.waiting_members.len(),
-                "waiting queue dropped live membership entries"
+            debug_assert_eq!(
+                self.waiting.len(),
+                self.waiting_members.len(),
+                "waiting queue and membership set disagree"
             );
+            for entry in &self.waiting.entries {
+                debug_assert!(
+                    self.waiting_members.contains(&entry.uuid),
+                    "stale request {} remains in the waiting priority queue",
+                    entry.uuid,
+                );
+                if let Some(request) = self.requests.get(&entry.uuid) {
+                    debug_assert_ne!(
+                        request.status,
+                        RequestStatus::Running,
+                        "running request {} remains in the waiting priority queue",
+                        entry.uuid,
+                    );
+                    debug_assert_eq!(
+                        *entry,
+                        WaitingRequest::from_state(entry.uuid, request),
+                        "waiting request {} priority entry does not match state",
+                        entry.uuid,
+                    );
+                } else {
+                    debug_assert!(
+                        false,
+                        "waiting request {} missing from state map",
+                        entry.uuid,
+                    );
+                }
+            }
             debug_assert!(
                 self.running.len() >= self.running_members.len(),
                 "running queue dropped live membership entries"
@@ -889,11 +1027,13 @@ impl VllmCore {
     }
 
     fn make_request_state(
-        &self,
+        &mut self,
         request: DirectRequest,
         status: RequestStatus,
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        let priority = request.priority;
+        let arrival_order = self.state.next_arrival_order();
         let prompt_len = request.tokens.len();
         let mut max_output_tokens = request.max_output_tokens;
         let planned_output_ids = request.output_token_ids;
@@ -951,6 +1091,8 @@ impl VllmCore {
         };
         VllmRequestState {
             sequence,
+            priority,
+            arrival_order,
             status,
             num_computed_tokens: 0,
             num_preemptions: 0,
@@ -1197,11 +1339,10 @@ impl VllmCore {
         }
 
         self.requests_awaiting_swap_in = pending;
-        // Completed swap-ins are ready to run immediately: put them back at
-        // the front so unrelated cold requests cannot evict the freshly
-        // onboarded inactive blocks first. Iterate in reverse because each
-        // completion prepends to the queue; this preserves completion order.
-        for aws in completed.into_iter().rev() {
+        // Completed swap-ins re-enter with their original priority and arrival
+        // order. This preserves FIFO among equal priorities without allowing a
+        // lower-priority resumed request to bypass newer higher-priority work.
+        for aws in completed {
             self.complete_swap_in(aws);
         }
         if self.kv_manager.num_active_blocks() < active_before {
@@ -1254,8 +1395,8 @@ impl VllmCore {
     }
 
     /// Register the onboard'd PLHs into G1 inactive (so the request's
-    /// next `process_use` sees `InactiveHit`) and re-queue the request at
-    /// the front for admission. The swap-in covers
+    /// next `process_use` sees `InactiveHit`) and re-queue the request for
+    /// stable-priority admission. The swap-in covers
     /// `[skip_blocks .. skip_blocks + count]` of the request's block
     /// sequence — we skip the G1-cached prefix the request already had
     /// and register only the uncached-remainder blocks that the engine
@@ -1319,7 +1460,7 @@ impl VllmCore {
             outcome.consumed_entries, entries_len,
             "reserved destination slots should cover every swapped-in block"
         );
-        self.state.prepend_waiting(aws.uuid);
+        self.state.requeue_waiting(aws.uuid);
     }
 
     /// Admission-side hook: park a request on a G2 swap-in covering its
@@ -1503,11 +1644,7 @@ impl VllmCore {
         let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
         let mut rejected_uuids: Vec<Uuid> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
-            let prefer_materialized = matches!(
-                admission.stage_for(false),
-                AdmissionStage::PendingDestinationHead
-            );
-            let Some(uuid) = self.state.next_waiting_uuid(prefer_materialized) else {
+            let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
             if self.refresh_request_offload_dependency(uuid).is_some() {
