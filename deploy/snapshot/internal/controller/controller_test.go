@@ -71,6 +71,7 @@ type noopMountPoint struct{}
 
 func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
 func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
+func (noopMountPoint) NsFd() *os.File                   { return nil }
 
 // errorInjector always returns the wrapped error from Mount.
 type errorInjector struct{ err error }

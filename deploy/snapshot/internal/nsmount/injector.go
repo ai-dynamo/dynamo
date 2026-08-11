@@ -38,6 +38,12 @@ type MountPoint interface {
 	// A non-nil error means the mount may still be active; callers must treat
 	// this as fatal and exit so Kubernetes restarts into a clean namespace.
 	Unmount(ctx context.Context) error
+
+	// NsFd returns the pinned mount-namespace fd opened at Mount time.
+	// Use /proc/self/fd/<Fd()> as the --mount= argument to nsenter so the
+	// correct namespace is entered even if the original PID is recycled.
+	// Valid until Unmount is called. Test mocks may return nil.
+	NsFd() *os.File
 }
 
 // NSMounter mounts a source directory into a placeholder container's mount
@@ -47,6 +53,17 @@ type NSMounter struct {
 	dst     string
 	mounter mounter
 	log     logr.Logger
+}
+
+// probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
+// Called with an invalid fd: EBADF means the syscall exists; ENOSYS means the
+// kernel is too old.
+func probeKernelMountAPI() error {
+	err := unix.MountSetattr(-1, "", 0, nil)
+	if errors.Is(err, syscall.ENOSYS) {
+		return fmt.Errorf("ns-bind-mount requires Linux 5.12+ (mount_setattr): kernel does not support it")
+	}
+	return nil
 }
 
 // New returns an NSMounter backed by the ns-bind-mount binary at its default
@@ -62,18 +79,6 @@ func New(src, dst string, log logr.Logger) (*NSMounter, error) {
 		return nil, err
 	}
 	return newWithMounter(src, dst, m, log)
-}
-
-// probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
-// It calls mount_setattr with an invalid fd; EBADF means the syscall exists,
-// ENOSYS means the kernel is too old.
-func probeKernelMountAPI() error {
-	err := unix.MountSetattr(-1, "", 0, nil)
-	if errors.Is(err, syscall.ENOSYS) {
-		return fmt.Errorf("ns-bind-mount requires Linux 5.12+ (mount_setattr): kernel does not support it")
-	}
-	// Any other errno (EBADF, EINVAL, EPERM) means the syscall is present.
-	return nil
 }
 
 // newWithMounter is the test seam: it takes an arbitrary mounter so tests can
@@ -115,4 +120,8 @@ func (h *mountPoint) Path(name string) (string, error) {
 
 func (h *mountPoint) Unmount(ctx context.Context) error {
 	return h.mount.Unmount(ctx)
+}
+
+func (h *mountPoint) NsFd() *os.File {
+	return h.mount.NsFd()
 }

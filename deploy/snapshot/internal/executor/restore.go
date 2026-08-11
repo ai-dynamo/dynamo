@@ -69,15 +69,15 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	// Phase 2: Mount agent binaries into the placeholder's namespace so nsrestore is reachable.
 	injectStart := time.Now()
-	mp, nsRestorePath, err := mountBundle(ctx, mounter, snap.PlaceholderPID)
+	mp, err := mountBundle(ctx, mounter, snap.PlaceholderPID)
 	if err != nil {
 		return 0, err
 	}
 	injectDuration := time.Since(injectStart)
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if cleanupErr := mp.Unmount(cleanupCtx); cleanupErr != nil {
+		// Pass a background context: mp.Unmount has its own internal timeout
+		// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
+		if cleanupErr := mp.Unmount(context.Background()); cleanupErr != nil {
 			// Deliberately not promoted to retErr. The controller treats any
 			// error from Restore as a failed restore and SIGKILLs the placeholder,
 			// so surfacing a cleanup failure here would destroy a workload that
@@ -87,7 +87,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}()
 
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
-	result, err := execNSRestore(ctx, log, req, snap, nsRestorePath)
+	result, err := execNSRestore(ctx, log, req, snap, mp)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
@@ -125,19 +125,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	return snap.PlaceholderPID, nil
 }
 
-func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPoint, string, error) {
+func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPoint, error) {
 	mp, err := mounter.Mount(ctx, pid)
 	if err != nil {
-		return nil, "", fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return nil, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
-	nsRestorePath, err := mp.Path("nsrestore")
-	if err != nil {
-		if uerr := mp.Unmount(ctx); uerr != nil {
-			return nil, "", fmt.Errorf("resolve nsrestore path: %w (also failed to unmount: %v)", err, uerr)
-		}
-		return nil, "", fmt.Errorf("resolve nsrestore path: %w", err)
-	}
-	return mp, nsRestorePath, nil
+	return mp, nil
 }
 
 func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger) error {
@@ -238,7 +231,21 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, nsRestorePath string) (*RestoreInNamespaceResult, error) {
+//
+// Security hardening against two races:
+//
+//  1. PID reuse: mp.NsFd() is the /proc/<pid>/ns/mnt fd pinned at mount time.
+//     Passing it via --mount=/proc/self/fd/N to nsenter means we enter the
+//     exact namespace we mounted into, even if the placeholder died and its PID
+//     was recycled before nsenter runs.
+//
+//  2. TOCTOU path attack: the container runs as root and could rename /tmp
+//     between mountBundle and this exec, carrying our bind-mount to a new path
+//     and placing a malicious binary at /tmp/snapshot-binaries/nsrestore. We
+//     open the nsrestore binary from the agent host side (SnapshotBinSrc) before
+//     entering any namespace and exec it via /proc/self/fd/N, which is unaffected
+//     by mount-namespace changes inside the container.
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint) (*RestoreInNamespaceResult, error) {
 	checkpointPath := req.ContainerCheckpointLocation
 	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
 		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
@@ -246,16 +253,50 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
-	bundleDir := filepath.Dir(nsRestorePath)
-	args := []string{
-		"-t", strconv.Itoa(snap.PlaceholderPID),
-		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
-		// from the host-visible hierarchy so --cgroup-root remap works.
-		"-m", "-u", "-i", "-n", "-p",
-		"--", nsRestorePath,
+
+	// Open nsrestore from the agent host side before entering the container
+	// namespace, so the binary fd is immune to rename attacks inside the container.
+	binaryFile, err := os.Open(filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
+	if err != nil {
+		return nil, fmt.Errorf("open nsrestore from agent bundle: %w", err)
+	}
+	defer binaryFile.Close()
+
+	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
+	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
+	const (
+		nsFdChild     = 3 // mp.NsFd() passed as ExtraFiles[0]
+		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
+	)
+
+	bundleDir := nsmount.SnapshotBinDst // agent-side bundle root
+	var args []string
+
+	nsFd := mp.NsFd()
+	if nsFd != nil {
+		// Use the pinned ns fd for the mount namespace; keep -t for the other
+		// namespaces (user, ipc, net, pid). This decouples mount-ns entry from
+		// PID liveness.
+		args = []string{
+			fmt.Sprintf("--mount=/proc/self/fd/%d", nsFdChild),
+			"-t", strconv.Itoa(snap.PlaceholderPID),
+			// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
+			// from the host-visible hierarchy so --cgroup-root remap works.
+			"-u", "-i", "-n", "-p",
+			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
+		}
+	} else {
+		// Fallback for test mocks where NsFd returns nil.
+		args = []string{
+			"-t", strconv.Itoa(snap.PlaceholderPID),
+			"-m", "-u", "-i", "-n", "-p",
+			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
+		}
+	}
+	args = append(args,
 		"--checkpoint-path", checkpointPath,
 		"--bundle-dir", bundleDir,
-	}
+	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -265,14 +306,15 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
-	// LD_LIBRARY_PATH and PATH are not passed as flags: cmd.Env = os.Environ()
-	// below already inherits the agent's env into nsrestore, so useInjectedBundle
-	// reads them directly. Routing them through argv would expose them in
-	// /proc/<pid>/cmdline to any process in the container's PID namespace.
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
+	if nsFd != nil {
+		cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
+	} else {
+		cmd.ExtraFiles = []*os.File{nil, binaryFile}
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

@@ -3,14 +3,25 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
+
+// testMountPoint satisfies nsmount.MountPoint for executor unit tests.
+type testMountPoint struct{ dst string }
+
+func (m testMountPoint) Path(name string) (string, error) { return m.dst + "/" + name, nil }
+func (m testMountPoint) Unmount(_ context.Context) error  { return nil }
+func (m testMountPoint) NsFd() *os.File                   { return nil }
+
+var _ nsmount.MountPoint = testMountPoint{}
 
 type restoreFakeRuntime struct {
 	resolvedID      string
@@ -44,7 +55,7 @@ func TestExecNSRestoreRejectsRelativeContainerCheckpointLocation(t *testing.T) {
 			CheckpointPath: "/host/checkpoints/abc123",
 			PlaceholderPID: 1,
 		},
-		"/tmp/snapshot-binaries/nsrestore",
+		testMountPoint{dst: "/tmp/snapshot-binaries"},
 	)
 	if err == nil {
 		t.Fatal("expected relative container checkpoint location to be rejected")

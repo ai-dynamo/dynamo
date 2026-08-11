@@ -129,11 +129,11 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 	criuOpts.EvasiveDevices = proto.Bool(settings.EvasiveDevices)
 	criuOpts.ForceIrmap = proto.Bool(settings.ForceIrmap)
 
-	// Use nftables for network lock/unlock. The iptables mode (CRIU default)
-	// requires six binary names (iptables-restore, ip6tables-restore, …) and
-	// the libxtables dlopen plugins which ldd cannot detect at bundle-build time.
-	// nftables only needs the single `nft` binary and has no dlopen dependencies.
-	criuOpts.NetworkLock = criurpc.CriuNetworkLockMethod_NFTABLES.Enum()
+	// Skip network locking. Each Kubernetes pod runs in its own network
+	// namespace, so CRIU's DROP-rule lock (iptables or nftables) is unnecessary.
+	// Skipping also avoids bundling iptables/nft binaries which are GPL-2.0
+	// and fail the NVIDIA license compliance gate.
+	criuOpts.NetworkLock = criurpc.CriuNetworkLockMethod_SKIP.Enum()
 
 	if cgroupRoot != "" && shouldSetCgroupRoot(criuOpts.GetManageCgroupsMode()) {
 		criuOpts.CgRoot = []*criurpc.CgroupRoot{

@@ -250,16 +250,16 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
-#   nft — network lock/unlock (CRIU is configured with --network-lock nftables,
-#         which uses nft instead of the iptables ecosystem; avoids needing all
-#         six iptables/ip6tables variant names and the libxtables dlopen plugins)
 #   tar — used by runtime.ApplyRootfsDiff
+# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts: each
+# pod runs in its own network namespace in Kubernetes, so DROP-rule locking
+# is unnecessary and avoids bundling iptables/nft (both GPL-2.0).
 # All resolve through PATH inside the namespace.
 RUN set -eu; \
-    cp -L "$(command -v ip)" "$(command -v nft)" "$(command -v tar)" /snapshot-binaries/; \
+    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
-             /snapshot-binaries/ip /snapshot-binaries/nft /snapshot-binaries/tar
+             /snapshot-binaries/ip /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
 #
@@ -284,7 +284,7 @@ RUN set -eu; \
 # lib/. The closure step above uses xargs -r which exits 0 on empty input, so
 # a silent ldd failure leaves lib/ empty; asserting here catches that.
 RUN set -eu; \
-    for f in /snapshot-binaries/criu /snapshot-binaries/ip /snapshot-binaries/nft \
+    for f in /snapshot-binaries/criu /snapshot-binaries/ip \
              /snapshot-binaries/tar /snapshot-binaries/criu-plugins/*.so; do \
       [ -f "$f" ] || continue; \
       if LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" 2>&1 | grep -q 'not found'; then \
