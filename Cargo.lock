@@ -2482,7 +2482,16 @@ name = "dynamo-custom-policy-example-catalog"
 version = "1.4.0"
 dependencies = [
  "dynamo-custom-policy-example-basic",
+ "dynamo-custom-policy-example-disaggregated",
  "dynamo-kv-router",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-disaggregated"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
 ]
 
 [[package]]
@@ -2918,13 +2927,14 @@ dependencies = [
  "educe",
  "either",
  "etcd-client",
+ "fastrand",
  "figment",
+ "fs4",
  "futures",
  "humantime",
  "jsonschema",
  "k8s-openapi",
  "kube",
- "libc",
  "local-ip-address",
  "log",
  "lru 0.16.4",

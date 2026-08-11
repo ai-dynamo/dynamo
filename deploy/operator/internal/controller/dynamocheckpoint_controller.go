@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -59,11 +59,11 @@ type CheckpointReconciler struct {
 	client.Client
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 }
 
 // GetRecorder returns the event recorder (implements controller_common.Reconciler interface)
-func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
+func (r *CheckpointReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 
@@ -235,7 +235,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, nil
 		}
 		ckpt.Status.Message = checkpointDisabledMessage
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
+		r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
 		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
@@ -382,7 +382,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 				return ctrl.Result{}, nil
 			}
 			ckpt.Status.Message = checkpointDisabledMessage
-			r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
+			r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
 			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 		}
 
@@ -485,7 +485,7 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 // failCreating marks the DynamoCheckpoint Failed with a completion-condition reason.
 func (r *CheckpointReconciler) failCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, reason, message string) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Checkpoint failed", "reason", reason, "message", message)
-	r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", message)
+	r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointFailed", "Update", "%s", message)
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 	ckpt.Status.Message = message
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
@@ -503,7 +503,7 @@ func (r *CheckpointReconciler) failCreating(ctx context.Context, ckpt *nvidiacom
 // markCheckpointReady marks the DynamoCheckpoint Ready after PodSnapshot success and live JobComplete.
 func (r *CheckpointReconciler) markCheckpointReady(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, message string) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Checkpoint ready", "checkpointID", checkpointID)
-	r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", message)
+	r.Recorder.Eventf(ckpt, nil, corev1.EventTypeNormal, "CheckpointReady", "Update", "%s", message)
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 	ckpt.Status.CheckpointID = checkpointID
 	ckpt.Status.CreatedAt = ptr.To(metav1.Now())
