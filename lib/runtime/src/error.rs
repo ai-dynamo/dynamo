@@ -133,6 +133,25 @@ impl fmt::Display for BackendError {
 // DynamoError - The Standardized Error Type
 // ============================================================================
 
+/// Typed HTTP metadata attached at an error's origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpErrorMetadata {
+    code: u16,
+    message: String,
+}
+
+impl HttpErrorMetadata {
+    /// Returns the HTTP status code supplied by the error origin.
+    pub fn code(&self) -> u16 {
+        self.code
+    }
+
+    /// Returns the message supplied by the error origin.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 /// The standardized error type for Dynamo.
 ///
 /// `DynamoError` is a serializable, chainable error that:
@@ -154,6 +173,8 @@ impl fmt::Display for BackendError {
 pub struct DynamoError {
     error_type: ErrorType,
     message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_error: Option<HttpErrorMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     caused_by: Option<Box<DynamoError>>,
 }
@@ -177,6 +198,11 @@ impl DynamoError {
     /// Returns the error message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Returns typed HTTP metadata supplied by the error origin, if any.
+    pub fn http_error(&self) -> Option<&HttpErrorMetadata> {
+        self.http_error.as_ref()
     }
 }
 
@@ -208,6 +234,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
         Self {
             error_type: ErrorType::Unknown,
             message: err.to_string(),
+            http_error: None,
             caused_by: err.source().map(|s| Box::new(DynamoError::from(s))),
         }
     }
@@ -244,6 +271,7 @@ impl From<Box<dyn std::error::Error + 'static>> for DynamoError {
 pub struct DynamoErrorBuilder {
     error_type: Option<ErrorType>,
     message: Option<String>,
+    http_error: Option<HttpErrorMetadata>,
     caused_by: Option<Box<DynamoError>>,
 }
 
@@ -260,6 +288,15 @@ impl DynamoErrorBuilder {
         self
     }
 
+    /// Attach typed HTTP metadata supplied by the error origin.
+    pub fn http_error(mut self, code: u16, message: impl Into<String>) -> Self {
+        self.http_error = Some(HttpErrorMetadata {
+            code,
+            message: message.into(),
+        });
+        self
+    }
+
     /// Set the cause from any `std::error::Error`.
     ///
     /// If the cause is already a `DynamoError`, it is preserved as-is.
@@ -273,11 +310,13 @@ impl DynamoErrorBuilder {
 
     /// Build the `DynamoError`.
     ///
-    /// Defaults: `error_type` → `Unknown`, `message` → `""`, `cause` → `None`.
+    /// Defaults: `error_type` → `Unknown`, `message` → `""`, `http_error` →
+    /// `None`, `cause` → `None`.
     pub fn build(self) -> DynamoError {
         DynamoError {
             error_type: self.error_type.unwrap_or(ErrorType::Unknown),
             message: self.message.unwrap_or_default(),
+            http_error: self.http_error,
             caused_by: self.caused_by,
         }
     }
@@ -448,6 +487,7 @@ mod tests {
         let err = DynamoError::builder()
             .error_type(ErrorType::Unknown)
             .message("outer error")
+            .http_error(415, "unsupported media type")
             .cause(cause)
             .build();
 
@@ -456,6 +496,9 @@ mod tests {
 
         assert_eq!(deserialized.error_type(), ErrorType::Unknown);
         assert_eq!(deserialized.message(), "outer error");
+        let http_error = deserialized.http_error().unwrap();
+        assert_eq!(http_error.code(), 415);
+        assert_eq!(http_error.message(), "unsupported media type");
         assert!(deserialized.source().is_some());
 
         let cause = deserialized

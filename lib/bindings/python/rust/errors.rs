@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -143,7 +143,7 @@ define_dynamo_exceptions!(
 /// internal state, file paths, traceback strings, or backend identifiers.
 /// Non-4xx codes (including 5xx) are sanitized downstream — the original
 /// message survives in server logs only.
-pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
+fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
         .getattr("code")
@@ -157,4 +157,43 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    let (code, message) = extract_http_like_error(py, err)?;
+    Some(build_http_like_error(code, message))
+}
+
+fn build_http_like_error(code: u16, message: String) -> DynamoError {
+    let backend_error = if (400..500).contains(&code) {
+        BackendError::InvalidArgument
+    } else {
+        BackendError::Unknown
+    };
+
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(backend_error))
+        .message(message.clone())
+        .http_error(code, message)
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_like_errors_are_typed_at_the_python_boundary() {
+        for (code, expected_type) in [
+            (415, ErrorType::Backend(BackendError::InvalidArgument)),
+            (503, ErrorType::Backend(BackendError::Unknown)),
+        ] {
+            let error = build_http_like_error(code, "backend message".to_string());
+            assert_eq!(error.error_type(), expected_type);
+            assert_eq!(error.message(), "backend message");
+            let http_error = error.http_error().unwrap();
+            assert_eq!(http_error.code(), code);
+            assert_eq!(http_error.message(), "backend message");
+        }
+    }
 }

@@ -25,6 +25,7 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
+use super::error::{ClassifiedHttpError, HttpErrorKind};
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
@@ -90,6 +91,24 @@ fn generate_error_response(code: StatusCode, error_type: &str, message: String) 
         }),
     )
         .into_response()
+}
+
+fn generate_problem(problem: ClassifiedHttpError) -> Response {
+    if problem.status().is_server_error() {
+        tracing::error!(status = %problem.status(), "Generate error: {}", problem.diagnostic());
+    }
+    let error_type = match problem.kind() {
+        HttpErrorKind::Validation => "invalid_request_error",
+        HttpErrorKind::Authentication => "authentication_error",
+        HttpErrorKind::Permission => "permission_error",
+        HttpErrorKind::NotFound => "not_found_error",
+        HttpErrorKind::RateLimit => "rate_limit_error",
+        HttpErrorKind::Cancelled => "request_cancelled",
+        HttpErrorKind::Overloaded | HttpErrorKind::Unavailable => "service_unavailable",
+        HttpErrorKind::NotImplemented => "not_implemented",
+        HttpErrorKind::Internal => "internal_error",
+    };
+    generate_error_response(problem.status(), error_type, problem.message().to_string())
 }
 
 /// Resolve the request metadata that vLLM keeps outside the public JSON body.
@@ -423,32 +442,16 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            inflight_guard.mark_error(if was_cancelled {
-                ErrorType::Cancelled
-            } else if was_rejected {
-                ErrorType::Unavailable
-            } else {
-                ErrorType::Internal
-            });
-            if was_cancelled {
-                return generate_cancelled_response();
-            }
             if was_rejected {
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
                 state
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Generate);
-                return generate_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                    "engine rejected the request".to_string(),
-                );
             }
-            tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
-            return generate_internal_error_response();
+            let problem = ClassifiedHttpError::from_error(error.as_ref(), "internal server error");
+            inflight_guard.mark_error(problem.metric_type());
+            return generate_problem(problem);
         }
     };
 
@@ -484,16 +487,13 @@ async fn generate_dispatch(
             Json(response).into_response()
         }
         Err(error) => {
-            if request_context.is_killed()
-                || engine_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref())
-            {
+            if request_context.is_killed() || engine_context.is_killed() {
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
-            inflight_guard.mark_error(ErrorType::Internal);
-            tracing::error!(%request_id, %error, "failed to fold generate stream");
-            generate_internal_error_response()
+            let problem = ClassifiedHttpError::from_error(error.as_ref(), "internal server error");
+            inflight_guard.mark_error(problem.metric_type());
+            generate_problem(problem)
         }
     }
 }
@@ -588,6 +588,44 @@ mod tests {
     struct TerminalEngine(crate::protocols::common::FinishReason);
 
     struct CancelledEngine;
+
+    struct InvalidArgumentEngine {
+        during_stream: bool,
+    }
+
+    fn backend_invalid_argument() -> dynamo_runtime::error::DynamoError {
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::Backend(
+                dynamo_runtime::error::BackendError::InvalidArgument,
+            ))
+            .message("unsupported generate option")
+            .build()
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for InvalidArgumentEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            if !self.during_stream {
+                return Err(backend_invalid_argument().into());
+            }
+            let event = Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(backend_invalid_argument()),
+            };
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter([event])),
+                request.context(),
+            ))
+        }
+    }
 
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -1129,6 +1167,47 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn typed_validation_from_generate_or_stream_returns_400() {
+        for during_stream in [false, true] {
+            let engine: crate::types::openai::generate::GenerateStreamingEngine =
+                Arc::new(InvalidArgumentEngine { during_stream });
+            let service = HttpService::builder().build().unwrap();
+            let state = service.state_clone();
+            let response = generate_dispatch(
+                engine,
+                dispatch_test_context(),
+                "req-invalid-generate".to_string(),
+                "test-model".to_string(),
+                state.clone(),
+                GenerateResponseOptions::default(),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read validation response");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("parse validation response");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(body["error"]["message"], "unsupported generate option");
+
+            let metric_model = state.manager().metric_model_for("test-model");
+            assert_eq!(state.metrics_clone().get_inflight_count(metric_model), 0);
+            assert_eq!(
+                state.metrics_clone().get_request_counter(
+                    metric_model,
+                    &Endpoint::Generate,
+                    &RequestType::Unary,
+                    &Status::Error,
+                    &ErrorType::Validation,
+                ),
+                1
+            );
+        }
     }
 
     #[test]

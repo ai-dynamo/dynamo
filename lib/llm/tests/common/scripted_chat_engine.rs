@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(dead_code)]
+
 //! A deterministic chat-completions engine for HTTP protocol integration tests.
 
 use std::collections::VecDeque;
@@ -11,6 +13,7 @@ use dynamo_llm::protocols::{
     openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
+    openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
 };
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
@@ -18,11 +21,14 @@ use dynamo_runtime::pipeline::{
 use tokio::sync::{Mutex, Semaphore};
 
 pub type Script = Vec<NvCreateChatCompletionStreamResponse>;
+pub type AnnotatedScript = Vec<Annotated<NvCreateChatCompletionStreamResponse>>;
+pub type CompletionScript = Vec<Annotated<NvCreateCompletionResponse>>;
 
 enum QueuedScript {
-    Immediate(Script),
+    Immediate(AnnotatedScript),
+    PendingAfter(AnnotatedScript),
     Gated {
-        chunks: Script,
+        chunks: AnnotatedScript,
         split_at: usize,
         release: std::sync::Arc<Semaphore>,
     },
@@ -47,7 +53,35 @@ pub struct ScriptedChatEngine {
 impl ScriptedChatEngine {
     pub fn new(scripts: impl IntoIterator<Item = Script>) -> Self {
         Self {
+            scripts: Mutex::new(
+                scripts
+                    .into_iter()
+                    .map(|script| {
+                        QueuedScript::Immediate(
+                            script.into_iter().map(Annotated::from_data).collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn new_annotated(scripts: impl IntoIterator<Item = AnnotatedScript>) -> Self {
+        Self {
             scripts: Mutex::new(scripts.into_iter().map(QueuedScript::Immediate).collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn new_pending_after_annotated(scripts: impl IntoIterator<Item = AnnotatedScript>) -> Self {
+        Self {
+            scripts: Mutex::new(
+                scripts
+                    .into_iter()
+                    .map(QueuedScript::PendingAfter)
+                    .collect(),
+            ),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -61,7 +95,7 @@ impl ScriptedChatEngine {
         (
             Self {
                 scripts: Mutex::new(VecDeque::from([QueuedScript::Gated {
-                    chunks: script,
+                    chunks: script.into_iter().map(Annotated::from_data).collect(),
                     split_at,
                     release: release.clone(),
                 }])),
@@ -108,8 +142,14 @@ impl
             match script {
                 QueuedScript::Immediate(chunks) => {
                     for chunk in chunks {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
+                }
+                QueuedScript::PendingAfter(chunks) => {
+                    for chunk in chunks {
+                        yield chunk;
+                    }
+                    std::future::pending::<()>().await;
                 }
                 QueuedScript::Gated {
                     chunks,
@@ -118,7 +158,7 @@ impl
                 } => {
                     let mut chunks = chunks.into_iter();
                     for chunk in chunks.by_ref().take(split_at) {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
                     let permit = release
                         .acquire()
@@ -126,11 +166,57 @@ impl
                         .expect("script gate semaphore was closed");
                     permit.forget();
                     for chunk in chunks {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
                 }
             }
         };
         Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
+}
+
+/// Captures Completion requests and returns one annotated script per request.
+pub struct ScriptedCompletionEngine {
+    scripts: Mutex<VecDeque<CompletionScript>>,
+    requests: Mutex<Vec<NvCreateCompletionRequest>>,
+}
+
+impl ScriptedCompletionEngine {
+    pub fn new(scripts: impl IntoIterator<Item = CompletionScript>) -> Self {
+        Self {
+            scripts: Mutex::new(scripts.into_iter().collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn take_requests(&self) -> Vec<NvCreateCompletionRequest> {
+        std::mem::take(&mut *self.requests.lock().await)
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for ScriptedCompletionEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        self.requests.lock().await.push(request);
+        let script =
+            self.scripts.lock().await.pop_front().ok_or_else(|| {
+                anyhow!("ScriptedCompletionEngine received an unexpected request")
+            })?;
+
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter(script)),
+            ctx,
+        ))
     }
 }

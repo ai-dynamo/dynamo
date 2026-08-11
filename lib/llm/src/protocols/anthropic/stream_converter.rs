@@ -580,20 +580,22 @@ impl AnthropicStreamConverter {
     }
 
     /// Emit error events when the stream ends due to a backend error.
-    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_error_events(
+        &mut self,
+        error: AnthropicErrorBody,
+    ) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::with_capacity(1);
-        self.append_error_events(&mut events);
+        self.append_error_events(error, &mut events);
         events
     }
 
     /// Append error events when the stream ends due to a backend error.
-    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        let error_event = AnthropicStreamEvent::Error {
-            error: AnthropicErrorBody {
-                error_type: "api_error".to_string(),
-                message: "An internal error occurred during generation.".to_string(),
-            },
-        };
+    pub fn append_error_events(
+        &mut self,
+        error: AnthropicErrorBody,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        let error_event = AnthropicStreamEvent::Error { error };
         events.push(make_sse_event("error", &error_event));
     }
 }
@@ -1006,7 +1008,13 @@ mod tests {
         assert!(events.iter().all(Result::is_ok));
 
         events.clear();
-        conv.append_error_events(&mut events);
+        conv.append_error_events(
+            AnthropicErrorBody {
+                error_type: "api_error".to_string(),
+                message: "Internal server error".to_string(),
+            },
+            &mut events,
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(events.capacity(), capacity);
         assert!(events.iter().all(Result::is_ok));

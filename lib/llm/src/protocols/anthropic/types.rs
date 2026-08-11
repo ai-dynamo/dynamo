@@ -55,10 +55,37 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
             .join("\n"),
     }
 }
+
+fn validate_request(req: &AnthropicCreateMessageRequest) -> anyhow::Result<()> {
+    if req.messages.is_empty() {
+        anyhow::bail!("messages: field required");
+    }
+    if req.max_tokens == 0 {
+        anyhow::bail!("max_tokens: must be greater than 0");
+    }
+
+    for (message_index, message) in req.messages.iter().enumerate() {
+        let AnthropicMessageContent::Blocks { content } = &message.content else {
+            continue;
+        };
+        for (block_index, block) in content.iter().enumerate() {
+            if let AnthropicContentBlock::Other(value) = block
+                && !value.is_object()
+            {
+                anyhow::bail!(
+                    "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
     fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+        validate_request(&req)?;
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -1293,6 +1320,22 @@ mod tests {
             }
             other => panic!("expected assistant message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_scalar_content_block_is_rejected_during_conversion() {
+        let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": ["hello"]}]
+        }))
+        .unwrap();
+
+        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "messages[0].content[0]: content blocks must be objects"
+        );
     }
 
     #[test]

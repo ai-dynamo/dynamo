@@ -31,10 +31,11 @@
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
+use std::error::Error as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::http::service::error::SanitizedError;
+use crate::http::service::error::{ClassifiedHttpError, HttpErrorKind};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -208,12 +209,63 @@ pub fn monitor_for_disconnects(
     )
 }
 
+/// Monitor a protocol stream that renders its own terminal error event before
+/// returning the classified [`ClassifiedHttpError`]. The monitor still owns metrics and
+/// stream finalization, but does not append an OpenAI error envelope.
+pub fn monitor_for_disconnects_with_rendered_errors(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_impl(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        false,
+    )
+}
+
+fn openai_stream_error_type(kind: HttpErrorKind) -> &'static str {
+    match kind {
+        HttpErrorKind::Validation => "invalid_request_error",
+        HttpErrorKind::Authentication => "authentication_error",
+        HttpErrorKind::Permission => "permission_error",
+        HttpErrorKind::NotFound => "not_found_error",
+        HttpErrorKind::RateLimit => "rate_limit_error",
+        HttpErrorKind::Cancelled => "request_cancelled",
+        HttpErrorKind::Overloaded | HttpErrorKind::Unavailable => "service_unavailable",
+        HttpErrorKind::NotImplemented => "not_implemented",
+        HttpErrorKind::Internal => "internal_server_error",
+    }
+}
+
 fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_impl(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        inactivity_timeout,
+        true,
+    )
+}
+
+fn monitor_for_disconnects_impl(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
+    render_openai_error: bool,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -242,27 +294,44 @@ fn monitor_for_disconnects_with_timeout(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
+                            let problem = err
+                                .source()
+                                .and_then(|source| source.downcast_ref::<ClassifiedHttpError>())
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    ClassifiedHttpError::internal(
+                                        "Internal server error",
+                                        err.to_string(),
+                                    )
+                                });
+                            inflight_guard.mark_error(problem.metric_type());
+                            // A terminal stream error abandons the source stream, so explicitly
+                            // kill linked backend work instead of relying on ResponseStream::drop().
+                            context.kill();
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
-                            tracing::error!("Streaming error: {err}");
-                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
-                            // so naive `data:`-line parsers see both the error and a
-                            // stream terminator. Body derived from SanitizedError so
-                            // the sanitized message + status live in one place.
-                            let sanitized = SanitizedError::Internal;
-                            let err_json = serde_json::json!({
-                                "error": {
-                                    "message": sanitized.to_string(),
-                                    "type": sanitized.openai_type_slug(),
-                                    "code": sanitized.status().as_u16(),
-                                }
-                            });
-                            yield Event::default().data(err_json.to_string());
+                            if problem.status().is_server_error() {
+                                tracing::error!("Streaming error: {}", problem.diagnostic());
+                            } else {
+                                tracing::debug!("Streaming error: {}", problem.diagnostic());
+                            }
+                            if render_openai_error {
+                                // HTTP status is already committed, so carry the
+                                // classification in an OpenAI inline envelope.
+                                let err_json = serde_json::json!({
+                                    "error": {
+                                        "message": problem.message(),
+                                        "type": openai_stream_error_type(problem.kind()),
+                                        "code": problem.status().as_u16(),
+                                    }
+                                });
+                                yield Event::default().data(err_json.to_string());
+                            }
+                            // Preserve the frontend's common SSE terminator after
+                            // either the default or protocol-native error frame.
                             yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
@@ -408,7 +477,7 @@ mod tests {
     ) -> (
         Arc<Metrics>,
         InflightGuard,
-        Arc<dyn AsyncEngineContext>,
+        Arc<MockContext>,
         ConnectionHandle,
     ) {
         let metrics = Arc::new(Metrics::new());
@@ -416,7 +485,7 @@ mod tests {
             metrics
                 .clone()
                 .create_inflight_guard(model, Endpoint::ChatCompletions, true, req_id);
-        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
+        let context = Arc::new(MockContext::with_kill_tracking());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
@@ -713,8 +782,8 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_object())
             .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
-        let expected = SanitizedError::Internal;
-        let expected_message = expected.to_string();
+        let expected = ClassifiedHttpError::internal("Internal server error", "test diagnostic");
+        let expected_message = expected.message().to_string();
         assert_eq!(
             error.get("message").and_then(|v| v.as_str()),
             Some(expected_message.as_str()),
@@ -722,7 +791,7 @@ mod tests {
         );
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
-            Some(expected.openai_type_slug()),
+            Some(openai_stream_error_type(expected.kind())),
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
         assert_eq!(
@@ -748,9 +817,11 @@ mod tests {
         let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk");
         let backend_detail = "Disconnected: Stream ended before generation completed";
         let stream = simulate_mid_stream_error(3, backend_detail);
+        let backend_ctx = ctx.clone();
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("worker_kill", &body, backend_detail);
+        assert!(backend_ctx.is_killed());
     }
 
     /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with

@@ -63,6 +63,7 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
 pub use prometheus::Registry;
 
 use super::RouteDoc;
+use super::error::ClassifiedHttpError;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
@@ -2048,6 +2049,10 @@ fn observe_annotation_metrics<T>(
 fn annotated_to_sse_event<T: Serialize>(
     annotated: crate::types::Annotated<T>,
 ) -> Result<Option<Event>, axum::Error> {
+    if let Some(problem) = ClassifiedHttpError::from_annotated(&annotated) {
+        return Err(axum::Error::new(problem));
+    }
+
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
@@ -2055,23 +2060,6 @@ fn annotated_to_sse_event<T: Serialize>(
     }
 
     if let Some(ref msg) = annotated.event {
-        if msg == "error" {
-            let error_message = if let Some(ref dynamo_err) = annotated.error
-                && !dynamo_err.message().is_empty()
-            {
-                dynamo_err.message().to_string()
-            } else if let Some(ref comments) = annotated.comment {
-                let joined = comments.join(" -- ");
-                if joined.trim().is_empty() {
-                    "unspecified error".to_string()
-                } else {
-                    joined
-                }
-            } else {
-                "unspecified error".to_string()
-            };
-            return Err(axum::Error::new(error_message));
-        }
         event = event.event(msg);
     }
 
@@ -3784,6 +3772,22 @@ mod tests {
         }
     }
 
+    fn assert_internal_problem(
+        result: Result<Option<Event>, axum::Error>,
+        expected_diagnostic: &str,
+    ) {
+        use std::error::Error as _;
+
+        let error = result.expect_err("error annotation must fail conversion");
+        let problem = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ClassifiedHttpError>())
+            .expect("converter must preserve the classified HTTP problem");
+        assert_eq!(problem.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(problem.message(), "Internal server error");
+        assert!(problem.diagnostic().contains(expected_diagnostic));
+    }
+
     #[test]
     fn test_error_event_uses_dynamo_error_message() {
         use dynamo_runtime::error::DynamoError;
@@ -3791,30 +3795,26 @@ mod tests {
             Some(DynamoError::msg("image load failed: 403 Forbidden")),
             None,
         ));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+        assert_internal_problem(result, "403 Forbidden");
     }
 
     #[test]
     fn test_error_event_falls_back_to_comment() {
         let result =
             run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("connection lost"));
+        assert_internal_problem(result, "connection lost");
     }
 
     #[test]
     fn test_error_event_unspecified_when_no_message() {
         let result = run_event_converter(error_annotated(None, None));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+        assert_internal_problem(result, "unspecified error");
     }
 
     #[test]
     fn test_error_event_empty_comment_falls_through() {
         let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+        assert_internal_problem(result, "unspecified error");
     }
 
     #[test]
