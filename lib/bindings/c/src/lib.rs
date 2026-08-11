@@ -497,6 +497,56 @@ impl RouterHandles {
         }
     }
 
+    /// Atomically select and reserve a prefill worker for an EPP-owned booking.
+    #[expect(clippy::too_many_arguments)]
+    async fn reserve_prefill_worker(
+        &self,
+        reservation_id: &str,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
+        let outcome = self
+            .prefill_router
+            .reserve_prefill_worker(
+                reservation_id,
+                tokens,
+                block_mm_infos,
+                lora_name,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(%reservation_id, %error, "Prefill reservation failed");
+                QueryRouterResult::ErrQueryFailed
+            })?;
+        match outcome {
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    %reservation_id,
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill reservation rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
+    }
+
     /// Query optimal decode worker for a request.
     /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_credit=0
     /// (since KV cache is being transferred from prefill, not reused).
@@ -894,6 +944,7 @@ pub unsafe extern "C" fn add_request(
         Vec::new()
     };
 
+    let prefill_router = handles.prefill_router.clone();
     let decode_router = handles.decode_router.clone();
 
     let result = handles.runtime.secondary().block_on(async {
@@ -981,12 +1032,16 @@ pub unsafe extern "C" fn mark_prefill_complete(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
+    let prefill_router = handles.prefill_router.clone();
     let decode_router = handles.decode_router.clone();
 
     let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
+            if let Err(e) = prefill_router.release_prefill_reservation(&request_id_str).await {
+                tracing::warn!(request_id = %request_id_str, error = %e, "Failed to release prefill reservation");
+            }
             if let Err(e) = decode_router.mark_prefill_completed(&request_id_str).await {
                 tracing::warn!(
                     request_id = %request_id_str,
@@ -1038,12 +1093,16 @@ pub unsafe extern "C" fn free_request(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
+    let prefill_router = handles.prefill_router.clone();
     let decode_router = handles.decode_router.clone();
 
     let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
+            if let Err(e) = prefill_router.release_prefill_reservation(&request_id_str).await {
+                tracing::warn!(request_id = %request_id_str, error = %e, "Failed to release prefill reservation");
+            }
             if let Err(e) = decode_router.free(&request_id_str).await {
                 tracing::warn!(
                     request_id = %request_id_str,
@@ -1316,6 +1375,94 @@ pub unsafe extern "C" fn route_prefill_request(
             QueryRouterResult::Ok
         }
         Err(code) => code,
+    }
+}
+
+/// Atomically select and reserve the best prefill worker for an EPP-owned booking.
+///
+/// Pending scheduler admission is bounded by `timeout_ms`.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `reservation_id` must be a non-empty null-terminated UTF-8 string
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn route_prefill_request_with_reservation(
+    handle: RouterHandlesPtr,
+    reservation_id: *const c_char,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    timeout_ms: u64,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null()
+        || reservation_id.is_null()
+        || request_json.is_null()
+        || out_result.is_null()
+        || timeout_ms == 0
+    {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let reservation_id = match unsafe { CStr::from_ptr(reservation_id) }.to_str() {
+        Ok(value) if !value.is_empty() => value.to_owned(),
+        _ => return QueryRouterResult::ErrInvalidParam,
+    };
+    let handles = unsafe { &*handle };
+    let (tokens, priority_jump, strict_priority, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(values) => values,
+            Err(code) => return code,
+        };
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
+    let timeout_duration = Duration::from_millis(timeout_ms);
+
+    let result = handles.runtime.secondary().block_on(async {
+        tokio::time::timeout(timeout_duration, async {
+            handles
+                .reserve_prefill_worker(
+                    &reservation_id,
+                    &tokens,
+                    None,
+                    None,
+                    priority_jump,
+                    strict_priority,
+                    allowed_worker_ids,
+                    routing_constraints,
+                )
+                .await
+        })
+        .await
+    });
+
+    match result {
+        Ok(Ok((prefill_worker_id, prefill_dp_rank))) => {
+            let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
+            tracing::info!(
+                %reservation_id,
+                prefill_worker_id,
+                prefill_dp_rank,
+                token_count = tokens.len(),
+                priority_jump,
+                strict_priority,
+                "Reserved prefill request"
+            );
+
+            let out = unsafe { &mut *out_result };
+            *out = CRoutingResult::default();
+            out.is_disaggregated = true;
+            out.prefill_worker_id = prefill_worker_id;
+            out.prefill_dp_rank = prefill_dp_rank;
+            write_tokens_to_result(&tokens, out);
+            QueryRouterResult::Ok
+        }
+        Ok(Err(code)) => code,
+        Err(_) => {
+            tracing::warn!(%reservation_id, timeout_ms, "Prefill reservation timed out");
+            QueryRouterResult::ErrTimeout
+        }
     }
 }
 

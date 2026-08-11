@@ -54,10 +54,10 @@ var _ rc.ResponseBodyProcessor = &DynDecodeScorer{}
 
 // DecodeRoutingState holds routing information passed from Score() to PreRequest().
 type DecodeRoutingState struct {
-	WorkerID        string
-	DpRank          uint32
-	PrefillWorkerID string
-	TokenData       []int64
+	BookingID      string
+	WorkerID       string
+	DpRank         uint32
+	TokenData      []int64
 }
 
 // Clone implements plugins.StateData.
@@ -66,9 +66,9 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 		return nil
 	}
 	clone := &DecodeRoutingState{
-		WorkerID:        s.WorkerID,
-		DpRank:          s.DpRank,
-		PrefillWorkerID: s.PrefillWorkerID,
+		BookingID:      s.BookingID,
+		WorkerID:       s.WorkerID,
+		DpRank:         s.DpRank,
 	}
 	if s.TokenData != nil {
 		clone.TokenData = make([]int64, len(s.TokenData))
@@ -100,16 +100,22 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
 func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
 	return &DynDecodeScorer{
-		typedName:   plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState: plugins.NewPluginState(ctx),
+		typedName:           plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
+		pluginState:         plugins.NewPluginState(ctx),
+		addRequest:          dynscorer.CallAddRequest,
+		markPrefillComplete: dynscorer.CallMarkPrefillComplete,
+		freeBooking:         dynscorer.CallFreeRequest,
 	}
 }
 
 // DynDecodeScorer is a scorer plugin for the decode scheduling profile.
 type DynDecodeScorer struct {
-	typedName      plugins.TypedName
-	pluginState    *plugins.PluginState
-	firstTokenSeen sync.Map
+	typedName           plugins.TypedName
+	pluginState         *plugins.PluginState
+	prefillMarkInFlight sync.Map
+	addRequest          func(string, []int64, uint64, uint32) error
+	markPrefillComplete func(string) error
+	freeBooking         func(string) error
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -131,12 +137,28 @@ func (s *DynDecodeScorer) Category() schedtypes.ScorerCategory {
 // Score scores endpoints for decode suitability.
 func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
 	logger := log.FromContext(ctx)
+	if req == nil {
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		return uniformScores(endpoints, 1.0)
+	}
+	booking := ensureBookingState(cycleState)
+	attachBookingID(req, booking.ID)
 
-	isDisaggregated := readPrefillEnabled(cycleState)
+	if err := ctx.Err(); err != nil {
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer: scheduling already cancelled", "error", err.Error())
+		s.cleanupBooking(ctx, booking.ID, "decode scheduling cancelled before routing")
+		return uniformScores(endpoints, 1.0)
+	}
 
+	prefillEnabled := readPrefillEnabled(cycleState)
+	if booking.PrefillReserved && !prefillEnabled {
+		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "prefill scheduling did not complete")
+	}
+	isDisaggregated := prefillEnabled && booking.PrefillReserved
 	requestJSON, err := buildRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: failed to build request")
+		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "decode request serialization failed")
 		return uniformScores(endpoints, 1.0)
 	}
 
@@ -148,45 +170,41 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	result, err := dynscorer.CallRouteDecodeRequest(requestJSON, endpointsJSON, isDisaggregated)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: FFI decode routing failed")
+		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "decode routing failed")
+		return uniformScores(endpoints, 1.0)
+	}
+	if err := ctx.Err(); err != nil {
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer: scheduling cancelled after decode routing", "error", err.Error())
+		s.cleanupBooking(ctx, booking.ID, "decode scheduling cancelled after routing")
 		return uniformScores(endpoints, 1.0)
 	}
 
 	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
 	dpRankStr := strconv.FormatUint(uint64(result.DpRank), 10)
 	logger.V(logutil.DEFAULT).Info("[EPP-SCORER] FFI returned tokens from C bindings tokenization",
+		"bookingID", booking.ID,
 		"decodeWorkerID", workerIDStr,
 		"decodeDpRank", result.DpRank,
 		"isDisaggregated", isDisaggregated,
 		"tokenCount", len(result.TokenData))
 
-	if req.Headers == nil {
-		req.Headers = map[string]string{}
-	}
 	req.Headers[WorkerIDHeader] = workerIDStr
 	req.Headers[DpRankHeader] = dpRankStr
-
 	if isDisaggregated {
 		req.Headers[RoutingModeHeader] = "disaggregated"
-		if prefillID, ok := req.Headers[PrefillWorkerIDHeader]; ok {
-			logger.V(logutil.DEFAULT).Info("DynDecodeScorer: prefill worker header present",
-				"prefillWorkerID", prefillID)
-		} else {
-			logger.V(logutil.DEFAULT).Error(nil,
-				"DynDecodeScorer: x-dynamo-prefill-instance-id header missing — DynPrefillScorer did not set it")
-		}
 	} else {
 		req.Headers[RoutingModeHeader] = "aggregated"
+		delete(req.Headers, PrefillWorkerIDHeader)
+		delete(req.Headers, PrefillDpRankHeader)
 	}
 
-	// Store routing state for PreRequest bookkeeping
-	if req.RequestId != "" {
-		routingState := &DecodeRoutingState{
-			WorkerID:  workerIDStr,
-			DpRank:    result.DpRank,
-			TokenData: result.TokenData,
-		}
-		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
+	routingState := &DecodeRoutingState{
+		BookingID:      booking.ID,
+		WorkerID:       workerIDStr,
+		DpRank:         result.DpRank,
+		TokenData:      result.TokenData,
 	}
+	s.pluginState.Write(booking.ID, plugins.StateKey(decodeStateKey), routingState)
 
 	// Inject pre-computed tokens into the request body so the frontend
 	// sidecar can skip redundant tokenization.
@@ -195,77 +213,133 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	return uniformScores(endpoints, 1.0)
 }
 
+func (s *DynDecodeScorer) cleanupBooking(ctx context.Context, bookingID, reason string) bool {
+	if bookingID == "" {
+		return true
+	}
+	if err := s.freeBooking(bookingID); err != nil {
+		log.FromContext(ctx).V(logutil.DEFAULT).Error(err, "DynDecodeScorer: booking cleanup failed",
+			"bookingID", bookingID, "reason", reason)
+		return false
+	}
+	log.FromContext(ctx).V(logutil.VERBOSE).Info("DynDecodeScorer: booking cleaned up",
+		"bookingID", bookingID, "reason", reason)
+	return true
+}
+
+func (s *DynDecodeScorer) rollbackPrefillReservation(
+	ctx context.Context,
+	cycleState *schedtypes.CycleState,
+	request *schedtypes.InferenceRequest,
+	booking *BookingState,
+	reason string,
+) {
+	if booking != nil && booking.PrefillReserved && s.cleanupBooking(ctx, booking.ID, reason) {
+		booking.PrefillReserved = false
+		cycleState.Write(BookingStateKey, booking)
+	}
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+	if request != nil {
+		if request.Headers == nil {
+			request.Headers = map[string]string{}
+		}
+		request.Headers[RoutingModeHeader] = "aggregated"
+		delete(request.Headers, PrefillWorkerIDHeader)
+		delete(request.Headers, PrefillDpRankHeader)
+	}
+}
+
 // PreRequest registers the request with the Dynamo router's bookkeeping.
 func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.InferenceRequest, _ *schedtypes.SchedulingResult) {
 	logger := log.FromContext(ctx)
-
-	if request == nil || request.RequestId == "" {
-		logger.V(logutil.DEBUG).Info("DynDecodeScorer PreRequest: no request ID, skipping")
+	bookingID := bookingIDFromRequest(request)
+	if bookingID == "" {
+		logger.V(logutil.DEBUG).Info("DynDecodeScorer PreRequest: no controller booking ID, skipping")
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		s.cleanupBooking(ctx, bookingID, "request cancelled before decode booking")
 		return
 	}
 
 	state, err := plugins.ReadPluginStateKey[*DecodeRoutingState](
-		s.pluginState, request.RequestId, plugins.StateKey(decodeStateKey),
+		s.pluginState, bookingID, plugins.StateKey(decodeStateKey),
 	)
-	s.pluginState.Delete(request.RequestId)
-
-	if err != nil {
+	s.pluginState.Delete(bookingID)
+	if err != nil || state == nil || state.BookingID != bookingID {
 		logger.V(logutil.DEBUG).Info("DynDecodeScorer PreRequest: no routing state found",
-			"requestID", request.RequestId)
+			"bookingID", bookingID)
+		s.cleanupBooking(ctx, bookingID, "decode routing state missing")
 		return
 	}
 
 	var workerIDUint uint64
 	if _, parseErr := fmt.Sscanf(state.WorkerID, "%d", &workerIDUint); parseErr != nil {
 		logger.V(logutil.DEFAULT).Error(parseErr, "DynDecodeScorer PreRequest: invalid worker ID",
-			"requestID", request.RequestId, "workerID", state.WorkerID)
+			"bookingID", bookingID, "workerID", state.WorkerID)
+		s.cleanupBooking(ctx, bookingID, "decode worker ID invalid")
 		return
 	}
 
-	if addErr := dynscorer.CallAddRequest(request.RequestId, state.TokenData, workerIDUint, state.DpRank); addErr != nil {
+	if addErr := s.addRequest(
+		bookingID,
+		state.TokenData,
+		workerIDUint,
+		state.DpRank,
+	); addErr != nil {
 		logger.V(logutil.DEFAULT).Error(addErr, "DynDecodeScorer PreRequest: failed to add request",
-			"requestID", request.RequestId)
+			"bookingID", bookingID)
+		s.cleanupBooking(ctx, bookingID, "decode booking failed")
 		return
 	}
 
 	logger.V(logutil.VERBOSE).Info("DynDecodeScorer PreRequest: registered request",
-		"requestID", request.RequestId,
+		"bookingID", bookingID,
 		"workerID", state.WorkerID,
 		"dpRank", state.DpRank,
 		"tokenCount", len(state.TokenData))
+
+	go func() {
+		<-ctx.Done()
+		s.cleanupBooking(ctx, bookingID, "request context cancelled")
+	}()
 }
 
 // ResponseBody handles streaming chunks and end-of-stream cleanup.
 // On the first token it marks prefill as complete; on EndOfStream it frees the request.
 func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.InferenceRequest, response *rc.Response, _ *fwkdl.EndpointMetadata) {
-	if request == nil || request.RequestId == "" {
+	bookingID := bookingIDFromRequest(request)
+	if bookingID == "" || response == nil {
 		return
 	}
 
 	logger := log.FromContext(ctx)
 
-	// Mark prefill complete on first token
-	if _, alreadySeen := s.firstTokenSeen.LoadOrStore(request.RequestId, true); !alreadySeen {
-		if err := dynscorer.CallMarkPrefillComplete(request.RequestId); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
-				"requestID", request.RequestId)
-		} else {
-			logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
-				"requestID", request.RequestId)
-		}
-	}
-
-	// Free request on end of stream — must always run regardless of
-	// earlier errors to avoid leaking router bookkeeping state.
-	if response != nil && response.EndOfStream {
-		s.firstTokenSeen.Delete(request.RequestId)
-
-		if err := dynscorer.CallFreeRequest(request.RequestId); err != nil {
+	// Terminal cleanup takes precedence over first-token bookkeeping. This also
+	// covers empty/error responses where no output token was observed.
+	if response.EndOfStream {
+		s.prefillMarkInFlight.Delete(bookingID)
+		if err := s.freeBooking(bookingID); err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to free request",
-				"requestID", request.RequestId)
+				"bookingID", bookingID, "requestID", request.RequestId)
 		} else {
 			logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: freed request",
-				"requestID", request.RequestId)
+				"bookingID", bookingID, "requestID", request.RequestId)
 		}
+		return
+	}
+
+	// Keep the marker while the FFI call is in flight. On failure, remove it so
+	// the next response chunk retries instead of leaking the prefill load.
+	if _, alreadyInFlight := s.prefillMarkInFlight.LoadOrStore(bookingID, struct{}{}); alreadyInFlight {
+		return
+	}
+	if err := s.markPrefillComplete(bookingID); err != nil {
+		s.prefillMarkInFlight.Delete(bookingID)
+		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
+			"bookingID", bookingID, "requestID", request.RequestId)
+	} else {
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
+			"bookingID", bookingID, "requestID", request.RequestId)
 	}
 }

@@ -33,6 +33,7 @@ use crate::{
 mod activation;
 mod admission;
 mod query;
+mod reservations;
 
 use admission::InnerPrefillRouter;
 
@@ -123,6 +124,7 @@ struct PrefillCompletion {
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
+    reservations: reservations::PrefillReservationRegistry,
     model_manager: Arc<ModelManager>,
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,

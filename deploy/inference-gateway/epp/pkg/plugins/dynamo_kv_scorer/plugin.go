@@ -41,6 +41,7 @@ enum {
     QUERY_ROUTER_ERR_QUERY_FAILED = 4,
     QUERY_ROUTER_ERR_DISAGG_ENFORCED = 5,
     QUERY_ROUTER_ERR_TIMEOUT = 6,
+    QUERY_ROUTER_ERR_BACKPRESSURE = 7,
 };
 
 // opaque handle forward-decl for Router bindings
@@ -68,6 +69,13 @@ query_router_result_t route_prefill_request(RouterHandles *handle,
                                             const char *request_json,
                                             const char *pods_json,
                                             CRoutingResult *out_result);
+
+query_router_result_t route_prefill_request_with_reservation(RouterHandles *handle,
+                                                             const char *reservation_id,
+                                                             const char *request_json,
+                                                             const char *pods_json,
+                                                             uint64_t timeout_ms,
+                                                             CRoutingResult *out_result);
 
 query_router_result_t route_decode_request(RouterHandles *handle,
                                            const char *request_json,
@@ -454,8 +462,69 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
 }
 
+// CallRoutePrefillRequestWithReservation atomically selects and books a prefill worker.
+// The Rust scheduler retracts pending admission when timeout expires.
+func CallRoutePrefillRequestWithReservation(reservationID string, requestJSON string, podsJSON string, timeout time.Duration) (*RoutingResult, error) {
+	if reservationID == "" {
+		return nil, fmt.Errorf("prefill reservation ID is required")
+	}
+	if timeout <= 0 {
+		return nil, fmt.Errorf("prefill reservation timeout must be positive")
+	}
+	if !routerInitialized {
+		return nil, fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return nil, fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+	cRequestJSON := C.CString(requestJSON)
+	defer C.free(unsafe.Pointer(cRequestJSON))
+
+	var cPodsJSON *C.char
+	if podsJSON != "" {
+		cPodsJSON = C.CString(podsJSON)
+		defer C.free(unsafe.Pointer(cPodsJSON))
+	}
+
+	timeoutMS := timeout.Milliseconds()
+	if timeoutMS < 1 {
+		timeoutMS = 1
+	}
+	var result C.CRoutingResult
+	rc := C.route_prefill_request_with_reservation(
+		router,
+		cReservationID,
+		cRequestJSON,
+		cPodsJSON,
+		C.uint64_t(timeoutMS),
+		&result,
+	)
+	if rc != C.QUERY_ROUTER_OK {
+		return nil, fmt.Errorf("route_prefill_request_with_reservation failed with code %d", rc)
+	}
+
+	tokens := extractTokenData(&result)
+	workerID := uint64(result.prefill_worker_id)
+	dpRank := uint32(result.prefill_dp_rank)
+	C.free_routing_result(&result)
+
+	return &RoutingResult{
+		WorkerID:       workerID,
+		DpRank:         dpRank,
+		TokenData:      tokens,
+	}, nil
+}
+
 // CallRouteDecodeRequest routes a request to the best decode worker.
 // When isDisaggregated is true, overlap_score_credit=0 is used (KV cache transferred from prefill).
+
 func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated bool) (*RoutingResult, error) {
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")

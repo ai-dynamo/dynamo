@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
@@ -33,6 +34,8 @@ import (
 const (
 	// DynPrefillScorerType is the plugin type registered in the plugin registry.
 	DynPrefillScorerType = "dyn-prefill-scorer"
+
+	defaultPrefillReservationTimeout = 5 * time.Second
 )
 
 // compile-time type assertion
@@ -60,13 +63,17 @@ func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ plugi
 // NewDynPrefillScorer initializes a new DynPrefillScorer.
 func NewDynPrefillScorer() *DynPrefillScorer {
 	return &DynPrefillScorer{
-		typedName: plugins.TypedName{Type: DynPrefillScorerType, Name: DynPrefillScorerType},
+		typedName:      plugins.TypedName{Type: DynPrefillScorerType, Name: DynPrefillScorerType},
+		reservePrefill: dynscorer.CallRoutePrefillRequestWithReservation,
+		freeBooking:    dynscorer.CallFreeRequest,
 	}
 }
 
 // DynPrefillScorer is a scorer plugin for the prefill scheduling profile.
 type DynPrefillScorer struct {
-	typedName plugins.TypedName
+	typedName      plugins.TypedName
+	reservePrefill func(string, string, string, time.Duration) (*dynscorer.RoutingResult, error)
+	freeBooking    func(string) error
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -88,15 +95,29 @@ func (s *DynPrefillScorer) Category() schedtypes.ScorerCategory {
 // Score scores endpoints for prefill suitability.
 func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
 	logger := log.FromContext(ctx)
+	if req == nil {
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		return uniformScores(endpoints, 0)
+	}
 
+	if err := ctx.Err(); err != nil {
+		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: scheduling already cancelled", "error", err.Error())
+		return uniformScores(endpoints, 0)
+	}
 	if !readPrefillEnabled(cycleState) {
 		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: prefill not enabled, returning zero scores")
 		return uniformScores(endpoints, 0)
 	}
 
+	booking := ensureBookingState(cycleState)
+	attachBookingID(req, booking.ID)
+	delete(req.Headers, PrefillWorkerIDHeader)
+	delete(req.Headers, PrefillDpRankHeader)
+
 	requestJSON, err := buildRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to build request")
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 		return uniformScores(endpoints, 0)
 	}
 
@@ -105,28 +126,62 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		"endpointCount", len(endpoints),
 		"endpointsJSON", string(endpointsJSON))
 
-	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, endpointsJSON)
-	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+	timeout := defaultPrefillReservationTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	if timeout <= 0 {
 		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 		return uniformScores(endpoints, 0)
 	}
 
+	result, err := s.reservePrefill(booking.ID, requestJSON, endpointsJSON, timeout)
+	if err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill reservation failed")
+		booking.PrefillReserved = false
+		cycleState.Write(BookingStateKey, booking)
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		return uniformScores(endpoints, 0)
+	}
+
+	booking.PrefillReserved = true
+	cycleState.Write(BookingStateKey, booking)
 	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
-	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
+	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker reserved",
+		"bookingID", booking.ID,
 		"prefillWorkerID", prefillWorkerID,
 		"prefillDpRank", result.DpRank,
 		"tokenCount", len(result.TokenData))
 
-	if req.Headers == nil {
-		req.Headers = map[string]string{}
-	}
 	req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
 	if result.DpRank != dynscorer.UnsetDpRank {
 		req.Headers[PrefillDpRankHeader] = strconv.FormatUint(uint64(result.DpRank), 10)
 	} else {
 		delete(req.Headers, PrefillDpRankHeader)
 	}
+
+	if err := ctx.Err(); err != nil {
+		if cleanupErr := s.freeBooking(booking.ID); cleanupErr != nil {
+			logger.V(logutil.DEFAULT).Error(cleanupErr, "DynPrefillScorer: failed to clean cancelled reservation",
+				"bookingID", booking.ID)
+		}
+		booking.PrefillReserved = false
+		cycleState.Write(BookingStateKey, booking)
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		return uniformScores(endpoints, 0)
+	}
+
+	bookingID := booking.ID
+	go func() {
+		<-ctx.Done()
+		if cleanupErr := s.freeBooking(bookingID); cleanupErr != nil {
+			logger.V(logutil.DEFAULT).Error(cleanupErr, "DynPrefillScorer: cancellation cleanup failed",
+				"bookingID", bookingID)
+		}
+	}()
 
 	return uniformScores(endpoints, 1.0)
 }

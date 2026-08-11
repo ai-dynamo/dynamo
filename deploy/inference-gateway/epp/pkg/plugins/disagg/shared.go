@@ -32,6 +32,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
@@ -46,6 +47,8 @@ const (
 
 	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
 	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
+	BookingStateKey        = plugins.StateKey("dynamo-epp-booking")
+	BookingIDHeader        = "x-dynamo-epp-booking-id"
 )
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
@@ -65,6 +68,61 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 		return state.Enabled
 	}
 	return false
+}
+
+// BookingState owns the controller-generated ID used for router bookkeeping.
+type BookingState struct {
+	ID              string
+	PrefillReserved bool
+}
+
+// Clone implements plugins.StateData.
+func (s *BookingState) Clone() plugins.StateData {
+	if s == nil {
+		return &BookingState{}
+	}
+	return &BookingState{ID: s.ID, PrefillReserved: s.PrefillReserved}
+}
+
+func readBookingState(cycleState *schedtypes.CycleState) (*BookingState, bool) {
+	state, err := schedtypes.ReadCycleStateKey[*BookingState](cycleState, BookingStateKey)
+	if err != nil || state == nil {
+		return nil, false
+	}
+	if _, err := uuid.Parse(state.ID); err != nil {
+		return nil, false
+	}
+	return state, true
+}
+
+func ensureBookingState(cycleState *schedtypes.CycleState) *BookingState {
+	if state, ok := readBookingState(cycleState); ok {
+		return state
+	}
+	state := &BookingState{ID: uuid.NewString()}
+	cycleState.Write(BookingStateKey, state)
+	return state
+}
+
+func attachBookingID(request *schedtypes.InferenceRequest, bookingID string) {
+	if request == nil {
+		return
+	}
+	if request.Headers == nil {
+		request.Headers = map[string]string{}
+	}
+	request.Headers[BookingIDHeader] = bookingID
+}
+
+func bookingIDFromRequest(request *schedtypes.InferenceRequest) string {
+	if request == nil || request.Headers == nil {
+		return ""
+	}
+	bookingID := request.Headers[BookingIDHeader]
+	if _, err := uuid.Parse(bookingID); err != nil {
+		return ""
+	}
+	return bookingID
 }
 
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
