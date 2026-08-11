@@ -93,7 +93,22 @@ func TestResponseBodyRetriesPrefillMarkAndFreesTerminalResponse(t *testing.T) {
 	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
 	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
 	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
+
+	lifecycle := findBookingLifecycle(bookingID)
+	if lifecycle == nil {
+		t.Fatal("expected booking lifecycle after first response chunk")
+	}
+	select {
+	case <-lifecycle.markerComplete():
+	case <-time.After(time.Second):
+		t.Fatal("prefill marker did not finish")
+	}
 	scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("terminal booking cleanup did not finish")
+	}
 
 	if markCalls != 2 {
 		t.Fatalf("mark calls = %d, want one retry then success", markCalls)
@@ -124,6 +139,15 @@ func TestResponseBodyFreesWithoutMarkingEmptyTerminalResponse(t *testing.T) {
 		&rc.Response{EndOfStream: true},
 		nil,
 	)
+	lifecycle := findBookingLifecycle(bookingID)
+	if lifecycle == nil {
+		t.Fatal("expected booking lifecycle for terminal response")
+	}
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("terminal booking cleanup did not finish")
+	}
 
 	if markCalls != 0 {
 		t.Fatalf("mark calls = %d, want 0", markCalls)
@@ -213,5 +237,166 @@ func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
 	}
 	if readPrefillEnabled(cycleState) {
 		t.Fatal("prefill remained enabled after reservation cancellation")
+	}
+}
+
+func TestResponseBodyBoundsPersistentPrefillMarkRetries(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	markCalls := 0
+	freeCalls := 0
+	scorer := &DynDecodeScorer{
+		markPrefillComplete: func(string) error {
+			markCalls++
+			return errors.New("persistent mark failure")
+		},
+		freeBooking: func(string) error {
+			freeCalls++
+			return nil
+		},
+	}
+	request := requestWithBooking("external-request", bookingID)
+
+	for range 10 {
+		scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
+	}
+	lifecycle := findBookingLifecycle(bookingID)
+	if lifecycle == nil {
+		t.Fatal("expected booking lifecycle after first response chunk")
+	}
+	select {
+	case <-lifecycle.markerComplete():
+	case <-time.After(2 * time.Second):
+		t.Fatal("bounded marker retries did not finish")
+	}
+	if markCalls != prefillMarkMaxAttempts {
+		t.Fatalf("mark calls = %d, want %d", markCalls, prefillMarkMaxAttempts)
+	}
+
+	scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("terminal booking cleanup did not finish")
+	}
+	if freeCalls != 1 {
+		t.Fatalf("free calls = %d, want 1", freeCalls)
+	}
+}
+
+func TestResponseBodyEOSDoesNotWaitForInFlightPrefillMark(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	markStarted := make(chan struct{})
+	allowMarkReturn := make(chan struct{})
+	freeCalls := 0
+	scorer := &DynDecodeScorer{
+		markPrefillComplete: func(string) error {
+			close(markStarted)
+			<-allowMarkReturn
+			return nil
+		},
+		freeBooking: func(string) error {
+			freeCalls++
+			return nil
+		},
+	}
+	request := requestWithBooking("external-request", bookingID)
+	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
+	<-markStarted
+	lifecycle := findBookingLifecycle(bookingID)
+	if lifecycle == nil {
+		t.Fatal("expected booking lifecycle after first response chunk")
+	}
+
+	started := time.Now()
+	scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("EOS callback blocked for %s waiting on prefill mark", elapsed)
+	}
+	close(allowMarkReturn)
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("terminal booking cleanup did not finish")
+	}
+	if freeCalls != 1 {
+		t.Fatalf("free calls = %d, want 1", freeCalls)
+	}
+}
+
+func TestBookingLifecycleCleansUpOnceForEOSAndCancellation(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	freeCalls := 0
+	lifecycle := registerBookingLifecycle(bookingID, func(string) error {
+		freeCalls++
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	lifecycle.armCancellation(ctx)
+	lifecycle.cleanup(ctx, "response end of stream")
+	cancel()
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("booking cleanup did not finish")
+	}
+	if freeCalls != 1 {
+		t.Fatalf("free calls = %d, want 1", freeCalls)
+	}
+}
+
+func TestPrefillScoreBoundsConcurrentReservations(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reserveStarted := make(chan struct{})
+	allowReserveReturn := make(chan struct{})
+	reserveCalls := 0
+	scorer := &DynPrefillScorer{
+		reservePrefill: func(string, string, string) (*dynscorer.RoutingResult, error) {
+			reserveCalls++
+			close(reserveStarted)
+			<-allowReserveReturn
+			return &dynscorer.RoutingResult{WorkerID: 7}, nil
+		},
+		freeBooking:                 func(string) error { return nil },
+		reservationAdmissionTimeout: 20 * time.Millisecond,
+		reservationSlots:            make(chan struct{}, 1),
+	}
+	newRequest := func() (*schedtypes.CycleState, *schedtypes.InferenceRequest) {
+		cycleState := schedtypes.NewCycleState()
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: true})
+		return cycleState, &schedtypes.InferenceRequest{
+			TargetModel: "model",
+			Headers:     map[string]string{},
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.PayloadMap{"model": "model", "prompt": "hello"},
+			},
+		}
+	}
+	firstState, firstRequest := newRequest()
+	firstScores := make(chan map[schedtypes.Endpoint]float64, 1)
+	go func() {
+		firstScores <- scorer.Score(ctx, firstState, firstRequest, nil)
+	}()
+	<-reserveStarted
+
+	secondState, secondRequest := newRequest()
+	if scores := scorer.Score(context.Background(), secondState, secondRequest, nil); len(scores) != 0 {
+		t.Fatalf("scores = %v, want aggregate fallback with no prefill endpoints", scores)
+	}
+	if reserveCalls != 1 {
+		t.Fatalf("reserve calls = %d, want 1 bounded in-flight admission", reserveCalls)
+	}
+
+	close(allowReserveReturn)
+	<-firstScores
+	cancel()
+	lifecycle := findBookingLifecycle(bookingIDFromRequest(firstRequest))
+	if lifecycle == nil {
+		t.Fatal("expected lifecycle for successful first reservation")
+	}
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("first reservation cleanup did not finish")
 	}
 }

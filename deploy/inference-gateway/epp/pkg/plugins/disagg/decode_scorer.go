@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"sync"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
@@ -54,10 +53,10 @@ var _ rc.ResponseBodyProcessor = &DynDecodeScorer{}
 
 // DecodeRoutingState holds routing information passed from Score() to PreRequest().
 type DecodeRoutingState struct {
-	BookingID      string
-	WorkerID       string
-	DpRank         uint32
-	TokenData      []int64
+	BookingID string
+	WorkerID  string
+	DpRank    uint32
+	TokenData []int64
 }
 
 // Clone implements plugins.StateData.
@@ -66,9 +65,9 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 		return nil
 	}
 	clone := &DecodeRoutingState{
-		BookingID:      s.BookingID,
-		WorkerID:       s.WorkerID,
-		DpRank:         s.DpRank,
+		BookingID: s.BookingID,
+		WorkerID:  s.WorkerID,
+		DpRank:    s.DpRank,
 	}
 	if s.TokenData != nil {
 		clone.TokenData = make([]int64, len(s.TokenData))
@@ -112,7 +111,6 @@ func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
 type DynDecodeScorer struct {
 	typedName           plugins.TypedName
 	pluginState         *plugins.PluginState
-	prefillMarkInFlight sync.Map
 	addRequest          func(string, []int64, uint64, uint32) error
 	markPrefillComplete func(string) error
 	freeBooking         func(string) error
@@ -199,10 +197,10 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	}
 
 	routingState := &DecodeRoutingState{
-		BookingID:      booking.ID,
-		WorkerID:       workerIDStr,
-		DpRank:         result.DpRank,
-		TokenData:      result.TokenData,
+		BookingID: booking.ID,
+		WorkerID:  workerIDStr,
+		DpRank:    result.DpRank,
+		TokenData: result.TokenData,
 	}
 	s.pluginState.Write(booking.ID, plugins.StateKey(decodeStateKey), routingState)
 
@@ -216,6 +214,9 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 func (s *DynDecodeScorer) cleanupBooking(ctx context.Context, bookingID, reason string) bool {
 	if bookingID == "" {
 		return true
+	}
+	if lifecycle := findBookingLifecycle(bookingID); lifecycle != nil {
+		return lifecycle.cleanup(ctx, reason)
 	}
 	if err := s.freeBooking(bookingID); err != nil {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(err, "DynDecodeScorer: booking cleanup failed",
@@ -298,11 +299,6 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.In
 		"workerID", state.WorkerID,
 		"dpRank", state.DpRank,
 		"tokenCount", len(state.TokenData))
-
-	go func() {
-		<-ctx.Done()
-		s.cleanupBooking(ctx, bookingID, "request context cancelled")
-	}()
 }
 
 // ResponseBody handles streaming chunks and end-of-stream cleanup.
@@ -313,33 +309,14 @@ func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.
 		return
 	}
 
-	logger := log.FromContext(ctx)
-
-	// Terminal cleanup takes precedence over first-token bookkeeping. This also
-	// covers empty/error responses where no output token was observed.
+	lifecycle := findBookingLifecycle(bookingID)
+	if lifecycle == nil {
+		lifecycle = registerBookingLifecycle(bookingID, s.freeBooking)
+	}
 	if response.EndOfStream {
-		s.prefillMarkInFlight.Delete(bookingID)
-		if err := s.freeBooking(bookingID); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to free request",
-				"bookingID", bookingID, "requestID", request.RequestId)
-		} else {
-			logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: freed request",
-				"bookingID", bookingID, "requestID", request.RequestId)
-		}
+		lifecycle.cleanup(ctx, "response end of stream")
 		return
 	}
 
-	// Keep the marker while the FFI call is in flight. On failure, remove it so
-	// the next response chunk retries instead of leaking the prefill load.
-	if _, alreadyInFlight := s.prefillMarkInFlight.LoadOrStore(bookingID, struct{}{}); alreadyInFlight {
-		return
-	}
-	if err := s.markPrefillComplete(bookingID); err != nil {
-		s.prefillMarkInFlight.Delete(bookingID)
-		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
-			"bookingID", bookingID, "requestID", request.RequestId)
-	} else {
-		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
-			"bookingID", bookingID, "requestID", request.RequestId)
-	}
+	lifecycle.startPrefillMarker(s.markPrefillComplete, log.FromContext(ctx), request.RequestId)
 }

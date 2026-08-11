@@ -27,12 +27,15 @@ limitations under the License.
 package disagg
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
@@ -210,6 +213,163 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 }
 
 var enforceDisaggDeprecationOnce sync.Once
+
+const (
+	prefillMarkMaxAttempts  = 3
+	prefillMarkRetryBackoff = 100 * time.Millisecond
+)
+
+var bookingLifecycles sync.Map
+
+// bookingLifecycle owns cleanup for one EPP booking across the prefill scorer,
+// decode scorer, and response callbacks. A booking has exactly one free_request
+// caller even when EOS and context cancellation race.
+type bookingLifecycle struct {
+	bookingID   string
+	freeBooking func(string) error
+
+	cleanupOnce sync.Once
+	mu          sync.Mutex
+	cleaned     bool
+
+	stopCancellation func() bool
+	stopMarker       context.CancelFunc
+	markerDone       chan struct{}
+	cleanupDone      chan struct{}
+}
+
+func registerBookingLifecycle(bookingID string, freeBooking func(string) error) *bookingLifecycle {
+	lifecycle := &bookingLifecycle{
+		bookingID:   bookingID,
+		freeBooking: freeBooking,
+	}
+	actual, loaded := bookingLifecycles.LoadOrStore(bookingID, lifecycle)
+	if loaded {
+		return actual.(*bookingLifecycle)
+	}
+	return lifecycle
+}
+
+func findBookingLifecycle(bookingID string) *bookingLifecycle {
+	lifecycle, ok := bookingLifecycles.Load(bookingID)
+	if !ok {
+		return nil
+	}
+	return lifecycle.(*bookingLifecycle)
+}
+
+func (l *bookingLifecycle) armCancellation(ctx context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cleaned || l.stopCancellation != nil {
+		return
+	}
+	l.stopCancellation = context.AfterFunc(ctx, func() {
+		l.cleanup(ctx, "request context cancelled")
+	})
+}
+
+// startPrefillMarker makes first-token bookkeeping bounded and independent of
+// the response callback. EOS or request cancellation stops any pending retry.
+func (l *bookingLifecycle) startPrefillMarker(markPrefillComplete func(string) error, logger logr.Logger, requestID string) {
+	l.mu.Lock()
+	if l.cleaned || l.markerDone != nil {
+		l.mu.Unlock()
+		return
+	}
+	markerCtx, stopMarker := context.WithCancel(context.Background())
+	markerDone := make(chan struct{})
+	l.stopMarker = stopMarker
+	l.markerDone = markerDone
+	l.mu.Unlock()
+
+	go func() {
+		defer close(markerDone)
+		for attempt := 1; attempt <= prefillMarkMaxAttempts; attempt++ {
+			if markerCtx.Err() != nil {
+				return
+			}
+			if err := markPrefillComplete(l.bookingID); err == nil {
+				logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
+					"bookingID", l.bookingID, "requestID", requestID, "attempt", attempt)
+				return
+			} else {
+				logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
+					"bookingID", l.bookingID, "requestID", requestID, "attempt", attempt)
+			}
+			if attempt == prefillMarkMaxAttempts {
+				return
+			}
+
+			timer := time.NewTimer(prefillMarkRetryBackoff * time.Duration(attempt))
+			select {
+			case <-markerCtx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
+
+// cleanup stops cancellation and retry ownership, then releases the booking
+// off the response callback. If a mark call is already in flight, cleanup
+// waits for that one bounded call before issuing free_request, preventing
+// concurrent mark/free FFI operations for the same booking.
+func (l *bookingLifecycle) cleanup(ctx context.Context, reason string) bool {
+	started := false
+	l.cleanupOnce.Do(func() {
+		started = true
+		l.mu.Lock()
+		l.cleaned = true
+		stopCancellation := l.stopCancellation
+		stopMarker := l.stopMarker
+		markerDone := l.markerDone
+		cleanupDone := make(chan struct{})
+		l.cleanupDone = cleanupDone
+		l.mu.Unlock()
+
+		if stopCancellation != nil {
+			stopCancellation()
+		}
+		if stopMarker != nil {
+			stopMarker()
+		}
+
+		go func() {
+			if markerDone != nil {
+				<-markerDone
+			}
+			if err := l.freeBooking(l.bookingID); err != nil {
+				log.FromContext(ctx).V(logutil.DEFAULT).Error(err, "Dynamo EPP booking cleanup failed",
+					"bookingID", l.bookingID, "reason", reason)
+			} else {
+				log.FromContext(ctx).V(logutil.VERBOSE).Info("Dynamo EPP booking cleaned up",
+					"bookingID", l.bookingID, "reason", reason)
+			}
+			close(cleanupDone)
+			bookingLifecycles.Delete(l.bookingID)
+		}()
+	})
+	return started
+}
+
+func (l *bookingLifecycle) markerComplete() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.markerDone
+}
+
+func (l *bookingLifecycle) cleanupComplete() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.cleanupDone
+}
 
 func warnDeprecatedEnforceDisagg(logger logr.Logger) {
 	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {

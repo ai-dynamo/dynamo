@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
@@ -33,13 +34,22 @@ import (
 const (
 	// DynPrefillScorerType is the plugin type registered in the plugin registry.
 	DynPrefillScorerType = "dyn-prefill-scorer"
+
+	defaultPrefillReservationAdmissionTimeout = 5 * time.Second
+	defaultMaxPrefillReservations             = 32
 )
 
 // compile-time type assertion
 var _ schedtypes.Scorer = &DynPrefillScorer{}
 
 // DynPrefillScorerConfig holds the configuration for the DynPrefillScorer plugin.
-type DynPrefillScorerConfig struct{}
+type DynPrefillScorerConfig struct {
+	// ReservationTimeoutSeconds bounds waiting for scheduler admission. The
+	// request context deadline still wins when it is shorter.
+	ReservationTimeoutSeconds int `json:"reservationTimeoutSeconds"`
+	// MaxConcurrentReservations bounds the number of blocking CGO admissions.
+	MaxConcurrentReservations int `json:"maxConcurrentReservations"`
+}
 
 // DynPrefillScorerFactory defines the factory function for DynPrefillScorer.
 func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
@@ -49,35 +59,82 @@ func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ plugi
 			return nil, fmt.Errorf("failed to parse %s plugin parameters: %w", DynPrefillScorerType, err)
 		}
 	}
+	if cfg.ReservationTimeoutSeconds < 0 || cfg.MaxConcurrentReservations < 0 {
+		return nil, fmt.Errorf("%s reservation timeout and concurrency must not be negative", DynPrefillScorerType)
+	}
 
 	if err := dynscorer.InitFFI(); err != nil {
 		return nil, fmt.Errorf("Dynamo FFI init for prefill scorer failed: %w", err)
 	}
 
-	return NewDynPrefillScorer().WithName(name), nil
+	return newDynPrefillScorer(cfg).WithName(name), nil
 }
 
 // NewDynPrefillScorer initializes a new DynPrefillScorer.
 func NewDynPrefillScorer() *DynPrefillScorer {
+	return newDynPrefillScorer(DynPrefillScorerConfig{})
+}
+
+func newDynPrefillScorer(cfg DynPrefillScorerConfig) *DynPrefillScorer {
+	reservationTimeout := defaultPrefillReservationAdmissionTimeout
+	if cfg.ReservationTimeoutSeconds > 0 {
+		reservationTimeout = time.Duration(cfg.ReservationTimeoutSeconds) * time.Second
+	}
+	maxReservations := defaultMaxPrefillReservations
+	if cfg.MaxConcurrentReservations > 0 {
+		maxReservations = cfg.MaxConcurrentReservations
+	}
 	return &DynPrefillScorer{
-		typedName:      plugins.TypedName{Type: DynPrefillScorerType, Name: DynPrefillScorerType},
-		reservePrefill: dynscorer.CallRoutePrefillRequestWithReservation,
-		cancelPrefill:  dynscorer.CallCancelPrefillReservation,
-		freeBooking:    dynscorer.CallFreeRequest,
+		typedName:                   plugins.TypedName{Type: DynPrefillScorerType, Name: DynPrefillScorerType},
+		beginPrefill:                dynscorer.CallBeginPrefillReservation,
+		reservePrefill:              dynscorer.CallRoutePrefillRequestWithReservation,
+		cancelPrefill:               dynscorer.CallCancelPrefillReservation,
+		freeBooking:                 dynscorer.CallFreeRequest,
+		reservationAdmissionTimeout: reservationTimeout,
+		reservationSlots:            make(chan struct{}, maxReservations),
 	}
 }
 
 // DynPrefillScorer is a scorer plugin for the prefill scheduling profile.
 type DynPrefillScorer struct {
-	typedName      plugins.TypedName
-	reservePrefill func(string, string, string) (*dynscorer.RoutingResult, error)
-	cancelPrefill  func(string) error
-	freeBooking    func(string) error
+	typedName                   plugins.TypedName
+	beginPrefill                func(string) error
+	reservePrefill              func(string, string, string) (*dynscorer.RoutingResult, error)
+	cancelPrefill               func(string) error
+	freeBooking                 func(string) error
+	reservationAdmissionTimeout time.Duration
+	reservationSlots            chan struct{}
 }
 
 type prefillReservationResult struct {
 	result *dynscorer.RoutingResult
 	err    error
+}
+
+func (s *DynPrefillScorer) admissionTimeout() time.Duration {
+	if s.reservationAdmissionTimeout <= 0 {
+		return defaultPrefillReservationAdmissionTimeout
+	}
+	return s.reservationAdmissionTimeout
+}
+
+func (s *DynPrefillScorer) acquireReservationSlot(ctx context.Context) (func(), bool) {
+	if s.reservationSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case s.reservationSlots <- struct{}{}:
+		return func() { <-s.reservationSlots }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
+func (s *DynPrefillScorer) beginReservation(bookingID string) error {
+	if s.beginPrefill == nil {
+		return nil
+	}
+	return s.beginPrefill(bookingID)
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -130,18 +187,36 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		"endpointCount", len(endpoints),
 		"endpointsJSON", string(endpointsJSON))
 
-	resultCh := make(chan prefillReservationResult, 1)
 	bookingID := booking.ID
+	admissionCtx, cancelAdmission := context.WithTimeout(ctx, s.admissionTimeout())
+	defer cancelAdmission()
+	releaseSlot, acquired := s.acquireReservationSlot(admissionCtx)
+	if !acquired {
+		logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill reservation admission budget exhausted",
+			"bookingID", bookingID, "error", admissionCtx.Err().Error())
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		return uniformScores(endpoints, 0)
+	}
+	if err := s.beginReservation(bookingID); err != nil {
+		releaseSlot()
+		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to begin prefill reservation",
+			"bookingID", bookingID)
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		return uniformScores(endpoints, 0)
+	}
+
+	resultCh := make(chan prefillReservationResult, 1)
 	go func() {
+		defer releaseSlot()
 		result, err := s.reservePrefill(bookingID, requestJSON, endpointsJSON)
 		resultCh <- prefillReservationResult{result: result, err: err}
 	}()
 
 	var result *dynscorer.RoutingResult
 	select {
-	case <-ctx.Done():
+	case <-admissionCtx.Done():
 		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: scheduling cancelled during prefill reservation",
-			"error", ctx.Err().Error())
+			"error", admissionCtx.Err().Error())
 		if cancelErr := s.cancelPrefill(bookingID); cancelErr != nil {
 			logger.V(logutil.DEFAULT).Error(cancelErr, "DynPrefillScorer: failed to cancel pending prefill reservation",
 				"bookingID", bookingID)
@@ -188,24 +263,15 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		delete(req.Headers, PrefillDpRankHeader)
 	}
 
+	lifecycle := registerBookingLifecycle(booking.ID, s.freeBooking)
+	lifecycle.armCancellation(ctx)
 	if err := ctx.Err(); err != nil {
-		if cleanupErr := s.freeBooking(booking.ID); cleanupErr != nil {
-			logger.V(logutil.DEFAULT).Error(cleanupErr, "DynPrefillScorer: failed to clean cancelled reservation",
-				"bookingID", booking.ID)
-		}
+		lifecycle.cleanup(ctx, "prefill scheduling cancelled after reservation")
 		booking.PrefillReserved = false
 		cycleState.Write(BookingStateKey, booking)
 		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 		return uniformScores(endpoints, 0)
 	}
-
-	go func() {
-		<-ctx.Done()
-		if cleanupErr := s.freeBooking(bookingID); cleanupErr != nil {
-			logger.V(logutil.DEFAULT).Error(cleanupErr, "DynPrefillScorer: cancellation cleanup failed",
-				"bookingID", bookingID)
-		}
-	}()
 
 	return uniformScores(endpoints, 1.0)
 }

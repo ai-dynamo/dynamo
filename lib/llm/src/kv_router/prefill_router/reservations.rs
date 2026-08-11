@@ -8,10 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use dynamo_kv_router::{
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    sequence::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION,
-};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 use parking_lot::Mutex;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -22,7 +19,7 @@ use super::{
 use crate::kv_router::{KvRouter, sequence::SequenceError};
 
 const PREFILL_SCHEDULER_ID_PREFIX: &str = "epp-prefill/";
-const ACTIVE_REQUEST_EXPIRY_ENV: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+const ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
 const RESERVATION_EXPIRY_GRACE: Duration = Duration::from_secs(60);
 const CANCELLED_RESERVATION_RETENTION: Duration = Duration::from_secs(60);
 const RESERVATION_REAPER_INTERVAL: Duration = Duration::from_secs(30);
@@ -47,11 +44,15 @@ enum PrefillReservationEntry {
     /// Cancelling this token drops the selection future. Release/1.3.0 keeps a
     /// queued entry until its next dequeue, where the closed response receiver
     /// prevents scheduler booking.
-    Pending { cancellation: CancellationToken },
+    Pending {
+        cancellation: CancellationToken,
+    },
     Active(ActivePrefillReservation),
     /// Preserve a cancellation that reaches Rust before the blocking reserve
     /// call creates the pending entry.
-    Cancelled { created_at: Instant },
+    Cancelled {
+        created_at: Instant,
+    },
 }
 
 enum BeginReservation {
@@ -88,9 +89,10 @@ impl PrefillReservationRegistry {
                     entry.remove();
                     BeginReservation::Cancelled
                 }
-                PrefillReservationEntry::Pending { .. } | PrefillReservationEntry::Active(_) => {
-                    BeginReservation::AlreadyExists
+                PrefillReservationEntry::Pending { cancellation } => {
+                    BeginReservation::Pending(cancellation.clone())
                 }
+                PrefillReservationEntry::Active(_) => BeginReservation::AlreadyExists,
             },
         }
     }
@@ -180,16 +182,12 @@ impl PrefillReservationRegistry {
     }
 }
 
+fn reservation_retention_from_expiry(active_request_expiry: Duration) -> Duration {
+    active_request_expiry.saturating_add(RESERVATION_EXPIRY_GRACE)
+}
+
 fn reservation_retention() -> Duration {
-    let configured = std::env::var(ACTIVE_REQUEST_EXPIRY_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION);
-    configured
-        .max(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION)
-        .saturating_add(RESERVATION_EXPIRY_GRACE)
+    reservation_retention_from_expiry(ACTIVE_REQUEST_EXPIRY_DURATION)
 }
 
 fn scheduler_id(reservation_id: &str) -> String {
@@ -204,6 +202,37 @@ fn ignore_missing_request(result: std::result::Result<(), SequenceError>) -> Res
 }
 
 impl PrefillRouter {
+    /// Register the pending state before potentially slow request preprocessing.
+    ///
+    /// Calling this repeatedly for the same in-flight booking is idempotent. A
+    /// cancellation that arrived first is observed here and never queues work.
+    pub fn begin_prefill_reservation(&self, reservation_id: &str) -> Result<()> {
+        if reservation_id.is_empty() {
+            anyhow::bail!("prefill reservation ID must not be empty");
+        }
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+        if self.prefill_router.get().is_none() {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+
+        match self.reservations.begin(reservation_id) {
+            BeginReservation::Pending(_) => Ok(()),
+            BeginReservation::Cancelled => {
+                anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
+            }
+            BeginReservation::AlreadyExists => {
+                anyhow::bail!("prefill reservation {reservation_id:?} already exists")
+            }
+        }
+    }
+
+    /// Drop a pending reservation when preprocessing fails before scheduler admission.
+    pub fn abort_prefill_reservation(&self, reservation_id: &str) {
+        self.reservations.remove_pending(reservation_id);
+    }
+
     /// Atomically select and reserve a prefill worker for an externally dispatched request.
     ///
     /// The scheduler observes the booking before selecting the next request. The caller owns
@@ -223,18 +252,6 @@ impl PrefillRouter {
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
-            return Err(anyhow::anyhow!(PrefillError::NotActivated));
-        }
-        let inner = self
-            .prefill_router
-            .get()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
-        let InnerPrefillRouter::KvRouter(router) = inner else {
-            return Err(anyhow::anyhow!(PrefillError::NotActivated));
-        };
-        let chooser = router.chooser.clone();
-        let scheduler_id = scheduler_id(reservation_id);
         let cancellation = match self.reservations.begin(reservation_id) {
             BeginReservation::Pending(cancellation) => cancellation,
             BeginReservation::Cancelled => {
@@ -244,6 +261,20 @@ impl PrefillRouter {
                 anyhow::bail!("prefill reservation {reservation_id:?} already exists")
             }
         };
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            self.reservations.remove_pending(reservation_id);
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+        let Some(inner) = self.prefill_router.get() else {
+            self.reservations.remove_pending(reservation_id);
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        };
+        let InnerPrefillRouter::KvRouter(router) = inner else {
+            self.reservations.remove_pending(reservation_id);
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        };
+        let chooser = router.chooser.clone();
+        let scheduler_id = scheduler_id(reservation_id);
 
         let outcome = tokio::select! {
             biased;
@@ -317,3 +348,113 @@ impl PrefillRouter {
         ignore_missing_request(reservation.chooser.free(&reservation.scheduler_id).await)?;
         self.reservations
             .remove_if_scheduler_id(reservation_id, &reservation.scheduler_id);
+        Ok(())
+    }
+
+    pub(super) fn spawn_reservation_reaper(router: &Arc<Self>) {
+        let router: Weak<Self> = Arc::downgrade(router);
+        let cancellation = router
+            .upgrade()
+            .expect("router must be alive while starting reservation reaper")
+            .cancel_token
+            .child_token();
+
+        tokio::spawn(async move {
+            let retention = reservation_retention();
+            let mut interval = tokio::time::interval_at(
+                Instant::now() + RESERVATION_REAPER_INTERVAL,
+                RESERVATION_REAPER_INTERVAL,
+            );
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = interval.tick() => {
+                        let Some(router) = router.upgrade() else {
+                            return;
+                        };
+                        let now = Instant::now();
+                        router
+                            .reservations
+                            .remove_expired_cancellations(now, CANCELLED_RESERVATION_RETENTION);
+                        let expired = router.reservations.expired_active_ids(now, retention);
+                        for reservation_id in expired {
+                            if let Err(error) = router.release_prefill_reservation(&reservation_id).await {
+                                tracing::warn!(
+                                    %reservation_id,
+                                    %error,
+                                    "Failed to expire stale EPP prefill reservation"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_before_reservation_is_observed() {
+        let registry = PrefillReservationRegistry::default();
+        registry.cancel("reservation-1");
+
+        assert!(matches!(
+            registry.begin("reservation-1"),
+            BeginReservation::Cancelled
+        ));
+        assert!(matches!(
+            registry.begin("reservation-1"),
+            BeginReservation::Pending(_)
+        ));
+    }
+
+    #[test]
+    fn pre_registered_pending_reservation_survives_tombstone_reaping() {
+        let registry = PrefillReservationRegistry::default();
+        let BeginReservation::Pending(cancellation) = registry.begin("reservation-1") else {
+            panic!("expected pending reservation");
+        };
+
+        registry.cancel("reservation-1");
+        registry.remove_expired_cancellations(
+            Instant::now() + CANCELLED_RESERVATION_RETENTION + Duration::from_secs(1),
+            CANCELLED_RESERVATION_RETENTION,
+        );
+
+        assert!(cancellation.is_cancelled());
+        let BeginReservation::Pending(existing) = registry.begin("reservation-1") else {
+            panic!("expected pending reservation to remain registered");
+        };
+        assert!(existing.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_signals_pending_reservation() {
+        let registry = PrefillReservationRegistry::default();
+        let BeginReservation::Pending(cancellation) = registry.begin("reservation-1") else {
+            panic!("expected pending reservation");
+        };
+
+        registry.cancel("reservation-1");
+        assert!(cancellation.is_cancelled());
+        registry.remove_pending("reservation-1");
+    }
+
+    #[test]
+    fn reservation_retention_tracks_active_request_expiry() {
+        assert_eq!(
+            reservation_retention_from_expiry(Duration::from_secs(30)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            reservation_retention_from_expiry(Duration::from_secs(3600)),
+            Duration::from_secs(3660)
+        );
+    }
+}

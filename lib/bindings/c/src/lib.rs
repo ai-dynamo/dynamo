@@ -446,7 +446,7 @@ pub struct RouterHandles {
 }
 
 impl RouterHandles {
-     /// Atomically select and reserve a prefill worker for an EPP-owned booking.
+    /// Atomically select and reserve a prefill worker for an EPP-owned booking.
     #[expect(clippy::too_many_arguments)]
     async fn reserve_prefill_worker(
         &self,
@@ -1249,7 +1249,42 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
- /// Atomically select and reserve the best prefill worker for an EPP-owned booking.
+/// Register a prefill booking before potentially slow request preprocessing.
+///
+/// This is intentionally synchronous and lock-only: Go calls it before it starts
+/// the blocking route operation, so cancellation always observes an actual Pending
+/// entry rather than relying on a timed tombstone.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `reservation_id` must be a non-empty null-terminated UTF-8 string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn begin_prefill_reservation(
+    handle: RouterHandlesPtr,
+    reservation_id: *const c_char,
+) -> QueryRouterResult {
+    if handle.is_null() || reservation_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let reservation_id = match unsafe { CStr::from_ptr(reservation_id) }.to_str() {
+        Ok(value) if !value.is_empty() => value,
+        _ => return QueryRouterResult::ErrInvalidParam,
+    };
+    let handles = unsafe { &*handle };
+    match handles
+        .prefill_router
+        .begin_prefill_reservation(reservation_id)
+    {
+        Ok(()) => QueryRouterResult::Ok,
+        Err(error) => {
+            tracing::warn!(%reservation_id, %error, "Failed to begin EPP prefill reservation");
+            QueryRouterResult::ErrQueryFailed
+        }
+    }
+}
+
+/// Atomically select and reserve the best prefill worker for an EPP-owned booking.
 ///
 /// Cancellation drops the scheduling future. Release/1.3.0 skips a cancelled queued
 /// admission when it is subsequently dequeued.
@@ -1281,23 +1316,38 @@ pub unsafe extern "C" fn route_prefill_request_with_reservation(
         _ => return QueryRouterResult::ErrInvalidParam,
     };
     let handles = unsafe { &*handle };
+    if let Err(error) = handles
+        .prefill_router
+        .begin_prefill_reservation(&reservation_id)
+    {
+        tracing::warn!(%reservation_id, %error, "Failed to begin EPP prefill reservation");
+        return QueryRouterResult::ErrQueryFailed;
+    }
     let (tokens, priority_jump, strict_priority, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(values) => values,
-            Err(code) => return code,
+            Err(code) => {
+                handles
+                    .prefill_router
+                    .abort_prefill_reservation(&reservation_id);
+                return code;
+            }
         };
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
-    let result = handles.runtime.secondary().block_on(handles.reserve_prefill_worker(
-        &reservation_id,
-        &tokens,
-        None,
-        None,
-        priority_jump,
-        strict_priority,
-        allowed_worker_ids,
-        routing_constraints,
-    ));
+    let result = handles
+        .runtime
+        .secondary()
+        .block_on(handles.reserve_prefill_worker(
+            &reservation_id,
+            &tokens,
+            None,
+            None,
+            priority_jump,
+            strict_priority,
+            allowed_worker_ids,
+            routing_constraints,
+        ));
 
     match result {
         Ok((prefill_worker_id, prefill_dp_rank)) => {
